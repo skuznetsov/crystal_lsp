@@ -37040,6 +37040,21 @@ module Crystal::HIR
         end
       end
 
+      # String#[](Int32, Int32) intercept: extract substring via runtime helper
+      if method_name == "[]" && receiver_id && args.size == 2
+        recv_type = ctx.type_of(receiver_id)
+        if recv_type == TypeRef::STRING || recv_type == TypeRef::POINTER
+          arg0_type = prepack_arg_types.size > 0 ? prepack_arg_types[0] : TypeRef::VOID
+          arg1_type = prepack_arg_types.size > 1 ? prepack_arg_types[1] : TypeRef::VOID
+          if numeric_primitive?(arg0_type) && numeric_primitive?(arg1_type)
+            ext_call = ExternCall.new(ctx.next_id, TypeRef::STRING, "__crystal_v2_string_substring", [receiver_id, args[0], args[1]])
+            ctx.emit(ext_call)
+            ctx.register_type(ext_call.id, TypeRef::STRING)
+            return ext_call.id
+          end
+        end
+      end
+
       # String#split(String) intercept: bypass wrong overload resolution and call runtime helper
       if method_name == "split" && receiver_id && args.size == 1 &&
          prepack_arg_types.size == 1 && prepack_arg_types[0] == TypeRef::STRING
@@ -43897,6 +43912,12 @@ module Crystal::HIR
         ctx.emit(index_get)
         ctx.register_type(index_get.id, element_type)
         index_get.id
+      elsif ctx.type_of(object_id) == TypeRef::STRING && index_ids.size == 2
+        # String#[](Int32, Int32) → substring extraction via runtime helper
+        ext_call = ExternCall.new(ctx.next_id, TypeRef::STRING, "__crystal_v2_string_substring", [object_id, index_ids[0], index_ids[1]])
+        ctx.emit(ext_call)
+        ctx.register_type(ext_call.id, TypeRef::STRING)
+        return ext_call.id
       else
         # Everything else (classes like Hash, custom types): call [] method
         # Resolve the method name properly (with class name and mangling)

@@ -2771,7 +2771,31 @@ module Crystal
       ptr = get_value(realloc.pointer)
       new_size = get_value(realloc.new_size)
 
-      args = [ptr, new_size]
+      # Crystal's Pointer#realloc(count) expects element count, but C realloc expects bytes.
+      # Multiply count by element size. Determine element size from the pointer's type descriptor.
+      elem_size = 8 # default: pointer-sized elements (class instances)
+      ptr_type = realloc.type
+      if desc = @hir_module.get_type_descriptor(ptr_type)
+        if desc.name.starts_with?("Pointer(")
+          elem_name = desc.name[8, desc.name.size - 9]
+          elem_size = case elem_name
+                      when "UInt8", "Int8", "Bool" then 1
+                      when "UInt16", "Int16"       then 2
+                      when "UInt32", "Int32", "Float32", "Char" then 4
+                      when "UInt64", "Int64", "Float64" then 8
+                      when "UInt128", "Int128" then 16
+                      else 8 # class/struct instances are pointers (8 bytes)
+                      end
+        end
+      end
+
+      # Multiply element count by element size to get byte count
+      elem_size_val = builder.const_int(elem_size.to_i64, TypeRef::INT64)
+      # Extend new_size to i64 for multiplication
+      size_i64 = builder.cast(CastKind::SExt, new_size, TypeRef::INT64)
+      byte_count = builder.mul(size_i64, elem_size_val, TypeRef::INT64)
+
+      args = [ptr, byte_count]
       builder.extern_call("__crystal_v2_realloc64", args, TypeRef::POINTER)
     end
 

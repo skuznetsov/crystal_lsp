@@ -1715,6 +1715,32 @@ module Crystal::MIR
       emit_raw "  ret i1 %found\n"
       emit_raw "}\n\n"
 
+      # String#[](Int32, Int32) — extract substring (start, count)
+      # Returns new Crystal String with the specified byte range
+      emit_raw "define ptr @__crystal_v2_string_substring(ptr %self, i32 %start, i32 %count) {\n"
+      emit_raw "entry:\n"
+      emit_raw "  %bs_ptr = getelementptr i8, ptr %self, i32 4\n"
+      emit_raw "  %bytesize = load i32, ptr %bs_ptr\n"
+      # Clamp start: if negative, add bytesize
+      emit_raw "  %neg = icmp slt i32 %start, 0\n"
+      emit_raw "  %adj_start = add i32 %start, %bytesize\n"
+      emit_raw "  %real_start = select i1 %neg, i32 %adj_start, i32 %start\n"
+      # Clamp count: min(count, bytesize - real_start)
+      emit_raw "  %remaining = sub i32 %bytesize, %real_start\n"
+      emit_raw "  %too_much = icmp sgt i32 %count, %remaining\n"
+      emit_raw "  %real_count = select i1 %too_much, i32 %remaining, i32 %count\n"
+      # Clamp to non-negative
+      emit_raw "  %neg_count = icmp slt i32 %real_count, 0\n"
+      emit_raw "  %final_count = select i1 %neg_count, i32 0, i32 %real_count\n"
+      # Get data pointer + start
+      emit_raw "  %data_base = getelementptr i8, ptr %self, i32 12\n"
+      emit_raw "  %data_start = getelementptr i8, ptr %data_base, i32 %real_start\n"
+      # Get String type_id from self
+      emit_raw "  %tid = load i32, ptr %self\n"
+      emit_raw "  %result = call ptr @__crystal_v2_create_substring(ptr %data_start, i32 %final_count, i32 %tid)\n"
+      emit_raw "  ret ptr %result\n"
+      emit_raw "}\n\n"
+
       # Array#sum for Int32 — loops over Crystal Array buffer and sums elements
       # Crystal Array layout: { i32 type_id, i32 @size, i32 @capacity, i32 @offset_to_buffer, ptr @buffer }
       emit_raw "define i32 @__crystal_v2_array_sum_int32(ptr %arr) {\n"
