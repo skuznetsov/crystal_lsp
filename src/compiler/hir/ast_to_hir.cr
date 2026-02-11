@@ -8748,6 +8748,38 @@ module Crystal::HIR
       (@module_defs[module_name] ||= [] of {CrystalV2::Compiler::Frontend::ModuleNode, CrystalV2::Compiler::Frontend::ArenaLike}) << {node, @arena}
       @module_defs_cache_version += 1
       invalidate_type_cache_for_namespace(module_name) if existing_defs
+
+      # Always register nested types (classes, enums, modules) from module bodies.
+      # Namespace modules like Crystal, Crystal::MachO etc. are not "class-like"
+      # but still contain class definitions that must be registered.
+      if body = node.body
+        body.each do |expr_id|
+          member = unwrap_visibility_member(@arena[expr_id])
+          case member
+          when CrystalV2::Compiler::Frontend::ClassNode
+            nested_name = String.new(member.name)
+            full_nested_name = "#{module_name}::#{nested_name}"
+            register_class_with_name(member, full_nested_name)
+          when CrystalV2::Compiler::Frontend::EnumNode
+            nested_name = String.new(member.name)
+            full_nested_name = "#{module_name}::#{nested_name}"
+            register_enum_with_name(member, full_nested_name)
+          when CrystalV2::Compiler::Frontend::ModuleNode
+            nested_name = String.new(member.name)
+            full_nested_name = "#{module_name}::#{nested_name}"
+            register_nested_module(member, full_nested_name)
+          when CrystalV2::Compiler::Frontend::AliasNode
+            alias_name = String.new(member.name)
+            old_class = @current_class
+            @current_class = module_name
+            target_name = resolve_alias_target(String.new(member.value), module_name)
+            @current_class = old_class
+            full_alias_name = "#{module_name}::#{alias_name}"
+            register_type_alias(full_alias_name, target_name)
+          end
+        end
+      end
+
       if module_name == "Enum"
         if body = node.body
           body.each do |expr_id|
@@ -39300,9 +39332,36 @@ module Crystal::HIR
         if class_info = @class_info[class_name]?
           return_type = class_info.type_ref
         else
-          # Unknown class (probably from stdlib) - use pointer type as fallback
-          # This ensures exception types like ArgumentError work correctly
-          return_type = TypeRef::POINTER
+          # Try resolving nested class names (e.g., "Crystal::Lexer" → check short name)
+          short_name = class_name.includes?("::") ? class_name.split("::").last : nil
+          found_via_short = false
+          if short_name
+            # Try progressively shorter qualified names
+            parts = class_name.split("::")
+            (parts.size - 1).downto(1) do |i|
+              candidate = parts[i..].join("::")
+              if ci = @class_info[candidate]?
+                return_type = ci.type_ref
+                found_via_short = true
+                break
+              end
+            end
+            # Also try full name with different namespace resolutions
+            unless found_via_short
+              @class_info.each_key do |k|
+                if k.ends_with?(class_name) || k.ends_with?(short_name.not_nil!)
+                  return_type = @class_info[k].type_ref
+                  found_via_short = true
+                  break
+                end
+              end
+            end
+          end
+          unless found_via_short
+            # Unknown class (probably from stdlib) - use pointer type as fallback
+            # This ensures exception types like ArgumentError work correctly
+            return_type = TypeRef::POINTER
+          end
         end
       end
 

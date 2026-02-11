@@ -31,6 +31,10 @@ module CrystalV2
     # Standard library path - relative to compiler source
     STDLIB_PATH = File.expand_path("../stdlib", File.dirname(__FILE__))
 
+    # Original Crystal compiler source path - for require'ing compiler modules
+    # (e.g., require "compiler/crystal/syntax/lexer")
+    CRYSTAL_SRC_PATH = File.expand_path("../../../crystal/src", File.dirname(__FILE__))
+
     class CLI
       @ast_cache_hits : Int32 = 0
       @ast_cache_misses : Int32 = 0
@@ -2608,6 +2612,13 @@ module CrystalV2
           stdlib_path = File.expand_path(req_path, STDLIB_PATH)
           result = try_require_path(stdlib_path)
           return result if result
+
+          # Try original Crystal compiler source (for compiler modules like lexer/parser)
+          if File.directory?(CRYSTAL_SRC_PATH)
+            crystal_src = File.expand_path(req_path, CRYSTAL_SRC_PATH)
+            result = try_require_path(crystal_src)
+            return result if result
+          end
         end
         nil
       end
