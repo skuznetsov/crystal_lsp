@@ -1648,6 +1648,10 @@ module Crystal::HIR
 
     @inline_yield_return_stack : Array(InlineReturnContext) = [] of InlineReturnContext
     @inline_yield_return_override_stack : Array(InlineReturnOverride) = [] of InlineReturnOverride
+    # Loop context stack: tracks exit_block (for break) and cond_block (for next)
+    @loop_exit_stack : Array(BlockId) = [] of BlockId
+    @loop_cond_stack : Array(BlockId) = [] of BlockId
+    @loop_phi_stack : Array(Hash(String, Phi)) = [] of Hash(String, Phi)
     @virtual_targets_lowered : Set(String) = Set(String).new
     # Track assigned local names for the current def (used to disambiguate
     # bare identifier receivers vs top-level function calls).
@@ -31090,6 +31094,9 @@ module Crystal::HIR
       # Body block
       ctx.current_block = body_block
       ctx.push_scope(ScopeKind::Loop)
+      @loop_exit_stack << exit_block
+      @loop_cond_stack << cond_block
+      @loop_phi_stack << phi_nodes
       pushed_inline = false
       if !inline_vars.empty?
         @inline_loop_vars_stack << inline_vars
@@ -31099,6 +31106,9 @@ module Crystal::HIR
         lower_body(ctx, node.body)
       ensure
         @inline_loop_vars_stack.pop? if pushed_inline
+        @loop_exit_stack.pop?
+        @loop_cond_stack.pop?
+        @loop_phi_stack.pop?
       end
       body_exit_block = ctx.current_block
       ctx.pop_scope
@@ -31248,6 +31258,9 @@ module Crystal::HIR
       end
 
       ctx.push_scope(ScopeKind::Loop)
+      @loop_exit_stack << exit_block
+      @loop_cond_stack << body_block  # for infinite loop, `next` jumps back to body start
+      @loop_phi_stack << phi_nodes
       pushed_inline = false
       if !inline_vars.empty?
         @inline_loop_vars_stack << inline_vars
@@ -31257,6 +31270,9 @@ module Crystal::HIR
         lower_body(ctx, node.body)
       ensure
         @inline_loop_vars_stack.pop? if pushed_inline
+        @loop_exit_stack.pop?
+        @loop_cond_stack.pop?
+        @loop_phi_stack.pop?
       end
       body_exit_block = ctx.current_block
       ctx.pop_scope
@@ -32330,18 +32346,54 @@ module Crystal::HIR
     end
 
     private def lower_break(ctx : LoweringContext, node : CrystalV2::Compiler::Frontend::BreakNode) : ValueId
-      # Break needs special handling - for now emit as unreachable
-      # TODO: proper break with loop exit block tracking
-      ctx.terminate(Unreachable.new)
+      if exit_block = @loop_exit_stack.last?
+        ctx.terminate(Jump.new(exit_block))
+      else
+        ctx.terminate(Unreachable.new)
+      end
+      # Start a new unreachable block for any dead code after break
+      dead_block = ctx.create_block
+      ctx.switch_to_block(dead_block)
       nil_lit = Literal.new(ctx.next_id, TypeRef::NIL, nil)
       ctx.emit(nil_lit)
       nil_lit.id
     end
 
     private def lower_next(ctx : LoweringContext, node : CrystalV2::Compiler::Frontend::NextNode) : ValueId
-      # Next needs special handling - for now emit as unreachable
-      # TODO: proper next with loop continue block tracking
-      ctx.terminate(Unreachable.new)
+      if cond_block = @loop_cond_stack.last?
+        # Patch phi nodes with current variable values so the loop header
+        # sees updated variables when we jump back from this block
+        if phi_nodes = @loop_phi_stack.last?
+          current_block = ctx.current_block
+          phi_nodes.each do |var_name, phi|
+            if updated_val = ctx.lookup_local(var_name)
+              incoming_val = updated_val
+              phi_type = ctx.type_of(phi.id)
+              val_type = ctx.type_of(updated_val)
+              if phi_type != val_type
+                if is_union_type?(phi_type)
+                  if variant_id = get_union_variant_id(phi_type, val_type)
+                    wrap = UnionWrap.new(ctx.next_id, phi_type, updated_val, variant_id)
+                    ctx.emit(wrap)
+                    incoming_val = wrap.id
+                  end
+                elsif numeric_primitive?(val_type) && numeric_primitive?(phi_type)
+                  cast = Cast.new(ctx.next_id, phi_type, updated_val, phi_type, safe: false)
+                  ctx.emit(cast)
+                  incoming_val = cast.id
+                end
+              end
+              phi.add_incoming(current_block, incoming_val)
+            end
+          end
+        end
+        ctx.terminate(Jump.new(cond_block))
+      else
+        ctx.terminate(Unreachable.new)
+      end
+      # Start a new unreachable block for any dead code after next
+      dead_block = ctx.create_block
+      ctx.switch_to_block(dead_block)
       nil_lit = Literal.new(ctx.next_id, TypeRef::NIL, nil)
       ctx.emit(nil_lit)
       nil_lit.id
