@@ -2457,6 +2457,106 @@ module Crystal::MIR
         emit_raw "  ret ptr %str\n"
         emit_raw "}\n\n"
         return true
+      when "String$Hbyte_slice$$Int32_Int32"
+        # String#byte_slice(start : Int32, count : Int32) : String
+        # The stdlib uses String.new(capacity) { block } which we can't compile.
+        # Override with direct implementation using our working String.new(UInt8*, Int32, Int32).
+        emit_raw "; String#byte_slice(Int32, Int32) — runtime override\n"
+        emit_raw "define ptr @#{mangled}(ptr %self, i32 %start, i32 %count) {\n"
+        emit_raw "entry:\n"
+        # Get bytesize
+        emit_raw "  %bs_ptr = getelementptr i8, ptr %self, i32 4\n"
+        emit_raw "  %bytesize = load i32, ptr %bs_ptr\n"
+        # Handle negative start
+        emit_raw "  %start_neg = icmp slt i32 %start, 0\n"
+        emit_raw "  br i1 %start_neg, label %fix_start, label %check_bounds\n"
+        emit_raw "fix_start:\n"
+        emit_raw "  %fixed_start = add i32 %start, %bytesize\n"
+        emit_raw "  br label %check_bounds\n"
+        emit_raw "check_bounds:\n"
+        emit_raw "  %real_start = phi i32 [%fixed_start, %fix_start], [%start, %entry]\n"
+        # Clamp: if start < 0 or start >= bytesize, return empty
+        emit_raw "  %start_lo = icmp slt i32 %real_start, 0\n"
+        emit_raw "  br i1 %start_lo, label %ret_empty, label %check_hi\n"
+        emit_raw "check_hi:\n"
+        emit_raw "  %start_hi = icmp sge i32 %real_start, %bytesize\n"
+        emit_raw "  br i1 %start_hi, label %ret_empty, label %clamp_count\n"
+        # Clamp count to remaining bytes
+        emit_raw "clamp_count:\n"
+        emit_raw "  %remaining = sub i32 %bytesize, %real_start\n"
+        emit_raw "  %count_too_big = icmp sgt i32 %count, %remaining\n"
+        emit_raw "  %real_count = select i1 %count_too_big, i32 %remaining, i32 %count\n"
+        # If count <= 0, return empty
+        emit_raw "  %count_zero = icmp sle i32 %real_count, 0\n"
+        emit_raw "  br i1 %count_zero, label %ret_empty, label %do_slice\n"
+        emit_raw "ret_empty:\n"
+        emit_raw "  ret ptr @.str.empty\n"
+        emit_raw "do_slice:\n"
+        # Get data pointer + start offset
+        emit_raw "  %data_base = getelementptr i8, ptr %self, i32 12\n"
+        emit_raw "  %src_ptr = getelementptr i8, ptr %data_base, i32 %real_start\n"
+        # Call our working String.new(UInt8*, Int32, Int32)
+        emit_raw "  %result = call ptr @String$Dnew$$Pointer$LUInt8$R_Int32_Int32(ptr %src_ptr, i32 %real_count, i32 %real_count)\n"
+        emit_raw "  ret ptr %result\n"
+        emit_raw "}\n\n"
+        return true
+      when "String$Hbyte_slice$Q$$Int32_Int32"
+        # String#byte_slice?(start : Int32, count : Int32) : String?
+        # Nilable version — returns nil instead of raising for out-of-bounds.
+        emit_raw "; String#byte_slice?(Int32, Int32) — runtime override\n"
+        emit_raw "define %Nil$_$OR$_String.union @#{mangled}(ptr %self, i32 %start, i32 %count) {\n"
+        emit_raw "entry:\n"
+        emit_raw "  %bs_ptr = getelementptr i8, ptr %self, i32 4\n"
+        emit_raw "  %bytesize = load i32, ptr %bs_ptr\n"
+        # Handle negative start
+        emit_raw "  %start_neg = icmp slt i32 %start, 0\n"
+        emit_raw "  br i1 %start_neg, label %fix_start, label %check_bounds\n"
+        emit_raw "fix_start:\n"
+        emit_raw "  %fixed_start = add i32 %start, %bytesize\n"
+        emit_raw "  br label %check_bounds\n"
+        emit_raw "check_bounds:\n"
+        emit_raw "  %real_start = phi i32 [%fixed_start, %fix_start], [%start, %entry]\n"
+        # Out-of-bounds → return nil
+        emit_raw "  %start_lo = icmp slt i32 %real_start, 0\n"
+        emit_raw "  br i1 %start_lo, label %ret_nil, label %check_hi\n"
+        emit_raw "check_hi:\n"
+        emit_raw "  %start_hi = icmp sgt i32 %real_start, %bytesize\n"
+        emit_raw "  br i1 %start_hi, label %ret_nil, label %clamp_count\n"
+        emit_raw "clamp_count:\n"
+        emit_raw "  %remaining = sub i32 %bytesize, %real_start\n"
+        emit_raw "  %count_too_big = icmp sgt i32 %count, %remaining\n"
+        emit_raw "  %real_count = select i1 %count_too_big, i32 %remaining, i32 %count\n"
+        emit_raw "  %count_zero = icmp sle i32 %real_count, 0\n"
+        emit_raw "  br i1 %count_zero, label %ret_empty_str, label %do_slice\n"
+        # Return empty string (wrapped in union)
+        emit_raw "ret_empty_str:\n"
+        emit_raw "  %ret_empty.ptr = alloca %Nil$_$OR$_String.union, align 8\n"
+        emit_raw "  %ret_empty.tid = getelementptr %Nil$_$OR$_String.union, ptr %ret_empty.ptr, i32 0, i32 0\n"
+        emit_raw "  store i32 1, ptr %ret_empty.tid\n"
+        emit_raw "  %ret_empty.val = getelementptr %Nil$_$OR$_String.union, ptr %ret_empty.ptr, i32 0, i32 1\n"
+        emit_raw "  store ptr @.str.empty, ptr %ret_empty.val, align 4\n"
+        emit_raw "  %ret_empty_union = load %Nil$_$OR$_String.union, ptr %ret_empty.ptr\n"
+        emit_raw "  ret %Nil$_$OR$_String.union %ret_empty_union\n"
+        # Return nil
+        emit_raw "ret_nil:\n"
+        emit_raw "  %ret_nil.ptr = alloca %Nil$_$OR$_String.union, align 8\n"
+        emit_raw "  %ret_nil.tid = getelementptr %Nil$_$OR$_String.union, ptr %ret_nil.ptr, i32 0, i32 0\n"
+        emit_raw "  store i32 0, ptr %ret_nil.tid\n"
+        emit_raw "  %ret_nil_union = load %Nil$_$OR$_String.union, ptr %ret_nil.ptr\n"
+        emit_raw "  ret %Nil$_$OR$_String.union %ret_nil_union\n"
+        emit_raw "do_slice:\n"
+        emit_raw "  %data_base = getelementptr i8, ptr %self, i32 12\n"
+        emit_raw "  %src_ptr = getelementptr i8, ptr %data_base, i32 %real_start\n"
+        emit_raw "  %result = call ptr @String$Dnew$$Pointer$LUInt8$R_Int32_Int32(ptr %src_ptr, i32 %real_count, i32 %real_count)\n"
+        emit_raw "  %ret.ptr = alloca %Nil$_$OR$_String.union, align 8\n"
+        emit_raw "  %ret.tid = getelementptr %Nil$_$OR$_String.union, ptr %ret.ptr, i32 0, i32 0\n"
+        emit_raw "  store i32 1, ptr %ret.tid\n"
+        emit_raw "  %ret.val = getelementptr %Nil$_$OR$_String.union, ptr %ret.ptr, i32 0, i32 1\n"
+        emit_raw "  store ptr %result, ptr %ret.val, align 4\n"
+        emit_raw "  %ret_union = load %Nil$_$OR$_String.union, ptr %ret.ptr\n"
+        emit_raw "  ret %Nil$_$OR$_String.union %ret_union\n"
+        emit_raw "}\n\n"
+        return true
       end
       false
     end

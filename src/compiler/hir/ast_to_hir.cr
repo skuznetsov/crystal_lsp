@@ -31857,6 +31857,20 @@ module Crystal::HIR
       end
 
       case cond_node
+      when CrystalV2::Compiler::Frontend::StringNode
+        # String literals: use content comparison, not pointer comparison
+        cond_val = lower_expr(ctx, cond_expr)
+        subject_type = ctx.type_of(subject_id)
+        if subject_type == TypeRef::STRING
+          call = Call.new(ctx.next_id, TypeRef::BOOL, subject_id, "__crystal_v2_string_eq", [cond_val])
+          ctx.emit(call)
+          ctx.register_type(call.id, TypeRef::BOOL)
+          call.id
+        else
+          eq = BinaryOperation.new(ctx.next_id, TypeRef::BOOL, BinaryOp::Eq, subject_id, cond_val)
+          ctx.emit(eq)
+          eq.id
+        end
       when CrystalV2::Compiler::Frontend::NumberNode,
            CrystalV2::Compiler::Frontend::BoolNode,
            CrystalV2::Compiler::Frontend::NilNode,
