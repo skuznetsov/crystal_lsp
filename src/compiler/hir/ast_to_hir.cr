@@ -38435,21 +38435,7 @@ module Crystal::HIR
               # (method resolution may retype receiver to module like Enumerable)
               is_array = array_intrinsic_receiver?(ctx, receiver_id)
               if !is_array && callee_node.is_a?(CrystalV2::Compiler::Frontend::MemberAccessNode)
-                orig_obj = @arena[callee_node.object]
-                if orig_obj.is_a?(CrystalV2::Compiler::Frontend::ArrayLiteralNode)
-                  is_array = true
-                elsif orig_obj.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode)
-                  if pname = orig_obj.name
-                    var_name = String.new(pname)
-                    if var_val = ctx.lookup_local(var_name)
-                      var_type = ctx.type_of(var_val)
-                      if desc = @module.get_type_descriptor(var_type)
-                        is_array = desc.kind == TypeKind::Array &&
-                          (desc.name.starts_with?("Array(") || desc.name.starts_with?("StaticArray("))
-                      end
-                    end
-                  end
-                end
+                is_array = check_original_receiver_is_array?(ctx, callee_node)
               end
               if is_array
                 return lower_array_each_with_index_dynamic(ctx, receiver_id, blk_node)
@@ -38533,6 +38519,15 @@ module Crystal::HIR
       if method_name == "includes?" && receiver_id && args.size == 1
         if array_intrinsic_receiver?(ctx, receiver_id)
           return lower_array_includes_dynamic(ctx, receiver_id, args[0])
+        end
+      end
+
+      # Handle Array#index(value) intrinsic — returns Int32 (-1 = not found)
+      if method_name == "index" && receiver_id && args.size >= 1 && block_expr.nil?
+        if array_intrinsic_receiver?(ctx, receiver_id) ||
+           (callee_node.is_a?(CrystalV2::Compiler::Frontend::MemberAccessNode) &&
+            check_original_receiver_is_array?(ctx, callee_node))
+          return lower_array_index_dynamic(ctx, receiver_id, args[0])
         end
       end
 
@@ -43273,6 +43268,26 @@ module Crystal::HIR
       nil_lit.id
     end
 
+    # Check if a MemberAccessNode's original object is an array (before module retyping)
+    private def check_original_receiver_is_array?(ctx : LoweringContext, callee_node : CrystalV2::Compiler::Frontend::MemberAccessNode) : Bool
+      orig_obj = @arena[callee_node.object]
+      if orig_obj.is_a?(CrystalV2::Compiler::Frontend::ArrayLiteralNode)
+        return true
+      elsif orig_obj.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode)
+        if pname = orig_obj.name
+          var_name = String.new(pname)
+          if var_val = ctx.lookup_local(var_name)
+            var_type = ctx.type_of(var_val)
+            if desc = @module.get_type_descriptor(var_type)
+              return desc.kind == TypeKind::Array &&
+                (desc.name.starts_with?("Array(") || desc.name.starts_with?("StaticArray("))
+            end
+          end
+        end
+      end
+      false
+    end
+
     private def array_intrinsic_receiver?(ctx : LoweringContext, receiver_id : ValueId) : Bool
       receiver_type = ctx.type_of(receiver_id)
       return false if receiver_type == TypeRef::VOID
@@ -44391,6 +44406,77 @@ module Crystal::HIR
       result_phi.add_incoming(found_block, true_val.id)
       result_phi.add_incoming(cond_block, false_val.id)
       ctx.emit(result_phi)
+
+      result_phi.id
+    end
+
+    # Lower Array#index(value) intrinsic
+    # Returns Int32: index if found, -1 if not found
+    private def lower_array_index_dynamic(
+      ctx : LoweringContext,
+      array_id : ValueId,
+      value_id : ValueId,
+    ) : ValueId
+      element_type = array_element_type_for_value(ctx, array_id, TypeRef::INT32)
+
+      size_val = ArraySize.new(ctx.next_id, TypeRef::INT32, array_id)
+      ctx.emit(size_val)
+
+      entry_block = ctx.current_block
+      zero = Literal.new(ctx.next_id, TypeRef::INT32, 0_i64)
+      ctx.emit(zero)
+      neg_one = Literal.new(ctx.next_id, TypeRef::INT32, -1_i64)
+      ctx.emit(neg_one)
+      ctx.register_type(neg_one.id, TypeRef::INT32)
+
+      cond_block = ctx.create_block
+      body_block = ctx.create_block
+      found_block = ctx.create_block
+      incr_block = ctx.create_block
+      exit_block = ctx.create_block
+
+      ctx.terminate(Jump.new(cond_block))
+
+      # Condition: i < size
+      ctx.current_block = cond_block
+      index_phi = Phi.new(ctx.next_id, TypeRef::INT32)
+      index_phi.add_incoming(entry_block, zero.id)
+      ctx.emit(index_phi)
+
+      cmp = BinaryOperation.new(ctx.next_id, TypeRef::BOOL, BinaryOp::Lt, index_phi.id, size_val.id)
+      ctx.emit(cmp)
+      ctx.terminate(Branch.new(cmp.id, body_block, exit_block))
+
+      # Body: arr[i] == value?
+      ctx.current_block = body_block
+      elem = IndexGet.new(ctx.next_id, element_type, array_id, index_phi.id)
+      ctx.emit(elem)
+      ctx.register_type(elem.id, element_type)
+
+      eq_cmp = BinaryOperation.new(ctx.next_id, TypeRef::BOOL, BinaryOp::Eq, elem.id, value_id)
+      ctx.emit(eq_cmp)
+      ctx.terminate(Branch.new(eq_cmp.id, found_block, incr_block))
+
+      # Found block: return current index
+      ctx.current_block = found_block
+      ctx.terminate(Jump.new(exit_block))
+
+      # Incr block
+      ctx.current_block = incr_block
+      one = Literal.new(ctx.next_id, TypeRef::INT32, 1_i64)
+      ctx.emit(one)
+      new_i = BinaryOperation.new(ctx.next_id, TypeRef::INT32, BinaryOp::Add, index_phi.id, one.id)
+      ctx.emit(new_i)
+      index_phi.add_incoming(incr_block, new_i.id)
+      ctx.terminate(Jump.new(cond_block))
+
+      # Exit block: phi result (index from found_block, -1 from cond_block)
+      ctx.current_block = exit_block
+      result_phi = Phi.new(ctx.next_id, TypeRef::INT32)
+      result_phi.add_incoming(found_block, index_phi.id)
+      result_phi.add_incoming(cond_block, neg_one.id)
+      ctx.emit(result_phi)
+      ctx.register_type(result_phi.id, TypeRef::INT32)
 
       result_phi.id
     end
