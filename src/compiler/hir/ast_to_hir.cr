@@ -1677,6 +1677,10 @@ module Crystal::HIR
     @inline_yield_block_body_depth : Int32 = 0
     # Track when we are lowering proc literal bodies (returns should not escape).
     @inline_yield_proc_depth : Int32 = 0
+    # Counter for generating unique proc function names
+    @proc_function_counter : Int32 = 0
+    # Track captured values for proc closures: FuncPointer ValueId → Array of parent ValueIds
+    @proc_captures_by_value = {} of ValueId => Array(ValueId)
 
     # Inline return handling for yield-function inlining.
     class InlineReturnContext
@@ -28968,6 +28972,10 @@ module Crystal::HIR
           enum_map = @enum_value_types ||= {} of ValueId => String
           enum_map[copy.id] = enum_name
         end
+        # Propagate proc captures through copies
+        if caps = @proc_captures_by_value[local_id]?
+          @proc_captures_by_value[copy.id] = caps
+        end
         return copy.id
       else
         # Local not found - try inline caller locals for block bodies
@@ -36764,6 +36772,33 @@ module Crystal::HIR
                 ctx.register_type(cast.id, target_type)
                 return cast.id
               end
+            end
+          end
+        end
+
+        # Proc#call intercept: lower receiver, check if Proc, emit direct Call
+        # with individual args (NOT packed into splat tuple).
+        if method_name == "call" && block_expr.nil? && block_pass_expr.nil?
+          proc_recv_id = lower_expr(ctx, obj_expr)
+          proc_recv_type = ctx.type_of(proc_recv_id)
+          if proc_recv_desc = @module.get_type_descriptor(proc_recv_type)
+            if proc_recv_desc.kind == TypeKind::Proc
+              # Lower each arg individually
+              proc_call_args = call_args.map { |arg_expr| lower_expr(ctx, arg_expr) }
+              # Append captured values as hidden extra args
+              if capture_ids = @proc_captures_by_value[proc_recv_id]?
+                proc_call_args.concat(capture_ids)
+              end
+              # Extract return type from Proc type_params (last element)
+              proc_call_return = TypeRef::VOID
+              if proc_recv_desc.type_params.size > 0
+                proc_ret = proc_recv_desc.type_params.last
+                proc_call_return = proc_ret if proc_ret != TypeRef::VOID
+              end
+              proc_call = Call.new(ctx.next_id, proc_call_return, proc_recv_id, "Proc#call", proc_call_args)
+              ctx.emit(proc_call)
+              ctx.register_type(proc_call.id, proc_call_return)
+              return proc_call.id
             end
           end
         end
@@ -47055,6 +47090,31 @@ module Crystal::HIR
       obj_node = @arena[node.object]
       member_name = String.new(node.member)
 
+      # Proc#call intercept for zero-arg calls (parsed as MemberAccessNode, not CallNode)
+      if member_name == "call"
+        proc_recv_id = lower_expr(ctx, node.object)
+        proc_recv_type = ctx.type_of(proc_recv_id)
+        if proc_recv_desc = @module.get_type_descriptor(proc_recv_type)
+          if proc_recv_desc.kind == TypeKind::Proc
+            proc_call_args = [] of ValueId
+            # Append captured values as hidden extra args
+            if capture_ids = @proc_captures_by_value[proc_recv_id]?
+              proc_call_args.concat(capture_ids)
+            end
+            # Extract return type from Proc type_params (last element)
+            proc_call_return = TypeRef::VOID
+            if proc_recv_desc.type_params.size > 0
+              proc_ret = proc_recv_desc.type_params.last
+              proc_call_return = proc_ret if proc_ret != TypeRef::VOID
+            end
+            proc_call = Call.new(ctx.next_id, proc_call_return, proc_recv_id, "Proc#call", proc_call_args)
+            ctx.emit(proc_call)
+            ctx.register_type(proc_call.id, proc_call_return)
+            return proc_call.id
+          end
+        end
+      end
+
       # Intercept Array#sort/sort! on member access (no parens, no args)
       if member_name == "sort" || member_name == "sort!"
         receiver_id = lower_expr(ctx, node.object)
@@ -48625,6 +48685,10 @@ module Crystal::HIR
             enum_map = @enum_value_types ||= {} of ValueId => String
             enum_map[copy.id] = enum_name
           end
+          # Propagate proc captures through reassignment copies
+          if caps = @proc_captures_by_value[value_id]?
+            @proc_captures_by_value[copy.id] = caps
+          end
           update_typeof_local(name, value_type)
           if concrete_name = concrete_type_name_for(value_type)
             existing_name = lookup_typeof_local_name(name)
@@ -48646,6 +48710,10 @@ module Crystal::HIR
             enum_map = @enum_value_types ||= {} of ValueId => String
             enum_map[local.id] = enum_name
             enum_map[copy.id] = enum_name
+          end
+          # Propagate proc captures through assignment copies
+          if caps = @proc_captures_by_value[value_id]?
+            @proc_captures_by_value[copy.id] = caps
           end
           update_typeof_local(name, value_type)
           if concrete_name = concrete_type_name_for(value_type)
@@ -49834,35 +49902,91 @@ module Crystal::HIR
       end
     end
 
+    # Scan proc body AST to collect referenced identifier names (for capture detection).
+    # Simple recursive walk — handles common node types.
+    private def collect_proc_body_identifiers(body : Array(ExprId)) : Set(String)
+      names = Set(String).new
+      body.each { |eid| collect_proc_body_ident_walk(eid, names) }
+      names
+    end
+
+    private def collect_proc_body_ident_walk(expr_id : ExprId, names : Set(String))
+      return if expr_id.index < 0 || expr_id.index >= @arena.size
+      node = @arena[expr_id]
+      case node
+      when CrystalV2::Compiler::Frontend::IdentifierNode
+        names.add(String.new(node.name))
+      when CrystalV2::Compiler::Frontend::BinaryNode
+        collect_proc_body_ident_walk(node.left, names)
+        collect_proc_body_ident_walk(node.right, names)
+      when CrystalV2::Compiler::Frontend::UnaryNode
+        collect_proc_body_ident_walk(node.operand, names)
+      when CrystalV2::Compiler::Frontend::CallNode
+        collect_proc_body_ident_walk(node.callee, names)
+        node.args.each { |a| collect_proc_body_ident_walk(a, names) }
+        if blk = node.block
+          collect_proc_body_ident_walk(blk, names)
+        end
+      when CrystalV2::Compiler::Frontend::MemberAccessNode
+        collect_proc_body_ident_walk(node.object, names)
+      when CrystalV2::Compiler::Frontend::IfNode
+        collect_proc_body_ident_walk(node.condition, names)
+        node.then_body.each { |e| collect_proc_body_ident_walk(e, names) }
+        if eb = node.else_body
+          eb.each { |e| collect_proc_body_ident_walk(e, names) }
+        end
+      when CrystalV2::Compiler::Frontend::WhileNode
+        collect_proc_body_ident_walk(node.condition, names)
+        node.body.each { |e| collect_proc_body_ident_walk(e, names) }
+      when CrystalV2::Compiler::Frontend::AssignNode
+        collect_proc_body_ident_walk(node.target, names)
+        collect_proc_body_ident_walk(node.value, names)
+      when CrystalV2::Compiler::Frontend::ReturnNode
+        if v = node.value
+          collect_proc_body_ident_walk(v, names)
+        end
+      when CrystalV2::Compiler::Frontend::ArrayLiteralNode
+        node.elements.each { |e| collect_proc_body_ident_walk(e, names) }
+      when CrystalV2::Compiler::Frontend::StringInterpolationNode
+        node.pieces.each do |piece|
+          if e = piece.expr
+            collect_proc_body_ident_walk(e, names)
+          end
+        end
+      when CrystalV2::Compiler::Frontend::BlockNode
+        node.body.each { |e| collect_proc_body_ident_walk(e, names) }
+      when CrystalV2::Compiler::Frontend::TernaryNode
+        collect_proc_body_ident_walk(node.condition, names)
+        collect_proc_body_ident_walk(node.true_branch, names)
+        collect_proc_body_ident_walk(node.false_branch, names)
+      when CrystalV2::Compiler::Frontend::CaseNode
+        if cond = node.value
+          collect_proc_body_ident_walk(cond, names)
+        end
+        node.when_branches.each do |wb|
+          wb.conditions.each { |c| collect_proc_body_ident_walk(c, names) }
+          wb.body.each { |b| collect_proc_body_ident_walk(b, names) }
+        end
+        if eb = node.else_branch
+          eb.each { |e| collect_proc_body_ident_walk(e, names) }
+        end
+      end
+    end
+
     private def lower_proc_literal(
       ctx : LoweringContext,
       node : CrystalV2::Compiler::Frontend::ProcLiteralNode,
       param_type_override : Array(TypeRef)? = nil,
     ) : ValueId
-      saved_block = ctx.current_block
-      saved_locals = ctx.save_locals
-      assigned_vars = collect_assigned_vars(node.body).to_set
-      old_typeof_locals = @current_typeof_locals
-      old_typeof_local_names = @current_typeof_local_names
-      @current_typeof_locals = old_typeof_locals ? old_typeof_locals.dup : old_typeof_locals
-      @current_typeof_local_names = old_typeof_local_names ? old_typeof_local_names.dup : old_typeof_local_names
+      # Generate unique function name for the proc body
+      proc_func_name = "__crystal_proc_#{@proc_function_counter}"
+      @proc_function_counter += 1
 
-      ctx.push_scope(ScopeKind::Closure)
-      closure_scope = ctx.current_scope
-      body_block = ctx.create_block
-      ctx.current_block = body_block
-
+      # Determine param types
       proc_param_types = [] of TypeRef
-      if env_get("DEBUG_BLOCK_PARAMS") && param_type_override
-        override_count = param_type_override.size
-        param_count = node.params ? node.params.not_nil!.size : 0
-        STDERR.puts "[BLOCK_PARAMS] proc_literal params=#{param_count} override=#{override_count}"
-      end
-      # Add proc parameters (params can be nil)
       if params = node.params
         params.each_with_index do |param, idx|
           if param_name = param.name
-            name = String.new(param_name)
             param_type = if ta = param.type_annotation
                            type_ref_for_name(String.new(ta))
                          elsif param_type_override && (override = param_type_override[idx]?)
@@ -49871,53 +49995,117 @@ module Crystal::HIR
                            TypeRef::VOID
                          end
             proc_param_types << param_type
-            param_val = Parameter.new(ctx.next_id, param_type, idx, name)
-            ctx.emit(param_val)
-            ctx.register_local(name, param_val.id)
-            ctx.register_type(param_val.id, param_type)
-            update_typeof_local(name, param_type)
-            if ta = param.type_annotation
-              update_typeof_local_name(name, String.new(ta))
-            end
-            assigned_vars.delete(name)
           end
         end
       end
 
+      # Pre-determine return type (may be refined after lowering)
+      proc_return_type = if rt = node.return_type
+                           type_ref_for_name(String.new(rt))
+                         else
+                           TypeRef::VOID # Will be updated after body lowering
+                         end
+
+      # Create standalone function for the proc body
+      proc_func = @module.create_function(proc_func_name, proc_return_type)
+      proc_ctx = LoweringContext.new(proc_func, @module, @arena)
+
+      # Collect proc param names (to exclude from capture detection)
+      proc_param_names = Set(String).new
+      if params = node.params
+        params.each do |param|
+          if param_name = param.name
+            proc_param_names.add(String.new(param_name))
+          end
+        end
+      end
+
+      # Detect captures: scan proc body for identifiers that reference parent locals
+      referenced_names = collect_proc_body_identifiers(node.body)
+      parent_locals = ctx.save_locals  # {name => ValueId}
+      captures = [] of {String, ValueId, TypeRef}  # {name, parent_value_id, type}
+      referenced_names.each do |name|
+        next if proc_param_names.includes?(name)
+        next if name == "self"
+        if parent_value_id = parent_locals[name]?
+          parent_type = ctx.type_of(parent_value_id)
+          next if parent_type == TypeRef::VOID
+          captures << {name, parent_value_id, parent_type}
+        end
+      end
+
+      # Add parameters to the standalone function
+      if params = node.params
+        params.each_with_index do |param, idx|
+          if param_name = param.name
+            name = String.new(param_name)
+            param_type = proc_param_types[idx]? || TypeRef::VOID
+            hir_param = proc_func.add_param(name, param_type)
+            proc_ctx.register_local(name, hir_param.id)
+            proc_ctx.register_type(hir_param.id, param_type)
+            update_typeof_local(name, param_type)
+            if ta = param.type_annotation
+              update_typeof_local_name(name, String.new(ta))
+            end
+          end
+        end
+      end
+
+      # Add captured variables as hidden extra parameters
+      captures.each do |cap_name, _parent_vid, cap_type|
+        hir_param = proc_func.add_param("__capture_#{cap_name}", cap_type)
+        proc_ctx.register_local(cap_name, hir_param.id)
+        proc_ctx.register_type(hir_param.id, cap_type)
+      end
+
+      # Save and lower body into the standalone function
+      saved_class = @current_class
+      saved_typeof_locals = @current_typeof_locals
+      saved_typeof_local_names = @current_typeof_local_names
+      @current_typeof_locals = saved_typeof_locals ? saved_typeof_locals.dup : nil
+      @current_typeof_local_names = saved_typeof_local_names ? saved_typeof_local_names.dup : nil
+
       @inline_yield_proc_depth += 1
-      # Lower body
       last_value = begin
-        lower_body(ctx, node.body)
+        lower_body(proc_ctx, node.body)
       ensure
         @inline_yield_proc_depth -= 1
       end
-      ctx.pop_scope
 
-      if ctx.get_block(ctx.current_block).terminator.is_a?(Unreachable)
-        ctx.terminate(Return.new(last_value))
+      # Terminate the proc function — always add Return unless already terminated with Return
+      block = proc_func.get_block(proc_ctx.current_block)
+      unless block.terminator.is_a?(Return)
+        proc_ctx.terminate(Return.new(last_value))
       end
 
-      ctx.current_block = saved_block
-      ctx.restore_locals(saved_locals)
-      @current_typeof_locals = old_typeof_locals
-      @current_typeof_local_names = old_typeof_local_names
+      # Update return type from actual lowered body type
+      if proc_return_type == TypeRef::VOID
+        actual_return_type = proc_ctx.type_of(last_value)
+        if actual_return_type != TypeRef::VOID
+          proc_return_type = actual_return_type
+          proc_func.return_type = proc_return_type
+        end
+      end
 
-      proc_return_type = if rt = node.return_type
-                           type_ref_for_name(String.new(rt))
-                         elsif last_expr = node.body.last?
-                           infer_type_from_expr(last_expr, @current_class) || TypeRef::NIL
-                         else
-                           TypeRef::NIL
-                         end
+      @current_class = saved_class
+      @current_typeof_locals = saved_typeof_locals
+      @current_typeof_local_names = saved_typeof_local_names
+
+      # Compute proc type (user-visible, does NOT include captures)
       proc_type = @module.intern_type(TypeDescriptor.new(TypeKind::Proc, "Proc", proc_param_types + [proc_return_type]))
 
-      # Create MakeClosure
-      captures = compute_block_captures(ctx, closure_scope, saved_locals, assigned_vars)
-      closure = MakeClosure.new(ctx.next_id, proc_type, body_block, captures)
-      closure.lifetime = LifetimeTag::HeapEscape # Procs typically escape
-      ctx.emit(closure)
-      ctx.register_type(closure.id, proc_type)
-      closure.id
+      # Return FuncPointer in caller's context, registered with Proc type
+      fp = FuncPointer.new(ctx.next_id, proc_type, proc_func_name)
+      ctx.emit(fp)
+      ctx.register_type(fp.id, proc_type)
+
+      # Store capture parent value IDs for use at call site
+      if !captures.empty?
+        capture_parent_ids = captures.map { |_, parent_vid, _| parent_vid }
+        @proc_captures_by_value[fp.id] = capture_parent_ids
+      end
+
+      fp.id
     end
 
     # ═══════════════════════════════════════════════════════════════════════

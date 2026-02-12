@@ -1071,19 +1071,18 @@ module Crystal
       end
       if call.receiver && is_proc_call
         recv_type = @hir_value_types[call.receiver.not_nil!]?
+        recv_desc = recv_type ? @hir_module.get_type_descriptor(recv_type) : nil
         if recv_type
-          recv_desc = @hir_module.get_type_descriptor(recv_type)
           if recv_desc && recv_desc.kind == HIR::TypeKind::Proc
             # Proc is a function pointer - emit indirect call
-            # The first arg is the proc/closure, remaining are call arguments
-            # For now, we emit an indirect_call MIR instruction
-            # The proc value contains: {function_ptr, closure_context}
+            # args[0] = receiver (func ptr), args[1..] = actual arguments
             filtered_args = [] of ValueId
             filtered_args << args[0]
             call.args.each_with_index do |arg_id, idx|
               arg_type = @hir_value_types[arg_id]?
+              in_map = @value_map.has_key?(arg_id)
               next if arg_type == HIR::TypeRef::VOID
-              next unless @value_map.has_key?(arg_id)
+              next unless in_map
               filtered_args << args[idx + 1]
             end
             return builder.call_indirect(filtered_args[0], filtered_args[1..].to_a, convert_type(call.type))
