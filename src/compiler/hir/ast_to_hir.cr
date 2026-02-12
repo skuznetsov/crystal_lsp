@@ -36618,6 +36618,18 @@ module Crystal::HIR
           end
         end
 
+        # Array#join(separator) (EARLY): intercept before method resolution.
+        if method_name == "join" && call_args.size == 1 && block_expr.nil? && block_pass_expr.nil?
+          recv_id = lower_expr(ctx, obj_expr)
+          if array_intrinsic_receiver?(ctx, recv_id)
+            sep_id = with_arena(call_arena) { lower_expr(ctx, call_args[0]) }
+            ext_call = ExternCall.new(ctx.next_id, TypeRef::STRING, "__crystal_v2_array_join_string", [recv_id, sep_id])
+            ctx.emit(ext_call)
+            ctx.register_type(ext_call.id, TypeRef::STRING)
+            return ext_call.id
+          end
+        end
+
         # Array#count { |x| condition } (EARLY): same as above.
         if method_name == "count" && block_expr
           recv_id = lower_expr(ctx, obj_expr)
@@ -40730,6 +40742,17 @@ module Crystal::HIR
         ctx.emit(ext_call)
         ctx.register_type(ext_call.id, TypeRef::INT32)
         return ext_call.id
+      end
+
+      # Intercept Array(String)#join(String) → runtime helper
+      if receiver_id && method_name == "join" && args.size == 1 &&
+         mangled_method_name.starts_with?("Array(")
+        if array_intrinsic_receiver?(ctx, receiver_id)
+          ext_call = ExternCall.new(ctx.next_id, TypeRef::STRING, "__crystal_v2_array_join_string", [receiver_id, args[0]])
+          ctx.emit(ext_call)
+          ctx.register_type(ext_call.id, TypeRef::STRING)
+          return ext_call.id
+        end
       end
 
       call = Call.new(ctx.next_id, return_type, receiver_id, mangled_method_name, args, block_id, call_virtual)
@@ -46204,6 +46227,17 @@ module Crystal::HIR
           ctx.register_type(ext_call.id, TypeRef::INT32)
           return ext_call.id
         end
+      end
+
+      # Array#join intrinsic (MemberAccessNode path — no-parens call uses empty separator)
+      if member_name == "join" && array_intrinsic_receiver?(ctx, object_id)
+        empty_sep = Literal.new(ctx.next_id, TypeRef::STRING, "")
+        ctx.emit(empty_sep)
+        ctx.register_type(empty_sep.id, TypeRef::STRING)
+        ext_call = ExternCall.new(ctx.next_id, TypeRef::STRING, "__crystal_v2_array_join_string", [object_id, empty_sep.id])
+        ctx.emit(ext_call)
+        ctx.register_type(ext_call.id, TypeRef::STRING)
+        return ext_call.id
       end
 
       # Array#empty? intrinsic (MemberAccessNode path — no-parens call)
