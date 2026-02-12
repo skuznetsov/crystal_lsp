@@ -12260,17 +12260,36 @@ module Crystal::HIR
         @inline_arenas = saved_inline_arenas
       end
 
-      # Infer return type from the last expression for unannotated module methods.
-      if node.return_type.nil? && (last_id = last_value)
-        inferred = ctx.type_of(last_id)
-        if env_get("DEBUG_INFER_RETURN") && base_name.includes?("get_cache")
-          inferred_name = get_type_name_from_ref(inferred)
-          return_name = get_type_name_from_ref(return_type)
-          STDERR.puts "[INFER_RETURN_MOD] base=#{base_name} full=#{full_name} inferred=#{inferred_name} return=#{return_name}"
+      # Infer return type from all Return terminators + last expression.
+      # Functions with explicit `return` inside conditionals may return different
+      # types from different paths. We must merge all of them.
+      if node.return_type.nil?
+        inferred_types = [] of TypeRef
+
+        # Collect types from all Return terminators
+        func.blocks.each do |block|
+          term = block.terminator
+          next unless term.is_a?(Return)
+          if value = term.value
+            t = ctx.type_of(value)
+            inferred_types << t unless t == TypeRef::VOID
+          else
+            inferred_types << TypeRef::NIL
+          end
         end
-        if inferred != TypeRef::VOID && inferred != return_type
-          return_type = inferred
-          func.return_type = inferred
+
+        # Also consider the last expression
+        if (last_id = last_value)
+          t = ctx.type_of(last_id)
+          inferred_types << t unless t == TypeRef::VOID
+        end
+
+        if inferred_types.any?
+          inferred_type = merge_return_types(inferred_types)
+          if inferred_type && inferred_type != TypeRef::VOID && inferred_type != return_type
+            return_type = inferred_type
+            func.return_type = inferred_type
+          end
         end
       end
 
@@ -16030,19 +16049,36 @@ module Crystal::HIR
 
       fixup_module_receiver_calls(ctx)
 
-      # Infer return type from the last expression for unannotated methods.
-      # This is a pragmatic bootstrap improvement for stdlib-style combinators and nilable query methods
-      # that often omit return annotations (e.g., `Hash#[]?`, `Array#first?`).
-      if node.return_type.nil? && (last_id = last_value)
-        inferred = ctx.type_of(last_id)
-        if env_get("DEBUG_INFER_RETURN") && base_name.includes?("get_cache")
-          inferred_name = get_type_name_from_ref(inferred)
-          return_name = get_type_name_from_ref(return_type)
-          STDERR.puts "[INFER_RETURN] base=#{base_name} full=#{full_name} inferred=#{inferred_name} return=#{return_name}"
+      # Infer return type from all Return terminators + last expression.
+      # Functions with explicit `return` inside conditionals (e.g., check_downcase_ascii)
+      # may return different types from different paths. We must merge all of them.
+      if node.return_type.nil?
+        inferred_types = [] of TypeRef
+
+        # Collect types from all Return terminators
+        func.blocks.each do |block|
+          term = block.terminator
+          next unless term.is_a?(Return)
+          if value = term.value
+            t = ctx.type_of(value)
+            inferred_types << t unless t == TypeRef::VOID
+          else
+            inferred_types << TypeRef::NIL
+          end
         end
-        if inferred != TypeRef::VOID && inferred != return_type
-          return_type = inferred
-          func.return_type = inferred
+
+        # Also consider the last expression
+        if (last_id = last_value)
+          t = ctx.type_of(last_id)
+          inferred_types << t unless t == TypeRef::VOID
+        end
+
+        if inferred_types.any?
+          inferred_type = merge_return_types(inferred_types)
+          if inferred_type && inferred_type != TypeRef::VOID && inferred_type != return_type
+            return_type = inferred_type
+            func.return_type = inferred_type
+          end
         end
       end
 
@@ -25298,7 +25334,6 @@ module Crystal::HIR
           return_type = registered
         end
       end
-
       # Idempotency: avoid lowering the same function twice (can happen with conditional defs).
       if existing = @module.function_by_name(full_name)
         @enum_value_types = old_enum_value_types
