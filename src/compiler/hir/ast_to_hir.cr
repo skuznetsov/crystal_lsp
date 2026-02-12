@@ -8186,6 +8186,32 @@ module Crystal::HIR
             if obj_name = stringify_type_expr(callee_node.object)
               obj_name = resolve_type_name_in_context(obj_name)
               base_method = "#{obj_name}.#{member_name}"
+              # When there are args, try to find the specific overload matching arg types.
+              # This avoids returning the wrong type when multiple overloads exist
+              # (e.g., Math.sqrt(Float32):Float32 vs Math.sqrt(Float64):Float64).
+              if !expr_node.args.empty?
+                arg_type_names = [] of String
+                expr_node.args.each do |arg_id|
+                  if at = infer_type_from_expr(arg_id, self_type_name)
+                    arg_type_names << type_name_for_mangling(at) if at != TypeRef::VOID
+                  end
+                end
+                unless arg_type_names.empty?
+                  # Check function types with mangled name
+                  mangled_method = "#{base_method}$#{arg_type_names.join("_")}"
+                  if ret_type = @function_types[mangled_method]?
+                    return ret_type if ret_type != TypeRef::VOID
+                  end
+                  # Check function def for declared return type annotation with matching args
+                  if def_node = @function_defs[mangled_method]? || @function_defs["#{base_method}$$#{arg_type_names.join("_")}"]?
+                    if rt_bytes = def_node.return_type
+                      rt_name = normalize_declared_type_name(String.new(rt_bytes))
+                      resolved = type_ref_for_name(rt_name)
+                      return resolved if resolved != TypeRef::VOID
+                    end
+                  end
+                end
+              end
               if ret_type = @function_base_return_types[base_method]?
                 return ret_type if ret_type != TypeRef::VOID
               end
