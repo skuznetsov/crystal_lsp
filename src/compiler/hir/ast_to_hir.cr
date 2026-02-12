@@ -42712,11 +42712,19 @@ module Crystal::HIR
         @inline_loop_vars_stack << inline_vars
         pushed_inline = true
       end
+      @loop_exit_stack << exit_block
+      @loop_cond_stack << incr_block
+      @loop_phi_stack << phi_nodes
+      @loop_break_info_stack << [] of {BlockId, Hash(String, ValueId)}
       begin
         lower_body(ctx, block.body)
       ensure
         @inline_loop_vars_stack.pop? if pushed_inline
+        @loop_exit_stack.pop?
+        @loop_cond_stack.pop?
+        @loop_phi_stack.pop?
       end
+      break_info = @loop_break_info_stack.pop
       body_exit_block = ctx.current_block
       ctx.pop_scope
 
@@ -42746,10 +42754,26 @@ module Crystal::HIR
       # Jump back to condition
       ctx.terminate(Jump.new(cond_block))
 
-      # Exit block - restore phi values for use after the loop
+      # Exit block - merge normal exit + break paths
       ctx.current_block = exit_block
-      phi_nodes.each do |var_name, phi|
-        ctx.register_local(var_name, phi.id)
+      if break_info.empty?
+        phi_nodes.each do |var_name, phi|
+          ctx.register_local(var_name, phi.id)
+        end
+      else
+        phi_nodes.each do |var_name, cond_phi|
+          exit_phi = Phi.new(ctx.next_id, cond_phi.type)
+          exit_phi.add_incoming(cond_block, cond_phi.id)
+          break_info.each do |break_block, break_locals|
+            if break_val = break_locals[var_name]?
+              exit_phi.add_incoming(break_block, break_val)
+            else
+              exit_phi.add_incoming(break_block, cond_phi.id)
+            end
+          end
+          ctx.emit(exit_phi)
+          ctx.register_local(var_name, exit_phi.id)
+        end
       end
 
       nil_lit = Literal.new(ctx.next_id, TypeRef::NIL, nil)
@@ -42831,11 +42855,19 @@ module Crystal::HIR
         @inline_loop_vars_stack << inline_vars
         pushed_inline = true
       end
+      @loop_exit_stack << exit_block
+      @loop_cond_stack << incr_block
+      @loop_phi_stack << phi_nodes
+      @loop_break_info_stack << [] of {BlockId, Hash(String, ValueId)}
       begin
         lower_body(ctx, block.body)
       ensure
         @inline_loop_vars_stack.pop? if pushed_inline
+        @loop_exit_stack.pop?
+        @loop_cond_stack.pop?
+        @loop_phi_stack.pop?
       end
+      break_info = @loop_break_info_stack.pop
       ctx.pop_scope
       ctx.terminate(Jump.new(incr_block))
 
@@ -42859,10 +42891,26 @@ module Crystal::HIR
 
       ctx.terminate(Jump.new(cond_block))
 
-      # Exit block
+      # Exit block - merge normal exit + break paths
       ctx.current_block = exit_block
-      phi_nodes.each do |var_name, phi|
-        ctx.register_local(var_name, phi.id)
+      if break_info.empty?
+        phi_nodes.each do |var_name, phi|
+          ctx.register_local(var_name, phi.id)
+        end
+      else
+        phi_nodes.each do |var_name, cond_phi|
+          exit_phi = Phi.new(ctx.next_id, cond_phi.type)
+          exit_phi.add_incoming(cond_block, cond_phi.id)
+          break_info.each do |break_block, break_locals|
+            if break_val = break_locals[var_name]?
+              exit_phi.add_incoming(break_block, break_val)
+            else
+              exit_phi.add_incoming(break_block, cond_phi.id)
+            end
+          end
+          ctx.emit(exit_phi)
+          ctx.register_local(var_name, exit_phi.id)
+        end
       end
 
       nil_lit = Literal.new(ctx.next_id, TypeRef::NIL, nil)
@@ -42973,11 +43021,19 @@ module Crystal::HIR
         @inline_loop_vars_stack << inline_vars
         pushed_inline = true
       end
+      @loop_exit_stack << exit_block
+      @loop_cond_stack << incr_block
+      @loop_phi_stack << phi_nodes
+      @loop_break_info_stack << [] of {BlockId, Hash(String, ValueId)}
       begin
         lower_body(ctx, block.body)
       ensure
         @inline_loop_vars_stack.pop? if pushed_inline
+        @loop_exit_stack.pop?
+        @loop_cond_stack.pop?
+        @loop_phi_stack.pop?
       end
+      break_info = @loop_break_info_stack.pop
       ctx.pop_scope
       ctx.terminate(Jump.new(incr_block))
 
@@ -43001,10 +43057,26 @@ module Crystal::HIR
 
       ctx.terminate(Jump.new(cond_block))
 
-      # Exit block
+      # Exit block - merge normal exit + break paths
       ctx.current_block = exit_block
-      phi_nodes.each do |var_name, phi|
-        ctx.register_local(var_name, phi.id)
+      if break_info.empty?
+        phi_nodes.each do |var_name, phi|
+          ctx.register_local(var_name, phi.id)
+        end
+      else
+        phi_nodes.each do |var_name, cond_phi|
+          exit_phi = Phi.new(ctx.next_id, cond_phi.type)
+          exit_phi.add_incoming(cond_block, cond_phi.id)
+          break_info.each do |break_block, break_locals|
+            if break_val = break_locals[var_name]?
+              exit_phi.add_incoming(break_block, break_val)
+            else
+              exit_phi.add_incoming(break_block, cond_phi.id)
+            end
+          end
+          ctx.emit(exit_phi)
+          ctx.register_local(var_name, exit_phi.id)
+        end
       end
 
       nil_lit = Literal.new(ctx.next_id, TypeRef::NIL, nil)
@@ -43116,11 +43188,21 @@ module Crystal::HIR
         @inline_loop_vars_stack << inline_vars
         pushed_inline = true
       end
+      # Push loop stacks so `next` in block body jumps to incr_block (advances index),
+      # and `break` jumps to exit_block. Without this, `next` emits `unreachable`.
+      @loop_exit_stack << exit_block
+      @loop_cond_stack << incr_block  # next → increment → cond (NOT directly to cond)
+      @loop_phi_stack << phi_nodes
+      @loop_break_info_stack << [] of {BlockId, Hash(String, ValueId)}
       begin
         lower_body(ctx, block.body)
       ensure
         @inline_loop_vars_stack.pop? if pushed_inline
+        @loop_exit_stack.pop?
+        @loop_cond_stack.pop?
+        @loop_phi_stack.pop?
       end
+      break_info = @loop_break_info_stack.pop
       ctx.pop_scope
       ctx.terminate(Jump.new(incr_block))
 
@@ -43144,10 +43226,26 @@ module Crystal::HIR
 
       ctx.terminate(Jump.new(cond_block))
 
-      # Exit block
+      # Exit block - merge normal exit + break paths
       ctx.current_block = exit_block
-      phi_nodes.each do |var_name, phi|
-        ctx.register_local(var_name, phi.id)
+      if break_info.empty?
+        phi_nodes.each do |var_name, phi|
+          ctx.register_local(var_name, phi.id)
+        end
+      else
+        phi_nodes.each do |var_name, cond_phi|
+          exit_phi = Phi.new(ctx.next_id, cond_phi.type)
+          exit_phi.add_incoming(cond_block, cond_phi.id)
+          break_info.each do |break_block, break_locals|
+            if break_val = break_locals[var_name]?
+              exit_phi.add_incoming(break_block, break_val)
+            else
+              exit_phi.add_incoming(break_block, cond_phi.id)
+            end
+          end
+          ctx.emit(exit_phi)
+          ctx.register_local(var_name, exit_phi.id)
+        end
       end
 
       nil_lit = Literal.new(ctx.next_id, TypeRef::NIL, nil)
@@ -43343,11 +43441,19 @@ module Crystal::HIR
         @inline_loop_vars_stack << inline_vars
         pushed_inline = true
       end
+      @loop_exit_stack << exit_block
+      @loop_cond_stack << incr_block
+      @loop_phi_stack << phi_nodes
+      @loop_break_info_stack << [] of {BlockId, Hash(String, ValueId)}
       begin
         lower_body(ctx, block.body)
       ensure
         @inline_loop_vars_stack.pop? if pushed_inline
+        @loop_exit_stack.pop?
+        @loop_cond_stack.pop?
+        @loop_phi_stack.pop?
       end
+      break_info = @loop_break_info_stack.pop
       # Capture post-body block (may differ from exec_block if body has control flow)
       post_exec_block = ctx.current_block
       ctx.pop_scope
@@ -43397,10 +43503,26 @@ module Crystal::HIR
 
       ctx.terminate(Jump.new(cond_block))
 
-      # Exit block
+      # Exit block - merge normal exit + break paths
       ctx.current_block = exit_block
-      phi_nodes.each do |var_name, phi|
-        ctx.register_local(var_name, phi.id)
+      if break_info.empty?
+        phi_nodes.each do |var_name, phi|
+          ctx.register_local(var_name, phi.id)
+        end
+      else
+        phi_nodes.each do |var_name, cond_phi|
+          exit_phi = Phi.new(ctx.next_id, cond_phi.type)
+          exit_phi.add_incoming(cond_block, cond_phi.id)
+          break_info.each do |break_block, break_locals|
+            if break_val = break_locals[var_name]?
+              exit_phi.add_incoming(break_block, break_val)
+            else
+              exit_phi.add_incoming(break_block, cond_phi.id)
+            end
+          end
+          ctx.emit(exit_phi)
+          ctx.register_local(var_name, exit_phi.id)
+        end
       end
 
       nil_lit = Literal.new(ctx.next_id, TypeRef::NIL, nil)
@@ -43632,11 +43754,19 @@ module Crystal::HIR
         @inline_loop_vars_stack << inline_vars
         pushed_inline = true
       end
+      @loop_exit_stack << exit_block
+      @loop_cond_stack << incr_block
+      @loop_phi_stack << phi_nodes
+      @loop_break_info_stack << [] of {BlockId, Hash(String, ValueId)}
       begin
         lower_body(ctx, block.body)
       ensure
         @inline_loop_vars_stack.pop? if pushed_inline
+        @loop_exit_stack.pop?
+        @loop_cond_stack.pop?
+        @loop_phi_stack.pop?
       end
+      break_info = @loop_break_info_stack.pop
       ctx.pop_scope
       ctx.terminate(Jump.new(incr_block))
 
@@ -43660,10 +43790,26 @@ module Crystal::HIR
 
       ctx.terminate(Jump.new(cond_block))
 
-      # Exit block
+      # Exit block - merge normal exit + break paths
       ctx.current_block = exit_block
-      phi_nodes.each do |var_name, phi|
-        ctx.register_local(var_name, phi.id)
+      if break_info.empty?
+        phi_nodes.each do |var_name, phi|
+          ctx.register_local(var_name, phi.id)
+        end
+      else
+        phi_nodes.each do |var_name, cond_phi|
+          exit_phi = Phi.new(ctx.next_id, cond_phi.type)
+          exit_phi.add_incoming(cond_block, cond_phi.id)
+          break_info.each do |break_block, break_locals|
+            if break_val = break_locals[var_name]?
+              exit_phi.add_incoming(break_block, break_val)
+            else
+              exit_phi.add_incoming(break_block, cond_phi.id)
+            end
+          end
+          ctx.emit(exit_phi)
+          ctx.register_local(var_name, exit_phi.id)
+        end
       end
 
       nil_lit = Literal.new(ctx.next_id, TypeRef::NIL, nil)
@@ -44556,7 +44702,19 @@ module Crystal::HIR
       ctx.register_type(char_val.id, TypeRef::CHAR)
       ctx.register_local(param_name, char_val.id)
 
-      lower_body(ctx, block.body)
+      empty_phis = {} of String => Phi
+      @loop_exit_stack << exit_block
+      @loop_cond_stack << incr_block
+      @loop_phi_stack << empty_phis
+      @loop_break_info_stack << [] of {BlockId, Hash(String, ValueId)}
+      begin
+        lower_body(ctx, block.body)
+      ensure
+        @loop_exit_stack.pop?
+        @loop_cond_stack.pop?
+        @loop_phi_stack.pop?
+      end
+      break_info = @loop_break_info_stack.pop
       ctx.pop_scope
 
       ctx.terminate(Jump.new(incr_block))
