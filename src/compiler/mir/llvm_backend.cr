@@ -729,6 +729,7 @@ module Crystal::MIR
       already_declared << "__crystal_v2_string_index_string" << "__crystal_v2_string_index_char"
       already_declared << "__crystal_v2_string_gsub" << "__crystal_v2_string_byte_slice"
       already_declared << "__crystal_v2_string_bytesize" << "__crystal_v2_string_byte_at"
+      already_declared << "__crystal_v2_array_new_filled_i32" << "__crystal_v2_array_new_filled_bool"
       # Skip any function starting with __crystal_v2_ (runtime functions)
       runtime_prefix = "__crystal_v2_"
 
@@ -2094,6 +2095,68 @@ module Crystal::MIR
       emit_raw "done:\n"
       emit_raw "  %result = phi i32 [0, %entry], [%sum_next, %loop]\n"
       emit_raw "  ret i32 %result\n"
+      emit_raw "}\n\n"
+
+      # Array.new(size, initial_i32_value) → creates filled Crystal Array
+      # Creates proper 24-byte Array header with buffer filled with initial value
+      emit_raw "define ptr @__crystal_v2_array_new_filled_i32(i32 %size, i32 %val) {\n"
+      emit_raw "entry:\n"
+      # Allocate 24-byte Crystal Array header
+      emit_raw "  %arr = call ptr @__crystal_v2_malloc64(i64 24)\n"
+      emit_raw "  store i32 0, ptr %arr\n"  # type_id = 0
+      emit_raw "  %sz_ptr = getelementptr i8, ptr %arr, i32 4\n"
+      emit_raw "  store i32 %size, ptr %sz_ptr\n"  # @size = size
+      emit_raw "  %cap_ptr = getelementptr i8, ptr %arr, i32 8\n"
+      emit_raw "  store i32 %size, ptr %cap_ptr\n"  # @capacity = size
+      emit_raw "  %otb_ptr = getelementptr i8, ptr %arr, i32 12\n"
+      emit_raw "  store i32 0, ptr %otb_ptr\n"  # @offset_to_buffer = 0
+      # Allocate element buffer
+      emit_raw "  %buf_bytes = mul i32 %size, 4\n"
+      emit_raw "  %buf_sz64 = sext i32 %buf_bytes to i64\n"
+      emit_raw "  %buf = call ptr @__crystal_v2_malloc64(i64 %buf_sz64)\n"
+      emit_raw "  %buf_ptr = getelementptr i8, ptr %arr, i32 16\n"
+      emit_raw "  store ptr %buf, ptr %buf_ptr\n"  # @buffer = buf
+      # Fill buffer with initial value
+      emit_raw "  %is_empty = icmp sle i32 %size, 0\n"
+      emit_raw "  br i1 %is_empty, label %done, label %fill_loop\n"
+      emit_raw "fill_loop:\n"
+      emit_raw "  %i = phi i32 [0, %entry], [%i_next, %fill_loop]\n"
+      emit_raw "  %elem_ptr = getelementptr i32, ptr %buf, i32 %i\n"
+      emit_raw "  store i32 %val, ptr %elem_ptr\n"
+      emit_raw "  %i_next = add i32 %i, 1\n"
+      emit_raw "  %fill_done = icmp sge i32 %i_next, %size\n"
+      emit_raw "  br i1 %fill_done, label %done, label %fill_loop\n"
+      emit_raw "done:\n"
+      emit_raw "  ret ptr %arr\n"
+      emit_raw "}\n\n"
+
+      # Array.new(size, initial_bool_value) → creates filled Crystal Array with i1 stored as i8
+      emit_raw "define ptr @__crystal_v2_array_new_filled_bool(i32 %size, i1 %val) {\n"
+      emit_raw "entry:\n"
+      emit_raw "  %arr = call ptr @__crystal_v2_malloc64(i64 24)\n"
+      emit_raw "  store i32 0, ptr %arr\n"
+      emit_raw "  %sz_ptr = getelementptr i8, ptr %arr, i32 4\n"
+      emit_raw "  store i32 %size, ptr %sz_ptr\n"
+      emit_raw "  %cap_ptr = getelementptr i8, ptr %arr, i32 8\n"
+      emit_raw "  store i32 %size, ptr %cap_ptr\n"
+      emit_raw "  %otb_ptr = getelementptr i8, ptr %arr, i32 12\n"
+      emit_raw "  store i32 0, ptr %otb_ptr\n"
+      emit_raw "  %buf_sz64 = sext i32 %size to i64\n"
+      emit_raw "  %buf = call ptr @__crystal_v2_malloc64(i64 %buf_sz64)\n"
+      emit_raw "  %buf_ptr = getelementptr i8, ptr %arr, i32 16\n"
+      emit_raw "  store ptr %buf, ptr %buf_ptr\n"
+      emit_raw "  %val8 = zext i1 %val to i8\n"
+      emit_raw "  %is_empty = icmp sle i32 %size, 0\n"
+      emit_raw "  br i1 %is_empty, label %done, label %fill_loop\n"
+      emit_raw "fill_loop:\n"
+      emit_raw "  %i = phi i32 [0, %entry], [%i_next, %fill_loop]\n"
+      emit_raw "  %elem_ptr = getelementptr i8, ptr %buf, i32 %i\n"
+      emit_raw "  store i8 %val8, ptr %elem_ptr\n"
+      emit_raw "  %i_next = add i32 %i, 1\n"
+      emit_raw "  %fill_done = icmp sge i32 %i_next, %size\n"
+      emit_raw "  br i1 %fill_done, label %done, label %fill_loop\n"
+      emit_raw "done:\n"
+      emit_raw "  ret ptr %arr\n"
       emit_raw "}\n\n"
 
       # Hash entry access helpers for Hash#each intrinsic

@@ -38099,6 +38099,33 @@ module Crystal::HIR
         STDERR.puts "[CALL_TRACE] stage=after_double_splat method=#{method_name} args=#{args.size} receiver=#{!!receiver_id} full=#{full_method_name || ""}"
       end
 
+      # Array.new(size, value) intercept → runtime helper for filled array
+      if method_name == "new" && args.size == 2
+        owner = static_class_name || class_name_str
+        if owner && owner.starts_with?("Array")
+          size_id = args[0]
+          value_id = args[1]
+          value_type = ctx.type_of(value_id)
+          helper_name = if value_type == TypeRef::BOOL
+                          "__crystal_v2_array_new_filled_bool"
+                        else
+                          "__crystal_v2_array_new_filled_i32"
+                        end
+          # Determine the element type name for proper array type
+          elem_name = if owner.includes?("(")
+                        owner.split("(").last.rstrip(')')
+                      else
+                        get_type_name_from_ref(value_type)
+                      end
+          arr_type_name = "Array(#{elem_name})"
+          arr_type = type_ref_for_name(arr_type_name) || TypeRef::POINTER
+          ext_call = ExternCall.new(ctx.next_id, arr_type, helper_name, [size_id, value_id])
+          ctx.emit(ext_call)
+          ctx.register_type(ext_call.id, arr_type)
+          return ext_call.id
+        end
+      end
+
       if method_name == "new"
         enum_owner = static_class_name || class_name_str
         enum_name = enum_owner ? resolve_enum_name(enum_owner) : nil
@@ -46729,6 +46756,14 @@ module Crystal::HIR
         cast = Cast.new(ctx.next_id, TypeRef::INT32, object_id, TypeRef::INT32)
         ctx.emit(cast)
         ctx.register_type(cast.id, TypeRef::INT32)
+        return cast.id
+      end
+
+      # Int32#chr → Char (identity, since both are i32 internally)
+      if member_name == "chr" && numeric_primitive?(receiver_type)
+        cast = Cast.new(ctx.next_id, TypeRef::CHAR, object_id, TypeRef::CHAR)
+        ctx.emit(cast)
+        ctx.register_type(cast.id, TypeRef::CHAR)
         return cast.id
       end
 
