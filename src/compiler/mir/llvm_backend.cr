@@ -789,6 +789,37 @@ module Crystal::MIR
                "}\n"
       end
 
+      # Float64#**(Int32) / Float32#**(Int32) — primitive power via llvm.powi intrinsic
+      if name == "Float64$H$POW$$Int32"
+        return "; Float64#**(Int32) via llvm.powi.f64\n" \
+               "define double @#{name}(double %self, i32 %other) {\n" \
+               "  %result = call double @llvm.powi.f64(double %self, i32 %other)\n" \
+               "  ret double %result\n" \
+               "}\n"
+      end
+      if name == "Float32$H$POW$$Int32"
+        return "; Float32#**(Int32) via llvm.powi.f32\n" \
+               "define float @#{name}(float %self, i32 %other) {\n" \
+               "  %result = call float @llvm.powi.f32(float %self, i32 %other)\n" \
+               "  ret float %result\n" \
+               "}\n"
+      end
+      # Float64#**(Float64) / Float32#**(Float32) — via llvm.pow
+      if name == "Float64$H$POW$$Float64"
+        return "; Float64#**(Float64) via llvm.pow.f64\n" \
+               "define double @#{name}(double %self, double %other) {\n" \
+               "  %result = call double @llvm.pow.f64(double %self, double %other)\n" \
+               "  ret double %result\n" \
+               "}\n"
+      end
+      if name == "Float32$H$POW$$Float32"
+        return "; Float32#**(Float32) via llvm.pow.f32\n" \
+               "define float @#{name}(float %self, float %other) {\n" \
+               "  %result = call float @llvm.pow.f32(float %self, float %other)\n" \
+               "  ret float %result\n" \
+               "}\n"
+      end
+
       return nil unless is_nil_method || is_unknown_method || is_wrong_receiver || is_v2_mangled
 
       # Build a minimal function body that returns a zero/default value
@@ -891,6 +922,8 @@ module Crystal::MIR
       when "llvm.rint.f64"  then "declare double @llvm.rint.f64(double)"
       when "llvm.pow.f32"   then "declare float @llvm.pow.f32(float, float)"
       when "llvm.pow.f64"   then "declare double @llvm.pow.f64(double, double)"
+      when "llvm.powi.f32"  then "declare float @llvm.powi.f32(float, i32)"
+      when "llvm.powi.f64"  then "declare double @llvm.powi.f64(double, i32)"
       when "llvm.fma.f32"   then "declare float @llvm.fma.f32(float, float, float)"
       when "llvm.fma.f64"   then "declare double @llvm.fma.f64(double, double, double)"
       when "llvm.copysign.f32" then "declare float @llvm.copysign.f32(float, float)"
@@ -1059,6 +1092,8 @@ module Crystal::MIR
       when "llvm.rint.f64"  then {["double"], "double"}
       when "llvm.pow.f32"   then {["float", "float"], "float"}
       when "llvm.pow.f64"   then {["double", "double"], "double"}
+      when "llvm.powi.f32"  then {["float", "i32"], "float"}
+      when "llvm.powi.f64"  then {["double", "i32"], "double"}
       when "llvm.fma.f32"   then {["float", "float", "float"], "float"}
       when "llvm.fma.f64"   then {["double", "double", "double"], "double"}
       when "llvm.copysign.f32" then {["float", "float"], "float"}
