@@ -41768,6 +41768,14 @@ module Crystal::HIR
       members.each do |member_name, value|
         return value if underscore_lower(member_name) == target
       end
+      # @[Flags] enums auto-generate None = 0 and All = bitor(all members)
+      if target == "none"
+        return 0_i64
+      elsif target == "all"
+        all_val = 0_i64
+        members.each_value { |v| all_val |= v }
+        return all_val
+      end
       nil
     end
 
@@ -42073,7 +42081,13 @@ module Crystal::HIR
                 next if provided[idx]
                 next unless default_expr
                 @arena = call_arena
-                default_id = with_arena(def_arena) { lower_expr(ctx, default_expr) }
+                default_id = with_arena(def_arena) {
+                  if idx < param_type_names.size && param_type_names[idx]
+                    lower_arg_with_expected_type(ctx, default_expr, param_types[idx], param_type_names[idx], func_context)
+                  else
+                    lower_expr(ctx, default_expr)
+                  end
+                }
                 if param_types[idx] != TypeRef::VOID
                   ctx.register_type(default_id, param_types[idx])
                 end
@@ -42156,6 +42170,7 @@ module Crystal::HIR
       param_local_names = [] of String
       param_defaults = [] of ExprId?
       param_types = [] of TypeRef
+      param_type_names = [] of String?
 
       params.each do |p|
         next if p.is_block
@@ -42166,8 +42181,10 @@ module Crystal::HIR
         if ta = p.type_annotation
           param_type_name = normalize_declared_type_name(String.new(ta), func_context)
           param_types << type_ref_for_name(param_type_name)
+          param_type_names << param_type_name
         else
           param_types << TypeRef::VOID
+          param_type_names << nil
         end
       end
 
@@ -42203,7 +42220,13 @@ module Crystal::HIR
         while idx < param_defaults.size
           default_expr = param_defaults[idx]
           break unless default_expr
-          default_id = with_arena(def_arena) { lower_expr(ctx, default_expr) }
+          default_id = with_arena(def_arena) {
+            if idx < param_type_names.size && param_type_names[idx]
+              lower_arg_with_expected_type(ctx, default_expr, param_types[idx], param_type_names[idx].not_nil!, func_context)
+            else
+              lower_expr(ctx, default_expr)
+            end
+          }
           if param_types[idx] != TypeRef::VOID
             ctx.register_type(default_id, param_types[idx])
           end

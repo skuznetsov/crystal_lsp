@@ -2968,18 +2968,27 @@ module Crystal::MIR
           phi_bits = phi_llvm_type[1..-1].to_i? || 32
 
           phi.incoming.each do |(pred_block_id, val_id)|
-            # Check if this value needs conversion
-            conversion = @phi_zext_conversions[val_id]?
-            next unless conversion
-
-            from_bits, to_bits = conversion
-
             # Don't add duplicate entries
             next if @phi_predecessor_conversions.has_key?({pred_block_id, val_id})
 
-            # Record that this predecessor block needs to emit a conversion for this value
-            conv_name = "r#{val_id}.phi_conv.#{pred_block_id}"
-            @phi_predecessor_conversions[{pred_block_id, val_id}] = {conv_name, from_bits, to_bits}
+            # Check if this value needs conversion via phi_zext_conversions
+            if conversion = @phi_zext_conversions[val_id]?
+              from_bits, to_bits = conversion
+              conv_name = "r#{val_id}.phi_conv.#{pred_block_id}"
+              @phi_predecessor_conversions[{pred_block_id, val_id}] = {conv_name, from_bits, to_bits}
+              next
+            end
+
+            # Also check for general int width mismatches (e.g. i32 value in i8 phi)
+            val_type = @value_types[val_id]?
+            next unless val_type
+            val_llvm = @type_mapper.llvm_type(val_type)
+            next unless val_llvm.starts_with?('i') && !val_llvm.includes?('.')
+            val_bits = val_llvm[1..-1].to_i? || 32
+            if val_bits != phi_bits
+              conv_name = "r#{val_id}.conv.#{pred_block_id}"
+              @phi_predecessor_conversions[{pred_block_id, val_id}] = {conv_name, val_bits, phi_bits}
+            end
           end
         end
       end
@@ -7047,6 +7056,8 @@ module Crystal::MIR
         # Mark as void so value_ref returns a safe default for downstream uses
         @void_values << inst.id
       elsif needs_union_abi_fix
+        # Ensure value_names is registered (may have been skipped if prepass wrongly marked void)
+        @value_names[inst.id] ||= "r#{inst.id}"
         # ABI fix: emit call with correct union return type, then extract payload
         # as the simpler type that downstream code expects.
         c = @cond_counter
@@ -7061,6 +7072,8 @@ module Crystal::MIR
         record_emitted_type(name, union_abi_desired_type)
         @value_types[inst.id] = prepass_type.not_nil!
       else
+        # Ensure value_names is registered (may have been skipped if prepass wrongly marked void)
+        @value_names[inst.id] ||= "r#{inst.id}"
         emit "#{name} = call #{return_type} @#{callee_name}(#{args})"
         record_emitted_type(name, return_type)
         # Update value_types to match EMITTED return type (not callee's return type)
