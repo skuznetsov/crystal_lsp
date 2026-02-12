@@ -6551,6 +6551,27 @@ module Crystal::MIR
         end
       end
 
+      # Intercept Int#abs / Number#abs when self is a primitive integer.
+      # The generic abs function takes ptr self, but for primitive ints we inline:
+      #   abs(x) = x < 0 ? -x : x
+      if callee_name == "Int$Habs" || callee_name == "Number$Habs"
+        if inst.args.size >= 1
+          self_id = inst.args[0]
+          self_val = value_ref(self_id)
+          self_type = lookup_value_llvm_type(self_id)
+          if self_type.starts_with?('i') && !self_type.includes?('.')
+            zero = "0"
+            cmp_name = "%abs_cmp.#{inst.id}"
+            neg_name = "%abs_neg.#{inst.id}"
+            emit "#{cmp_name} = icmp slt #{self_type} #{self_val}, #{zero}"
+            emit "#{neg_name} = sub #{self_type} #{zero}, #{self_val}"
+            emit "#{name} = select i1 #{cmp_name}, #{self_type} #{neg_name}, #{self_type} #{self_val}"
+            @value_types[inst.id] = @value_types[self_id]? || TypeRef::INT32
+            return
+          end
+        end
+      end
+
       if raw_callee_name && pointer_constructor_name?(raw_callee_name) && inst.args.size == 1
         arg_id = inst.args[0]
         arg = value_ref(arg_id)
