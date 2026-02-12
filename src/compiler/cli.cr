@@ -855,6 +855,25 @@ module CrystalV2
         llvm_gen.progress = options.progress
         llvm_gen.reachability = true  # Only emit reachable functions from main
         llvm_gen.no_prelude = options.no_prelude
+
+        # Pass constant literal values for global initialization (e.g., Math::PI)
+        const_init = {} of String => (Float64 | Int64)
+        hir_converter.constant_literal_values.each do |name, value|
+          if value.is_a?(CrystalV2::Compiler::Semantic::MacroNumberValue)
+            # Convert constant name (Math::PI) to global name (Math__classvar__PI)
+            if idx = name.rindex("::")
+              owner = name[0, idx]
+              const_name = name[(idx + 2)..-1]
+            else
+              owner = "Object"
+              const_name = name
+            end
+            global_name = "#{owner}__classvar__#{const_name}"
+            const_init[global_name] = value.value
+          end
+        end
+        llvm_gen.constant_initial_values = const_init unless const_init.empty?
+
         llvm_ir = llvm_gen.generate
         log(options, out_io, "  LLVM IR size: #{llvm_ir.size} bytes")
         timings["llvm"] = (Time.instant - llvm_start).total_milliseconds if options.stats

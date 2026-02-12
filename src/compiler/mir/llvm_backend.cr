@@ -453,6 +453,7 @@ module Crystal::MIR
     property progress : Bool = false   # Print progress during generation
     property reachability : Bool = false  # Only emit reachable functions (from main) - DISABLED, needs HIR-level implementation
     property no_prelude : Bool = false   # --no-prelude mode: emit C strings instead of Crystal String objects
+    property constant_initial_values : Hash(String, Float64 | Int64) = {} of String => (Float64 | Int64)  # Constant literal values for globals (e.g., Math::PI)
     property target_triple : String = {% if flag?(:darwin) %}
                                         {% if flag?(:aarch64) %}
                                           "arm64-apple-macosx"
@@ -1300,6 +1301,8 @@ module Crystal::MIR
         initial = global.initial_value || 0_i64
         mangled_name = @type_mapper.mangle_name(global.name)
         actual_name = mangled_name
+        # Check for constant initial value override
+        const_val = @constant_initial_values[mangled_name]?
         # Avoid conflict with function names by prefixing with .global
         if function_names.includes?(mangled_name)
           actual_name = ".global.#{mangled_name}"
@@ -1311,12 +1314,21 @@ module Crystal::MIR
         elsif llvm_type == "ptr"
           emit_raw "@#{actual_name} = global #{llvm_type} null\n"
         elsif llvm_type == "float" || llvm_type == "double"
-          float_value = initial.to_f.to_s
+          if const_val && initial == 0_i64
+            float_value = const_val.is_a?(Float64) ? const_val.to_s : const_val.to_f64.to_s
+          else
+            float_value = initial.to_f.to_s
+          end
           float_value = "0.0" if float_value == "0"
           float_value = "#{float_value}.0" if float_value.matches?(/^-?\d+$/)
           emit_raw "@#{actual_name} = global #{llvm_type} #{float_value}\n"
         else
-          emit_raw "@#{actual_name} = global #{llvm_type} #{initial}\n"
+          if const_val && initial == 0_i64
+            int_value = const_val.is_a?(Int64) ? const_val : const_val.to_i64
+            emit_raw "@#{actual_name} = global #{llvm_type} #{int_value}\n"
+          else
+            emit_raw "@#{actual_name} = global #{llvm_type} #{initial}\n"
+          end
         end
       end
 
@@ -1326,15 +1338,27 @@ module Crystal::MIR
         next if function_names.includes?(name)
         llvm_type = @type_mapper.llvm_type(type_ref)
         llvm_type = "ptr" if llvm_type == "void"
-        # Use zeroinitializer for struct/union types, null for pointers, 0 for primitives
+        # Check for constant initial value (e.g., Math::PI = 3.14159...)
+        const_val = @constant_initial_values[name]?
         if llvm_type == "ptr"
           emit_raw "@#{name} = global #{llvm_type} null\n"
         elsif llvm_type.starts_with?('%') || llvm_type.starts_with?('{')
           emit_raw "@#{name} = global #{llvm_type} zeroinitializer\n"
         elsif llvm_type == "float" || llvm_type == "double"
-          emit_raw "@#{name} = global #{llvm_type} 0.0\n"
+          if const_val
+            float_value = const_val.is_a?(Float64) ? const_val.to_s : const_val.to_f64.to_s
+            float_value = "#{float_value}.0" if float_value.matches?(/^-?\d+$/)
+          else
+            float_value = "0.0"
+          end
+          emit_raw "@#{name} = global #{llvm_type} #{float_value}\n"
         else
-          emit_raw "@#{name} = global #{llvm_type} 0\n"
+          if const_val
+            int_value = const_val.is_a?(Int64) ? const_val : const_val.to_i64
+            emit_raw "@#{name} = global #{llvm_type} #{int_value}\n"
+          else
+            emit_raw "@#{name} = global #{llvm_type} 0\n"
+          end
         end
       end
 
