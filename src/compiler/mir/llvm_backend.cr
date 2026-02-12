@@ -947,7 +947,7 @@ module Crystal::MIR
           "#{expected_type} #{val}"
         else
           # Type mismatch - try to convert
-          if expected_type.starts_with?("i") && actual_type.starts_with?("i")
+          if expected_type.starts_with?('i') && actual_type.starts_with?('i')
             # Integer to integer - truncate or extend
             expected_bits = expected_type[1..].to_i? || 32
             actual_bits = actual_type[1..].to_i? || 32
@@ -1154,7 +1154,7 @@ module Crystal::MIR
     @[AlwaysInline]
     private def crystalish_extern_name?(name : String) : Bool
       # Namespaced or receiver-qualified: definitely Crystal.
-      return true if name.includes?("#") || name.includes?(".") || name.includes?("::")
+      return true if name.includes?('#') || name.includes?('.') || name.includes?("::")
       # Type-suffixed or type-like: likely Crystal (Int32/UInt64/etc).
       return true if name.includes?("_Int") || name.includes?("_UInt") || name.includes?("_Float")
       # Uppercase letters are uncommon in C lib symbols, common in Crystal types.
@@ -1269,7 +1269,7 @@ module Crystal::MIR
           @global_name_mapping[mangled_name] = actual_name
         end
         # Use zeroinitializer for struct/union types, numeric 0 for primitives
-        if llvm_type.starts_with?("%") || llvm_type.starts_with?("{")
+        if llvm_type.starts_with?('%') || llvm_type.starts_with?('{')
           emit_raw "@#{actual_name} = global #{llvm_type} zeroinitializer\n"
         elsif llvm_type == "ptr"
           emit_raw "@#{actual_name} = global #{llvm_type} null\n"
@@ -1292,7 +1292,7 @@ module Crystal::MIR
         # Use zeroinitializer for struct/union types, null for pointers, 0 for primitives
         if llvm_type == "ptr"
           emit_raw "@#{name} = global #{llvm_type} null\n"
-        elsif llvm_type.starts_with?("%") || llvm_type.starts_with?("{")
+        elsif llvm_type.starts_with?('%') || llvm_type.starts_with?('{')
           emit_raw "@#{name} = global #{llvm_type} zeroinitializer\n"
         elsif llvm_type == "float" || llvm_type == "double"
           emit_raw "@#{name} = global #{llvm_type} 0.0\n"
@@ -1313,7 +1313,7 @@ module Crystal::MIR
     end
 
     private def record_emitted_type(name : String, llvm_type : String)
-      return unless name.starts_with?("%")
+      return unless name.starts_with?('%')
       @emitted_value_types[name] = llvm_type
       @emitted_value_types[name[1..]] = llvm_type
     end
@@ -2877,7 +2877,7 @@ module Crystal::MIR
         init_val = case llvm_type
                    when "ptr" then "null"
                    when "float", "double" then "0.0"
-                   when .starts_with?("i") then "0"
+                   when .starts_with?('i') then "0"
                    when .includes?(".union") then "zeroinitializer"
                    else "0"
                    end
@@ -2925,7 +2925,7 @@ module Crystal::MIR
 
           phi_llvm_type = @type_mapper.llvm_type(phi.type)
           next if phi_llvm_type == "void"
-          next unless phi_llvm_type.starts_with?("i") && !phi_llvm_type.includes?(".")
+          next unless phi_llvm_type.starts_with?('i') && !phi_llvm_type.includes?('.')
           next if phi_llvm_type == "i1"
           phi_bits = phi_llvm_type[1..-1].to_i? || 32
 
@@ -3100,7 +3100,7 @@ module Crystal::MIR
             else
               # Fallback: apply type suffix heuristics for method names with type suffixes
               if suffix = suffix_after_dollar(extern_name)
-                if !suffix.includes?("_")
+                if !suffix.includes?('_')
                   case suffix
                   when "UInt64", "Int64"
                     effective_type = TypeRef::INT64
@@ -3268,7 +3268,7 @@ module Crystal::MIR
           phi_type = inst.type
           phi_llvm_type = @type_mapper.llvm_type(phi_type)
           next if phi_llvm_type == "void"
-          next unless phi_llvm_type.starts_with?("i") && !phi_llvm_type.includes?(".")
+          next unless phi_llvm_type.starts_with?('i') && !phi_llvm_type.includes?('.')
           next if phi_llvm_type == "i1"
           phi_bits = phi_llvm_type[1..-1].to_i? || 32
 
@@ -3278,7 +3278,7 @@ module Crystal::MIR
 
             # If phi expects different int type and both are integers
             if current_llvm_type != phi_llvm_type &&
-               current_llvm_type.starts_with?("i") && !current_llvm_type.includes?(".")
+               current_llvm_type.starts_with?('i') && !current_llvm_type.includes?('.')
               val_bits = current_llvm_type[1..-1].to_i? || 32
 
               if fixed_type_ids.includes?(val)
@@ -3698,14 +3698,14 @@ module Crystal::MIR
               result_llvm = @type_mapper.llvm_type(effective_type)
 
               # Check for int type size mismatch that will cause widening
-              if left_llvm.starts_with?("i") && !left_llvm.includes?(".") &&
-                 right_llvm.starts_with?("i") && !right_llvm.includes?(".")
+              if left_llvm.starts_with?('i') && !left_llvm.includes?('.') &&
+                 right_llvm.starts_with?('i') && !right_llvm.includes?('.')
                 left_bits = left_llvm[1..].to_i? || 32
                 right_bits = right_llvm[1..].to_i? || 32
                 max_bits = {left_bits, right_bits}.max
 
                 # If widening will occur, record the widened type
-                declared_bits = result_llvm.starts_with?("i") ? (result_llvm[1..].to_i? || 32) : 32
+                declared_bits = result_llvm.starts_with?('i') ? (result_llvm[1..].to_i? || 32) : 32
                 if max_bits > declared_bits
                   # Will be widened to max_bits
                   actual_type = case max_bits
@@ -4095,12 +4095,12 @@ module Crystal::MIR
       # Guard: if MIR reuses value IDs, skip store when types are completely incompatible
       if slot_llvm_type && slot_llvm_type != llvm_type &&
          slot_llvm_type.includes?(".union") && !llvm_type.includes?(".union")
-        scalar_compatible = llvm_type == "ptr" || llvm_type.starts_with?("i") ||
+        scalar_compatible = llvm_type == "ptr" || llvm_type.starts_with?('i') ||
                             llvm_type == "double" || llvm_type == "float"
         union_has_float = slot_llvm_type.includes?("Float") || slot_llvm_type.includes?("float")
         union_has_int = slot_llvm_type.includes?("Int") || slot_llvm_type.includes?("UInt")
         value_is_float = llvm_type == "double" || llvm_type == "float"
-        value_is_int = llvm_type.starts_with?("i") && !llvm_type.includes?(".")
+        value_is_int = llvm_type.starts_with?('i') && !llvm_type.includes?('.')
         if scalar_compatible && !((value_is_float && union_has_float) || (value_is_int && union_has_int) || llvm_type == "ptr")
           slot_llvm_type = nil
         end
@@ -4126,7 +4126,7 @@ module Crystal::MIR
           emit "%#{base}.slot_unwrap_val = load #{slot_llvm_type}, ptr %#{base}.slot_unwrap_pay"
           store_val = "%#{base}.slot_unwrap_val"
           store_type = slot_llvm_type
-        elsif llvm_type.starts_with?("i") && slot_llvm_type.starts_with?("i") && !llvm_type.includes?(".") && !slot_llvm_type.includes?(".")
+        elsif llvm_type.starts_with?('i') && slot_llvm_type.starts_with?('i') && !llvm_type.includes?('.') && !slot_llvm_type.includes?('.')
           val_bits = llvm_type[1..].to_i? || 64
           slot_bits = slot_llvm_type[1..].to_i? || 64
           if val_bits < slot_bits
@@ -4137,21 +4137,21 @@ module Crystal::MIR
             store_val = "%#{base}.slot_trunc"
           end
           store_type = slot_llvm_type
-        elsif llvm_type == "ptr" && slot_llvm_type.starts_with?("i")
+        elsif llvm_type == "ptr" && slot_llvm_type.starts_with?('i')
           emit "%#{base}.slot_ptrtoint = ptrtoint ptr #{name} to #{slot_llvm_type}"
           store_val = "%#{base}.slot_ptrtoint"
           store_type = slot_llvm_type
-        elsif llvm_type.starts_with?("i") && slot_llvm_type == "ptr"
+        elsif llvm_type.starts_with?('i') && slot_llvm_type == "ptr"
           emit "%#{base}.slot_inttoptr = inttoptr #{llvm_type} #{name} to ptr"
           store_val = "%#{base}.slot_inttoptr"
           store_type = slot_llvm_type
-        elsif (llvm_type == "double" || llvm_type == "float") && slot_llvm_type.starts_with?("i") && !slot_llvm_type.includes?(".")
+        elsif (llvm_type == "double" || llvm_type == "float") && slot_llvm_type.starts_with?('i') && !slot_llvm_type.includes?('.')
           slot_type_ref = @cross_block_slot_type_refs[inst_id]?
           op = slot_type_ref && unsigned_type_ref?(slot_type_ref) ? "fptoui" : "fptosi"
           emit "%#{base}.slot_ftoi = #{op} #{llvm_type} #{name} to #{slot_llvm_type}"
           store_val = "%#{base}.slot_ftoi"
           store_type = slot_llvm_type
-        elsif llvm_type.starts_with?("i") && !llvm_type.includes?(".") && (slot_llvm_type == "double" || slot_llvm_type == "float")
+        elsif llvm_type.starts_with?('i') && !llvm_type.includes?('.') && (slot_llvm_type == "double" || slot_llvm_type == "float")
           op = unsigned_type_ref?(val_type) ? "uitofp" : "sitofp"
           emit "%#{base}.slot_itof = #{op} #{llvm_type} #{name} to #{slot_llvm_type}"
           store_val = "%#{base}.slot_itof"
@@ -4380,7 +4380,7 @@ module Crystal::MIR
       if ptr_type_ref && union_ptr_like?(ptr_type_ref)
         union_llvm = @type_mapper.llvm_type(ptr_type_ref)
         if union_llvm.includes?(".union")
-          raw_name = name.starts_with?("%") ? name[1..] : name
+          raw_name = name.starts_with?('%') ? name[1..] : name
           base_name = "#{raw_name}.ptr_union"
           emit "%#{base_name}.ptr = alloca #{union_llvm}, align 8"
           emit "store #{union_llvm} #{normalize_union_value(ptr, union_llvm)}, ptr %#{base_name}.ptr"
@@ -4427,7 +4427,7 @@ module Crystal::MIR
 
       # Fix for VOID types - use a reasonable default type
       if val_type_str == "void"
-        if val.starts_with?("%")
+        if val.starts_with?('%')
           val_type_str = "ptr"  # Value reference, probably a pointer
         else
           val_type_str = "i64"  # Literal value (like "0" for void calls), use i64 as default
@@ -4440,7 +4440,7 @@ module Crystal::MIR
       end
 
       # For float/double types, ensure values are proper float literals
-      if (val_type_str == "float" || val_type_str == "double") && !val.starts_with?("%")
+      if (val_type_str == "float" || val_type_str == "double") && !val.starts_with?('%')
         # Convert integer literals to float literals (e.g., "0" -> "0.0", "3" -> "3.0")
         val = "#{val}.0" if val.matches?(/^-?\d+$/)
       end
@@ -4496,7 +4496,7 @@ module Crystal::MIR
           emit "%#{base_name}.payload_ptr = getelementptr #{base_type_str}, ptr %#{base_name}.union_ptr, i32 0, i32 1"
           emit "%#{base_name}.base_ptr = load ptr, ptr %#{base_name}.payload_ptr, align 4"
           base = "%#{base_name}.base_ptr"
-        elsif base_type_str.starts_with?("i")
+        elsif base_type_str.starts_with?('i')
           # Integer to pointer: inttoptr
           emit "%#{base_name}.base_ptr = inttoptr #{base_type_str} #{base} to ptr"
           base = "%#{base_name}.base_ptr"
@@ -4580,7 +4580,7 @@ module Crystal::MIR
           emit "#{name}.payload_ptr = getelementptr #{base_type_str}, ptr #{name}.union_ptr, i32 0, i32 1"
           emit "#{name}.base_ptr = load ptr, ptr #{name}.payload_ptr, align 4"
           base = "#{name}.base_ptr"
-        elsif base_type_str.starts_with?("i")
+        elsif base_type_str.starts_with?('i')
           # Integer to pointer: inttoptr (may be a value used as address)
           emit "#{name}.base_ptr = inttoptr #{base_type_str} #{base} to ptr"
           base = "#{name}.base_ptr"
@@ -4640,7 +4640,7 @@ module Crystal::MIR
         # Convert integer index to i64 (extend or truncate based on width).
         ext_name = "#{name}.idx64"
         bits = nil.as(Int32?)
-        if index_type_str.starts_with?("i")
+        if index_type_str.starts_with?('i')
           bits = index_type_str[1..].to_i?
         end
         if bits && bits > 64
@@ -4678,7 +4678,7 @@ module Crystal::MIR
 
       # Additional fallback: check if value_ref looks like a parameter name (not %r{number})
       # and look up its type from current function params
-      if !left.starts_with?("%r") && left.starts_with?("%")
+      if !left.starts_with?("%r") && left.starts_with?('%')
         param_name = left[1..]  # Remove %
         @current_func_params.each do |param|
           if param.name == param_name
@@ -4689,7 +4689,7 @@ module Crystal::MIR
           end
         end
       end
-      if !right.starts_with?("%r") && right.starts_with?("%")
+      if !right.starts_with?("%r") && right.starts_with?('%')
         param_name = right[1..]  # Remove %
         @current_func_params.each do |param|
           if param.name == param_name
@@ -4832,35 +4832,35 @@ module Crystal::MIR
         end
         # Convert integer literals to float format for float operations
         # Integer literals are numeric strings without "%" prefix and without "."
-        if !left.starts_with?("%") && left =~ /^-?\d+$/ && !left.includes?(".")
+        if !left.starts_with?('%') && left =~ /^-?\d+$/ && !left.includes?('.')
           left = "#{left}.0"
           operand_type_str = float_type
         end
-        if !right.starts_with?("%") && right =~ /^-?\d+$/ && !right.includes?(".")
+        if !right.starts_with?('%') && right =~ /^-?\d+$/ && !right.includes?('.')
           right = "#{right}.0"
           right_type_str = float_type
         end
         # Convert ptr operands to float (ptrtoint then sitofp/uitofp)
-        if left.starts_with?("%") && operand_type_str == "ptr"
+        if left.starts_with?('%') && operand_type_str == "ptr"
           emit "%binop#{inst.id}.left_ptrtoint = ptrtoint ptr #{left} to i64"
           emit "%binop#{inst.id}.left_itof = uitofp i64 %binop#{inst.id}.left_ptrtoint to #{float_type}"
           left = "%binop#{inst.id}.left_itof"
           operand_type_str = float_type
         end
-        if right.starts_with?("%") && right_type_str == "ptr"
+        if right.starts_with?('%') && right_type_str == "ptr"
           emit "%binop#{inst.id}.right_ptrtoint = ptrtoint ptr #{right} to i64"
           emit "%binop#{inst.id}.right_itof = uitofp i64 %binop#{inst.id}.right_ptrtoint to #{float_type}"
           right = "%binop#{inst.id}.right_itof"
           right_type_str = float_type
         end
         # Convert integer SSA values to float for float operations
-        if left.starts_with?("%") && operand_type_str.starts_with?("i")
+        if left.starts_with?('%') && operand_type_str.starts_with?('i')
           op = unsigned_type_ref?(operand_type) ? "uitofp" : "sitofp"
           emit "%binop#{inst.id}.left_itof = #{op} #{operand_type_str} #{left} to #{float_type}"
           left = "%binop#{inst.id}.left_itof"
           operand_type_str = float_type
         end
-        if right.starts_with?("%") && right_type_str.starts_with?("i")
+        if right.starts_with?('%') && right_type_str.starts_with?('i')
           op = right_type && unsigned_type_ref?(right_type) ? "uitofp" : "sitofp"
           emit "%binop#{inst.id}.right_itof = #{op} #{right_type_str} #{right} to #{float_type}"
           right = "%binop#{inst.id}.right_itof"
@@ -4947,8 +4947,8 @@ module Crystal::MIR
 
         # Handle int type size mismatch (e.g., i32 + i64)
         # Only do size matching for actual integer types, not unions or other types
-        left_is_int = operand_type_str.starts_with?("i") && !operand_type_str.includes?(".")
-        right_is_int = right_type_str.starts_with?("i") && !right_type_str.includes?(".")
+        left_is_int = operand_type_str.starts_with?('i') && !operand_type_str.includes?('.')
+        right_is_int = right_type_str.starts_with?('i') && !right_type_str.includes?('.')
         if operand_type_str != right_type_str && left_is_int && right_is_int
           # Convert smaller type to larger type
           left_bits = operand_type_str[1..-1].to_i? || 32
@@ -5002,7 +5002,7 @@ module Crystal::MIR
 
       mixed_sign = (left_is_signed && right_is_unsigned) || (left_is_unsigned && right_is_signed)
 
-      if mixed_sign && is_comparison && operand_type_str.starts_with?("i") && right_type_str.starts_with?("i")
+      if mixed_sign && is_comparison && operand_type_str.starts_with?('i') && right_type_str.starts_with?('i')
         # Promote both operands to a wider signed type that can represent both ranges
         left_bits = operand_type_str[1..].to_i? || 32
         right_bits = right_type_str[1..].to_i? || 32
@@ -5072,7 +5072,7 @@ module Crystal::MIR
         # Comparisons need both operands to be same type
         # If sizes differ, extend smaller to larger type
         cmp_type = operand_type_str
-        if operand_type_str != right_type_str && operand_type_str.starts_with?("i") && right_type_str.starts_with?("i")
+        if operand_type_str != right_type_str && operand_type_str.starts_with?('i') && right_type_str.starts_with?('i')
           left_size = operand_type_str[1..].to_i? || 32
           right_size = right_type_str[1..].to_i? || 32
           if left_size < right_size
@@ -5110,7 +5110,7 @@ module Crystal::MIR
             best_variant = descriptor.variants.find do |v|
               next if v.type_ref == TypeRef::NIL || v.type_ref == TypeRef::VOID
               vt = @type_mapper.llvm_type(v.type_ref)
-              is_float_result ? (vt == "float" || vt == "double") : vt.starts_with?("i")
+              is_float_result ? (vt == "float" || vt == "double") : vt.starts_with?('i')
             end
             # Fallback to any non-nil variant
             best_variant ||= descriptor.variants.find { |v| v.type_ref != TypeRef::NIL && v.type_ref != TypeRef::VOID }
@@ -5138,7 +5138,7 @@ module Crystal::MIR
           end
           payload_val = raw_name
           if payload_type != result_type
-            if payload_type.starts_with?("i") && result_type.starts_with?("i")
+            if payload_type.starts_with?('i') && result_type.starts_with?('i')
               payload_bits = payload_type[1..].to_i? || 32
               raw_bits = result_type[1..].to_i? || 32
               if raw_bits > payload_bits
@@ -5148,17 +5148,17 @@ module Crystal::MIR
                 emit "%binop#{inst.id}.raw_ext = sext #{result_type} #{raw_name} to #{payload_type}"
                 payload_val = "%binop#{inst.id}.raw_ext"
               end
-            elsif (payload_type == "float" || payload_type == "double") && result_type.starts_with?("i")
+            elsif (payload_type == "float" || payload_type == "double") && result_type.starts_with?('i')
               op = (unsigned_type_ref?(operand_type) || (right_type && unsigned_type_ref?(right_type))) ? "uitofp" : "sitofp"
               emit "%binop#{inst.id}.raw_itof = #{op} #{result_type} #{raw_name} to #{payload_type}"
               payload_val = "%binop#{inst.id}.raw_itof"
-            elsif payload_type == "ptr" && result_type.starts_with?("i")
+            elsif payload_type == "ptr" && result_type.starts_with?('i')
               emit "%binop#{inst.id}.raw_inttoptr = inttoptr #{result_type} #{raw_name} to ptr"
               payload_val = "%binop#{inst.id}.raw_inttoptr"
-            elsif payload_type.starts_with?("i") && result_type == "ptr"
+            elsif payload_type.starts_with?('i') && result_type == "ptr"
               emit "%binop#{inst.id}.raw_ptrtoint = ptrtoint ptr #{raw_name} to #{payload_type}"
               payload_val = "%binop#{inst.id}.raw_ptrtoint"
-            elsif payload_type.starts_with?("i") && (result_type == "float" || result_type == "double")
+            elsif payload_type.starts_with?('i') && (result_type == "float" || result_type == "double")
               unsigned_payload = unsigned_type_ref?(variant_type_ref)
               op = unsigned_payload ? "fptoui" : "fptosi"
               emit "%binop#{inst.id}.raw_ftoi = #{op} #{result_type} #{raw_name} to #{payload_type}"
@@ -5187,10 +5187,10 @@ module Crystal::MIR
 
         # Ensure operands match result_type for arithmetic ops
         # If operand is larger than result_type, use operand type instead (don't truncate)
-        if result_type.starts_with?("i") && result_type != "i1"
+        if result_type.starts_with?('i') && result_type != "i1"
           result_bits = result_type[1..].to_i? || 32
-          operand_bits = operand_type_str.starts_with?("i") ? (operand_type_str[1..].to_i? || 32) : 0
-          right_bits_val = right_type_str.starts_with?("i") ? (right_type_str[1..].to_i? || 32) : 0
+          operand_bits = operand_type_str.starts_with?('i') ? (operand_type_str[1..].to_i? || 32) : 0
+          right_bits_val = right_type_str.starts_with?('i') ? (right_type_str[1..].to_i? || 32) : 0
 
           # If operands are larger than result, use the larger operand type
           max_operand_bits = {operand_bits, right_bits_val}.max
@@ -5200,14 +5200,14 @@ module Crystal::MIR
 
           # Extend smaller operands to result_type
           result_bits = result_type[1..].to_i? || 32
-          if operand_type_str.starts_with?("i") && operand_type_str != result_type
+          if operand_type_str.starts_with?('i') && operand_type_str != result_type
             operand_bits = operand_type_str[1..].to_i? || 32
             if operand_bits < result_bits
               emit "%binop#{inst.id}.left_to_result = sext #{operand_type_str} #{left} to #{result_type}"
               left = "%binop#{inst.id}.left_to_result"
             end
           end
-          if right_type_str.starts_with?("i") && right_type_str != result_type
+          if right_type_str.starts_with?('i') && right_type_str != result_type
             right_bits_check = right_type_str[1..].to_i? || 32
             if right_bits_check < result_bits
               emit "%binop#{inst.id}.right_to_result = sext #{right_type_str} #{right} to #{result_type}"
@@ -5216,7 +5216,7 @@ module Crystal::MIR
           end
         end
         # If MIR expects ptr but we did arithmetic as int, convert back to ptr
-        if convert_result_to_ptr && result_type.starts_with?("i")
+        if convert_result_to_ptr && result_type.starts_with?('i')
           emit "%binop#{inst.id}.int_result = #{op} #{result_type} #{left}, #{right}"
           emit "#{name} = inttoptr #{result_type} %binop#{inst.id}.int_result to ptr"
           @value_types[inst.id] = TypeRef::POINTER
@@ -5252,7 +5252,7 @@ module Crystal::MIR
       operand_llvm_type = @type_mapper.llvm_type(operand_type)
 
       # Also check parameter types for operand (similar to binary op handling)
-      if !operand.starts_with?("%r") && operand.starts_with?("%")
+      if !operand.starts_with?("%r") && operand.starts_with?('%')
         param_name = operand[1..]  # Remove %
         @current_func_params.each do |param|
           if param.name == param_name
@@ -5289,7 +5289,7 @@ module Crystal::MIR
             else
               int_variant = descriptor.variants.find do |v|
                 vt = @type_mapper.llvm_type(v.type_ref)
-                vt.starts_with?("i")
+                vt.starts_with?('i')
               end
               if int_variant
                 variant_type_id = int_variant.type_id
@@ -5333,10 +5333,10 @@ module Crystal::MIR
 
           # If result type is ptr but operand is integer, use operand type
           # Can't do arithmetic on ptr with integer constants
-          if type == "ptr" && operand_llvm_type.starts_with?("i")
+          if type == "ptr" && operand_llvm_type.starts_with?('i')
             actual_type = operand_llvm_type
             result_type_ref = operand_type
-          elsif operand_llvm_type != type && operand_llvm_type.starts_with?("i") && type.starts_with?("i")
+          elsif operand_llvm_type != type && operand_llvm_type.starts_with?('i') && type.starts_with?('i')
             operand_bits = operand_llvm_type[1..].to_i? || 32
             type_bits = type[1..].to_i? || 32
             if operand_bits < type_bits
@@ -5505,7 +5505,7 @@ module Crystal::MIR
           emit "#{name} = fadd float #{value}, 0.0"
         elsif dst_type == "double"
           emit "#{name} = fadd double #{value}, 0.0"
-        elsif dst_type.starts_with?("i")
+        elsif dst_type.starts_with?('i')
           emit "#{name} = add #{dst_type} #{value}, 0"
         else
           emit "%#{base_name}.tmp = alloca #{dst_type}, align 8"
@@ -5577,8 +5577,8 @@ module Crystal::MIR
            end
 
       # Guard: bitcast can't convert between int and ptr - override op
-      is_src_int = src_type.starts_with?("i") && !src_type.includes?(".union")
-      is_dst_int = dst_type.starts_with?("i") && !dst_type.includes?(".union")
+      is_src_int = src_type.starts_with?('i') && !src_type.includes?(".union")
+      is_dst_int = dst_type.starts_with?('i') && !dst_type.includes?(".union")
       if op == "bitcast"
         if is_src_int && dst_type == "ptr"
           op = "inttoptr"
@@ -5689,7 +5689,7 @@ module Crystal::MIR
       # Guard: union to scalar cast - extract payload as the destination scalar type.
       # This avoids invalid LLVM bitcasts (union struct -> iN/float/double).
       if src_type.includes?(".union")
-        is_dst_int = dst_type.starts_with?("i") && !dst_type.includes?(".union")
+        is_dst_int = dst_type.starts_with?('i') && !dst_type.includes?(".union")
         is_dst_float = dst_type == "float" || dst_type == "double"
         if is_dst_int || is_dst_float
           base_name = name.lstrip('%')
@@ -5769,7 +5769,7 @@ module Crystal::MIR
                           true
                         elsif slot_llvm_type == "ptr" && phi_type == "ptr"
                           true
-                        elsif slot_llvm_type.starts_with?("i") && phi_type.starts_with?("i") &&
+                        elsif slot_llvm_type.starts_with?('i') && phi_type.starts_with?('i') &&
                               !slot_llvm_type.includes?(".union") && !phi_type.includes?(".union")
                           # Same integer width?
                           slot_llvm_type == phi_type
@@ -5909,7 +5909,7 @@ module Crystal::MIR
             extract_name = "r#{val}.u2p.#{block}"
             @phi_union_to_ptr_extracts[{block, val}] = {extract_name, val_type_str}
             "[%#{extract_name}, %#{block_name.call(block)}]"
-          elsif val_type_str && val_type_str.starts_with?("i") && !val_type_str.includes?(".union")
+          elsif val_type_str && val_type_str.starts_with?('i') && !val_type_str.includes?(".union")
             # Int value can't be used in ptr phi - use null
             "[null, %#{block_name.call(block)}]"
           else
@@ -5945,7 +5945,7 @@ module Crystal::MIR
         return
       end
 
-      is_int_type = phi_type.starts_with?("i") && phi_type != "i1" && !phi_type.includes?(".union")
+      is_int_type = phi_type.starts_with?('i') && phi_type != "i1" && !phi_type.includes?(".union")
       is_bool_type = phi_type == "i1"
       is_ptr_type = phi_type == "ptr"
       is_union_type = phi_type.includes?(".union")
@@ -5973,7 +5973,7 @@ module Crystal::MIR
             elsif val_type_str == "ptr" || val_type_str == "void"
               # Ptr/void value flowing into i1 phi - use 0 (type mismatch)
               "[0, %#{block_name.call(block)}]"
-            elsif val_type_str && val_type_str.starts_with?("i") && val_type_str != "i1"
+            elsif val_type_str && val_type_str.starts_with?('i') && val_type_str != "i1"
               # Larger int (i8, i16, i32, i64) flowing into i1 phi - use 0 (type mismatch)
               # Can't truncate in phi node, so use 0 as safe default
               "[0, %#{block_name.call(block)}]"
@@ -5990,7 +5990,7 @@ module Crystal::MIR
               else
                 ref = value_ref(val)
                 # Guard against null and float literals for non-ptr phi
-                ref = "0" if ref == "null" || ref.includes?(".")
+                ref = "0" if ref == "null" || ref.includes?('.')
                 "[#{ref}, %#{block_name.call(block)}]"
               end
             end
@@ -6024,7 +6024,7 @@ module Crystal::MIR
           next true if val_type_str == "void"
           # Check for ptr type in int phi
           next true if val_type_str == "ptr"
-          next false unless val_type_str.starts_with?("i") && !val_type_str.includes?(".union")
+          next false unless val_type_str.starts_with?('i') && !val_type_str.includes?(".union")
           val_bits = val_type_str[1..-1].to_i? || 32
           val_bits != phi_bits
         end
@@ -6040,7 +6040,7 @@ module Crystal::MIR
               # Union value flowing into int phi - use 0 as default
               # This happens with e.g. String#index returning Int32|Nil
               "[0, %#{block_name.call(block)}]"
-            elsif val_type_str && val_type_str.starts_with?("i") && !val_type_str.includes?(".union")
+            elsif val_type_str && val_type_str.starts_with?('i') && !val_type_str.includes?(".union")
               val_bits = val_type_str[1..-1].to_i? || 32
               if val_bits != phi_bits
                 # Type size mismatch - check if prepass recorded a conversion for this value
@@ -6095,7 +6095,7 @@ module Crystal::MIR
           # Union, int (including i1 bool), float/double, or void are incompatible with ptr
           # void values don't emit LLVM %rN - they're from void function calls
           val_type_str.includes?(".union") ||
-            val_type_str.starts_with?("i") ||
+            val_type_str.starts_with?('i') ||
             val_type_str == "float" || val_type_str == "double" ||
             val_type_str == "void"
         end
@@ -6112,7 +6112,7 @@ module Crystal::MIR
               extract_name = "r#{val}.u2p.#{block}"
               @phi_union_to_ptr_extracts[{block, val}] = {extract_name, val_type_str}
               "[%#{extract_name}, %#{block_name.call(block)}]"
-            elsif val_type_str && val_type_str.starts_with?("i") && !val_type_str.includes?(".union")
+            elsif val_type_str && val_type_str.starts_with?('i') && !val_type_str.includes?(".union")
               # Int value in ptr phi - use null
               "[null, %#{block_name.call(block)}]"
             elsif val_type_str == "float" || val_type_str == "double"
@@ -6192,7 +6192,7 @@ module Crystal::MIR
                 @phi_union_to_ptr_extracts[{block, val}] = {extract_name, val_type_str}
                 "[%#{extract_name}, %#{block_name.call(block)}]"
               end
-            elsif val_type_str && val_type_str.starts_with?("i") && !val_type_str.includes?(".union")
+            elsif val_type_str && val_type_str.starts_with?('i') && !val_type_str.includes?(".union")
               # Int value can't be used in ptr phi - use null
               "[null, %#{block_name.call(block)}]"
             else
@@ -6329,7 +6329,7 @@ module Crystal::MIR
             # Float/double flowing into int phi - use 0 as safe default
             # We can't bitcast here because it would be in wrong block
             "[0, %#{block_name.call(block)}]"
-          elsif is_int_type && val_type_str && val_type_str.starts_with?("i") && val_type_str != phi_type
+          elsif is_int_type && val_type_str && val_type_str.starts_with?('i') && val_type_str != phi_type
             # Integer width mismatch (e.g., i64 into i32 phi) - use 0 as safe default
             # We can't emit trunc/ext in phi, would need to be in source block
             "[0, %#{block_name.call(block)}]"
@@ -6343,7 +6343,7 @@ module Crystal::MIR
               # Allow %r* forward references - these are valid in phi nodes for loop back-edges
               "[#{ref}, %#{block_name.call(block)}]"
             end
-          elsif is_ptr_type && val_type_str && val_type_str.starts_with?("i") && !val_type_str.includes?(".union")
+          elsif is_ptr_type && val_type_str && val_type_str.starts_with?('i') && !val_type_str.includes?(".union")
             # Int flowing into ptr phi - use null (type mismatch from MIR)
             "[null, %#{block_name.call(block)}]"
           elsif is_float_type && (val_type_str == "ptr" || val_type_str == "void")
@@ -6353,7 +6353,7 @@ module Crystal::MIR
             # float↔double mismatch in phi - use 0.0 as safe default
             # Can't emit fpext/fptrunc in phi, would need to be in source block
             "[0.0, %#{block_name.call(block)}]"
-          elsif is_float_type && val_type_str && val_type_str.starts_with?("i")
+          elsif is_float_type && val_type_str && val_type_str.starts_with?('i')
             # Int flowing into float phi - use 0.0 (type mismatch from MIR)
             "[0.0, %#{block_name.call(block)}]"
           else
@@ -6367,7 +6367,7 @@ module Crystal::MIR
             elsif ref == "null" && is_union_type
               # null flowing into union phi - use zeroinitializer
               ref = "zeroinitializer"
-            elsif (ref == "0" || ref.starts_with?("%r")) && is_ptr_type && val_type_str && val_type_str.starts_with?("i")
+            elsif (ref == "0" || ref.starts_with?("%r")) && is_ptr_type && val_type_str && val_type_str.starts_with?('i')
               # Int value flowing into ptr phi
               ref = "null"
             end
@@ -6438,7 +6438,7 @@ module Crystal::MIR
         arg_type = lookup_value_llvm_type(arg_id)
         if arg_type == "ptr"
           emit "#{name} = bitcast ptr #{arg} to ptr"
-        elsif arg_type.starts_with?("i")
+        elsif arg_type.starts_with?('i')
           emit "#{name} = inttoptr #{arg_type} #{arg} to ptr"
         else
           emit "#{name} = bitcast ptr #{arg} to ptr"
@@ -6635,7 +6635,7 @@ module Crystal::MIR
                    else
                      "#{expected_llvm_type} #{val}"
                    end
-                 elsif expected_llvm_type == "ptr" && actual_llvm_type.starts_with?("%") && actual_llvm_type.includes?(".union")
+                 elsif expected_llvm_type == "ptr" && actual_llvm_type.starts_with?('%') && actual_llvm_type.includes?(".union")
                    # Coerce union to ptr: pass pointer to entire union on stack.
                    # The callee will load the union struct and dispatch based on type_id.
                    # Do NOT extract payload as ptr — for value-type unions (e.g., Nil | Int32),
@@ -6659,7 +6659,7 @@ module Crystal::MIR
                    @cond_counter += 1
                    emit "%bool_to_str.#{c} = call ptr @__crystal_v2_bool_to_string(i1 #{val})"
                    "ptr %bool_to_str.#{c}"
-                elsif expected_llvm_type == "ptr" && (actual_llvm_type.starts_with?("i") || actual_llvm_type == "ptr")
+                elsif expected_llvm_type == "ptr" && (actual_llvm_type.starts_with?('i') || actual_llvm_type == "ptr")
                    # Int to ptr conversion needed (inttoptr)
                    val = value_ref(a)
                    if val == "0"
@@ -6697,7 +6697,7 @@ module Crystal::MIR
                   emit "%ptrtofp.#{c}.int = ptrtoint ptr #{val} to i64"
                   emit "%ptrtofp.#{c} = uitofp i64 %ptrtofp.#{c}.int to #{expected_llvm_type}"
                   "#{expected_llvm_type} %ptrtofp.#{c}"
-                elsif (expected_llvm_type == "double" || expected_llvm_type == "float") && actual_llvm_type.starts_with?("i")
+                elsif (expected_llvm_type == "double" || expected_llvm_type == "float") && actual_llvm_type.starts_with?('i')
                    # Int to float conversion: signed or unsigned
                    val = value_ref(a)
                    c = @cond_counter
@@ -6705,7 +6705,7 @@ module Crystal::MIR
                    op = unsigned_type_ref?(actual_type) ? "uitofp" : "sitofp"
                    emit "%itofp.#{c} = #{op} #{actual_llvm_type} #{val} to #{expected_llvm_type}"
                    "#{expected_llvm_type} %itofp.#{c}"
-                 elsif expected_llvm_type.starts_with?("i") && (actual_llvm_type == "float" || actual_llvm_type == "double")
+                 elsif expected_llvm_type.starts_with?('i') && (actual_llvm_type == "float" || actual_llvm_type == "double")
                    # Float to int conversion: fptosi/fptoui based on signedness
                    val = value_ref(a)
                    c = @cond_counter
@@ -6716,7 +6716,7 @@ module Crystal::MIR
                    op = unsigned ? "fptoui" : "fptosi"
                    emit "%fpto_int.#{c} = #{op} #{actual_llvm_type} #{val} to #{expected_llvm_type}"
                    "#{expected_llvm_type} %fpto_int.#{c}"
-                 elsif expected_llvm_type == "i1" && actual_llvm_type.starts_with?("i") && actual_llvm_type != "i1"
+                 elsif expected_llvm_type == "i1" && actual_llvm_type.starts_with?('i') && actual_llvm_type != "i1"
                    # Larger int to i1 (bool) - truncate
                    val = value_ref(a)
                    c = @cond_counter
@@ -6765,7 +6765,7 @@ module Crystal::MIR
                    @cond_counter += 1
                    emit "%trunc_to_i8.#{c} = trunc #{actual_llvm_type} #{val} to i8"
                    "i8 %trunc_to_i8.#{c}"
-                 elsif expected_llvm_type.starts_with?("i") && actual_llvm_type.starts_with?("i") && expected_llvm_type != actual_llvm_type
+                 elsif expected_llvm_type.starts_with?('i') && actual_llvm_type.starts_with?('i') && expected_llvm_type != actual_llvm_type
                    expected_bits = expected_llvm_type[1..].to_i?
                    actual_bits = actual_llvm_type[1..].to_i?
                    if expected_bits && actual_bits
@@ -6786,7 +6786,7 @@ module Crystal::MIR
                    else
                      "#{expected_llvm_type} #{value_ref(a)}"
                    end
-                 elsif expected_llvm_type.starts_with?("i") && is_union_llvm_type?(actual_llvm_type)
+                 elsif expected_llvm_type.starts_with?('i') && is_union_llvm_type?(actual_llvm_type)
                    # Coerce union to int: extract payload as int
                    # Union layout: { type_id : i32, payload : [N x i8] }
                    # Payload starts at offset 4, so max guaranteed alignment is 4
@@ -6811,7 +6811,7 @@ module Crystal::MIR
                    emit "%union_to_fp.#{c}.payload_ptr = getelementptr #{actual_llvm_type}, ptr %union_to_fp.#{c}.ptr, i32 0, i32 1"
                    emit "%union_to_fp.#{c}.val = load #{expected_llvm_type}, ptr %union_to_fp.#{c}.payload_ptr, align 4"
                    "#{expected_llvm_type} %union_to_fp.#{c}.val"
-                 elsif expected_llvm_type.starts_with?("i") && actual_llvm_type == "ptr"
+                 elsif expected_llvm_type.starts_with?('i') && actual_llvm_type == "ptr"
                    # Ptr to int conversion needed (ptrtoint)
                    val = value_ref(a)
                    c = @cond_counter
@@ -6820,7 +6820,7 @@ module Crystal::MIR
                    emit "#{temp_int} = ptrtoint ptr #{val} to #{expected_llvm_type}"
                    "#{expected_llvm_type} #{temp_int}"
                  elsif is_union_llvm_type?(expected_llvm_type) &&
-                       (actual_llvm_type.starts_with?("i") || actual_llvm_type == "float" || actual_llvm_type == "double")
+                       (actual_llvm_type.starts_with?('i') || actual_llvm_type == "float" || actual_llvm_type == "double")
                    # Scalar to union conversion - wrap scalar payload with type_id=0 (non-nil)
                    val = value_ref(a)
                    c = @cond_counter
@@ -7080,23 +7080,23 @@ module Crystal::MIR
         @cond_counter += 1
         cast_name = "%varargs_cast.#{c}"
 
-        if actual_type == "ptr" && expected_type.starts_with?("i")
+        if actual_type == "ptr" && expected_type.starts_with?('i')
           emit "#{cast_name} = ptrtoint ptr #{value} to #{expected_type}"
           return cast_name
         end
 
-        if expected_type == "ptr" && actual_type.starts_with?("i")
+        if expected_type == "ptr" && actual_type.starts_with?('i')
           emit "#{cast_name} = inttoptr #{actual_type} #{value} to ptr"
           return cast_name
         end
 
         # Int <-> float conversions (avoid invalid LLVM bitcasts)
-        if (expected_type == "double" || expected_type == "float") && actual_type.starts_with?("i")
+        if (expected_type == "double" || expected_type == "float") && actual_type.starts_with?('i')
           emit "#{cast_name} = sitofp #{actual_type} #{value} to #{expected_type}"
           return cast_name
         end
 
-        if expected_type.starts_with?("i") && (actual_type == "double" || actual_type == "float")
+        if expected_type.starts_with?('i') && (actual_type == "double" || actual_type == "float")
           emit "#{cast_name} = fptosi #{actual_type} #{value} to #{expected_type}"
           return cast_name
         end
@@ -7111,7 +7111,7 @@ module Crystal::MIR
           return cast_name
         end
 
-        if actual_type.starts_with?("i") && expected_type.starts_with?("i")
+        if actual_type.starts_with?('i') && expected_type.starts_with?('i')
           actual_bits = actual_type[1..].to_i?
           expected_bits = expected_type[1..].to_i?
           if actual_bits && expected_bits
@@ -7153,10 +7153,10 @@ module Crystal::MIR
       # Mangle the extern name to be a valid LLVM identifier.
       # Preserve '$' for platform-specific C symbols like realpath$DARWIN_EXTSN.
       mangled_extern_name = @type_mapper.mangle_name(inst.extern_name)
-      if inst.extern_name.includes?("$") &&
+      if inst.extern_name.includes?('$') &&
          !inst.extern_name.includes?("::") &&
-         !inst.extern_name.includes?("#") &&
-         !inst.extern_name.includes?(".") &&
+         !inst.extern_name.includes?('#') &&
+         !inst.extern_name.includes?('.') &&
          inst.extern_name.matches?(/\A[a-zA-Z0-9_$]+\z/)
         mangled_extern_name = inst.extern_name
       end
@@ -7168,7 +7168,7 @@ module Crystal::MIR
         arg_type = lookup_value_llvm_type(arg_id)
         if arg_type == "ptr"
           emit "#{name} = bitcast ptr #{arg} to ptr"
-        elsif arg_type.starts_with?("i")
+        elsif arg_type.starts_with?('i')
           emit "#{name} = inttoptr #{arg_type} #{arg} to ptr"
         else
           emit "#{name} = bitcast ptr #{arg} to ptr"
@@ -7354,7 +7354,7 @@ module Crystal::MIR
         elsif arg_llvm_type == "i64"
           emit "#{name} = add i64 #{arg_val}, 0"
           @value_types[inst.id] = TypeRef::INT64
-        elsif arg_llvm_type.starts_with?("i")
+        elsif arg_llvm_type.starts_with?('i')
           # Primitive int type - just sign extend
           emit "#{name} = sext #{arg_llvm_type} #{arg_val} to i64"
           @value_types[inst.id] = TypeRef::INT64
@@ -7389,7 +7389,7 @@ module Crystal::MIR
         elsif arg_llvm_type == "i32"
           emit "#{name} = add i32 #{arg_val}, 0"
           @value_types[inst.id] = TypeRef::INT32
-        elsif arg_llvm_type.starts_with?("i")
+        elsif arg_llvm_type.starts_with?('i')
           emit "#{name} = sext #{arg_llvm_type} #{arg_val} to i32"
           @value_types[inst.id] = TypeRef::INT32
         elsif arg_llvm_type == "ptr"
@@ -7438,7 +7438,7 @@ module Crystal::MIR
         arg_llvm_type = @type_mapper.llvm_type(arg_type)
         arg_val = value_ref(arg_id)
 
-        if arg_llvm_type.starts_with?("i")
+        if arg_llvm_type.starts_with?('i')
           emit "#{name} = icmp eq #{arg_llvm_type} #{arg_val}, 0"
           @value_types[inst.id] = TypeRef::BOOL
           @value_names[inst.id] = "r#{inst.id}"
@@ -7455,7 +7455,7 @@ module Crystal::MIR
         # 1. Exact match, or
         # 2. Function name is namespace-prefixed version: "Namespace__method" == "method"
         mangled == mangled_extern_name ||
-        (mangled_extern_name.includes?("#") || mangled_extern_name.includes?(".")) && mangled == mangled_extern_name
+        (mangled_extern_name.includes?('#') || mangled_extern_name.includes?('.')) && mangled == mangled_extern_name
       end
       if matching_func
         mangled_extern_name = @type_mapper.mangle_name(matching_func.name)
@@ -7465,7 +7465,7 @@ module Crystal::MIR
       # Methods with type suffix in HIR (e.g., "unsafe_shr$UInt64").
       extern_name = inst.extern_name
       if suffix = suffix_after_dollar(extern_name)
-        if !suffix.includes?("_")
+        if !suffix.includes?('_')
           case suffix
           when "UInt64", "Int64"
             return_type = "i64"
@@ -7529,7 +7529,7 @@ module Crystal::MIR
             first_arg_type = @value_types[inst.args[0]]?
             if first_arg_type
               first_arg_llvm = @type_mapper.llvm_type(first_arg_type)
-              if first_arg_llvm.starts_with?("i") && !first_arg_llvm.includes?(".")
+              if first_arg_llvm.starts_with?('i') && !first_arg_llvm.includes?('.')
                 return_type = first_arg_llvm
                 @value_types[inst.id] = first_arg_type
               end
@@ -7873,7 +7873,7 @@ module Crystal::MIR
 
         if is_int_literal
           # union_val is an int literal, use it directly for int result types
-          if result_type.starts_with?("i")
+          if result_type.starts_with?('i')
             emit "#{name} = add #{result_type} #{union_val}, 0"
           elsif result_type == "ptr"
             emit "#{name} = inttoptr i64 #{union_val} to ptr"
@@ -7882,7 +7882,7 @@ module Crystal::MIR
           end
         elsif result_type == "ptr" || result_type == union_type
           emit "#{name} = bitcast ptr #{union_val} to ptr"
-        elsif result_type.starts_with?("i")
+        elsif result_type.starts_with?('i')
           # Need to convert ptr to int
           emit "#{name} = ptrtoint ptr #{union_val} to #{result_type}"
         else
@@ -8113,7 +8113,7 @@ module Crystal::MIR
           actual_elem_type_str = actual_elem_type ? @type_mapper.llvm_type(actual_elem_type) : nil
           if actual_elem_type_str && actual_elem_type_str != element_type
             # Type mismatch - need conversion
-            is_elem_int = element_type.starts_with?("i") && !element_type.includes?(".union")
+            is_elem_int = element_type.starts_with?('i') && !element_type.includes?(".union")
             is_actual_ptr = actual_elem_type_str == "ptr"
             is_elem_union = element_type.includes?(".union")
             if is_elem_union && is_actual_ptr
@@ -8136,7 +8136,7 @@ module Crystal::MIR
               emit "%#{base_name}.elem#{idx}_payload_ptr = getelementptr #{actual_elem_type_str}, ptr %#{base_name}.elem#{idx}_union_ptr, i32 0, i32 1"
               emit "%#{base_name}.elem#{idx}_val_ptr = load ptr, ptr %#{base_name}.elem#{idx}_payload_ptr, align 4"
               elem_val = "%#{base_name}.elem#{idx}_val_ptr"
-            elsif element_type == "ptr" && actual_elem_type_str.starts_with?("i") && !actual_elem_type_str.includes?(".union")
+            elsif element_type == "ptr" && actual_elem_type_str.starts_with?('i') && !actual_elem_type_str.includes?(".union")
               # int → ptr: use inttoptr, but convert 0 to null directly
               if elem_val == "0"
                 elem_val = "null"
@@ -8188,7 +8188,7 @@ module Crystal::MIR
           emit "%#{base_name}.payload_ptr = getelementptr #{array_llvm_type}, ptr %#{base_name}.union_ptr, i32 0, i32 1"
           emit "%#{base_name}.arr_ptr = load ptr, ptr %#{base_name}.payload_ptr, align 4"
           array_ptr = "%#{base_name}.arr_ptr"
-        elsif array_llvm_type != "ptr" && !array_llvm_type.starts_with?("%") && !array_llvm_type.starts_with?("[") && actual_val_type != "ptr"
+        elsif array_llvm_type != "ptr" && !array_llvm_type.starts_with?('%') && !array_llvm_type.starts_with?('[') && actual_val_type != "ptr"
           # Non-ptr, non-struct type (e.g., i1, i32) - this is a MIR type inference issue
           # Use inttoptr conversion as fallback
           if array_llvm_type == "i1" || array_llvm_type == "i8" || array_llvm_type == "i16" || array_llvm_type == "i32"
@@ -8280,9 +8280,9 @@ module Crystal::MIR
 
       # If the array value is actually a tuple value (struct), use extractvalue
       actual_array_llvm = lookup_value_llvm_type(inst.array_value, "")
-      if actual_array_llvm.starts_with?("{")
+      if actual_array_llvm.starts_with?('{')
         idx_const = nil
-        if !index.starts_with?("%") && index != "null"
+        if !index.starts_with?('%') && index != "null"
           idx_const = index.to_i?
         end
         if idx_const
@@ -8315,7 +8315,7 @@ module Crystal::MIR
           emit "%#{base_name}.payload_ptr = getelementptr #{array_llvm_type}, ptr %#{base_name}.union_ptr, i32 0, i32 1"
           emit "%#{base_name}.arr_ptr = load ptr, ptr %#{base_name}.payload_ptr, align 4"
           array_ptr = "%#{base_name}.arr_ptr"
-        elsif array_llvm_type != "ptr" && !array_llvm_type.starts_with?("%") && !array_llvm_type.starts_with?("[") && actual_val_type != "ptr"
+        elsif array_llvm_type != "ptr" && !array_llvm_type.starts_with?('%') && !array_llvm_type.starts_with?('[') && actual_val_type != "ptr"
           # Non-ptr, non-struct type (e.g., i1, i32) - this is a MIR type inference issue
           # Use inttoptr conversion as fallback
           if array_llvm_type == "i1" || array_llvm_type == "i8" || array_llvm_type == "i16" || array_llvm_type == "i32"
@@ -8347,7 +8347,7 @@ module Crystal::MIR
         if tuple_type = @module.type_registry.get(tuple_type_ref)
           if tuple_type.kind.tuple?
             idx_const = nil
-            if !index.starts_with?("%") && index != "null"
+            if !index.starts_with?('%') && index != "null"
               idx_const = index.to_i?
             end
             if idx_const
@@ -8456,7 +8456,7 @@ module Crystal::MIR
           emit "%#{base_name}.payload_ptr = getelementptr #{array_llvm_type}, ptr %#{base_name}.union_ptr, i32 0, i32 1"
           emit "%#{base_name}.arr_ptr = load ptr, ptr %#{base_name}.payload_ptr, align 4"
           array_ptr = "%#{base_name}.arr_ptr"
-        elsif array_llvm_type != "ptr" && !array_llvm_type.starts_with?("%")
+        elsif array_llvm_type != "ptr" && !array_llvm_type.starts_with?('%')
           # Non-ptr, non-struct type (e.g., i1, i32) - this is a MIR type inference issue
           # Use inttoptr conversion as fallback
           if array_llvm_type == "i1" || array_llvm_type == "i8" || array_llvm_type == "i16" || array_llvm_type == "i32"
@@ -8522,11 +8522,11 @@ module Crystal::MIR
         # Convert ptr to target integer type
         emit "%#{base_name}.val_cast = ptrtoint ptr #{value} to #{element_type}"
         value = "%#{base_name}.val_cast"
-      elsif actual_value_type == "i1" && element_type.starts_with?("i") && element_type != "i1"
+      elsif actual_value_type == "i1" && element_type.starts_with?('i') && element_type != "i1"
         # Convert bool (i1) to larger integer type (zext)
         emit "%#{base_name}.val_ext = zext i1 #{value} to #{element_type}"
         value = "%#{base_name}.val_ext"
-      elsif actual_value_type.starts_with?("i") && !actual_value_type.includes?(".union") && element_type == "ptr"
+      elsif actual_value_type.starts_with?('i') && !actual_value_type.includes?(".union") && element_type == "ptr"
         # Convert integer to ptr (inttoptr)
         emit "%#{base_name}.val_ptr = inttoptr #{actual_value_type} #{value} to ptr"
         value = "%#{base_name}.val_ptr"
@@ -8553,7 +8553,7 @@ module Crystal::MIR
         emit "store ptr #{value}, ptr %#{base_name}.val_pay_ptr"
         emit "%#{base_name}.val_union = load #{element_type}, ptr %#{base_name}.val_union_ptr"
         value = "%#{base_name}.val_union"
-      elsif actual_value_type.starts_with?("i") && element_type.starts_with?("i") && actual_value_type != element_type
+      elsif actual_value_type.starts_with?('i') && element_type.starts_with?('i') && actual_value_type != element_type
         # Integer width mismatch - use sext or trunc
         actual_bits = actual_value_type[1..].to_i? || 32
         element_bits = element_type[1..].to_i? || 32
@@ -8959,7 +8959,7 @@ module Crystal::MIR
             if val_llvm_type == "void" || val_ref == "null"
               emit "store i32 0, ptr %ret#{c}.type_id_ptr"
               # Don't store payload for nil
-            elsif @phi_nil_incoming_blocks.has_key?(val) && val_llvm_type.starts_with?("i")
+            elsif @phi_nil_incoming_blocks.has_key?(val) && val_llvm_type.starts_with?('i')
               # Value comes from a phi that has nil incoming - emit conditional type_id
               # When nil flows into an integer phi, it becomes 0, so check if val == 0
               # TODO: This heuristic assumes non-nil values are never 0, which may not always be true
@@ -8982,21 +8982,21 @@ module Crystal::MIR
             # For ptr returns with int value, use inttoptr
             if @current_return_type == "ptr" && val_ref == "0"
               emit "ret ptr null"
-            elsif @current_return_type.starts_with?("i") && val_ref == "null"
+            elsif @current_return_type.starts_with?('i') && val_ref == "null"
               emit "ret #{@current_return_type} 0"
-            elsif @current_return_type == "ptr" && val_llvm_type && val_llvm_type.starts_with?("i") && !val_llvm_type.includes?(".union")
+            elsif @current_return_type == "ptr" && val_llvm_type && val_llvm_type.starts_with?('i') && !val_llvm_type.includes?(".union")
               # Integer to pointer conversion needed (inttoptr)
               c = @cond_counter
               @cond_counter += 1
               emit "%ret_inttoptr.#{c} = inttoptr #{val_llvm_type} #{val_ref} to ptr"
               emit "ret ptr %ret_inttoptr.#{c}"
-            elsif @current_return_type.starts_with?("i") && val_llvm_type == "ptr"
+            elsif @current_return_type.starts_with?('i') && val_llvm_type == "ptr"
               # Pointer to integer conversion needed (ptrtoint)
               c = @cond_counter
               @cond_counter += 1
               emit "%ret_ptrtoint.#{c} = ptrtoint ptr #{val_ref} to #{@current_return_type}"
               emit "ret #{@current_return_type} %ret_ptrtoint.#{c}"
-            elsif @current_return_type.starts_with?("i") && val_llvm_type && val_llvm_type.includes?(".union")
+            elsif @current_return_type.starts_with?('i') && val_llvm_type && val_llvm_type.includes?(".union")
               # Union to integer - extract payload as the integer type
               c = @cond_counter
               @cond_counter += 1
@@ -9046,7 +9046,7 @@ module Crystal::MIR
               # Load and return destination union
               emit "%ret_union_conv.#{c}.result = load #{@current_return_type}, ptr %ret_union_conv.#{c}.dst_ptr"
               emit "ret #{@current_return_type} %ret_union_conv.#{c}.result"
-            elsif @current_return_type.starts_with?("i") && val_llvm_type && val_llvm_type.starts_with?("i") && @current_return_type != val_llvm_type
+            elsif @current_return_type.starts_with?('i') && val_llvm_type && val_llvm_type.starts_with?('i') && @current_return_type != val_llvm_type
               # Integer width mismatch - need sext or trunc
               ret_bits = @current_return_type[1..].to_i
               val_bits = val_llvm_type[1..].to_i
@@ -9059,14 +9059,14 @@ module Crystal::MIR
                 emit "%ret_trunc.#{c} = trunc #{val_llvm_type} #{val_ref} to #{@current_return_type}"
                 emit "ret #{@current_return_type} %ret_trunc.#{c}"
               end
-            elsif (@current_return_type == "double" || @current_return_type == "float") && val_llvm_type && val_llvm_type.starts_with?("i")
+            elsif (@current_return_type == "double" || @current_return_type == "float") && val_llvm_type && val_llvm_type.starts_with?('i')
               # Integer to float conversion (signed/unsigned)
               c = @cond_counter
               @cond_counter += 1
               op = (val_type && unsigned_type_ref?(val_type)) ? "uitofp" : "sitofp"
               emit "%ret_itof.#{c} = #{op} #{val_llvm_type} #{val_ref} to #{@current_return_type}"
               emit "ret #{@current_return_type} %ret_itof.#{c}"
-            elsif val_llvm_type && (val_llvm_type == "double" || val_llvm_type == "float") && @current_return_type.starts_with?("i")
+            elsif val_llvm_type && (val_llvm_type == "double" || val_llvm_type == "float") && @current_return_type.starts_with?('i')
               # Float to integer conversion (signed/unsigned)
               c = @cond_counter
               @cond_counter += 1
@@ -9115,7 +9115,7 @@ module Crystal::MIR
                              "0.0"
                            elsif @current_return_type == "ptr" && val_ref == "0"
                              "null"
-                           elsif @current_return_type.starts_with?("i") && val_ref == "null"
+                           elsif @current_return_type.starts_with?('i') && val_ref == "null"
                              "0"
                            else
                              val_ref
@@ -9130,7 +9130,7 @@ module Crystal::MIR
             emit "ret void"
           elsif @current_return_type == "ptr"
             emit "ret ptr null"
-          elsif @current_return_type.starts_with?("i")
+          elsif @current_return_type.starts_with?('i')
             emit "ret #{@current_return_type} 0"
           elsif @current_return_type.includes?(".union")
             # Return nil union (type_id = 0, matches variant table convention)
@@ -9278,7 +9278,7 @@ module Crystal::MIR
         if expected_type != llvm_type && expected_type != "void"
           cast_name = "%r#{id}.fromslot.cast.#{@cond_counter}"
           @cond_counter += 1
-          if llvm_type.starts_with?("i") && expected_type.starts_with?("i")
+          if llvm_type.starts_with?('i') && expected_type.starts_with?('i')
             src_bits = llvm_type[1..].to_i?
             dst_bits = expected_type[1..].to_i?
             if src_bits && dst_bits
@@ -9292,12 +9292,12 @@ module Crystal::MIR
               record_emitted_type(cast_name, expected_type)
               return cast_name
             end
-          elsif llvm_type.starts_with?("i") && (expected_type == "float" || expected_type == "double")
+          elsif llvm_type.starts_with?('i') && (expected_type == "float" || expected_type == "double")
             op = (val_type && unsigned_type_ref?(val_type)) ? "uitofp" : "sitofp"
             emit "#{cast_name} = #{op} #{llvm_type} #{temp_name} to #{expected_type}"
             record_emitted_type(cast_name, expected_type)
             return cast_name
-          elsif (llvm_type == "float" || llvm_type == "double") && expected_type.starts_with?("i")
+          elsif (llvm_type == "float" || llvm_type == "double") && expected_type.starts_with?('i')
             op = (val_type && unsigned_type_ref?(val_type)) ? "fptoui" : "fptosi"
             emit "#{cast_name} = #{op} #{llvm_type} #{temp_name} to #{expected_type}"
             record_emitted_type(cast_name, expected_type)
@@ -9310,11 +9310,11 @@ module Crystal::MIR
             emit "#{cast_name} = fptrunc double #{temp_name} to float"
             record_emitted_type(cast_name, expected_type)
             return cast_name
-          elsif expected_type == "ptr" && llvm_type.starts_with?("i")
+          elsif expected_type == "ptr" && llvm_type.starts_with?('i')
             emit "#{cast_name} = inttoptr #{llvm_type} #{temp_name} to ptr"
             record_emitted_type(cast_name, "ptr")
             return cast_name
-          elsif llvm_type == "ptr" && expected_type.starts_with?("i")
+          elsif llvm_type == "ptr" && expected_type.starts_with?('i')
             emit "#{cast_name} = ptrtoint ptr #{temp_name} to #{expected_type}"
             record_emitted_type(cast_name, expected_type)
             return cast_name
@@ -9328,7 +9328,7 @@ module Crystal::MIR
             emit "#{cast_name} = load ptr, ptr #{cast_name}.payload_ptr, align 4"
             record_emitted_type(cast_name, "ptr")
             return cast_name
-          elsif (expected_type == "double" || expected_type == "float" || (expected_type.starts_with?("i") && !expected_type.includes?("."))) && llvm_type.includes?(".union")
+          elsif (expected_type == "double" || expected_type == "float" || (expected_type.starts_with?('i') && !expected_type.includes?('.'))) && llvm_type.includes?(".union")
             # Extract scalar payload from union value.
             union_ptr = "%r#{id}.fromslot.union_ptr.#{@cond_counter}"
             @cond_counter += 1

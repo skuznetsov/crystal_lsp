@@ -54,10 +54,14 @@ module Crystal
     # Eliminates O(N) linear scans during fuzzy call resolution.
     @function_by_base_name : Hash(String, Function) = {} of String => Function
 
+    # Index: class_name → Array of functions belonging to that class.
+    # Eliminates O(N) full-scan of all functions during virtual dispatch.
+    @functions_by_class : Hash(String, Array(Function)) = {} of String => Array(Function)
+
     # Caches for virtual dispatch (avoid repeated hierarchy traversals)
     @subclass_cache : Hash(String, Array(String)) = {} of String => Array(String)
     @module_includers_cache : Hash(String, Array(String)) = {} of String => Array(String)
-    @resolve_virtual_cache : Hash(String, Function?) = {} of String => Function?
+    @resolve_virtual_cache : Hash({String, String, Int32?, Bool}, Function?) = {} of {String, String, Int32?, Bool} => Function?
 
     # Memory strategy (note: we use inline selection, not global assigner)
 
@@ -109,24 +113,38 @@ module Crystal
           io.puts "[HIR]"
           @hir_module.functions.each do |hir_func|
             name = hir_func.name
-            next if match_sub ? !name.includes?(match_sub) : !name.includes?("(")
+            next if match_sub ? !name.includes?(match_sub) : !name.includes?('(')
             io.puts name
           end
           io.puts "[MIR]"
           @mir_module.functions.each do |mir_func|
             name = mir_func.name
-            next if match_sub ? !name.includes?(match_sub) : !name.includes?("(")
+            next if match_sub ? !name.includes?(match_sub) : !name.includes?('(')
             io.puts name
           end
         end
       end
 
       # Build base-name index for fuzzy call resolution (avoids O(N) scans with split)
+      # Also build class-name index for virtual dispatch (avoids O(N) full scans)
       @mir_module.functions.each do |func|
         name = func.name
         dollar_idx = name.index('$')
         base = dollar_idx ? name[0, dollar_idx] : name
         @function_by_base_name[base] = func unless @function_by_base_name.has_key?(base)
+
+        # Index by class name (part before '#' or '.')
+        hash_idx = name.index('#')
+        dot_idx = name.index('.')
+        sep_idx = if hash_idx && dot_idx
+                    Math.min(hash_idx, dot_idx)
+                  else
+                    hash_idx || dot_idx
+                  end
+        if sep_idx
+          class_name = name[0, sep_idx]
+          (@functions_by_class[class_name] ||= [] of Function) << func
+        end
       end
 
       # Pass 2: Lower function bodies
@@ -1122,7 +1140,7 @@ module Crystal
           STDERR.puts "[VIRTUAL_CALL] unresolved method=#{method_name_str} base=#{base_method_name} func=#{@current_lowering_func_name}"
         end
         # Only apply fuzzy matching for qualified method names (containing . or #)
-        if method_name_str.includes?(".") || method_name_str.includes?("#")
+        if method_name_str.includes?('.') || method_name_str.includes?('#')
           # Extract base name (before $ type suffix) without allocating
           dollar_idx = method_name_str.index('$')
           base_name = dollar_idx ? method_name_str[0, dollar_idx] : method_name_str
@@ -1547,7 +1565,7 @@ module Crystal
           if desc.name == inner_name
             # Found matching union descriptor — build candidates from it
             desc.variants.each do |variant|
-              next if variant.full_name == "Nil" || variant.full_name.starts_with?("*")
+              next if variant.full_name == "Nil" || variant.full_name.starts_with?('*')
               if func = resolve_virtual_method_for_class(variant.full_name, method_suffix, call.args.size)
                 old_candidates << {
                   type_id: variant.type_id,
@@ -1958,7 +1976,7 @@ module Crystal
       arg_count : Int32? = nil,
       allow_module_method : Bool = false
     ) : Function?
-      cache_key = "#{class_name}|#{method_suffix}|#{arg_count}|#{allow_module_method}"
+      cache_key = {class_name, method_suffix, arg_count, allow_module_method}
       if @resolve_virtual_cache.has_key?(cache_key)
         return @resolve_virtual_cache[cache_key]
       end
@@ -1973,32 +1991,41 @@ module Crystal
       arg_count : Int32?,
       allow_module_method : Bool
     ) : Function?
+      # Pre-compute the base method name (before '$') once
+      base_method = if dollar = method_suffix.index('$')
+                      method_suffix[0, dollar]
+                    else
+                      method_suffix
+                    end
+
       current = class_name
       seen = Set(String).new
       while !current.empty? && !seen.includes?(current)
         seen.add(current)
-        exact_name = "#{current}##{method_suffix}"
+
+        # Pre-compute exact name once per iteration (avoid repeated interpolation)
+        exact_name = String.build(current.bytesize + 1 + method_suffix.bytesize) do |io|
+          io << current; io << '#'; io << method_suffix
+        end
+
         if func = @mir_module.get_function(exact_name)
-          # Check for naming collision: if a longer-named function exists with same prefix
-          # (e.g., to_s$IO_Int32_Int32_Bool vs to_s$IO), prefer the longer one.
-          # The longer name is the real overload with default args; the shorter one may
-          # be a different overload that was incorrectly given the same mangled name.
-          prefix_with_underscore = "#{exact_name}_"
+          # Check for naming collision using class index instead of full scan
+          prefix_with_underscore = String.build(exact_name.bytesize + 1) do |io|
+            io << exact_name; io << '_'
+          end
           longer_match = nil.as(Function?)
-          @mir_module.functions.each do |candidate|
-            if candidate.name.starts_with?(prefix_with_underscore)
-              # Prefer the longer match with the most params (most specific overload)
-              if lm_prev = longer_match
-                longer_match = candidate if candidate.params.size > lm_prev.params.size
-              else
-                longer_match = candidate
+          if class_funcs = @functions_by_class[current]?
+            class_funcs.each do |candidate|
+              if candidate.name.starts_with?(prefix_with_underscore)
+                if lm_prev = longer_match
+                  longer_match = candidate if candidate.params.size > lm_prev.params.size
+                else
+                  longer_match = candidate
+                end
               end
             end
           end
           if lm = longer_match
-            # Copy default values from short-named function params to longer-named
-            # function params (the short name was lowered from HIR with defaults,
-            # the longer name may have been created separately without them).
             func.params.each_with_index do |short_param, pi|
               if (dv = short_param.default_value) && pi < lm.params.size && lm.params[pi].default_value.nil?
                 old_p = lm.params[pi]
@@ -2009,32 +2036,43 @@ module Crystal
           end
           return func
         end
+
         if allow_module_method
-          if func = @mir_module.get_function("#{current}.#{method_suffix}")
+          module_name = String.build(current.bytesize + 1 + method_suffix.bytesize) do |io|
+            io << current; io << '.'; io << method_suffix
+          end
+          if func = @mir_module.get_function(module_name)
             return func
           end
         end
+
         if arg_count
-          base = method_suffix
-          if dollar = base.index('$')
-            base = base[0, dollar]
+          # Use class index + pre-computed prefix (avoids O(N) full scan + GC from interpolation)
+          instance_prefix = String.build(current.bytesize + 1 + base_method.bytesize) do |io|
+            io << current; io << '#'; io << base_method
           end
-          candidates = [] of Function
-          @mir_module.functions.each do |candidate|
-            next unless candidate.name.starts_with?("#{current}##{base}")
-            # +1 for receiver
-            next unless candidate.params.size == arg_count + 1
-            candidates << candidate
-          end
-          return candidates.first if candidates.size == 1
-          if allow_module_method
+          if class_funcs = @functions_by_class[current]?
             candidates = [] of Function
-            @mir_module.functions.each do |candidate|
-              next unless candidate.name.starts_with?("#{current}.#{base}")
-              next unless candidate.params.size == arg_count
+            class_funcs.each do |candidate|
+              next unless candidate.name.starts_with?(instance_prefix)
+              next unless candidate.params.size == arg_count + 1
               candidates << candidate
             end
             return candidates.first if candidates.size == 1
+          end
+          if allow_module_method
+            module_prefix = String.build(current.bytesize + 1 + base_method.bytesize) do |io|
+              io << current; io << '.'; io << base_method
+            end
+            if class_funcs2 = @functions_by_class[current]?
+              candidates = [] of Function
+              class_funcs2.each do |candidate|
+                next unless candidate.name.starts_with?(module_prefix)
+                next unless candidate.params.size == arg_count
+                candidates << candidate
+              end
+              return candidates.first if candidates.size == 1
+            end
           end
         end
         parent = @hir_module.class_parents[current]?
