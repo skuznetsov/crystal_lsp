@@ -737,6 +737,7 @@ module Crystal::MIR
       already_declared << "__crystal_v2_sort_i32_array" << "__crystal_v2_sort_string_array"
       already_declared << "__crystal_v2_sort_i32_array_dup" << "__crystal_v2_sort_string_array_dup"
       already_declared << "__cmp_i32" << "__cmp_string"
+      already_declared << "llvm.memcpy.p0.p0.i32" << "llvm.memcpy.p0.p0.i64" << "llvm.memmove.p0.p0.i64"
       # Skip any function starting with __crystal_v2_ (runtime functions)
       runtime_prefix = "__crystal_v2_"
 
@@ -1623,10 +1624,13 @@ module Crystal::MIR
       emit_raw "declare double @llvm.copysign.f64(double, double)\n"
       emit_raw "declare double @llvm.fabs.f64(double)\n"
       emit_raw "declare void @llvm.memmove.p0.p0.i64(ptr, ptr, i64, i1)\n"
+      emit_raw "declare void @llvm.memcpy.p0.p0.i32(ptr, ptr, i32, i1)\n"
+      emit_raw "declare void @llvm.memcpy.p0.p0.i64(ptr, ptr, i64, i1)\n"
       emit_raw "@.str_newline = private constant [2 x i8] c\"\\0A\\00\"\n"
       emit_raw "@.fixed_fmt = private constant [6 x i8] c\"%.17f\\00\"\n"
       emit_raw "@.prec_fmt = private constant [5 x i8] c\"%.*g\\00\"\n"
-      emit_raw "@.str_neg_zero = private constant [5 x i8] c\"-0.0\\00\"\n\n"
+      emit_raw "@.str_neg_zero = private constant [5 x i8] c\"-0.0\\00\"\n"
+      emit_raw "@.str.fmt.d = private constant [3 x i8] c\"%d\\00\"\n\n"
 
       emit_raw "define void @__crystal_v2_print_float_impl(double %val, i1 %newline) {\n"
       emit_raw "entry:\n"
@@ -2373,6 +2377,128 @@ module Crystal::MIR
       emit_raw "  %size64 = sext i32 %size to i64\n"
       emit_raw "  call void @qsort(ptr %new_buf, i64 %size64, i64 8, ptr @__cmp_string)\n"
       emit_raw "  ret ptr %new_arr\n"
+      emit_raw "}\n\n"
+
+      # Array(Int32)#to_s → "[elem, elem, ...]" Crystal String
+      # Uses snprintf to build the string in a buffer
+      emit_raw "define ptr @__crystal_v2_array_i32_to_string(ptr %arr) {\n"
+      emit_raw "entry:\n"
+      emit_raw "  %size_ptr = getelementptr i8, ptr %arr, i32 4\n"
+      emit_raw "  %size = load i32, ptr %size_ptr\n"
+      emit_raw "  %buf_ptr = getelementptr i8, ptr %arr, i32 16\n"
+      emit_raw "  %buf = load ptr, ptr %buf_ptr\n"
+      # Allocate max buffer: "[" + size * 12 + (size-1) * 2 + "]" + null = ~14*size + 2
+      emit_raw "  %max_len_i32 = mul i32 %size, 14\n"
+      emit_raw "  %max_len_with_extra = add i32 %max_len_i32, 16\n"
+      emit_raw "  %max_len = sext i32 %max_len_with_extra to i64\n"
+      emit_raw "  %tmp_buf = call ptr @__crystal_v2_malloc64(i64 %max_len)\n"
+      # Start with "["
+      emit_raw "  store i8 91, ptr %tmp_buf\n"  # '[' = 91
+      emit_raw "  %pos_init = add i32 0, 1\n"
+      emit_raw "  br label %loop_cond\n"
+      emit_raw "loop_cond:\n"
+      emit_raw "  %i = phi i32 [0, %entry], [%i_next, %no_sep]\n"
+      emit_raw "  %pos = phi i32 [%pos_init, %entry], [%pos_next, %no_sep]\n"
+      emit_raw "  %cmp = icmp slt i32 %i, %size\n"
+      emit_raw "  br i1 %cmp, label %loop_body, label %done\n"
+      emit_raw "loop_body:\n"
+      # Add ", " separator if not first
+      emit_raw "  %is_first = icmp eq i32 %i, 0\n"
+      emit_raw "  br i1 %is_first, label %no_sep, label %add_sep\n"
+      emit_raw "add_sep:\n"
+      emit_raw "  %sep_ptr = getelementptr i8, ptr %tmp_buf, i32 %pos\n"
+      emit_raw "  store i8 44, ptr %sep_ptr\n"  # ',' = 44
+      emit_raw "  %pos_after_comma = add i32 %pos, 1\n"
+      emit_raw "  %space_ptr = getelementptr i8, ptr %tmp_buf, i32 %pos_after_comma\n"
+      emit_raw "  store i8 32, ptr %space_ptr\n"  # ' ' = 32
+      emit_raw "  %pos_after_sep = add i32 %pos, 2\n"
+      emit_raw "  br label %no_sep\n"
+      emit_raw "no_sep:\n"
+      emit_raw "  %pos2 = phi i32 [%pos, %loop_body], [%pos_after_sep, %add_sep]\n"
+      # Get element value
+      emit_raw "  %elem_ptr = getelementptr i32, ptr %buf, i32 %i\n"
+      emit_raw "  %elem = load i32, ptr %elem_ptr\n"
+      # snprintf(tmp_buf + pos, remaining, "%d", elem)
+      emit_raw "  %write_ptr = getelementptr i8, ptr %tmp_buf, i32 %pos2\n"
+      emit_raw "  %remaining = sub i32 %max_len_with_extra, %pos2\n"
+      emit_raw "  %remaining64 = sext i32 %remaining to i64\n"
+      emit_raw "  %written = call i32 (ptr, i64, ptr, ...) @snprintf(ptr %write_ptr, i64 %remaining64, ptr @.str.fmt.d, i32 %elem)\n"
+      emit_raw "  %pos_next = add i32 %pos2, %written\n"
+      emit_raw "  %i_next = add i32 %i, 1\n"
+      emit_raw "  br label %loop_cond\n"
+      emit_raw "done:\n"
+      # Add "]"
+      emit_raw "  %end_ptr = getelementptr i8, ptr %tmp_buf, i32 %pos\n"
+      emit_raw "  store i8 93, ptr %end_ptr\n"  # ']' = 93
+      emit_raw "  %total_len = add i32 %pos, 1\n"
+      emit_raw "  %null_ptr = getelementptr i8, ptr %tmp_buf, i32 %total_len\n"
+      emit_raw "  store i8 0, ptr %null_ptr\n"
+      # Create Crystal String
+      emit_raw "  %str_type_id = add i32 0, #{TypeRef::STRING.id}\n"
+      emit_raw "  %result = call ptr @__crystal_v2_create_substring(ptr %tmp_buf, i32 %total_len, i32 %str_type_id)\n"
+      emit_raw "  ret ptr %result\n"
+      emit_raw "}\n\n"
+
+      # Array(String)#to_s → "[\"elem\", \"elem\", ...]" Crystal String
+      emit_raw "define ptr @__crystal_v2_array_string_to_string(ptr %arr) {\n"
+      emit_raw "entry:\n"
+      emit_raw "  %size_ptr = getelementptr i8, ptr %arr, i32 4\n"
+      emit_raw "  %size = load i32, ptr %size_ptr\n"
+      emit_raw "  %buf_ptr = getelementptr i8, ptr %arr, i32 16\n"
+      emit_raw "  %buf = load ptr, ptr %buf_ptr\n"
+      # Allocate buffer: estimate 64 * size for safety
+      emit_raw "  %max_len_i32 = mul i32 %size, 64\n"
+      emit_raw "  %max_len_with_extra = add i32 %max_len_i32, 16\n"
+      emit_raw "  %max_len = sext i32 %max_len_with_extra to i64\n"
+      emit_raw "  %tmp_buf = call ptr @__crystal_v2_malloc64(i64 %max_len)\n"
+      # Start with "["
+      emit_raw "  store i8 91, ptr %tmp_buf\n"
+      emit_raw "  %pos_init = add i32 0, 1\n"
+      emit_raw "  br label %loop_cond\n"
+      emit_raw "loop_cond:\n"
+      emit_raw "  %i = phi i32 [0, %entry], [%i_next, %loop_body_end]\n"
+      emit_raw "  %pos = phi i32 [%pos_init, %entry], [%pos_next, %loop_body_end]\n"
+      emit_raw "  %cmp = icmp slt i32 %i, %size\n"
+      emit_raw "  br i1 %cmp, label %loop_body, label %done\n"
+      emit_raw "loop_body:\n"
+      # Add ", " separator if not first
+      emit_raw "  %is_first = icmp eq i32 %i, 0\n"
+      emit_raw "  br i1 %is_first, label %no_sep, label %add_sep\n"
+      emit_raw "add_sep:\n"
+      emit_raw "  %sep_ptr = getelementptr i8, ptr %tmp_buf, i32 %pos\n"
+      emit_raw "  store i8 44, ptr %sep_ptr\n"
+      emit_raw "  %pos_after_comma = add i32 %pos, 1\n"
+      emit_raw "  %space_ptr = getelementptr i8, ptr %tmp_buf, i32 %pos_after_comma\n"
+      emit_raw "  store i8 32, ptr %space_ptr\n"
+      emit_raw "  %pos_after_sep = add i32 %pos, 2\n"
+      emit_raw "  br label %no_sep\n"
+      emit_raw "no_sep:\n"
+      emit_raw "  %pos2 = phi i32 [%pos, %loop_body], [%pos_after_sep, %add_sep]\n"
+      # Get string element
+      emit_raw "  %str_pp = getelementptr ptr, ptr %buf, i32 %i\n"
+      emit_raw "  %str = load ptr, ptr %str_pp\n"
+      # Get string data (at offset 12) and bytesize (at offset 4)
+      emit_raw "  %bs_ptr = getelementptr i8, ptr %str, i32 4\n"
+      emit_raw "  %bs = load i32, ptr %bs_ptr\n"
+      emit_raw "  %data_ptr = getelementptr i8, ptr %str, i32 12\n"
+      # Copy string bytes
+      emit_raw "  %write_ptr = getelementptr i8, ptr %tmp_buf, i32 %pos2\n"
+      emit_raw "  %bs64 = sext i32 %bs to i64\n"
+      emit_raw "  call void @llvm.memcpy.p0.p0.i64(ptr %write_ptr, ptr %data_ptr, i64 %bs64, i1 false)\n"
+      emit_raw "  %pos_next = add i32 %pos2, %bs\n"
+      emit_raw "  %i_next = add i32 %i, 1\n"
+      emit_raw "  br label %loop_body_end\n"
+      emit_raw "loop_body_end:\n"
+      emit_raw "  br label %loop_cond\n"
+      emit_raw "done:\n"
+      emit_raw "  %end_ptr = getelementptr i8, ptr %tmp_buf, i32 %pos\n"
+      emit_raw "  store i8 93, ptr %end_ptr\n"
+      emit_raw "  %total_len = add i32 %pos, 1\n"
+      emit_raw "  %null_ptr = getelementptr i8, ptr %tmp_buf, i32 %total_len\n"
+      emit_raw "  store i8 0, ptr %null_ptr\n"
+      emit_raw "  %str_type_id = add i32 0, #{TypeRef::STRING.id}\n"
+      emit_raw "  %result = call ptr @__crystal_v2_create_substring(ptr %tmp_buf, i32 %total_len, i32 %str_type_id)\n"
+      emit_raw "  ret ptr %result\n"
       emit_raw "}\n\n"
 
       # Helper: create Crystal String from raw pointer + length
@@ -9401,6 +9527,22 @@ module Crystal::MIR
 
         part_ref = value_ref(part_id)
 
+        # Check if part is an Array (stored as ptr but tracked in @array_info)
+        if arr_info = @array_info[part_id]?
+          elem_llvm_type = arr_info[0]  # LLVM type: "i32", "ptr", etc.
+          helper = case elem_llvm_type
+                   when "i32", "i16", "i8"
+                     "__crystal_v2_array_i32_to_string"
+                   when "ptr"
+                     "__crystal_v2_array_string_to_string"
+                   else
+                     "__crystal_v2_array_i32_to_string"  # fallback
+                   end
+          emit "%#{base_name}.conv#{idx} = call ptr @#{helper}(ptr #{part_ref})"
+          string_parts << "%#{base_name}.conv#{idx}"
+          next
+        end
+
         # Check if part is already a string (ptr type from string literal)
         if part_type == TypeRef::STRING || part_type == TypeRef::POINTER || part_type.nil?
           string_parts << part_ref
@@ -9466,8 +9608,25 @@ module Crystal::MIR
             emit "%#{base_name}.str_ptr#{idx} = load ptr, ptr %#{base_name}.payload_ptr#{idx}, align 4"
             string_parts << "%#{base_name}.str_ptr#{idx}"
           else
-            # Fallback - treat as ptr
-            string_parts << part_ref
+            # Check if this is an Array type — build "[elem, elem, ...]" string
+            arr_type_name = part_type ? (@module.type_registry.get(part_type).try(&.name) || "") : ""
+            if arr_type_name.starts_with?("Array(")
+              # Extract element type name from "Array(Int32)" etc.
+              elem_name = arr_type_name[6, arr_type_name.size - 7]
+              helper = case elem_name
+                       when "Int32", "UInt32", "Int16", "UInt16", "Int8", "UInt8"
+                         "__crystal_v2_array_i32_to_string"
+                       when "String"
+                         "__crystal_v2_array_string_to_string"
+                       else
+                         "__crystal_v2_array_i32_to_string"  # fallback for int-like types
+                       end
+              emit "%#{base_name}.conv#{idx} = call ptr @#{helper}(ptr #{part_ref})"
+              string_parts << "%#{base_name}.conv#{idx}"
+            else
+              # Fallback - treat as ptr
+              string_parts << part_ref
+            end
           end
         end
       end

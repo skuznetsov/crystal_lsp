@@ -43411,6 +43411,42 @@ module Crystal::HIR
             end
           end
         end
+      elsif orig_obj.is_a?(CrystalV2::Compiler::Frontend::ArrayLiteralNode)
+        # For inline array literals, infer element type from elements
+        elem_type_name = "Int32"  # default
+        if first_elem_id = orig_obj.elements.first?
+          first_elem = @arena[first_elem_id]
+          if first_elem.is_a?(CrystalV2::Compiler::Frontend::StringNode)
+            elem_type_name = "String"
+          elsif first_elem.is_a?(CrystalV2::Compiler::Frontend::NumberNode)
+            if first_elem.kind.f64? || first_elem.kind.f32?
+              elem_type_name = "Float64"
+            elsif first_elem.kind.u8?
+              elem_type_name = "UInt8"
+            else
+              elem_type_name = "Int32"
+            end
+          elsif first_elem.is_a?(CrystalV2::Compiler::Frontend::BoolNode)
+            elem_type_name = "Bool"
+          elsif first_elem.is_a?(CrystalV2::Compiler::Frontend::CharNode)
+            elem_type_name = "Char"
+          end
+        end
+        if orig_obj.of_type
+          # Use explicit type annotation if present (e.g., [] of String)
+          of_type_node = @arena[orig_obj.of_type.not_nil!]
+          if of_type_node.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode)
+            if tn = of_type_node.name
+              elem_type_name = String.new(tn)
+            end
+          end
+        end
+        arr_type_name = "Array(#{elem_type_name})"
+        @module.types.each_with_index do |desc, idx|
+          if desc.name == arr_type_name
+            return TypeRef.new((TypeRef::FIRST_USER_TYPE + idx).to_u32)
+          end
+        end
       end
       nil
     end
