@@ -31356,8 +31356,12 @@ module Crystal::HIR
           next
         end
 
-        # Determine merged type
+        # Determine merged type — filter VOID (unregistered type) to prevent
+        # spurious X|Void unions that corrupt struct access (e.g. Slice|Void
+        # makes Slice#size read the union type_id instead of actual size)
         var_types = branch_values.map { |(_, v)| ctx.type_of(v) }.uniq
+        non_void_types = var_types.reject { |t| t == TypeRef::VOID }
+        var_types = non_void_types unless non_void_types.empty?
         var_type = if var_types.size == 1
                      var_types.first
                    else
@@ -31432,8 +31436,12 @@ module Crystal::HIR
           next
         end
 
-        # Determine merged type
+        # Determine merged type — filter VOID (unregistered type) to prevent
+        # spurious X|Void unions that corrupt struct access (e.g. Slice|Void
+        # makes Slice#size read the union type_id instead of actual size)
         var_types = branch_values.map { |(_, v)| ctx.type_of(v) }.uniq
+        non_void_types = var_types.reject { |t| t == TypeRef::VOID }
+        var_types = non_void_types unless non_void_types.empty?
         var_type = if var_types.size == 1
                      var_types.first
                    else
