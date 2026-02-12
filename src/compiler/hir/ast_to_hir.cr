@@ -40230,6 +40230,44 @@ module Crystal::HIR
         end
       end
 
+      # ptr.copy_from(source, count) / ptr.copy_to(target, count) → runtime memcpy
+      # ptr.move_from(source, count) / ptr.move_to(target, count) → runtime memmove
+      # Crystal stdlib chains copy_from → copy_to → copy_from_impl which loses
+      # the element type (resolves to Pointer(Void)), so we intercept at the top level.
+      if receiver_id && (method_name == "copy_from" || method_name == "copy_to" ||
+                         method_name == "move_from" || method_name == "move_to") && args.size >= 2
+        receiver_type = ctx.type_of(receiver_id)
+        recv_type_desc = @module.get_type_descriptor(receiver_type)
+        is_pointer_type = receiver_type == TypeRef::POINTER ||
+                          (recv_type_desc && (recv_type_desc.kind == TypeKind::Pointer ||
+                           recv_type_desc.name.starts_with?("Pointer")))
+        if is_pointer_type
+          # Determine element size from pointer type
+          recv_name = recv_type_desc.try(&.name) || "Pointer(Void)"
+          elem_type = pointer_element_type(recv_name)
+          elem_size = size_for_type_name(get_type_name_from_ref(elem_type))
+
+          # For copy_from/move_from: dest=self, src=arg[0], count=arg[1]
+          # For copy_to/move_to:     dest=arg[0], src=self, count=arg[1]
+          is_copy = method_name == "copy_from" || method_name == "copy_to"
+          is_from = method_name == "copy_from" || method_name == "move_from"
+          helper = is_copy ? "__crystal_v2_ptr_copy" : "__crystal_v2_ptr_move"
+          dest_id = is_from ? receiver_id : args[0]
+          src_id = is_from ? args[0] : receiver_id
+          count_id = args[1]
+
+          elem_size_lit = Literal.new(ctx.next_id, TypeRef::INT32, elem_size)
+          ctx.emit(elem_size_lit)
+          ctx.register_type(elem_size_lit.id, TypeRef::INT32)
+
+          copy_call = ExternCall.new(ctx.next_id, TypeRef::POINTER, helper,
+                                     [dest_id, src_id, count_id, elem_size_lit.id] of ValueId)
+          ctx.emit(copy_call)
+          ctx.register_type(copy_call.id, receiver_type)
+          return copy_call.id
+        end
+      end
+
       # For allocator calls (ClassName.new), ensure return type is the class type
       # This handles cases where the mangled name wasn't found in @function_types
       if method_name == "new" && full_method_name && return_type == TypeRef::VOID

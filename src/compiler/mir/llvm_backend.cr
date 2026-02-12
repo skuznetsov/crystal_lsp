@@ -732,6 +732,7 @@ module Crystal::MIR
       already_declared << "__crystal_v2_array_new_filled_i32" << "__crystal_v2_array_new_filled_bool"
       already_declared << "__crystal_v2_array_concat"
       already_declared << "__crystal_v2_hash_new"
+      already_declared << "__crystal_v2_ptr_copy" << "__crystal_v2_ptr_move"
       # Skip any function starting with __crystal_v2_ (runtime functions)
       runtime_prefix = "__crystal_v2_"
 
@@ -2246,6 +2247,23 @@ module Crystal::MIR
       emit_raw "  call void @llvm.memset.p0.i64(ptr %raw, i8 0, i64 48, i1 false)\n"
       emit_raw "  store i32 %type_id, ptr %raw\n"
       emit_raw "  ret ptr %raw\n"
+      emit_raw "}\n\n"
+
+      # Pointer copy helper — memcpy with element-size-aware byte count
+      # count = number of elements, elem_size = bytes per element
+      emit_raw "define ptr @__crystal_v2_ptr_copy(ptr %dest, ptr %src, i32 %count, i32 %elem_size) {\n"
+      emit_raw "entry:\n"
+      emit_raw "  %bytes = mul i32 %count, %elem_size\n"
+      emit_raw "  call void @llvm.memcpy.p0.p0.i32(ptr %dest, ptr %src, i32 %bytes, i1 false)\n"
+      emit_raw "  ret ptr %dest\n"
+      emit_raw "}\n\n"
+
+      # Pointer move helper — memmove with element-size-aware byte count
+      emit_raw "define ptr @__crystal_v2_ptr_move(ptr %dest, ptr %src, i32 %count, i32 %elem_size) {\n"
+      emit_raw "entry:\n"
+      emit_raw "  %bytes = mul i32 %count, %elem_size\n"
+      emit_raw "  call void @llvm.memmove.p0.p0.i32(ptr %dest, ptr %src, i32 %bytes, i1 false)\n"
+      emit_raw "  ret ptr %dest\n"
       emit_raw "}\n\n"
 
       # Helper: create Crystal String from raw pointer + length
