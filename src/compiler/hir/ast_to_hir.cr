@@ -50112,10 +50112,32 @@ module Crystal::HIR
     # COLLECTIONS
     # ═══════════════════════════════════════════════════════════════════════
 
+    # Find common ancestor class for two class names by walking parent chains.
+    private def find_common_ancestor_class(a : String, b : String) : String?
+      return a if a == b
+      # Build ancestor chain for a
+      ancestors_a = [a]
+      current = a
+      while parent = @class_info[current]?.try(&.parent_name)
+        break if parent.empty?
+        ancestors_a << parent
+        current = parent
+      end
+      # Walk b's ancestor chain and find first match
+      current = b
+      return current if ancestors_a.includes?(current)
+      while parent = @class_info[current]?.try(&.parent_name)
+        break if parent.empty?
+        current = parent
+        return current if ancestors_a.includes?(current)
+      end
+      nil
+    end
+
     private def lower_array_literal(ctx : LoweringContext, node : CrystalV2::Compiler::Frontend::ArrayLiteralNode) : ValueId
       element_ids = node.elements.map { |e| lower_expr(ctx, e) }
 
-      # Determine element type from explicit `of` type, or from first element (or Int32 default)
+      # Determine element type from explicit `of` type, or from elements (or Int32 default)
       element_type_name = nil
       element_type = if of_type = node.of_type
                        if type_str = stringify_type_expr(of_type)
@@ -50125,7 +50147,22 @@ module Crystal::HIR
                          element_ids.size > 0 ? ctx.type_of(element_ids.first) : TypeRef::INT32
                        end
                      elsif element_ids.size > 0
-                       ctx.type_of(element_ids.first)
+                       first_type = ctx.type_of(element_ids.first)
+                       # Check if all elements have the same type
+                       all_same = element_ids.all? { |id| ctx.type_of(id) == first_type }
+                       if all_same
+                         first_type
+                       else
+                         # Mixed types — find common ancestor class
+                         type_names = element_ids.map { |id| get_type_name_from_ref(ctx.type_of(id)) }.uniq
+                         ancestor = type_names.reduce { |a, b| find_common_ancestor_class(a, b) || a }
+                         if ancestor && ancestor != "Unknown" && ancestor != "Void"
+                           element_type_name = ancestor
+                           type_ref_for_name(ancestor)
+                         else
+                           first_type
+                         end
+                       end
                      else
                        TypeRef::INT32
                      end
