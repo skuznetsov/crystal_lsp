@@ -30971,8 +30971,16 @@ module Crystal::HIR
       if method_name != primary_mangled_name
         lower_function_if_needed(method_name)
       end
-      call = Call.new(ctx.next_id, TypeRef::VOID, left, method_name, [right])
+      # Infer return type: comparison ops return Bool, arithmetic ops return left type
+      return_type = case op
+                    when "==", "!=", "<", "<=", ">", ">=", "===", "<=>"
+                      TypeRef::BOOL
+                    else
+                      left_type
+                    end
+      call = Call.new(ctx.next_id, return_type, left, method_name, [right])
       ctx.emit(call)
+      ctx.register_type(call.id, return_type)
       call.id
     end
 
