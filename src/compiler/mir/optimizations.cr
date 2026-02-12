@@ -338,6 +338,9 @@ module Crystal::MIR
         true
       when AtomicStore, AtomicRMW, AtomicCAS, Fence
         true
+      when TryBegin, TryEnd
+        # Exception handling setup/teardown — must not be removed
+        true
       else
         false
       end

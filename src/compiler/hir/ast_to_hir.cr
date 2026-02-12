@@ -33421,6 +33421,12 @@ module Crystal::HIR
         rescue_clauses = node.rescue_clauses.not_nil!
         ctx.switch_to_block(rescue_block.not_nil!)
 
+        # Pop exception handler FIRST — before rescue body executes.
+        # This ensures that if the rescue body raises (re-raise), the
+        # exception propagates to the OUTER handler, not back to this one.
+        try_end_rescue = TryEnd.new(ctx.next_id)
+        ctx.emit(try_end_rescue)
+
         # For now, just execute the first rescue clause's body
         # TODO: proper exception type matching
         rescue_result : ValueId = ctx.next_id
@@ -33484,9 +33490,8 @@ module Crystal::HIR
           break
         end
 
-        # Call TryEnd after rescue
-        try_end = TryEnd.new(ctx.next_id)
-        ctx.emit(try_end)
+        # TryEnd already called at start of rescue block (before body).
+        # No need to call again here — handler was already popped.
 
         # Snapshot locals after rescue for rescue-merge.
         rescue_locals = ctx.save_locals
@@ -49342,9 +49347,13 @@ module Crystal::HIR
       hash_type_name = "Hash(#{key_name}, #{value_name})"
       hash_type = type_ref_for_name(hash_type_name)
 
-      # Call Hash(K,V).new constructor (no args — default no block, no capacity)
-      ctor_name = "#{hash_type_name}.new"
-      hash_call = Call.new(ctx.next_id, hash_type, nil, ctor_name, [] of ValueId, nil, false)
+      # Direct allocation via runtime helper — bypasses broken constructor overload chains
+      # (Hash.new has multiple overloads that become dead-code stubs calling each other
+      # when V is a pointer type like String)
+      type_id_lit = Literal.new(ctx.next_id, TypeRef::INT32, hash_type.id.to_i64)
+      ctx.emit(type_id_lit)
+      ctx.register_type(type_id_lit.id, TypeRef::INT32)
+      hash_call = ExternCall.new(ctx.next_id, hash_type, "__crystal_v2_hash_new", [type_id_lit.id] of ValueId)
       ctx.emit(hash_call)
       ctx.register_type(hash_call.id, hash_type)
 

@@ -731,6 +731,7 @@ module Crystal::MIR
       already_declared << "__crystal_v2_string_bytesize" << "__crystal_v2_string_byte_at"
       already_declared << "__crystal_v2_array_new_filled_i32" << "__crystal_v2_array_new_filled_bool"
       already_declared << "__crystal_v2_array_concat"
+      already_declared << "__crystal_v2_hash_new"
       # Skip any function starting with __crystal_v2_ (runtime functions)
       runtime_prefix = "__crystal_v2_"
 
@@ -2227,6 +2228,26 @@ module Crystal::MIR
       emit_raw "  ret i1 %is_deleted\n"
       emit_raw "}\n\n"
 
+      # Hash object allocator — bypasses broken constructor overload chains
+      # Hash layout (48 bytes total):
+      #   offset 0:  type_id (i32)
+      #   offset 4:  @size (i32)
+      #   offset 8:  @entries (ptr)
+      #   offset 16: @indices (ptr)
+      #   offset 24: @first (i32)
+      #   offset 28: @deleted_count (i32)
+      #   offset 32: @indices_bytesize (i8)
+      #   offset 33: @indices_size_pow2 (i8)
+      #   offset 34: @compare_by_identity (i1)
+      #   offset 35-47: padding / @block (ptr)
+      emit_raw "define ptr @__crystal_v2_hash_new(i32 %type_id) {\n"
+      emit_raw "entry:\n"
+      emit_raw "  %raw = call ptr @__crystal_v2_malloc64(i64 48)\n"
+      emit_raw "  call void @llvm.memset.p0.i64(ptr %raw, i8 0, i64 48, i1 false)\n"
+      emit_raw "  store i32 %type_id, ptr %raw\n"
+      emit_raw "  ret ptr %raw\n"
+      emit_raw "}\n\n"
+
       # Helper: create Crystal String from raw pointer + length
       emit_raw "define ptr @__crystal_v2_create_substring(ptr %data, i32 %len, i32 %str_tid) {\n"
       emit_raw "entry:\n"
@@ -2964,35 +2985,39 @@ module Crystal::MIR
       emit_raw "declare void @longjmp(ptr, i32) noreturn nounwind\n"
       emit_raw "\n"
 
-      # Global exception state
-      emit_raw "; Global exception handling state\n"
-      emit_raw "@__crystal_exc_jmpbuf = global %jmp_buf zeroinitializer\n"
+      # Global exception state — stack of jmp_bufs for nested begin/rescue
+      emit_raw "; Global exception handling state (stack-based for nesting)\n"
+      emit_raw "@__crystal_exc_jmpbufs = global [64 x %jmp_buf] zeroinitializer\n"
+      emit_raw "@__crystal_exc_depth = global i32 0\n"
       emit_raw "@__crystal_exc_ptr = global ptr null\n"
-      emit_raw "@__crystal_exc_handler_active = global i1 false\n"
       emit_raw "\n"
 
-      # Note: __crystal_v2_try_begin is NOT a wrapper for setjmp because setjmp
-      # cannot work correctly when called from a wrapper (stack frame issues).
-      # Instead, callers should inline the setjmp call directly.
-      # This is just a placeholder that sets up the handler flag.
-      emit_raw "define void @__crystal_v2_try_begin_setup() {\n"
-      emit_raw "  store i1 true, ptr @__crystal_exc_handler_active\n"
-      emit_raw "  ret void\n"
+      # Helper: get pointer to current jmp_buf (at depth-1)
+      emit_raw "define ptr @__crystal_exc_current_jmpbuf() {\n"
+      emit_raw "  %depth = load i32, ptr @__crystal_exc_depth\n"
+      emit_raw "  %idx = sub i32 %depth, 1\n"
+      emit_raw "  %ptr = getelementptr [64 x %jmp_buf], ptr @__crystal_exc_jmpbufs, i32 0, i32 %idx\n"
+      emit_raw "  ret ptr %ptr\n"
       emit_raw "}\n\n"
 
-      # End exception handler scope
+      # End exception handler scope — decrement depth
       emit_raw "define void @__crystal_v2_try_end() {\n"
-      emit_raw "  store i1 false, ptr @__crystal_exc_handler_active\n"
-      emit_raw "  store ptr null, ptr @__crystal_exc_ptr\n"
+      emit_raw "  %depth = load i32, ptr @__crystal_exc_depth\n"
+      emit_raw "  %new_depth = sub i32 %depth, 1\n"
+      emit_raw "  %clamped = call i32 @llvm.smax.i32(i32 %new_depth, i32 0)\n"
+      emit_raw "  store i32 %clamped, ptr @__crystal_exc_depth\n"
       emit_raw "  ret void\n"
-      emit_raw "}\n\n"
+      emit_raw "}\n"
+      emit_raw "declare i32 @llvm.smax.i32(i32, i32)\n\n"
 
       emit_raw "define void @__crystal_v2_raise(ptr %exc) {\n"
       emit_raw "  store ptr %exc, ptr @__crystal_exc_ptr\n"
-      emit_raw "  %active = load i1, ptr @__crystal_exc_handler_active\n"
-      emit_raw "  br i1 %active, label %do_longjmp, label %no_handler\n"
+      emit_raw "  %depth = load i32, ptr @__crystal_exc_depth\n"
+      emit_raw "  %has_handler = icmp sgt i32 %depth, 0\n"
+      emit_raw "  br i1 %has_handler, label %do_longjmp, label %no_handler\n"
       emit_raw "do_longjmp:\n"
-      emit_raw "  call void @longjmp(ptr @__crystal_exc_jmpbuf, i32 1)\n"
+      emit_raw "  %jmpbuf = call ptr @__crystal_exc_current_jmpbuf()\n"
+      emit_raw "  call void @longjmp(ptr %jmpbuf, i32 1)\n"
       emit_raw "  unreachable\n"
       emit_raw "no_handler:\n"
       emit_raw "  call void @abort()\n"
@@ -3018,10 +3043,12 @@ module Crystal::MIR
 
       emit_raw "define void @__crystal_v2_reraise() {\n"
       emit_raw "  %exc = load ptr, ptr @__crystal_exc_ptr\n"
-      emit_raw "  %active = load i1, ptr @__crystal_exc_handler_active\n"
-      emit_raw "  br i1 %active, label %do_longjmp, label %no_handler\n"
+      emit_raw "  %depth = load i32, ptr @__crystal_exc_depth\n"
+      emit_raw "  %has_handler = icmp sgt i32 %depth, 0\n"
+      emit_raw "  br i1 %has_handler, label %do_longjmp, label %no_handler\n"
       emit_raw "do_longjmp:\n"
-      emit_raw "  call void @longjmp(ptr @__crystal_exc_jmpbuf, i32 1)\n"
+      emit_raw "  %jmpbuf = call ptr @__crystal_exc_current_jmpbuf()\n"
+      emit_raw "  call void @longjmp(ptr %jmpbuf, i32 1)\n"
       emit_raw "  unreachable\n"
       emit_raw "no_handler:\n"
       emit_raw "  call void @abort()\n"
@@ -4354,13 +4381,7 @@ module Crystal::MIR
 
       # Emit non-phi instructions
       non_phi_insts.each do |inst|
-        if ENV["DEBUG_EMIT_INST"]? && func.name == "__crystal_main" && inst.id >= 79 && inst.id <= 83
-          STDERR.puts "[EMIT_INST] BEFORE id=#{inst.id} type=#{inst.class.name}"
-        end
         emit_instruction(inst, func)
-        if ENV["DEBUG_EMIT_INST"]? && func.name == "__crystal_main" && inst.id >= 79 && inst.id <= 83
-          STDERR.puts "[EMIT_INST] AFTER  id=#{inst.id}"
-        end
       end
 
       # Emit predecessor loads for cross-block phi incoming values
@@ -4519,6 +4540,8 @@ module Crystal::MIR
       produces_value = !inst.is_a?(Store) && !inst.is_a?(Free) &&
                        !inst.is_a?(RCIncrement) && !inst.is_a?(RCDecrement) &&
                        !inst.is_a?(GlobalStore) && !inst.is_a?(AtomicStore) &&
+                       !inst.is_a?(TryEnd) && !inst.is_a?(ArraySet) &&
+                       !inst.is_a?(ArraySetSize) && !inst.is_a?(Fence) &&
                        !is_void_call
 
       # Only register value_names for instructions that produce values
@@ -9521,18 +9544,21 @@ module Crystal::MIR
       emit "call void @__crystal_v2_channel_close(ptr #{channel})"
     end
 
-    # Exception handling - inline setjmp call
+    # Exception handling - push jmp_buf and inline setjmp
     private def emit_try_begin(inst : TryBegin, name : String)
-      # Set handler active flag
-      emit "store i1 true, ptr @__crystal_exc_handler_active"
+      base = name.lstrip('%')
+      # Push: increment depth, compute jmpbuf pointer, setjmp
+      emit "%#{base}.depth = load i32, ptr @__crystal_exc_depth"
+      emit "%#{base}.new_depth = add i32 %#{base}.depth, 1"
+      emit "store i32 %#{base}.new_depth, ptr @__crystal_exc_depth"
+      emit "%#{base}.jmpbuf = getelementptr [64 x %jmp_buf], ptr @__crystal_exc_jmpbufs, i32 0, i32 %#{base}.depth"
       # Call setjmp inline (critical: must be inline, not in a wrapper function)
-      emit "#{name} = call i32 @setjmp(ptr @__crystal_exc_jmpbuf)"
+      emit "#{name} = call i32 @setjmp(ptr %#{base}.jmpbuf)"
     end
 
-    # Exception handling - clear exception handler
+    # Exception handling - pop jmp_buf (decrement depth)
     private def emit_try_end(inst : TryEnd, name : String)
-      emit "store i1 false, ptr @__crystal_exc_handler_active"
-      emit "store ptr null, ptr @__crystal_exc_ptr"
+      emit "call void @__crystal_v2_try_end()"
     end
 
     private def emit_func_pointer(inst : FuncPointer, name : String)
