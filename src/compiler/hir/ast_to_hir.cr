@@ -1704,6 +1704,8 @@ module Crystal::HIR
     @loop_phi_stack : Array(Hash(String, Phi)) = [] of Hash(String, Phi)
     # Track break blocks and their variable values for exit phi construction
     @loop_break_info_stack : Array(Array({BlockId, Hash(String, ValueId)})) = [] of Array({BlockId, Hash(String, ValueId)})
+    # Track break values for while expression result (break VALUE passes value out of while)
+    @loop_break_value_stack : Array(Array({BlockId, ValueId})) = [] of Array({BlockId, ValueId})
     @virtual_targets_lowered : Set({String, String, UInt64, UInt8}) = Set({String, String, UInt64, UInt8}).new
     # Cache for collect_subclasses — class hierarchy doesn't change during compilation.
     @subclasses_cache : Hash(String, Array(String)) = {} of String => Array(String)
@@ -31926,6 +31928,7 @@ module Crystal::HIR
       @loop_cond_stack << cond_block
       @loop_phi_stack << phi_nodes
       @loop_break_info_stack << [] of {BlockId, Hash(String, ValueId)}
+      @loop_break_value_stack << [] of {BlockId, ValueId}
       pushed_inline = false
       if !inline_vars.empty?
         @inline_loop_vars_stack << inline_vars
@@ -31940,6 +31943,7 @@ module Crystal::HIR
         @loop_phi_stack.pop?
       end
       break_info = @loop_break_info_stack.pop
+      break_values = @loop_break_value_stack.pop
       body_exit_block = ctx.current_block
       ctx.pop_scope
 
@@ -32008,9 +32012,55 @@ module Crystal::HIR
         end
       end
 
-      nil_lit = Literal.new(ctx.next_id, TypeRef::NIL, nil)
-      ctx.emit(nil_lit)
-      nil_lit.id
+      # While expression result: nil for normal exit, break value for break exit
+      if break_values.empty?
+        # No break values — while always returns nil
+        nil_lit = Literal.new(ctx.next_id, TypeRef::NIL, nil)
+        ctx.emit(nil_lit)
+        nil_lit.id
+      else
+        # Break values present — create phi merging nil (normal exit) + break values
+        break_type = ctx.type_of(break_values.first[1])
+        nil_lit = Literal.new(ctx.next_id, TypeRef::NIL, nil)
+        ctx.emit_to_block(cond_branch_block, nil_lit)
+        ctx.register_type(nil_lit.id, TypeRef::NIL)
+        # Create union type for T | Nil if break type is not already nilable
+        result_type = break_type
+        if break_type != TypeRef::NIL
+          result_type = union_type_for_values(break_type, TypeRef::NIL)
+          result_type = break_type if result_type == TypeRef::VOID
+        end
+        result_phi = Phi.new(ctx.next_id, result_type)
+        # Normal exit: nil
+        if is_union_type?(result_type) && result_type != TypeRef::NIL
+          nil_wrap = UnionWrap.new(ctx.next_id, result_type, nil_lit.id, 0)
+          ctx.emit_to_block(cond_branch_block, nil_wrap)
+          ctx.register_type(nil_wrap.id, result_type)
+          result_phi.add_incoming(cond_branch_block, nil_wrap.id)
+        else
+          result_phi.add_incoming(cond_branch_block, nil_lit.id)
+        end
+        # Break exits: break value (may need union wrapping)
+        break_values.each do |break_block, break_val|
+          if is_union_type?(result_type) && ctx.type_of(break_val) != result_type
+            val_type = ctx.type_of(break_val)
+            variant_id = get_union_variant_id(result_type, val_type)
+            if variant_id && variant_id >= 0
+              wrap = UnionWrap.new(ctx.next_id, result_type, break_val, variant_id)
+              ctx.emit_to_block(break_block, wrap)
+              ctx.register_type(wrap.id, result_type)
+              result_phi.add_incoming(break_block, wrap.id)
+            else
+              result_phi.add_incoming(break_block, break_val)
+            end
+          else
+            result_phi.add_incoming(break_block, break_val)
+          end
+        end
+        ctx.emit(result_phi)
+        ctx.register_type(result_phi.id, result_type)
+        result_phi.id
+      end
     end
 
     # ═══════════════════════════════════════════════════════════════════════
@@ -33297,7 +33347,18 @@ module Crystal::HIR
     end
 
     private def lower_break(ctx : LoweringContext, node : CrystalV2::Compiler::Frontend::BreakNode) : ValueId
+      # Lower the break value if present (e.g., `break x`)
+      break_val_id : ValueId? = nil
+      if val_expr = node.value
+        break_val_id = lower_expr(ctx, val_expr)
+      end
+
       if exit_block = @loop_exit_stack.last?
+        # Track break value for while expression result
+        if break_val_id && (break_vals = @loop_break_value_stack.last?)
+          break_vals << {ctx.current_block, break_val_id}
+        end
+
         # Capture current variable values at break point for exit phi construction
         if phi_nodes = @loop_phi_stack.last?
           if break_info = @loop_break_info_stack.last?
