@@ -3755,25 +3755,50 @@ module Crystal::MIR
                 max_bits = {left_bits, right_bits}.max
 
                 # If widening will occur, record the widened type
+                # Propagate unsigned-ness: if either operand is unsigned, result is unsigned
+                # (matches Crystal's promotion rules for mixed signed/unsigned arithmetic)
+                either_unsigned = unsigned_type_ref?(left_type) || unsigned_type_ref?(right_type)
                 declared_bits = result_llvm.starts_with?('i') ? (result_llvm[1..].to_i? || 32) : 32
                 if max_bits > declared_bits
                   # Will be widened to max_bits
-                  actual_type = case max_bits
-                                when 8 then TypeRef::INT8
-                                when 16 then TypeRef::INT16
-                                when 32 then TypeRef::INT32
-                                when 64 then TypeRef::INT64
-                                else TypeRef::INT64
+                  actual_type = if either_unsigned && is_arithmetic
+                                  case max_bits
+                                  when 8  then TypeRef::UINT8
+                                  when 16 then TypeRef::UINT16
+                                  when 32 then TypeRef::UINT32
+                                  when 64 then TypeRef::UINT64
+                                  else TypeRef::UINT64
+                                  end
+                                else
+                                  case max_bits
+                                  when 8 then TypeRef::INT8
+                                  when 16 then TypeRef::INT16
+                                  when 32 then TypeRef::INT32
+                                  when 64 then TypeRef::INT64
+                                  else TypeRef::INT64
+                                  end
                                 end
                   if @value_types[inst.id]? != actual_type
                     @value_types[inst.id] = actual_type
                     changed = true
                   end
-                elsif @value_types[inst.id]? != effective_type
-                  # No widening, use effective type (void→INT64)
-                  # Always update since prepass_collect_constants may have set wrong type
-                  @value_types[inst.id] = effective_type
-                  changed = true
+                else
+                  # No widening — use effective type but propagate unsigned-ness
+                  result_type_ref = effective_type
+                  if either_unsigned && is_arithmetic
+                    result_type_ref = case effective_type
+                                     when TypeRef::INT8  then TypeRef::UINT8
+                                     when TypeRef::INT16 then TypeRef::UINT16
+                                     when TypeRef::INT32 then TypeRef::UINT32
+                                     when TypeRef::INT64 then TypeRef::UINT64
+                                     else effective_type
+                                     end
+                  end
+                  if @value_types[inst.id]? != result_type_ref
+                    # Always update since prepass_collect_constants may have set wrong type
+                    @value_types[inst.id] = result_type_ref
+                    changed = true
+                  end
                 end
               elsif @value_types[inst.id]? != effective_type
                 # Non-int binary op, use effective type (void→INT64)
@@ -5001,17 +5026,22 @@ module Crystal::MIR
         right_is_int = right_type_str.starts_with?('i') && !right_type_str.includes?('.')
         if operand_type_str != right_type_str && left_is_int && right_is_int
           # Convert smaller type to larger type
+          # Use zext for unsigned types, sext for signed types
           left_bits = operand_type_str[1..-1].to_i? || 32
           right_bits = right_type_str[1..-1].to_i? || 32
           if left_bits < right_bits
             # Extend left to match right
-            emit "%binop#{inst.id}.left_ext = sext #{operand_type_str} #{left} to #{right_type_str}"
+            left_type = @value_types[inst.left]?
+            ext_op = (left_type && unsigned_type_ref?(left_type)) ? "zext" : "sext"
+            emit "%binop#{inst.id}.left_ext = #{ext_op} #{operand_type_str} #{left} to #{right_type_str}"
             left = "%binop#{inst.id}.left_ext"
             operand_type_str = right_type_str
             result_type = right_type_str if is_arithmetic
           elsif right_bits < left_bits
             # Extend right to match left
-            emit "%binop#{inst.id}.right_ext = sext #{right_type_str} #{right} to #{operand_type_str}"
+            right_type = @value_types[inst.right]?
+            ext_op = (right_type && unsigned_type_ref?(right_type)) ? "zext" : "sext"
+            emit "%binop#{inst.id}.right_ext = #{ext_op} #{right_type_str} #{right} to #{operand_type_str}"
             right = "%binop#{inst.id}.right_ext"
             right_type_str = operand_type_str
             result_type = operand_type_str if is_arithmetic
@@ -5273,13 +5303,19 @@ module Crystal::MIR
         else
           emit "#{name} = #{op} #{result_type} #{left}, #{right}"
           # Track actual emitted type for downstream use
+          # Preserve unsigned-ness from prepass if either operand was unsigned
+          prepass_was_unsigned = if pt = @value_types[inst.id]?
+                                   unsigned_type_ref?(pt)
+                                 else
+                                   false
+                                 end
           actual_type = case result_type
                         when "i1" then TypeRef::BOOL
-                        when "i8" then TypeRef::INT8
-                        when "i16" then TypeRef::INT16
-                        when "i32" then TypeRef::INT32
-                        when "i64" then TypeRef::INT64
-                        when "i128" then TypeRef::INT128
+                        when "i8" then prepass_was_unsigned ? TypeRef::UINT8 : TypeRef::INT8
+                        when "i16" then prepass_was_unsigned ? TypeRef::UINT16 : TypeRef::INT16
+                        when "i32" then prepass_was_unsigned ? TypeRef::UINT32 : TypeRef::INT32
+                        when "i64" then prepass_was_unsigned ? TypeRef::UINT64 : TypeRef::INT64
+                        when "i128" then prepass_was_unsigned ? TypeRef::UINT128 : TypeRef::INT128
                         when "float" then TypeRef::FLOAT32
                         when "double" then TypeRef::FLOAT64
                         when "ptr" then TypeRef::POINTER
