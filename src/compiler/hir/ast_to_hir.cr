@@ -36603,6 +36603,32 @@ module Crystal::HIR
           end
         end
 
+        # Array#first / Array#last / Array#min / Array#max (EARLY): must be before method resolution
+        # to prevent stdlib Enumerable method bodies (DWARF-contaminated) from being compiled.
+        if (method_name == "first" || method_name == "last" || method_name == "min" || method_name == "max") &&
+           call_args.empty? && block_expr.nil? && block_pass_expr.nil?
+          recv_id = lower_expr(ctx, obj_expr)
+          if array_intrinsic_receiver?(ctx, recv_id)
+            case method_name
+            when "first" then return lower_array_first_intrinsic(ctx, recv_id)
+            when "last"  then return lower_array_last_intrinsic(ctx, recv_id)
+            when "min"   then return lower_array_min_intrinsic(ctx, recv_id)
+            when "max"   then return lower_array_max_intrinsic(ctx, recv_id)
+            end
+          end
+        end
+
+        # Array#count { |x| condition } (EARLY): same as above.
+        if method_name == "count" && block_expr
+          recv_id = lower_expr(ctx, obj_expr)
+          if array_intrinsic_receiver?(ctx, recv_id)
+            blk_node = @arena[block_expr]
+            if blk_node.is_a?(CrystalV2::Compiler::Frontend::BlockNode)
+              return lower_array_count_dynamic(ctx, recv_id, blk_node)
+            end
+          end
+        end
+
         # Intrinsic: `x.upto(y).each { ... }` / `x.downto(y).each { ... }`
         # Prefer lowering directly via the yield-based overload to avoid iterator types like
         # `UptoIterator(typeof(self), typeof(to))` which are not yet fully monomorphized in codegen.
@@ -38338,6 +38364,49 @@ module Crystal::HIR
               end
             end
           end
+        end
+      end
+
+      # Handle Array#count { |x| condition } intrinsic
+      if method_name == "count"
+        if receiver_id
+          if blk_expr = block_expr
+            blk_node = @arena[blk_expr]
+            if blk_node.is_a?(CrystalV2::Compiler::Frontend::BlockNode)
+              if array_intrinsic_receiver?(ctx, receiver_id)
+                return lower_array_count_dynamic(ctx, receiver_id, blk_node)
+              end
+            end
+          end
+        end
+      end
+
+      # Handle Array#first (no args, no block) intrinsic (fallback — primary intercept is EARLY)
+      if method_name == "first" && args.empty? && block_expr.nil?
+        if receiver_id && array_intrinsic_receiver?(ctx, receiver_id)
+          return lower_array_first_intrinsic(ctx, receiver_id)
+        end
+      end
+
+      # Handle Array#last (no args, no block) intrinsic
+      if method_name == "last" && args.empty? && block_expr.nil?
+        if receiver_id && array_intrinsic_receiver?(ctx, receiver_id)
+          return lower_array_last_intrinsic(ctx, receiver_id)
+        end
+      end
+
+      # Handle Array#min (no args, no block) intrinsic
+      if method_name == "min" && args.empty? && block_expr.nil?
+        if receiver_id && array_intrinsic_receiver?(ctx, receiver_id)
+          # Only intercept for non-Math receivers (Math.min has args)
+          return lower_array_min_intrinsic(ctx, receiver_id)
+        end
+      end
+
+      # Handle Array#max (no args, no block) intrinsic
+      if method_name == "max" && args.empty? && block_expr.nil?
+        if receiver_id && array_intrinsic_receiver?(ctx, receiver_id)
+          return lower_array_max_intrinsic(ctx, receiver_id)
         end
       end
 
@@ -44008,6 +44077,289 @@ module Crystal::HIR
       acc_phi.id
     end
 
+    # Lower Array#count { |x| condition } intrinsic
+    # Returns the number of elements matching predicate
+    private def lower_array_count_dynamic(
+      ctx : LoweringContext,
+      array_id : ValueId,
+      block : CrystalV2::Compiler::Frontend::BlockNode,
+    ) : ValueId
+      param_name = block.params.try(&.first?).try(&.name).try { |n| String.new(n) } || "__arr_elem"
+
+      entry_block = ctx.current_block
+
+      # Emit constants in entry block
+      zero = Literal.new(ctx.next_id, TypeRef::INT32, 0_i64)
+      ctx.emit(zero)
+      zero_count = Literal.new(ctx.next_id, TypeRef::INT32, 0_i64)
+      ctx.emit(zero_count)
+
+      cond_block = ctx.create_block
+      body_block = ctx.create_block
+      incr_block = ctx.create_block
+      count_incr_block = ctx.create_block
+      exit_block = ctx.create_block
+
+      ctx.terminate(Jump.new(cond_block))
+
+      # Condition block: i < size ?
+      ctx.current_block = cond_block
+      index_phi = Phi.new(ctx.next_id, TypeRef::INT32)
+      index_phi.add_incoming(entry_block, zero.id)
+      ctx.emit(index_phi)
+
+      count_phi = Phi.new(ctx.next_id, TypeRef::INT32)
+      count_phi.add_incoming(entry_block, zero_count.id)
+      ctx.emit(count_phi)
+
+      size_val = ArraySize.new(ctx.next_id, TypeRef::INT32, array_id)
+      ctx.emit(size_val)
+
+      cmp = BinaryOperation.new(ctx.next_id, TypeRef::BOOL, BinaryOp::Lt, index_phi.id, size_val.id)
+      ctx.emit(cmp)
+      ctx.terminate(Branch.new(cmp.id, body_block, exit_block))
+
+      # Body block: evaluate predicate
+      ctx.current_block = body_block
+      ctx.push_scope(ScopeKind::Block)
+
+      element_type = array_element_type_for_value(ctx, array_id, TypeRef::INT32)
+      index_get = IndexGet.new(ctx.next_id, element_type, array_id, index_phi.id)
+      ctx.emit(index_get)
+      ctx.register_type(index_get.id, element_type)
+      ctx.register_local(param_name, index_get.id)
+
+      predicate_result = lower_body(ctx, block.body)
+      ctx.pop_scope
+
+      if predicate_result
+        ctx.terminate(Branch.new(predicate_result, count_incr_block, incr_block))
+      else
+        ctx.terminate(Jump.new(incr_block))
+      end
+
+      # Count incr block: count++, then fall through to incr
+      ctx.current_block = count_incr_block
+      one_c = Literal.new(ctx.next_id, TypeRef::INT32, 1_i64)
+      ctx.emit(one_c)
+      new_count = BinaryOperation.new(ctx.next_id, TypeRef::INT32, BinaryOp::Add, count_phi.id, one_c.id)
+      ctx.emit(new_count)
+      count_phi.add_incoming(count_incr_block, new_count.id)
+      ctx.terminate(Jump.new(incr_block))
+
+      # Incr block: i++
+      ctx.current_block = incr_block
+      # Need a phi for count coming from body (no match) or count_incr (match)
+      count_merged_phi = Phi.new(ctx.next_id, TypeRef::INT32)
+      count_merged_phi.add_incoming(body_block, count_phi.id)
+      count_merged_phi.add_incoming(count_incr_block, new_count.id)
+      ctx.emit(count_merged_phi)
+
+      one = Literal.new(ctx.next_id, TypeRef::INT32, 1_i64)
+      ctx.emit(one)
+      new_i = BinaryOperation.new(ctx.next_id, TypeRef::INT32, BinaryOp::Add, index_phi.id, one.id)
+      ctx.emit(new_i)
+      index_phi.add_incoming(incr_block, new_i.id)
+      count_phi.add_incoming(incr_block, count_merged_phi.id)
+      ctx.terminate(Jump.new(cond_block))
+
+      # Exit block: return count
+      ctx.current_block = exit_block
+      count_phi.id
+    end
+
+    # Lower Array#first intrinsic — returns arr[0]
+    private def lower_array_first_intrinsic(
+      ctx : LoweringContext,
+      array_id : ValueId,
+    ) : ValueId
+      element_type = array_element_type_for_value(ctx, array_id, TypeRef::INT32)
+      zero = Literal.new(ctx.next_id, TypeRef::INT32, 0_i64)
+      ctx.emit(zero)
+      index_get = IndexGet.new(ctx.next_id, element_type, array_id, zero.id)
+      ctx.emit(index_get)
+      ctx.register_type(index_get.id, element_type)
+      index_get.id
+    end
+
+    # Lower Array#last intrinsic — returns arr[arr.size - 1]
+    private def lower_array_last_intrinsic(
+      ctx : LoweringContext,
+      array_id : ValueId,
+    ) : ValueId
+      element_type = array_element_type_for_value(ctx, array_id, TypeRef::INT32)
+      size_val = ArraySize.new(ctx.next_id, TypeRef::INT32, array_id)
+      ctx.emit(size_val)
+      one = Literal.new(ctx.next_id, TypeRef::INT32, 1_i64)
+      ctx.emit(one)
+      last_idx = BinaryOperation.new(ctx.next_id, TypeRef::INT32, BinaryOp::Sub, size_val.id, one.id)
+      ctx.emit(last_idx)
+      index_get = IndexGet.new(ctx.next_id, element_type, array_id, last_idx.id)
+      ctx.emit(index_get)
+      ctx.register_type(index_get.id, element_type)
+      index_get.id
+    end
+
+    # Lower Array#min intrinsic — returns minimum element (Int32 arrays)
+    private def lower_array_min_intrinsic(
+      ctx : LoweringContext,
+      array_id : ValueId,
+    ) : ValueId
+      element_type = array_element_type_for_value(ctx, array_id, TypeRef::INT32)
+      entry_block = ctx.current_block
+
+      # Initialize with first element
+      zero = Literal.new(ctx.next_id, TypeRef::INT32, 0_i64)
+      ctx.emit(zero)
+      first_elem = IndexGet.new(ctx.next_id, element_type, array_id, zero.id)
+      ctx.emit(first_elem)
+      ctx.register_type(first_elem.id, element_type)
+
+      one = Literal.new(ctx.next_id, TypeRef::INT32, 1_i64)
+      ctx.emit(one)
+
+      size_val = ArraySize.new(ctx.next_id, TypeRef::INT32, array_id)
+      ctx.emit(size_val)
+
+      cond_block = ctx.create_block
+      body_block = ctx.create_block
+      update_block = ctx.create_block
+      incr_block = ctx.create_block
+      exit_block = ctx.create_block
+
+      ctx.terminate(Jump.new(cond_block))
+
+      # Condition: i < size
+      ctx.current_block = cond_block
+      index_phi = Phi.new(ctx.next_id, TypeRef::INT32)
+      index_phi.add_incoming(entry_block, one.id)
+      ctx.emit(index_phi)
+
+      min_phi = Phi.new(ctx.next_id, element_type)
+      min_phi.add_incoming(entry_block, first_elem.id)
+      ctx.emit(min_phi)
+      ctx.register_type(min_phi.id, element_type)
+
+      cmp = BinaryOperation.new(ctx.next_id, TypeRef::BOOL, BinaryOp::Lt, index_phi.id, size_val.id)
+      ctx.emit(cmp)
+      ctx.terminate(Branch.new(cmp.id, body_block, exit_block))
+
+      # Body: compare arr[i] < min
+      ctx.current_block = body_block
+      curr_elem = IndexGet.new(ctx.next_id, element_type, array_id, index_phi.id)
+      ctx.emit(curr_elem)
+      ctx.register_type(curr_elem.id, element_type)
+
+      less = BinaryOperation.new(ctx.next_id, TypeRef::BOOL, BinaryOp::Lt, curr_elem.id, min_phi.id)
+      ctx.emit(less)
+      ctx.terminate(Branch.new(less.id, update_block, incr_block))
+
+      # Update block: new min = curr_elem
+      ctx.current_block = update_block
+      min_phi.add_incoming(update_block, curr_elem.id)
+      ctx.terminate(Jump.new(incr_block))
+
+      # Incr block: i++
+      ctx.current_block = incr_block
+      min_merged_phi = Phi.new(ctx.next_id, element_type)
+      min_merged_phi.add_incoming(body_block, min_phi.id)
+      min_merged_phi.add_incoming(update_block, curr_elem.id)
+      ctx.emit(min_merged_phi)
+      ctx.register_type(min_merged_phi.id, element_type)
+
+      incr_one = Literal.new(ctx.next_id, TypeRef::INT32, 1_i64)
+      ctx.emit(incr_one)
+      new_i = BinaryOperation.new(ctx.next_id, TypeRef::INT32, BinaryOp::Add, index_phi.id, incr_one.id)
+      ctx.emit(new_i)
+      index_phi.add_incoming(incr_block, new_i.id)
+      min_phi.add_incoming(incr_block, min_merged_phi.id)
+      ctx.terminate(Jump.new(cond_block))
+
+      # Exit: return min
+      ctx.current_block = exit_block
+      min_phi.id
+    end
+
+    # Lower Array#max intrinsic — returns maximum element (Int32 arrays)
+    private def lower_array_max_intrinsic(
+      ctx : LoweringContext,
+      array_id : ValueId,
+    ) : ValueId
+      element_type = array_element_type_for_value(ctx, array_id, TypeRef::INT32)
+      entry_block = ctx.current_block
+
+      # Initialize with first element
+      zero = Literal.new(ctx.next_id, TypeRef::INT32, 0_i64)
+      ctx.emit(zero)
+      first_elem = IndexGet.new(ctx.next_id, element_type, array_id, zero.id)
+      ctx.emit(first_elem)
+      ctx.register_type(first_elem.id, element_type)
+
+      one = Literal.new(ctx.next_id, TypeRef::INT32, 1_i64)
+      ctx.emit(one)
+
+      size_val = ArraySize.new(ctx.next_id, TypeRef::INT32, array_id)
+      ctx.emit(size_val)
+
+      cond_block = ctx.create_block
+      body_block = ctx.create_block
+      update_block = ctx.create_block
+      incr_block = ctx.create_block
+      exit_block = ctx.create_block
+
+      ctx.terminate(Jump.new(cond_block))
+
+      # Condition: i < size
+      ctx.current_block = cond_block
+      index_phi = Phi.new(ctx.next_id, TypeRef::INT32)
+      index_phi.add_incoming(entry_block, one.id)
+      ctx.emit(index_phi)
+
+      max_phi = Phi.new(ctx.next_id, element_type)
+      max_phi.add_incoming(entry_block, first_elem.id)
+      ctx.emit(max_phi)
+      ctx.register_type(max_phi.id, element_type)
+
+      cmp = BinaryOperation.new(ctx.next_id, TypeRef::BOOL, BinaryOp::Lt, index_phi.id, size_val.id)
+      ctx.emit(cmp)
+      ctx.terminate(Branch.new(cmp.id, body_block, exit_block))
+
+      # Body: compare arr[i] > max
+      ctx.current_block = body_block
+      curr_elem = IndexGet.new(ctx.next_id, element_type, array_id, index_phi.id)
+      ctx.emit(curr_elem)
+      ctx.register_type(curr_elem.id, element_type)
+
+      greater = BinaryOperation.new(ctx.next_id, TypeRef::BOOL, BinaryOp::Gt, curr_elem.id, max_phi.id)
+      ctx.emit(greater)
+      ctx.terminate(Branch.new(greater.id, update_block, incr_block))
+
+      # Update block: new max = curr_elem
+      ctx.current_block = update_block
+      max_phi.add_incoming(update_block, curr_elem.id)
+      ctx.terminate(Jump.new(incr_block))
+
+      # Incr block: i++
+      ctx.current_block = incr_block
+      max_merged_phi = Phi.new(ctx.next_id, element_type)
+      max_merged_phi.add_incoming(body_block, max_phi.id)
+      max_merged_phi.add_incoming(update_block, curr_elem.id)
+      ctx.emit(max_merged_phi)
+      ctx.register_type(max_merged_phi.id, element_type)
+
+      incr_one = Literal.new(ctx.next_id, TypeRef::INT32, 1_i64)
+      ctx.emit(incr_one)
+      new_i = BinaryOperation.new(ctx.next_id, TypeRef::INT32, BinaryOp::Add, index_phi.id, incr_one.id)
+      ctx.emit(new_i)
+      index_phi.add_incoming(incr_block, new_i.id)
+      max_phi.add_incoming(incr_block, max_merged_phi.id)
+      ctx.terminate(Jump.new(cond_block))
+
+      # Exit: return max
+      ctx.current_block = exit_block
+      max_phi.id
+    end
+
     # Handle String.build { |io| ... } intrinsic
     # This creates a StringBuilder, passes it to the block, and returns the final string
     private def block_param_name(block : CrystalV2::Compiler::Frontend::BlockNode, default : String) : String
@@ -45836,6 +46188,42 @@ module Crystal::HIR
       # Hash#keys / Hash#values intrinsic (intercept before generic dispatch)
       if (member_name == "keys" || member_name == "values") && hash_intrinsic_receiver?(ctx, object_id)
         return lower_hash_keys_or_values_intrinsic(ctx, object_id, member_name == "keys")
+      end
+
+      # Array#first / Array#last / Array#min / Array#max / Array#sum intrinsic (MemberAccessNode path)
+      if (member_name == "first" || member_name == "last" || member_name == "min" ||
+          member_name == "max" || member_name == "sum") && array_intrinsic_receiver?(ctx, object_id)
+        case member_name
+        when "first" then return lower_array_first_intrinsic(ctx, object_id)
+        when "last"  then return lower_array_last_intrinsic(ctx, object_id)
+        when "min"   then return lower_array_min_intrinsic(ctx, object_id)
+        when "max"   then return lower_array_max_intrinsic(ctx, object_id)
+        when "sum"
+          ext_call = ExternCall.new(ctx.next_id, TypeRef::INT32, "__crystal_v2_array_sum_int32", [object_id])
+          ctx.emit(ext_call)
+          ctx.register_type(ext_call.id, TypeRef::INT32)
+          return ext_call.id
+        end
+      end
+
+      # Array#empty? intrinsic (MemberAccessNode path — no-parens call)
+      if member_name == "empty?" && array_intrinsic_receiver?(ctx, object_id)
+        zero = Literal.new(ctx.next_id, TypeRef::INT32, 0_i64)
+        ctx.emit(zero)
+        size_val = ArraySize.new(ctx.next_id, TypeRef::INT32, object_id)
+        ctx.emit(size_val)
+        cmp = BinaryOperation.new(ctx.next_id, TypeRef::BOOL, BinaryOp::Eq, size_val.id, zero.id)
+        ctx.emit(cmp)
+        ctx.register_type(cmp.id, TypeRef::BOOL)
+        return cmp.id
+      end
+
+      # Array#size intrinsic (MemberAccessNode path — no-parens call)
+      if member_name == "size" && array_intrinsic_receiver?(ctx, object_id)
+        size_val = ArraySize.new(ctx.next_id, TypeRef::INT32, object_id)
+        ctx.emit(size_val)
+        ctx.register_type(size_val.id, TypeRef::INT32)
+        return size_val.id
       end
 
       # If the receiver is an unresolved bare identifier (VOID local), but a
