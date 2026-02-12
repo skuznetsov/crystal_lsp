@@ -38519,7 +38519,7 @@ module Crystal::HIR
               # (method resolution may retype receiver to module like Enumerable)
               is_array = array_intrinsic_receiver?(ctx, receiver_id)
               if !is_array && callee_node.is_a?(CrystalV2::Compiler::Frontend::MemberAccessNode)
-                is_array = check_original_receiver_is_array?(ctx, callee_node)
+                is_array = check_and_fix_array_receiver_type(ctx, callee_node, receiver_id)
               end
               if is_array
                 return lower_array_each_with_index_dynamic(ctx, receiver_id, blk_node)
@@ -38619,7 +38619,7 @@ module Crystal::HIR
       if method_name == "sort" && receiver_id && args.empty?
         is_array = array_intrinsic_receiver?(ctx, receiver_id)
         if !is_array && callee_node.is_a?(CrystalV2::Compiler::Frontend::MemberAccessNode)
-          is_array = check_original_receiver_is_array?(ctx, callee_node)
+          is_array = check_and_fix_array_receiver_type(ctx, callee_node, receiver_id)
         end
         if is_array
           return lower_array_sort_dynamic(ctx, receiver_id)
@@ -38630,7 +38630,7 @@ module Crystal::HIR
       if method_name == "sort!" && receiver_id && args.empty?
         is_array = array_intrinsic_receiver?(ctx, receiver_id)
         if !is_array && callee_node.is_a?(CrystalV2::Compiler::Frontend::MemberAccessNode)
-          is_array = check_original_receiver_is_array?(ctx, callee_node)
+          is_array = check_and_fix_array_receiver_type(ctx, callee_node, receiver_id)
         end
         if is_array
           return lower_array_sort_bang_dynamic(ctx, receiver_id)
@@ -43394,6 +43394,39 @@ module Crystal::HIR
       false
     end
 
+    # Get the original array TypeRef for a receiver that may have been retyped
+    # to a module (e.g. Enumerable). Returns nil if not determinable.
+    private def original_array_type_for_receiver(ctx : LoweringContext, callee_node : CrystalV2::Compiler::Frontend::MemberAccessNode) : TypeRef?
+      orig_obj = @arena[callee_node.object]
+      if orig_obj.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode)
+        if pname = orig_obj.name
+          var_name = String.new(pname)
+          if var_val = ctx.lookup_local(var_name)
+            var_type = ctx.type_of(var_val)
+            if desc = @module.get_type_descriptor(var_type)
+              if desc.kind == TypeKind::Array &&
+                 (desc.name.starts_with?("Array(") || desc.name.starts_with?("StaticArray("))
+                return var_type
+              end
+            end
+          end
+        end
+      end
+      nil
+    end
+
+    # Check original receiver and fix type if it was retyped by module resolution
+    private def check_and_fix_array_receiver_type(ctx : LoweringContext, callee_node : CrystalV2::Compiler::Frontend::MemberAccessNode, receiver_id : ValueId) : Bool
+      if check_original_receiver_is_array?(ctx, callee_node)
+        if orig_type = original_array_type_for_receiver(ctx, callee_node)
+          ctx.register_type(receiver_id, orig_type)
+        end
+        true
+      else
+        false
+      end
+    end
+
     private def array_intrinsic_receiver?(ctx : LoweringContext, receiver_id : ValueId) : Bool
       receiver_type = ctx.type_of(receiver_id)
       return false if receiver_type == TypeRef::VOID
@@ -43879,8 +43912,8 @@ module Crystal::HIR
       ctx.current_block = body_block
       ctx.push_scope(ScopeKind::Block)
 
-      # Get element: arr[i] - element type should be POINTER for array of strings/objects
-      element_type = array_element_type_for_value(ctx, array_id, TypeRef::POINTER)
+      # Get element: arr[i]
+      element_type = array_element_type_for_value(ctx, array_id, TypeRef::INT32)
       index_get = IndexGet.new(ctx.next_id, element_type, array_id, index_phi.id)
       ctx.emit(index_get)
       ctx.register_type(index_get.id, element_type)
@@ -46896,7 +46929,7 @@ module Crystal::HIR
         receiver_id = lower_expr(ctx, node.object)
         is_array = array_intrinsic_receiver?(ctx, receiver_id)
         if !is_array
-          is_array = check_original_receiver_is_array?(ctx, node)
+          is_array = check_and_fix_array_receiver_type(ctx, node, receiver_id)
         end
         if is_array
           if member_name == "sort"
