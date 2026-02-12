@@ -38031,6 +38031,50 @@ module Crystal::HIR
         end
       end
 
+      # String#index(String) and String#index(Char) intercept
+      # Returns i32 (-1 = not found) to avoid DWARF-contaminated stdlib bodies
+      # Note: Crystal returns Int32? (nilable), but we return plain Int32 for now.
+      # -1 means not found. Callers using `if idx` on Int32 will always be truthy.
+      if method_name == "index" && receiver_id && (args.size == 1 || args.size == 2)
+        recv_type = ctx.type_of(receiver_id)
+        if recv_type == TypeRef::STRING || recv_type == TypeRef::POINTER
+          arg_type = prepack_arg_types.size > 0 ? prepack_arg_types[0] : nil
+          offset_id = if args.size >= 2
+                        args[1]
+                      else
+                        zero_lit = Literal.new(ctx.next_id, TypeRef::INT32, 0_i64)
+                        ctx.emit(zero_lit)
+                        ctx.register_type(zero_lit.id, TypeRef::INT32)
+                        zero_lit.id
+                      end
+          helper_name = if arg_type == TypeRef::STRING
+                          "__crystal_v2_string_index_string"
+                        elsif arg_type && (arg_type == TypeRef::CHAR || arg_type.id == TypeRef::CHAR.id)
+                          "__crystal_v2_string_index_char"
+                        else
+                          "__crystal_v2_string_index_string"
+                        end
+          raw_result = ExternCall.new(ctx.next_id, TypeRef::INT32, helper_name, [receiver_id, args[0], offset_id])
+          ctx.emit(raw_result)
+          ctx.register_type(raw_result.id, TypeRef::INT32)
+          return raw_result.id
+        end
+      end
+
+      # String#gsub(String, String) intercept → runtime helper
+      if method_name == "gsub" && receiver_id && args.size == 2 && block_expr.nil?
+        recv_type = ctx.type_of(receiver_id)
+        if recv_type == TypeRef::STRING || recv_type == TypeRef::POINTER
+          ext_call = ExternCall.new(ctx.next_id, TypeRef::STRING, "__crystal_v2_string_gsub", [receiver_id, args[0], args[1]])
+          ctx.emit(ext_call)
+          ctx.register_type(ext_call.id, TypeRef::STRING)
+          return ext_call.id
+        end
+      end
+
+      # String#sub(String, String) intercept → similar to gsub but only first occurrence
+      # For now, route through gsub (will replace all — TODO: implement proper sub)
+
       pack_result = pack_splat_args_for_call(ctx, args, method_name, full_method_name, has_block_call, has_named_args, receiver_id, has_splat)
       args = pack_result[0]
       splat_packed = pack_result[1]
@@ -45483,6 +45527,34 @@ module Crystal::HIR
       if node.indexes.size == 1
         idx_node = @arena[node.indexes.first]
         if idx_node.is_a?(CrystalV2::Compiler::Frontend::RangeNode)
+          # String#[](Range) intercept: extract begin/end from range, call byte_slice helper
+          obj_type = ctx.type_of(object_id)
+          if obj_type == TypeRef::STRING || obj_type == TypeRef::POINTER
+            begin_id = lower_expr(ctx, idx_node.begin_expr)
+            end_id = lower_expr(ctx, idx_node.end_expr)
+            exclusive = idx_node.exclusive
+            # Calculate length: for inclusive range (0..4), length = end - begin + 1
+            # For exclusive range (0...4), length = end - begin
+            len_raw = BinaryOperation.new(ctx.next_id, TypeRef::INT32, BinaryOp::Sub, end_id, begin_id)
+            ctx.emit(len_raw)
+            ctx.register_type(len_raw.id, TypeRef::INT32)
+            len_id = if !exclusive
+                       one_lit = Literal.new(ctx.next_id, TypeRef::INT32, 1_i64)
+                       ctx.emit(one_lit)
+                       ctx.register_type(one_lit.id, TypeRef::INT32)
+                       len_inc = BinaryOperation.new(ctx.next_id, TypeRef::INT32, BinaryOp::Add, len_raw.id, one_lit.id)
+                       ctx.emit(len_inc)
+                       ctx.register_type(len_inc.id, TypeRef::INT32)
+                       len_inc.id
+                     else
+                       len_raw.id
+                     end
+            ext_call = ExternCall.new(ctx.next_id, TypeRef::STRING, "__crystal_v2_string_byte_slice", [object_id, begin_id, len_id])
+            ctx.emit(ext_call)
+            ctx.register_type(ext_call.id, TypeRef::STRING)
+            return ext_call.id
+          end
+
           # Array slice: arr[start..end] -> call Array#[](Range) with the Range value
           # Lower the Range expression to get a Range value with proper type params
           range_id = lower_range(ctx, idx_node)
