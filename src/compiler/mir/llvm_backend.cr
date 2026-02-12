@@ -431,6 +431,9 @@ module Crystal::MIR
     # Phi predecessor union-to-ptr extracts: for union values that must be unwrapped to ptr before phi
     # Maps (pred_block, value_id) -> (extract_name, union_llvm_type)
     @phi_union_to_ptr_extracts : Hash({BlockId, ValueId}, {String, String}) = {} of {BlockId, ValueId} => {String, String}
+    # Phi union payload extracts: for union-typed slot values where phi expects a primitive
+    # Maps (pred_block, value_id) -> (extract_name, load_name, target_llvm_type)
+    @phi_union_payload_extracts : Hash({BlockId, ValueId}, {String, String, String}) = {} of {BlockId, ValueId} => {String, String, String}
     @current_func_blocks : Hash(BlockId, BasicBlock) = {} of BlockId => BasicBlock
     @current_block_id : BlockId? = nil
     @entry_user_block_id : BlockId = 0_u32  # First user block — dominates all others
@@ -2779,6 +2782,7 @@ module Crystal::MIR
       @cross_block_slot_type_refs.clear
       @phi_predecessor_loads.clear
       @phi_union_to_ptr_extracts.clear
+      @phi_union_payload_extracts.clear
       @current_func_blocks.clear
       @emitted_value_types.clear
 
@@ -3943,6 +3947,8 @@ module Crystal::MIR
       emit_phi_predecessor_union_wraps(block)
       # Emit union-to-ptr extractions for union values used in successor ptr phi nodes
       emit_phi_union_to_ptr_extracts(block)
+      # Emit union payload extractions for union-slotted values used in primitive phi nodes
+      emit_phi_union_payload_extracts(block)
 
       emit_terminator(block.terminator)
       @indent = 0
@@ -4052,6 +4058,24 @@ module Crystal::MIR
         emit "store #{union_type} #{val_ref_str}, ptr %#{extract_name}.alloca"
         emit "%#{extract_name}.pay_ptr = getelementptr #{union_type}, ptr %#{extract_name}.alloca, i32 0, i32 1"
         emit "%#{extract_name} = load ptr, ptr %#{extract_name}.pay_ptr, align 4"
+      end
+    end
+
+    private def emit_phi_union_payload_extracts(block : BasicBlock)
+      extracts = @phi_union_payload_extracts
+      return if extracts.empty?
+      extracts.each do |(key, info)|
+        pred_block_id, val_id = key
+        # Only emit extractions for THIS block
+        next unless pred_block_id == block.id
+
+        extract_name, load_name, target_type = info
+        # The load_name loaded the full union struct from the slot.
+        # Extract the payload (offset 4 after the type_id i32) as the target primitive type.
+        slot_name = @cross_block_slots[val_id]?
+        next unless slot_name
+        emit "%#{extract_name}.pay_ptr = getelementptr i8, ptr %#{slot_name}, i32 4"
+        emit "%#{extract_name} = load #{target_type}, ptr %#{extract_name}.pay_ptr"
       end
     end
 
@@ -5881,6 +5905,7 @@ module Crystal::MIR
         # - Same type: use the load directly
         # - Both ptr: compatible
         # - Both int (same size): compatible
+        # - Union slot, primitive phi: extract payload from union
         # - Otherwise: let the type mismatch handling kick in
         is_compatible = if slot_llvm_type.nil?
                           false  # Unknown slot type, let special handling deal with it
@@ -5896,6 +5921,14 @@ module Crystal::MIR
                           false
                         end
         return "%#{pred_load_name}" if is_compatible
+
+        # Union slot with primitive phi type: the value was stored as union but the phi
+        # expects a primitive (e.g., i32). Schedule extraction from the loaded union.
+        if slot_llvm_type && slot_llvm_type.includes?(".union") && !phi_type.includes?(".union")
+          extract_name = "r#{val}.phi_extract.#{block}"
+          @phi_union_payload_extracts[{block, val}] = {extract_name, pred_load_name, phi_type}
+          return "%#{extract_name}"
+        end
       end
       nil  # Let caller handle normally (type mismatch handling)
     end
