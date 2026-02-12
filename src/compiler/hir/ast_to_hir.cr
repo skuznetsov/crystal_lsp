@@ -38431,7 +38431,27 @@ module Crystal::HIR
           if blk_expr = block_expr
             blk_node = @arena[blk_expr]
             if blk_node.is_a?(CrystalV2::Compiler::Frontend::BlockNode)
-              if array_intrinsic_receiver?(ctx, receiver_id)
+              # Check direct type first, then fall back to original object type
+              # (method resolution may retype receiver to module like Enumerable)
+              is_array = array_intrinsic_receiver?(ctx, receiver_id)
+              if !is_array && callee_node.is_a?(CrystalV2::Compiler::Frontend::MemberAccessNode)
+                orig_obj = @arena[callee_node.object]
+                if orig_obj.is_a?(CrystalV2::Compiler::Frontend::ArrayLiteralNode)
+                  is_array = true
+                elsif orig_obj.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode)
+                  if pname = orig_obj.name
+                    var_name = String.new(pname)
+                    if var_val = ctx.lookup_local(var_name)
+                      var_type = ctx.type_of(var_val)
+                      if desc = @module.get_type_descriptor(var_type)
+                        is_array = desc.kind == TypeKind::Array &&
+                          (desc.name.starts_with?("Array(") || desc.name.starts_with?("StaticArray("))
+                      end
+                    end
+                  end
+                end
+              end
+              if is_array
                 return lower_array_each_with_index_dynamic(ctx, receiver_id, blk_node)
               end
             end
