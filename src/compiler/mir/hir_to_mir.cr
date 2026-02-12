@@ -2388,8 +2388,34 @@ module Crystal
 
     private def lower_is_a(isa : HIR::IsA) : ValueId
       builder = @builder.not_nil!
-      obj = get_value(isa.value)
       mir_check_type = convert_type(isa.check_type)
+
+      # Check if the value's type is already known (concrete, non-union).
+      # If so, resolve the is_a? check statically to avoid loading type_id
+      # from a raw value (e.g. Int32 treated as pointer → segfault).
+      if hir_value_type = @hir_value_types[isa.value]?
+        value_desc = @hir_module.get_type_descriptor(hir_value_type)
+        is_concrete = hir_value_type.primitive? ||
+                      (value_desc && value_desc.kind != HIR::TypeKind::Union)
+        if is_concrete
+          # Concrete type — resolve statically
+          # Collect matching type_ids (check_type + subclasses)
+          matching_type_ids = Set(UInt32).new
+          matching_type_ids << mir_check_type.id
+          if check_mir_type = @mir_module.type_registry.get(mir_check_type)
+            subclasses_for(check_mir_type.name).each do |sub_name|
+              if sub_mir_type = @mir_module.type_registry.get_by_name(sub_name)
+                matching_type_ids << sub_mir_type.id
+              end
+            end
+          end
+          mir_value_type = convert_type(hir_value_type)
+          is_match = matching_type_ids.includes?(mir_value_type.id)
+          return builder.const_int(is_match ? 1_i64 : 0_i64, TypeRef::BOOL)
+        end
+      end
+
+      obj = get_value(isa.value)
 
       # Collect all type_ids that should match: the check_type itself
       # plus all its subclasses (for parent type checks like is_a?(Base))
