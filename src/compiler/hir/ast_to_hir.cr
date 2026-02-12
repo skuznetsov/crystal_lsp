@@ -38615,6 +38615,28 @@ module Crystal::HIR
         end
       end
 
+      # Handle Array#sort → dup + sort in-place via qsort
+      if method_name == "sort" && receiver_id && args.empty?
+        is_array = array_intrinsic_receiver?(ctx, receiver_id)
+        if !is_array && callee_node.is_a?(CrystalV2::Compiler::Frontend::MemberAccessNode)
+          is_array = check_original_receiver_is_array?(ctx, callee_node)
+        end
+        if is_array
+          return lower_array_sort_dynamic(ctx, receiver_id)
+        end
+      end
+
+      # Handle Array#sort! → sort in-place via qsort
+      if method_name == "sort!" && receiver_id && args.empty?
+        is_array = array_intrinsic_receiver?(ctx, receiver_id)
+        if !is_array && callee_node.is_a?(CrystalV2::Compiler::Frontend::MemberAccessNode)
+          is_array = check_original_receiver_is_array?(ctx, callee_node)
+        end
+        if is_array
+          return lower_array_sort_bang_dynamic(ctx, receiver_id)
+        end
+      end
+
       # Handle Array#any? { |x| condition } intrinsic
       if method_name == "any?"
         if receiver_id
@@ -44565,6 +44587,55 @@ module Crystal::HIR
       result_phi.id
     end
 
+    # Lower Array#sort → dup + sort in-place
+    private def lower_array_sort_dynamic(
+      ctx : LoweringContext,
+      array_id : ValueId,
+    ) : ValueId
+      # Determine element type to pick the right dup+sort helper
+      element_type = array_element_type_for_value(ctx, array_id, TypeRef::INT32)
+      helper = case element_type
+               when TypeRef::STRING, TypeRef::POINTER
+                 "__crystal_v2_sort_string_array_dup"
+               else
+                 "__crystal_v2_sort_i32_array_dup"
+               end
+
+      # Pass the array's type_id so the dup helper can set it in the new array header
+      arr_type = ctx.type_of(array_id)
+      type_id_lit = Literal.new(ctx.next_id, TypeRef::INT32, arr_type.id.to_i64)
+      ctx.emit(type_id_lit)
+      ctx.register_type(type_id_lit.id, TypeRef::INT32)
+
+      # Call the combined dup+sort helper: returns a new sorted array
+      dup_sort_call = ExternCall.new(ctx.next_id, arr_type, helper, [array_id, type_id_lit.id] of ValueId)
+      ctx.emit(dup_sort_call)
+      ctx.register_type(dup_sort_call.id, arr_type)
+
+      dup_sort_call.id
+    end
+
+    # Lower Array#sort! → sort in-place via qsort
+    private def lower_array_sort_bang_dynamic(
+      ctx : LoweringContext,
+      array_id : ValueId,
+    ) : ValueId
+      # Determine element type to pick the right sort helper
+      element_type = array_element_type_for_value(ctx, array_id, TypeRef::INT32)
+      helper = case element_type
+               when TypeRef::STRING, TypeRef::POINTER
+                 "__crystal_v2_sort_string_array"
+               else
+                 "__crystal_v2_sort_i32_array"
+               end
+
+      sort_call = ExternCall.new(ctx.next_id, TypeRef::VOID, helper, [array_id])
+      ctx.emit(sort_call)
+      ctx.register_type(sort_call.id, TypeRef::NIL)
+
+      array_id
+    end
+
     # Lower Array#any? { |x| condition } intrinsic
     # Returns true if any element matches predicate, false otherwise
     private def lower_array_any_dynamic(
@@ -46819,6 +46890,23 @@ module Crystal::HIR
     private def lower_member_access(ctx : LoweringContext, node : CrystalV2::Compiler::Frontend::MemberAccessNode) : ValueId
       obj_node = @arena[node.object]
       member_name = String.new(node.member)
+
+      # Intercept Array#sort/sort! on member access (no parens, no args)
+      if member_name == "sort" || member_name == "sort!"
+        receiver_id = lower_expr(ctx, node.object)
+        is_array = array_intrinsic_receiver?(ctx, receiver_id)
+        if !is_array
+          is_array = check_original_receiver_is_array?(ctx, node)
+        end
+        if is_array
+          if member_name == "sort"
+            return lower_array_sort_dynamic(ctx, receiver_id)
+          else
+            return lower_array_sort_bang_dynamic(ctx, receiver_id)
+          end
+        end
+      end
+
       if env_get("DEBUG_TO_U32") && ctx.function.name.includes?("key_hash")
         STDERR.puts "[KEY_HASH_MEMBER] member=#{member_name} func=#{ctx.function.name}"
       end
