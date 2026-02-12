@@ -38422,6 +38422,27 @@ module Crystal::HIR
         end
       end
 
+      # Handle Array#reject { |x| condition } intrinsic
+      if method_name == "reject"
+        if receiver_id
+          if blk_expr = block_expr
+            blk_node = @arena[blk_expr]
+            if blk_node.is_a?(CrystalV2::Compiler::Frontend::BlockNode)
+              if array_intrinsic_receiver?(ctx, receiver_id)
+                return lower_array_reject_dynamic(ctx, receiver_id, blk_node)
+              end
+            end
+          end
+        end
+      end
+
+      # Handle Array#includes?(value) intrinsic for non-String arrays
+      if method_name == "includes?" && receiver_id && args.size == 1
+        if array_intrinsic_receiver?(ctx, receiver_id)
+          return lower_array_includes_dynamic(ctx, receiver_id, args[0])
+        end
+      end
+
       # Handle Array#any? { |x| condition } intrinsic
       if method_name == "any?"
         if receiver_id
@@ -43926,6 +43947,175 @@ module Crystal::HIR
       ctx.emit(set_size)
 
       new_array.id
+    end
+
+    # Lower Array#reject { |x| condition } intrinsic
+    # Same as select but copies when predicate is FALSE (inverted branch)
+    private def lower_array_reject_dynamic(
+      ctx : LoweringContext,
+      array_id : ValueId,
+      block : CrystalV2::Compiler::Frontend::BlockNode,
+    ) : ValueId
+      param_name = block.params.try(&.first?).try(&.name).try { |n| String.new(n) } || "__reject_elem"
+
+      element_type = array_element_type_for_value(ctx, array_id, TypeRef::INT32)
+      source_type = ctx.type_of(array_id)
+
+      size_val = ArraySize.new(ctx.next_id, TypeRef::INT32, array_id)
+      ctx.emit(size_val)
+
+      new_array = ArrayNew.new(ctx.next_id, element_type, size_val.id)
+      ctx.emit(new_array)
+      ctx.register_type(new_array.id, source_type)
+
+      entry_block = ctx.current_block
+      zero = Literal.new(ctx.next_id, TypeRef::INT32, 0_i64)
+      ctx.emit(zero)
+
+      cond_block = ctx.create_block
+      body_block = ctx.create_block
+      copy_block = ctx.create_block
+      incr_block = ctx.create_block
+      exit_block = ctx.create_block
+
+      ctx.terminate(Jump.new(cond_block))
+
+      # Condition block: check i < size
+      ctx.current_block = cond_block
+      index_phi = Phi.new(ctx.next_id, TypeRef::INT32)
+      index_phi.add_incoming(entry_block, zero.id)
+      ctx.emit(index_phi)
+
+      result_count_phi = Phi.new(ctx.next_id, TypeRef::INT32)
+      result_count_phi.add_incoming(entry_block, zero.id)
+      ctx.emit(result_count_phi)
+
+      cmp = BinaryOperation.new(ctx.next_id, TypeRef::BOOL, BinaryOp::Lt, index_phi.id, size_val.id)
+      ctx.emit(cmp)
+      ctx.terminate(Branch.new(cmp.id, body_block, exit_block))
+
+      # Body block: get element, evaluate predicate
+      ctx.current_block = body_block
+      ctx.push_scope(ScopeKind::Block)
+
+      index_get = IndexGet.new(ctx.next_id, element_type, array_id, index_phi.id)
+      ctx.emit(index_get)
+      ctx.register_type(index_get.id, element_type)
+      ctx.register_local(param_name, index_get.id)
+
+      predicate_result = lower_body(ctx, block.body)
+      ctx.pop_scope
+
+      if predicate_result
+        # INVERTED: copy when predicate is false (reject matching elements)
+        ctx.terminate(Branch.new(predicate_result, incr_block, copy_block))
+      else
+        ctx.terminate(Jump.new(incr_block))
+      end
+
+      # Copy block: store element to new array
+      ctx.current_block = copy_block
+      index_set = IndexSet.new(ctx.next_id, element_type, new_array.id, result_count_phi.id, index_get.id)
+      ctx.emit(index_set)
+
+      one_copy = Literal.new(ctx.next_id, TypeRef::INT32, 1_i64)
+      ctx.emit(one_copy)
+      new_count = BinaryOperation.new(ctx.next_id, TypeRef::INT32, BinaryOp::Add, result_count_phi.id, one_copy.id)
+      ctx.emit(new_count)
+      ctx.terminate(Jump.new(incr_block))
+
+      # Incr block
+      ctx.current_block = incr_block
+      count_incr_phi = Phi.new(ctx.next_id, TypeRef::INT32)
+      count_incr_phi.add_incoming(body_block, result_count_phi.id)
+      count_incr_phi.add_incoming(copy_block, new_count.id)
+      ctx.emit(count_incr_phi)
+
+      one_incr = Literal.new(ctx.next_id, TypeRef::INT32, 1_i64)
+      ctx.emit(one_incr)
+      new_i = BinaryOperation.new(ctx.next_id, TypeRef::INT32, BinaryOp::Add, index_phi.id, one_incr.id)
+      ctx.emit(new_i)
+
+      index_phi.add_incoming(incr_block, new_i.id)
+      result_count_phi.add_incoming(incr_block, count_incr_phi.id)
+      ctx.terminate(Jump.new(cond_block))
+
+      # Exit block: set size on new array
+      ctx.current_block = exit_block
+      set_size = ArraySetSize.new(ctx.next_id, TypeRef::VOID, new_array.id, result_count_phi.id)
+      ctx.emit(set_size)
+
+      new_array.id
+    end
+
+    # Lower Array#includes?(value) intrinsic — iterates elements, compares with ==
+    private def lower_array_includes_dynamic(
+      ctx : LoweringContext,
+      array_id : ValueId,
+      value_id : ValueId,
+    ) : ValueId
+      element_type = array_element_type_for_value(ctx, array_id, TypeRef::INT32)
+
+      size_val = ArraySize.new(ctx.next_id, TypeRef::INT32, array_id)
+      ctx.emit(size_val)
+
+      entry_block = ctx.current_block
+      zero = Literal.new(ctx.next_id, TypeRef::INT32, 0_i64)
+      ctx.emit(zero)
+      true_val = Literal.new(ctx.next_id, TypeRef::BOOL, 1_i64)
+      ctx.emit(true_val)
+      false_val = Literal.new(ctx.next_id, TypeRef::BOOL, 0_i64)
+      ctx.emit(false_val)
+
+      cond_block = ctx.create_block
+      body_block = ctx.create_block
+      found_block = ctx.create_block
+      incr_block = ctx.create_block
+      exit_block = ctx.create_block
+
+      ctx.terminate(Jump.new(cond_block))
+
+      # Condition: i < size
+      ctx.current_block = cond_block
+      index_phi = Phi.new(ctx.next_id, TypeRef::INT32)
+      index_phi.add_incoming(entry_block, zero.id)
+      ctx.emit(index_phi)
+
+      cmp = BinaryOperation.new(ctx.next_id, TypeRef::BOOL, BinaryOp::Lt, index_phi.id, size_val.id)
+      ctx.emit(cmp)
+      ctx.terminate(Branch.new(cmp.id, body_block, exit_block))
+
+      # Body: arr[i] == value?
+      ctx.current_block = body_block
+      elem = IndexGet.new(ctx.next_id, element_type, array_id, index_phi.id)
+      ctx.emit(elem)
+      ctx.register_type(elem.id, element_type)
+
+      eq_cmp = BinaryOperation.new(ctx.next_id, TypeRef::BOOL, BinaryOp::Eq, elem.id, value_id)
+      ctx.emit(eq_cmp)
+      ctx.terminate(Branch.new(eq_cmp.id, found_block, incr_block))
+
+      # Found block: return true
+      ctx.current_block = found_block
+      ctx.terminate(Jump.new(exit_block))
+
+      # Incr block
+      ctx.current_block = incr_block
+      one = Literal.new(ctx.next_id, TypeRef::INT32, 1_i64)
+      ctx.emit(one)
+      new_i = BinaryOperation.new(ctx.next_id, TypeRef::INT32, BinaryOp::Add, index_phi.id, one.id)
+      ctx.emit(new_i)
+      index_phi.add_incoming(incr_block, new_i.id)
+      ctx.terminate(Jump.new(cond_block))
+
+      # Exit block: phi result (true from found_block, false from cond_block)
+      ctx.current_block = exit_block
+      result_phi = Phi.new(ctx.next_id, TypeRef::BOOL)
+      result_phi.add_incoming(found_block, true_val.id)
+      result_phi.add_incoming(cond_block, false_val.id)
+      ctx.emit(result_phi)
+
+      result_phi.id
     end
 
     # Lower Array#any? { |x| condition } intrinsic
