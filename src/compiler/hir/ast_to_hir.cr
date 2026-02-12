@@ -37957,6 +37957,90 @@ module Crystal::HIR
               return extern_call.id
             end
 
+            # Enum types: emit value→name lookup + puts on string
+            # Skip if the expression is .value (user explicitly wants numeric value)
+            is_dot_value = false
+            if call_arena
+              arg_node = with_arena(call_arena) { @arena[call_args[0]] }
+              if arg_node.is_a?(CrystalV2::Compiler::Frontend::MemberAccessNode)
+                if String.new(arg_node.member) == "value"
+                  is_dot_value = true
+                end
+              elsif arg_node.is_a?(CrystalV2::Compiler::Frontend::CallNode)
+                callee_expr = with_arena(call_arena) { @arena[arg_node.callee] }
+                if callee_expr.is_a?(CrystalV2::Compiler::Frontend::MemberAccessNode)
+                  if String.new(callee_expr.member) == "value"
+                    is_dot_value = true
+                  end
+                end
+              end
+            end
+            if !is_dot_value && (enum_info = @enum_info)
+              # Check if arg_id is tracked as an enum value
+              enum_name = @enum_value_types.try(&.[arg_id]?)
+              # Also check the type name directly
+              enum_name ||= begin
+                tn = get_type_name_from_ref(arg_type)
+                tn if enum_info.has_key?(tn)
+              end
+              if members = enum_info[enum_name]?
+                # Build if-elsif chain: if val==0 then "Red" elsif val==1 then "Green" ...
+                exit_block = ctx.create_block
+                result_blocks = [] of {BlockId, ValueId} # {block_id, string_literal_id}
+
+                sorted_members = members.to_a.sort_by { |_, v| v }
+                remaining = sorted_members.size
+                sorted_members.each_with_index do |(member_name, member_value), idx|
+                  # Short member name: "Color::Green" → "Green"
+                  short_name = member_name.includes?("::") ? member_name.split("::").last : member_name
+                  cmp_lit = Literal.new(ctx.next_id, TypeRef::INT32, member_value)
+                  ctx.emit(cmp_lit)
+                  ctx.register_type(cmp_lit.id, TypeRef::INT32)
+                  cmp_eq = BinaryOperation.new(ctx.next_id, TypeRef::BOOL, BinaryOp::Eq, arg_id, cmp_lit.id)
+                  ctx.emit(cmp_eq)
+
+                  match_block = ctx.create_block
+                  next_block = if idx == sorted_members.size - 1
+                                 # Last member: fallback also goes to match (use its name)
+                                 match_block
+                               else
+                                 ctx.create_block
+                               end
+                  ctx.terminate(Branch.new(cmp_eq.id, match_block, next_block))
+
+                  ctx.current_block = match_block
+                  str_lit = Literal.new(ctx.next_id, TypeRef::STRING, short_name)
+                  ctx.emit(str_lit)
+                  ctx.register_type(str_lit.id, TypeRef::STRING)
+                  result_blocks << {match_block, str_lit.id}
+                  ctx.terminate(Jump.new(exit_block))
+
+                  if idx < sorted_members.size - 1
+                    ctx.current_block = next_block
+                  end
+                end
+
+                # Exit block: phi to get the string
+                ctx.current_block = exit_block
+                str_phi = Phi.new(ctx.next_id, TypeRef::STRING)
+                result_blocks.each do |block_id, str_id|
+                  str_phi.add_incoming(block_id, str_id)
+                end
+                ctx.emit(str_phi)
+                ctx.register_type(str_phi.id, TypeRef::STRING)
+
+                # Now puts/print the string
+                stdout_get = ClassVarGet.new(ctx.next_id, TypeRef::POINTER, "Object", "STDOUT")
+                ctx.emit(stdout_get)
+                ctx.register_type(stdout_get.id, TypeRef::POINTER)
+                mangled = mangle_function_name("IO##{method_name}", [TypeRef::STRING])
+                call_instr = Call.new(ctx.next_id, TypeRef::NIL, stdout_get.id, mangled, [str_phi.id], nil, true)
+                ctx.emit(call_instr)
+                ctx.register_type(call_instr.id, TypeRef::NIL)
+                return call_instr.id
+              end
+            end
+
             # Load STDOUT from classvar
             stdout_get = ClassVarGet.new(ctx.next_id, TypeRef::POINTER, "Object", "STDOUT")
             ctx.emit(stdout_get)
