@@ -36603,6 +36603,19 @@ module Crystal::HIR
           end
         end
 
+        # String#each_char { |ch| ... } (EARLY): intrinsic to avoid Char::Reader DWARF contamination
+        # Iterates bytes as ASCII Chars (sufficient for bootstrap)
+        if method_name == "each_char" && block_expr && call_args.empty?
+          recv_id = lower_expr(ctx, obj_expr)
+          recv_type = ctx.type_of(recv_id)
+          if recv_type == TypeRef::STRING || recv_type == TypeRef::POINTER
+            blk_node = @arena[block_expr]
+            if blk_node.is_a?(CrystalV2::Compiler::Frontend::BlockNode)
+              return lower_string_each_char_intrinsic(ctx, recv_id, blk_node)
+            end
+          end
+        end
+
         # Array#first / Array#last / Array#min / Array#max (EARLY): must be before method resolution
         # to prevent stdlib Enumerable method bodies (DWARF-contaminated) from being compiled.
         if (method_name == "first" || method_name == "last" || method_name == "min" || method_name == "max") &&
@@ -44142,6 +44155,75 @@ module Crystal::HIR
       ctx.current_block = exit_block
       ctx.register_type(acc_phi.id, element_type)
       acc_phi.id
+    end
+
+    # Lower String#each_char { |ch| ... } intrinsic
+    # Iterates string bytes as ASCII Chars (sufficient for bootstrap)
+    private def lower_string_each_char_intrinsic(
+      ctx : LoweringContext,
+      string_id : ValueId,
+      block : CrystalV2::Compiler::Frontend::BlockNode,
+    ) : ValueId
+      param_name = block.params.try(&.first?).try(&.name).try { |n| String.new(n) } || "__char"
+
+      entry_block = ctx.current_block
+
+      # Emit constants in entry block
+      zero = Literal.new(ctx.next_id, TypeRef::INT32, 0_i64)
+      ctx.emit(zero)
+
+      # Get string bytesize via ExternCall
+      bytesize = ExternCall.new(ctx.next_id, TypeRef::INT32, "__crystal_v2_string_bytesize", [string_id])
+      ctx.emit(bytesize)
+      ctx.register_type(bytesize.id, TypeRef::INT32)
+
+      cond_block = ctx.create_block
+      body_block = ctx.create_block
+      incr_block = ctx.create_block
+      exit_block = ctx.create_block
+
+      ctx.terminate(Jump.new(cond_block))
+
+      # Condition block: i < bytesize ?
+      ctx.current_block = cond_block
+      index_phi = Phi.new(ctx.next_id, TypeRef::INT32)
+      index_phi.add_incoming(entry_block, zero.id)
+      ctx.emit(index_phi)
+
+      cmp = BinaryOperation.new(ctx.next_id, TypeRef::BOOL, BinaryOp::Lt, index_phi.id, bytesize.id)
+      ctx.emit(cmp)
+      ctx.terminate(Branch.new(cmp.id, body_block, exit_block))
+
+      # Body block: load byte, convert to Char, execute block
+      ctx.current_block = body_block
+      ctx.push_scope(ScopeKind::Block)
+
+      # Load byte at index from string data (offset 12 + i)
+      char_val = ExternCall.new(ctx.next_id, TypeRef::CHAR, "__crystal_v2_string_byte_at", [string_id, index_phi.id])
+      ctx.emit(char_val)
+      ctx.register_type(char_val.id, TypeRef::CHAR)
+      ctx.register_local(param_name, char_val.id)
+
+      lower_body(ctx, block.body)
+      ctx.pop_scope
+
+      ctx.terminate(Jump.new(incr_block))
+
+      # Incr block: i++
+      ctx.current_block = incr_block
+      one = Literal.new(ctx.next_id, TypeRef::INT32, 1_i64)
+      ctx.emit(one)
+      new_i = BinaryOperation.new(ctx.next_id, TypeRef::INT32, BinaryOp::Add, index_phi.id, one.id)
+      ctx.emit(new_i)
+      index_phi.add_incoming(incr_block, new_i.id)
+      ctx.terminate(Jump.new(cond_block))
+
+      # Exit block
+      ctx.current_block = exit_block
+      nil_lit = Literal.new(ctx.next_id, TypeRef::NIL, nil)
+      ctx.emit(nil_lit)
+      ctx.register_type(nil_lit.id, TypeRef::NIL)
+      nil_lit.id
     end
 
     # Lower Array#count { |x| condition } intrinsic

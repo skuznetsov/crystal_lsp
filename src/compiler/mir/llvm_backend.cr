@@ -728,6 +728,7 @@ module Crystal::MIR
       already_declared << "__crystal_v2_init_buffer" << "__crystal_v2_string_repeat"
       already_declared << "__crystal_v2_string_index_string" << "__crystal_v2_string_index_char"
       already_declared << "__crystal_v2_string_gsub" << "__crystal_v2_string_byte_slice"
+      already_declared << "__crystal_v2_string_bytesize" << "__crystal_v2_string_byte_at"
       # Skip any function starting with __crystal_v2_ (runtime functions)
       runtime_prefix = "__crystal_v2_"
 
@@ -1790,6 +1791,22 @@ module Crystal::MIR
       emit_raw "  %result = call ptr @strstr(ptr %self_data, ptr %search_data)\n"
       emit_raw "  %found = icmp ne ptr %result, null\n"
       emit_raw "  ret i1 %found\n"
+      emit_raw "}\n\n"
+
+      # String#bytesize → i32 (read from offset 4)
+      emit_raw "define i32 @__crystal_v2_string_bytesize(ptr %self) {\n"
+      emit_raw "  %bs_ptr = getelementptr i8, ptr %self, i32 4\n"
+      emit_raw "  %bs = load i32, ptr %bs_ptr\n"
+      emit_raw "  ret i32 %bs\n"
+      emit_raw "}\n\n"
+
+      # String byte_at(index) → i32 (read byte at offset 12 + index, zero-extend to i32 for Char)
+      emit_raw "define i32 @__crystal_v2_string_byte_at(ptr %self, i32 %idx) {\n"
+      emit_raw "  %data = getelementptr i8, ptr %self, i32 12\n"
+      emit_raw "  %byte_ptr = getelementptr i8, ptr %data, i32 %idx\n"
+      emit_raw "  %byte = load i8, ptr %byte_ptr\n"
+      emit_raw "  %ch = zext i8 %byte to i32\n"
+      emit_raw "  ret i32 %ch\n"
       emit_raw "}\n\n"
 
       # String#index(String, offset) → i32 (-1 if not found, byte index otherwise)
