@@ -1426,6 +1426,10 @@ module Crystal::HIR
       @functions_by_name.has_key?(name)
     end
 
+    def function_count : Int32
+      @functions.size
+    end
+
     def function_by_name(name : String) : Function?
       @functions_by_name[name]?
     end

@@ -287,6 +287,14 @@ module Crystal::HIR
     arena : CrystalV2::Compiler::Frontend::ArenaLike, # Arena for looking up body ExprIds
     is_struct : Bool = false
 
+  # Context saved when module method registration is deferred (lazy mode).
+  # Stores enough information to register a single method from a module on demand.
+  record DeferredModuleContext,
+    module_full_name : String,
+    type_param_snapshot : Hash(String, String),   # full @type_param_map at include time
+    mod_arena : CrystalV2::Compiler::Frontend::ArenaLike,
+    namespace_override : String?
+
   # Main AST to HIR converter
   class AstToHir
     alias AstNode = CrystalV2::Compiler::Frontend::Node
@@ -1585,6 +1593,10 @@ module Crystal::HIR
     @debug_cache_last : Time::Instant?
     # Modules that have `extend self` applied (treat defs without receiver as class methods).
     @module_extend_self : Set(String)
+    # Lazy module method registration: defer DefNode processing during monomorphization.
+    # Maps class_name → list of deferred module contexts for on-demand resolution.
+    @deferred_module_contexts : Hash(String, Array(DeferredModuleContext))
+    @lazy_module_methods : Bool
     @module_defs_cache_version : Int32
     @module_def_lookup_cache_version : Int32
     @module_def_lookup_cache : Hash(String, Tuple(CrystalV2::Compiler::Frontend::DefNode, CrystalV2::Compiler::Frontend::ArenaLike)?)
@@ -1860,6 +1872,8 @@ module Crystal::HIR
       @debug_cache_stats = {} of String => Tuple(Int32, Int32)
       @debug_cache_last = @debug_cache_histo ? Time.instant : nil
       @module_extend_self = Set(String).new
+      @deferred_module_contexts = {} of String => Array(DeferredModuleContext)
+      @lazy_module_methods = false
       @module_defs_cache_version = 0
       @module_def_lookup_cache_version = 0
       @module_def_lookup_cache = {} of String => Tuple(CrystalV2::Compiler::Frontend::DefNode, CrystalV2::Compiler::Frontend::ArenaLike)?
@@ -5335,6 +5349,28 @@ module Crystal::HIR
       map
     end
 
+    # Register type params from a deferred module context (lazy module method registration).
+    # Called when the deferred module lookup finds a method, to provide the module's
+    # type param mapping (e.g., Enumerable's T → Tuple(K, V) for Hash includes).
+    private def register_deferred_module_type_params(owner : String, module_name : String, full_name : String, base_name : String) : Nil
+      contexts = @deferred_module_contexts[owner]?
+      return unless contexts
+      contexts.each do |ctx|
+        base_ctx_module = strip_generic_args(ctx.module_full_name)
+        next unless base_ctx_module == module_name || ctx.module_full_name == module_name
+        # Store the deferred type param snapshot so lower_method can set up correct context
+        store_function_type_param_map(full_name, base_name, ctx.type_param_snapshot)
+        # Also store the namespace override if present
+        if ns = ctx.namespace_override
+          store_function_namespace_override(full_name, base_name, ns)
+        end
+        # Store the arena so the method body can be found
+        @function_def_arenas[full_name] ||= ctx.mod_arena
+        @function_def_arenas[base_name] ||= ctx.mod_arena
+        break
+      end
+    end
+
     private def store_function_type_param_map(full_name : String, base_name : String, params : Hash(String, String)) : Nil
       return if params.empty?
       stored = params.dup
@@ -6009,6 +6045,22 @@ module Crystal::HIR
                 # (e.g., Indexable#empty? overriding Enumerable#empty?), the defining
                 # module's version is registered first and wins.
 
+                # Lazy mode: save context for on-demand method resolution, skip DefNodes
+                if @lazy_module_methods
+                  ctx = DeferredModuleContext.new(
+                    module_full_name: module_full_name,
+                    type_param_snapshot: @type_param_map.dup,
+                    mod_arena: mod_arena,
+                    namespace_override: @current_namespace_override
+                  )
+                  list = @deferred_module_contexts[class_name]?
+                  unless list
+                    list = [] of DeferredModuleContext
+                    @deferred_module_contexts[class_name] = list
+                  end
+                  list << ctx
+                end
+
                 # Pass 1: Everything except IncludeNode
                 body_ids.each do |member_id|
                   member = unwrap_visibility_member(@arena[member_id])
@@ -6060,6 +6112,11 @@ module Crystal::HIR
                     # Early skip: if the class already defines this method (base_name), skip
                     # the expensive type resolution below. The class's own def takes priority.
                     next if defined_full_names.includes?(base_name)
+
+                    # Lazy mode: skip DefNode registration entirely (will be resolved on demand)
+                    # via the deferred module lookup path. This prevents the monomorphization
+                    # cascade caused by type_ref_for_name in param type resolution.
+                    next if @lazy_module_methods
 
                     # NOTE: We intentionally do NOT write @function_def_arenas[base_name] here.
                     # The early arena write was causing bugs when included module methods should
@@ -13691,6 +13748,12 @@ module Crystal::HIR
       old_defer_mono = @defer_monomorphization
       @defer_monomorphization = true
 
+      # Lazy module method registration: skip registering ALL module DefNodes
+      # during monomorphization. Methods will be resolved on demand when actually called.
+      # This prevents the 100+ method-per-module explosion that makes the pending queue diverge.
+      old_lazy = @lazy_module_methods
+      @lazy_module_methods = true
+
       # Register the specialized class using the template's AST node
       # The type_ref_for_name calls will now substitute T => Int32
       register_concrete_class(template.node, specialized_name, template.is_struct)
@@ -13704,6 +13767,7 @@ module Crystal::HIR
 
       @defer_monomorphization = old_defer_mono
       @defer_body_return_inference = old_defer_body
+      @lazy_module_methods = old_lazy
 
       # Process deferred monomorphizations iteratively (breadth-first).
       # Only process if we're the outermost monomorphize call (not nested).
@@ -25991,6 +26055,9 @@ module Crystal::HIR
         saved_depth = @lowering_depth
         @lowering_depth = 0
 
+        lowered_this_iter = 0
+        defs_before = @function_defs.size
+        mono_before = @monomorphized.size
         pending.each do |name|
           # Skip if already lowered or currently being lowered
           next if @module.has_function?(name)
@@ -25999,14 +26066,20 @@ module Crystal::HIR
 
           attempt_counts[name] += 1
           lower_function_if_needed(name)
+          lowered_this_iter += 1
         end
 
         @lowering_depth = saved_depth
         iteration += 1
+        defs_after = @function_defs.size
+        mono_after = @monomorphized.size
+        new_pending = pending_functions.size
+        STDERR.puts "[PROGRESS] iter=#{iteration} lowered=#{lowered_this_iter}/#{pending.size} pending=#{new_pending} funcs=#{@module.function_count} defs=#{defs_before}->#{defs_after}(+#{defs_after - defs_before}) mono=#{mono_before}->#{mono_after}(+#{mono_after - mono_before})"
         break if pending.empty?
       end
 
       pending_remaining = pending_functions
+      STDERR.puts "[LOWER] Finished lowering: #{iteration} iterations, #{@module.function_count} functions, #{@monomorphized.size} types, #{@function_defs.size} defs"
       if iteration >= max_iterations && pending_remaining.size > 0
         STDERR.puts "[WARNING] process_pending_lower_functions hit iteration limit, #{pending_remaining.size} functions remaining"
       end
@@ -34701,6 +34774,8 @@ module Crystal::HIR
                   if env_has?("DEBUG_YIELD_SKIP") && name.includes?("byte_range")
                     STDERR.puts "[BYTE_RANGE_FIND_MOD_OK] func_def_found=true arena=#{arena.size}"
                   end
+                  # Register type params from deferred module context (lazy registration)
+                  register_deferred_module_type_params(owner, base_module, name, base_name)
                   # When the call site already carries a mangled name, preserve it so
                   # overloads don't collapse onto the base during deferred lookup.
                   target_name = name.includes?('$') ? name : base_name
