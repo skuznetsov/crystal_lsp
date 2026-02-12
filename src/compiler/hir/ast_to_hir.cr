@@ -32616,7 +32616,6 @@ module Crystal::HIR
           # Type check: subject.is_a?(ConstName)
           check_type = type_ref_for_name(const_name)
           subject_type = ctx.type_of(subject_id)
-
           # If subject is union type, use UnionIs
           if is_union_type?(subject_type)
             variant_id = get_union_variant_id(subject_type, check_type)
@@ -32918,6 +32917,35 @@ module Crystal::HIR
         eq = BinaryOperation.new(ctx.next_id, TypeRef::BOOL, BinaryOp::Eq, subject_id, cond_val)
         ctx.emit(eq)
         eq.id
+      when CrystalV2::Compiler::Frontend::GenericNode
+        # Generic type like Tuple(X, Y), Array(Int32), etc.
+        # In case/in this is a type check: subject.is_a?(GenericType)
+        type_name = extract_type_name_from_node(cond_node)
+        if type_name
+          check_type = type_ref_for_name(type_name)
+          subject_type = ctx.type_of(subject_id)
+
+          # If subject is union type, use UnionIs
+          if is_union_type?(subject_type)
+            variant_id = get_union_variant_id(subject_type, check_type)
+            if variant_id >= 0
+              union_is = UnionIs.new(ctx.next_id, subject_id, variant_id)
+              ctx.emit(union_is)
+              return union_is.id
+            end
+          end
+
+          # Regular is_a? check
+          is_a = IsA.new(ctx.next_id, subject_id, check_type)
+          ctx.emit(is_a)
+          is_a.id
+        else
+          # Fallback: equality
+          cond_val = lower_expr(ctx, cond_expr)
+          eq = BinaryOperation.new(ctx.next_id, TypeRef::BOOL, BinaryOp::Eq, subject_id, cond_val)
+          ctx.emit(eq)
+          eq.id
+        end
       else
         # Default: call === method (when we have method calls working)
         # For now, fall back to equality
@@ -32951,8 +32979,14 @@ module Crystal::HIR
       incoming = [] of Tuple(BlockId, ValueId)
       branch_locals = [] of Tuple(BlockId, Hash(String, ValueId)) # Track locals for each branch
 
-      # Process each when branch
-      node.when_branches.each_with_index do |when_branch, idx|
+      # Combine when_branches and in_branches (case/in exhaustive matching)
+      all_branches = node.when_branches.dup
+      if in_branches = node.in_branches
+        in_branches.each { |b| all_branches << b }
+      end
+
+      # Process each when/in branch
+      all_branches.each_with_index do |when_branch, idx|
         when_block = ctx.create_block
         next_block = ctx.create_block
 

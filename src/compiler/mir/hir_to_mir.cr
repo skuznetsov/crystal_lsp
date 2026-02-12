@@ -2417,6 +2417,32 @@ module Crystal
 
       obj = get_value(isa.value)
 
+      # For ptr-typed values (class instances represented as raw pointers),
+      # nilable checks must use null comparison instead of loading type_id
+      # from the object header (which would crash on null ptr).
+      # is_a?(Nil) → ptr == null, is_a?(SomeClass) → ptr != null
+      hir_val_type = @hir_value_types[isa.value]?
+      mir_val_type = hir_val_type ? convert_type(hir_val_type) : nil
+      val_is_ptr_type = false
+      if mir_val_type
+        val_desc = @mir_module.type_registry.get(mir_val_type)
+        val_is_ptr_type = mir_val_type == TypeRef::POINTER ||
+                          mir_val_type == TypeRef::NIL ||
+                          (val_desc && (val_desc.kind == MIR::TypeKind::Reference ||
+                                        val_desc.kind == MIR::TypeKind::Struct)) ||
+                          (val_desc.nil? && !mir_val_type.primitive?)  # Not in registry and not primitive → ptr
+      end
+      if val_is_ptr_type && mir_check_type == TypeRef::NIL
+        # is_a?(Nil) on a ptr value → compare to null
+        null_val = builder.const_int(0_i64, TypeRef::POINTER)
+        return builder.eq(obj, null_val)
+      elsif val_is_ptr_type && mir_check_type != TypeRef::NIL
+        # is_a?(SomeClass) on a ptr value → ptr != null
+        # For simple nilable checks, non-null means it IS the type
+        null_val = builder.const_int(0_i64, TypeRef::POINTER)
+        return builder.ne(obj, null_val)
+      end
+
       # Collect all type_ids that should match: the check_type itself
       # plus all its subclasses (for parent type checks like is_a?(Base))
       matching_type_ids = [] of UInt32

@@ -1233,9 +1233,13 @@ module Crystal::MIR
       if string_mir_type
         # Prelude mode: Crystal String objects
         emit_raw "@.str.empty = private unnamed_addr constant { i32, i32, i32, [1 x i8] } { i32 #{string_type_id}, i32 0, i32 0, [1 x i8] c\"\\00\" }, align 8\n"
+        # Error message strings for builtin overrides
+        emit_raw "@.str.file_open_error = private unnamed_addr constant { i32, i32, i32, [26 x i8] } { i32 #{string_type_id}, i32 25, i32 25, [26 x i8] c\"Error opening file (open)\\00\" }, align 8\n"
+        emit_raw "@.str.dbg_open_label = private unnamed_addr constant [5 x i8] c\"open\\00\", align 1\n"
       else
         # No-prelude mode: C strings
         emit_raw "@.str.empty = private unnamed_addr constant [1 x i8] c\"\\00\", align 1\n"
+        emit_raw "@.str.file_open_error = private unnamed_addr constant [26 x i8] c\"Error opening file (open)\\00\", align 1\n"
       end
 
       return if @string_constants.empty?
@@ -1507,6 +1511,8 @@ module Crystal::MIR
       emit_raw "declare ptr @fgets(ptr, i32, ptr)\n"
       emit_raw "declare ptr @fputs(ptr, ptr)\n"
       emit_raw "declare void @exit(i32)\n"
+      emit_raw "declare void @perror(ptr)\n"
+      emit_raw "declare i32 @dprintf(i32, ptr, ...)\n"
       emit_raw "\n"
 
       # Format strings for printing
@@ -3471,6 +3477,61 @@ module Crystal::MIR
         emit_raw "}\n\n"
         return true
       end
+
+      # Arena::Index#valid? — null check for uninitialized __evloop_data
+      if mangled == "Crystal$CCEventLoop$CCPolling$CCArena$CCIndex$Hvalid$Q"
+        emit_raw "; Arena::Index#valid? — with null self guard\n"
+        emit_raw "define i1 @#{mangled}(ptr %self) {\n"
+        emit_raw "entry:\n"
+        emit_raw "  %is_null = icmp eq ptr %self, null\n"
+        emit_raw "  br i1 %is_null, label %ret_false, label %check\n"
+        emit_raw "check:\n"
+        emit_raw "  %val = load i64, ptr %self\n"
+        emit_raw "  %valid = icmp sge i64 %val, 0\n"
+        emit_raw "  ret i1 %valid\n"
+        emit_raw "ret_false:\n"
+        emit_raw "  ret i1 0\n"
+        emit_raw "}\n\n"
+        return true
+      end
+
+      # Crystal::System::File.open — case/in on Errno | Tuple(Handle, Bool) doesn't compile.
+      # Override with direct POSIX open() call returning {i32 fd, i1 close_on_finalize}.
+      if mangled.starts_with?("Crystal$CCSystem$CCFile$Dopen$$String_String_")
+        # Build param string from MIR params using simple p0, p1, ... names
+        params_str = func.params.map_with_index { |p, i|
+          llvm_t = @type_mapper.llvm_type(p.type)
+          llvm_t = "ptr" if llvm_t == "void"
+          "#{llvm_t} %p#{i}"
+        }.join(", ")
+
+        emit_raw "; Crystal::System::File.open — builtin override (direct POSIX open)\n"
+        emit_raw "define ptr @#{mangled}(#{params_str}) {\n"
+        emit_raw "entry:\n"
+        # p0 = filename (Crystal String), p1 = mode (Crystal String)
+        # Get filename C string: Crystal String data starts at offset 12
+        emit_raw "  %cstr = getelementptr i8, ptr %p0, i32 12\n"
+        # Get open flags from mode string
+        emit_raw "  %flags = call i32 @Crystal$CCSystem$CCFile$Dopen_flag$$String(ptr %p1)\n"
+        # Call POSIX open(path, flags, 0666)
+        emit_raw "  %fd = call i32 (ptr, i32, ...) @open(ptr %cstr, i32 %flags, i32 438)\n"
+        emit_raw "  %fd_neg = icmp slt i32 %fd, 0\n"
+        emit_raw "  br i1 %fd_neg, label %error, label %success\n"
+        emit_raw "error:\n"
+        emit_raw "  call void @perror(ptr @.str.dbg_open_label)\n"
+        emit_raw "  call void @__crystal_v2_raise_msg(ptr @.str.file_open_error)\n"
+        emit_raw "  unreachable\n"
+        emit_raw "success:\n"
+        # Allocate tuple {i32 fd, i1 close_on_finalize}
+        emit_raw "  %tup = call ptr @__crystal_v2_malloc64(i64 8)\n"
+        emit_raw "  store i32 %fd, ptr %tup\n"
+        emit_raw "  %cof_ptr = getelementptr i8, ptr %tup, i32 4\n"
+        emit_raw "  store i1 1, ptr %cof_ptr\n"
+        emit_raw "  ret ptr %tup\n"
+        emit_raw "}\n\n"
+        return true
+      end
+
       false
     end
 
@@ -7485,6 +7546,9 @@ module Crystal::MIR
                         "double #{default_val.to_f? ? default_val : "0.0"}"
                       when .includes?(".union")
                         "#{param_llvm} zeroinitializer"
+                      when "void"
+                        # Nil/void param with default - convert to ptr null
+                        "ptr null"
                       else
                         # For integer types, validate the default is numeric
                         if default_val == "true"
@@ -7513,7 +7577,6 @@ module Crystal::MIR
       use_callee_params = callee_func && call_args.size <= callee_func.params.size
       # Debug void args
       has_void_arg = call_args.any? { |a| @type_mapper.llvm_type(@value_types[a]? || TypeRef::POINTER) == "void" }
-      # STDERR.puts "[CALL-DEBUG] #{callee_name}, use_callee_params=#{use_callee_params}, has_void_arg=#{has_void_arg}" if has_void_arg
       args = if use_callee_params && callee_func
                call_args.map_with_index { |a, i|
                  param_type = callee_func.params[i].type
