@@ -43304,7 +43304,14 @@ module Crystal::HIR
       # Create new ArrayLiteral with transformed values
       arr_lit = ArrayLiteral.new(ctx.next_id, result_element_type, transformed_values)
       ctx.emit(arr_lit)
-      ctx.register_type(arr_lit.id, TypeRef::POINTER) # Arrays are pointers
+      # Register proper Array type so array_intrinsic_receiver? recognizes it for each/map/select
+      elem_type_name = get_type_name_from_ref(result_element_type)
+      if elem_type_name != "Unknown" && elem_type_name != "Void"
+        array_type = type_ref_for_name("Array(#{elem_type_name})")
+        ctx.register_type(arr_lit.id, array_type)
+      else
+        ctx.register_type(arr_lit.id, TypeRef::POINTER)
+      end
       arr_lit.id
     end
 
@@ -43428,7 +43435,14 @@ module Crystal::HIR
       # Create result array with only selected elements
       arr_lit = ArrayLiteral.new(ctx.next_id, source_element_type, selected_values)
       ctx.emit(arr_lit)
-      ctx.register_type(arr_lit.id, TypeRef::POINTER)
+      # Register proper Array type so array_intrinsic_receiver? recognizes it for each/map/select
+      elem_type_name = get_type_name_from_ref(source_element_type)
+      if elem_type_name != "Unknown" && elem_type_name != "Void"
+        array_type = type_ref_for_name("Array(#{elem_type_name})")
+        ctx.register_type(arr_lit.id, array_type)
+      else
+        ctx.register_type(arr_lit.id, TypeRef::POINTER)
+      end
       arr_lit.id
     end
 
