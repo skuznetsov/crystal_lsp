@@ -30148,11 +30148,11 @@ module Crystal::HIR
 
       # Check for string repetition: String * Int -> __crystal_v2_string_repeat
       if (left_type == TypeRef::STRING || left_type == TypeRef::POINTER) && op_str == "*"
-        # String repetition - emit as runtime call
-        call = Call.new(ctx.next_id, TypeRef::POINTER, nil, "__crystal_v2_string_repeat", [left_id, right_id])
-        ctx.emit(call)
-        ctx.register_type(call.id, TypeRef::POINTER)
-        return call.id
+        # String repetition - emit as extern call (returns Crystal String ptr)
+        ext_call = ExternCall.new(ctx.next_id, TypeRef::STRING, "__crystal_v2_string_repeat", [left_id, right_id])
+        ctx.emit(ext_call)
+        ctx.register_type(ext_call.id, TypeRef::STRING)
+        return ext_call.id
       end
 
       # Check for shovel operator << on non-integer types (IO, Array, etc.)
