@@ -5847,8 +5847,20 @@ module Crystal::HIR
                   end
 
       unless ivars.any? { |iv| iv.name == ivar_name }
+        # Store default value expression if present (property x : T = expr)
+        default_expr_id : CrystalV2::Compiler::Frontend::ExprId? = nil
+        default_arena : CrystalV2::Compiler::Frontend::ArenaLike? = nil
+        if val_expr = spec.default_value
+          val_node = @arena[val_expr]
+          unless is_trivial_default(val_node)
+            default_expr_id = val_expr
+            default_arena = @arena
+          end
+        end
         offset = align_offset(offset, type_alignment(ivar_type))
-        ivars << IVarInfo.new(ivar_name, ivar_type, offset)
+        ivars << IVarInfo.new(ivar_name, ivar_type, offset,
+          default_expr_id: default_expr_id,
+          default_arena: default_arena)
         offset += type_size(ivar_type)
       end
 
@@ -6079,8 +6091,20 @@ module Crystal::HIR
                     ivar_name = String.new(member.name)
                     ivar_type = type_ref_for_name(String.new(member.type))
                     unless ivars.any? { |iv| iv.name == ivar_name }
+                      # Store default value expression if present (e.g., @x : T = expr)
+                      default_expr_id : CrystalV2::Compiler::Frontend::ExprId? = nil
+                      default_arena : CrystalV2::Compiler::Frontend::ArenaLike? = nil
+                      if val_expr = member.value
+                        val_node = @arena[val_expr]
+                        unless is_trivial_default(val_node)
+                          default_expr_id = val_expr
+                          default_arena = @arena
+                        end
+                      end
                       offset = align_offset(offset, type_alignment(ivar_type))
-                      ivars << IVarInfo.new(ivar_name, ivar_type, offset)
+                      ivars << IVarInfo.new(ivar_name, ivar_type, offset,
+                        default_expr_id: default_expr_id,
+                        default_arena: default_arena)
                       offset += type_size(ivar_type)
                     end
                   when CrystalV2::Compiler::Frontend::AssignNode
@@ -12689,11 +12713,23 @@ module Crystal::HIR
             when CrystalV2::Compiler::Frontend::ExtendNode
               next
             when CrystalV2::Compiler::Frontend::InstanceVarDeclNode
-              # Instance variable declaration: @value : Int32
+              # Instance variable declaration: @value : Int32 = expr
               ivar_name = String.new(member.name)
               ivar_type = type_ref_for_name(String.new(member.type))
+              # Store default value expression if present
+              default_expr_id : CrystalV2::Compiler::Frontend::ExprId? = nil
+              default_arena : CrystalV2::Compiler::Frontend::ArenaLike? = nil
+              if val_expr = member.value
+                val_node = @arena[val_expr]
+                unless is_trivial_default(val_node)
+                  default_expr_id = val_expr
+                  default_arena = @arena
+                end
+              end
               offset = align_offset(offset, type_alignment(ivar_type, is_c_struct))
-              ivars << IVarInfo.new(ivar_name, ivar_type, offset)
+              ivars << IVarInfo.new(ivar_name, ivar_type, offset,
+                default_expr_id: default_expr_id,
+                default_arena: default_arena)
               offset += type_size(ivar_type, is_c_struct)
             when CrystalV2::Compiler::Frontend::TypeDeclarationNode
               # Lib struct field declaration: value : Type
@@ -14549,6 +14585,22 @@ module Crystal::HIR
               next
             end
 
+            # Handle X.empty patterns (Bytes.empty, Slice.empty) → allocate zero-filled struct
+            # Our compiler heap-allocates structs, so zero-init (null pointer) is wrong.
+            # GC_malloc zero-fills, so allocating a struct gives a valid pointer to zeroed memory.
+            # Handle X.empty patterns (Bytes.empty, Slice.empty) → allocate zero-filled struct
+            # Our compiler heap-allocates structs, so zero-init (null pointer) is wrong.
+            # GC_malloc zero-fills, so allocating a struct gives a valid pointer to zeroed memory.
+            if default_node.is_a?(CrystalV2::Compiler::Frontend::MemberAccessNode) &&
+               String.new(default_node.member) == "empty"
+              struct_alloc = Allocate.new(ctx.next_id, ivar.type, [] of ValueId, false)
+              ctx.emit(struct_alloc)
+              ctx.register_type(struct_alloc.id, ivar.type)
+              ivar_store = FieldSet.new(ctx.next_id, TypeRef::VOID, alloc.id, ivar.name, struct_alloc.id, ivar.offset)
+              ctx.emit(ivar_store)
+              next
+            end
+
             saved_arena = @arena
             saved_class = @current_class
             @arena = default_arena
@@ -14712,6 +14764,27 @@ module Crystal::HIR
           default_node = default_arena[default_expr_id]
           is_lazy_getter = default_node.is_a?(CrystalV2::Compiler::Frontend::BlockNode)
           unless is_lazy_getter
+            # Try simple literal resolution first
+            resolved_literal = try_resolve_simple_default(default_node, default_arena, ivar.type)
+            if resolved_literal
+              default_val = Literal.new(ctx.next_id, ivar.type, resolved_literal)
+              ctx.emit(default_val)
+              ivar_store = FieldSet.new(ctx.next_id, TypeRef::VOID, alloc.id, ivar.name, default_val.id, ivar.offset)
+              ctx.emit(ivar_store)
+              next
+            end
+
+            # Handle X.empty patterns (Bytes.empty, Slice.empty) → allocate zero-filled struct
+            if default_node.is_a?(CrystalV2::Compiler::Frontend::MemberAccessNode) &&
+               String.new(default_node.member) == "empty"
+              struct_alloc = Allocate.new(ctx.next_id, ivar.type, [] of ValueId, false)
+              ctx.emit(struct_alloc)
+              ctx.register_type(struct_alloc.id, ivar.type)
+              ivar_store = FieldSet.new(ctx.next_id, TypeRef::VOID, alloc.id, ivar.name, struct_alloc.id, ivar.offset)
+              ctx.emit(ivar_store)
+              next
+            end
+
             saved_arena = @arena
             saved_class = @current_class
             @arena = default_arena
@@ -24441,7 +24514,7 @@ module Crystal::HIR
       when CrystalV2::Compiler::Frontend::MemberAccessNode
         # Pointer(T).null, Bytes.empty, etc. — all produce zero/null values
         member_name = String.new(value_node.member)
-        member_name == "null" || member_name == "empty"
+        member_name == "null"
       else
         false
       end
