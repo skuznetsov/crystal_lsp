@@ -762,9 +762,10 @@ module Crystal::MIR
       is_unknown_method = name.starts_with?("Unknown$H")
       # Wrong receiver: Int32#unsafe_fetch makes no sense (Array method on Int32)
       is_wrong_receiver = name == "Int32$Hunsafe_fetch$$Int32"
-      # Any V2-mangled method name (contains $H, $D, or $CC) that has no body
+      # Any V2-mangled method name (contains $) that has no body
       # is dead code from type-inference gaps. Emit a stub to avoid linker errors.
-      is_v2_mangled = name.includes?("$H") || name.includes?("$D") || name.includes?("$CC") || name.includes?("$$")
+      # Catches: $H (#), $D (.), $CC (::), $$ (param separator), $Q (?), $SHL (<<), etc.
+      is_v2_mangled = name.includes?("$")
 
       # Pointer::Appender#<<(UInt8) — real method, emit proper implementation.
       # Stores byte at current pointer, advances pointer by 1.
