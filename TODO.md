@@ -1,8 +1,29 @@
 # Crystal v2 — Active Work (codegen branch)
 
+## Known Bugs (codegen)
+- **Array select+map heap corruption**: `select` on 4+ matching elements corrupts heap,
+  subsequent `map`/`Array.new` segfaults. Likely in array resize/capacity logic.
+- **Float#** variable path**: `x ** 2` where x is a Float64 variable segfaults (literal path works)
+- **String#upcase**: "Capacity too big (ArgumentError)" — capacity calculation bug
+
+## Working Features
+- Basic output: puts String/Int32/Float64, string interpolation
+- Classes with getters, custom to_s, inheritance
+- Structs with getters
+- Arrays: literal, each, map, select, size
+- Hash: literal, [], []=, each, has_key?, size
+- Conditionals, while loops, times
+- Raise/rescue, unhandled exceptions with class name
+- String: size, includes?, starts_with?, ends_with?, []
+- Float64: arithmetic, ** on literals
+
 ## Recently completed
 - **VOID filter in merge_if_branch_locals** (6d8df07) — fixed infinite loop on buffered I/O
   (Slice|Void union bug caused 450MB+ memory, machine reboot)
+- **Cross-block value detection** (ae7234e) — added missing MIR types to operand scan
+  (fixed PHI domination errors in String#underscore, Hash compilation)
+- **Dead-code stub broadening** (08e3a42) — catch all $-mangled names (fixed linker errors)
+- **Float#** primitives** (909c8b7) — llvm.powi/pow intrinsics for Float#** operator
 - Lazy module method registration (c1df62e) — defers DefNode registration during monomorphization
 - `__crystal_type_name_table` (768e835)
 - `.class` type literal fix (ff9ead6)
