@@ -356,6 +356,7 @@ module Crystal::MIR
     @value_types : Hash(ValueId, TypeRef)     # For tracking operand types
     @void_values : Set(ValueId) = Set(ValueId).new  # Values emitted as void (no LLVM result)
     @emitted_functions : Set(String) = Set(String).new  # Track emitted function names to avoid duplicates
+    @emitted_function_return_types : Hash(String, String) = {} of String => String  # Track emitted function return types for call-site consistency
     @undefined_externs : Hash(String, String) = {} of String => String  # Track undefined extern calls (name => return_type)
     @global_name_mapping : Hash(String, String) = {} of String => String  # Map original global names to renamed names
     @alloc_element_types : Hash(ValueId, TypeRef)  # For GEP element type lookup
@@ -2811,6 +2812,7 @@ module Crystal::MIR
         return
       end
       @emitted_functions << mangled_name
+      @emitted_function_return_types[mangled_name] = return_type
 
       # Pointer#address — primitive: return ptrtoint of self pointer
       if mangled_name.includes?("Pointer$L") && mangled_name.ends_with?("$Haddress")
@@ -6508,9 +6510,12 @@ module Crystal::MIR
                         callee_ret
                       end
                     else
-                      # Unresolved function - if void, default to ptr to be safe
-                      # because downstream code may use the result
-                      if inst_return_type == "void"
+                      # Unresolved function - check if we already emitted this function
+                      # and use its actual return type for ABI consistency
+                      emitted_ret = @emitted_function_return_types[callee_name]?
+                      if emitted_ret && emitted_ret != "void"
+                        emitted_ret
+                      elsif inst_return_type == "void"
                         "ptr"
                       else
                         inst_return_type
@@ -6519,11 +6524,21 @@ module Crystal::MIR
 
       # IMPORTANT: Check if prepass determined a different type (e.g., from phi usage)
       # Prepass type takes precedence when phi expects a specific type
+      needs_union_abi_fix = false
+      union_abi_desired_type = ""
       prepass_type = @value_types[inst.id]?
       if prepass_type
         prepass_llvm_type = @type_mapper.llvm_type(prepass_type)
         if prepass_llvm_type != "void" && prepass_llvm_type != return_type
-          return_type = prepass_llvm_type
+          if callee_func && return_type.includes?(".union") && !prepass_llvm_type.includes?(".union")
+            # ABI fix: callee returns union but MIR/prepass expects simpler type.
+            # Keep the union return type for the call instruction (ABI correctness),
+            # then extract the payload to the desired type after the call.
+            needs_union_abi_fix = true
+            union_abi_desired_type = prepass_llvm_type
+          else
+            return_type = prepass_llvm_type
+          end
         end
       end
 
@@ -6995,6 +7010,20 @@ module Crystal::MIR
         emit "call void @#{callee_name}(#{args})"
         # Mark as void so value_ref returns a safe default for downstream uses
         @void_values << inst.id
+      elsif needs_union_abi_fix
+        # ABI fix: emit call with correct union return type, then extract payload
+        # as the simpler type that downstream code expects.
+        c = @cond_counter
+        @cond_counter += 1
+        call_reg = "%union_abi.#{c}.call"
+        emit "#{call_reg} = call #{return_type} @#{callee_name}(#{args})"
+        record_emitted_type(call_reg, return_type)
+        emit "%union_abi.#{c}.alloca = alloca #{return_type}, align 8"
+        emit "store #{return_type} #{call_reg}, ptr %union_abi.#{c}.alloca"
+        emit "%union_abi.#{c}.payload = getelementptr #{return_type}, ptr %union_abi.#{c}.alloca, i32 0, i32 1"
+        emit "#{name} = load #{union_abi_desired_type}, ptr %union_abi.#{c}.payload, align 4"
+        record_emitted_type(name, union_abi_desired_type)
+        @value_types[inst.id] = prepass_type.not_nil!
       else
         emit "#{name} = call #{return_type} @#{callee_name}(#{args})"
         record_emitted_type(name, return_type)
