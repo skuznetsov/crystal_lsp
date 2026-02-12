@@ -1,3 +1,17 @@
+# Crystal v2 — Active Work (codegen branch)
+
+## Recently completed
+- **VOID filter in merge_if_branch_locals** (6d8df07) — fixed infinite loop on buffered I/O
+  (Slice|Void union bug caused 450MB+ memory, machine reboot)
+- Lazy module method registration (c1df62e) — defers DefNode registration during monomorphization
+- `__crystal_type_name_table` (768e835)
+- `.class` type literal fix (ff9ead6)
+- Codegen fixes: primitives, intrinsics, is_a?, sizeof (a639c66)
+- Nested types + Crystal src require fallback (cf946e8)
+- Bootstrap optimization: yield name map, env cache, arena refresh (25f77df)
+
+---
+
 # Crystal v2 Frontend & LSP Roadmap
 
 This TODO tracks work to bring the v2 frontend (parser + macros + semantic/type
