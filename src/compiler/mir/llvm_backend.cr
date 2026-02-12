@@ -6375,16 +6375,41 @@ module Crystal::MIR
         if block = @current_func_blocks[current_block_id]?
           preds = block.predecessors
           if preds.any?
+            # Double-validate predecessors: check both computed preds AND
+            # that the block's terminator actually targets us. This catches
+            # stale predecessors from HIR block splits.
+            validated_preds = preds.select do |pred_id|
+              if pred_block = @current_func_blocks[pred_id]?
+                pred_block.terminator.successors.includes?(current_block_id)
+              else
+                true  # External/missing block — keep as predecessor
+              end
+            end
             incoming_map = {} of BlockId => ValueId
             inst.incoming.each { |(block_id, val)| incoming_map[block_id] = val }
             incoming_pairs = [] of Tuple(BlockId, ValueId)
-            preds.each do |pred|
+            validated_preds.each do |pred|
               if val = incoming_map[pred]?
                 incoming_pairs << {pred, val}
               else
                 missing_preds << pred
               end
             end
+          else
+            # No predecessors computed — validate incoming blocks by checking
+            # if each block's terminator actually targets the current block.
+            filtered = [] of Tuple(BlockId, ValueId)
+            inst.incoming.each do |(block_id, val)|
+              if pred_block = @current_func_blocks[block_id]?
+                succs = pred_block.terminator.successors
+                if succs.includes?(current_block_id)
+                  filtered << {block_id, val}
+                end
+              else
+                filtered << {block_id, val}
+              end
+            end
+            incoming_pairs = filtered
           end
         end
       end

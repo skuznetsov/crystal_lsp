@@ -1702,6 +1702,8 @@ module Crystal::HIR
     @loop_exit_stack : Array(BlockId) = [] of BlockId
     @loop_cond_stack : Array(BlockId) = [] of BlockId
     @loop_phi_stack : Array(Hash(String, Phi)) = [] of Hash(String, Phi)
+    # Track break blocks and their variable values for exit phi construction
+    @loop_break_info_stack : Array(Array({BlockId, Hash(String, ValueId)})) = [] of Array({BlockId, Hash(String, ValueId)})
     @virtual_targets_lowered : Set({String, String, UInt64, UInt8}) = Set({String, String, UInt64, UInt8}).new
     # Cache for collect_subclasses — class hierarchy doesn't change during compilation.
     @subclasses_cache : Hash(String, Array(String)) = {} of String => Array(String)
@@ -31912,6 +31914,9 @@ module Crystal::HIR
       end
 
       cond_id = lower_expr(ctx, node.condition)
+      # After lowering the condition, current_block may differ from cond_block
+      # (e.g., method calls create new blocks). The Branch is in THIS block.
+      cond_branch_block = ctx.current_block
       ctx.terminate(Branch.new(cond_id, body_block, exit_block))
 
       # Body block
@@ -31920,6 +31925,7 @@ module Crystal::HIR
       @loop_exit_stack << exit_block
       @loop_cond_stack << cond_block
       @loop_phi_stack << phi_nodes
+      @loop_break_info_stack << [] of {BlockId, Hash(String, ValueId)}
       pushed_inline = false
       if !inline_vars.empty?
         @inline_loop_vars_stack << inline_vars
@@ -31933,6 +31939,7 @@ module Crystal::HIR
         @loop_cond_stack.pop?
         @loop_phi_stack.pop?
       end
+      break_info = @loop_break_info_stack.pop
       body_exit_block = ctx.current_block
       ctx.pop_scope
 
@@ -31972,12 +31979,33 @@ module Crystal::HIR
         ctx.terminate(Jump.new(cond_block)) # Loop back
       end
 
-      # Exit block - locals should still point to phi nodes
+      # Exit block - create exit phis if any break occurred
       ctx.current_block = exit_block
 
-      # Restore phi values for use after the loop
-      phi_nodes.each do |var_name, phi|
-        ctx.register_local(var_name, phi.id)
+      if break_info.empty?
+        # No breaks — locals point to cond_block phi nodes (normal exit only)
+        phi_nodes.each do |var_name, phi|
+          ctx.register_local(var_name, phi.id)
+        end
+      else
+        # Breaks occurred — create exit phi nodes that merge normal-exit + break paths
+        # Use cond_branch_block (NOT cond_block) as the normal-exit predecessor,
+        # because condition expression lowering may split cond_block into multiple blocks.
+        phi_nodes.each do |var_name, cond_phi|
+          exit_phi = Phi.new(ctx.next_id, cond_phi.type)
+          # Normal exit path: from the block that has the Branch terminator
+          exit_phi.add_incoming(cond_branch_block, cond_phi.id)
+          # Break paths: use the variable value at each break point
+          break_info.each do |break_block, break_locals|
+            if break_val = break_locals[var_name]?
+              exit_phi.add_incoming(break_block, break_val)
+            else
+              exit_phi.add_incoming(break_block, cond_phi.id)
+            end
+          end
+          ctx.emit(exit_phi)
+          ctx.register_local(var_name, exit_phi.id)
+        end
       end
 
       nil_lit = Literal.new(ctx.next_id, TypeRef::NIL, nil)
@@ -32087,6 +32115,7 @@ module Crystal::HIR
       @loop_exit_stack << exit_block
       @loop_cond_stack << body_block  # for infinite loop, `next` jumps back to body start
       @loop_phi_stack << phi_nodes
+      @loop_break_info_stack << [] of {BlockId, Hash(String, ValueId)}
       pushed_inline = false
       if !inline_vars.empty?
         @inline_loop_vars_stack << inline_vars
@@ -32100,6 +32129,7 @@ module Crystal::HIR
         @loop_cond_stack.pop?
         @loop_phi_stack.pop?
       end
+      break_info_loop = @loop_break_info_stack.pop
       body_exit_block = ctx.current_block
       ctx.pop_scope
 
@@ -32135,12 +32165,38 @@ module Crystal::HIR
         ctx.terminate(Jump.new(body_block))
       end
 
-      # Exit block (reached via break)
+      # Exit block (reached via break only for infinite loops)
       ctx.current_block = exit_block
 
-      # Restore phi values for use after the loop
-      phi_nodes.each do |var_name, phi|
-        ctx.register_local(var_name, phi.id)
+      if break_info_loop.empty?
+        # No breaks — locals point to body phi nodes
+        phi_nodes.each do |var_name, phi|
+          ctx.register_local(var_name, phi.id)
+        end
+      else
+        # Breaks occurred — create exit phi nodes merging break paths
+        phi_nodes.each do |var_name, body_phi|
+          if break_info_loop.size == 1
+            # Single break — use break value directly (no phi needed)
+            break_block, break_locals = break_info_loop[0]
+            if break_val = break_locals[var_name]?
+              ctx.register_local(var_name, break_val)
+            else
+              ctx.register_local(var_name, body_phi.id)
+            end
+          else
+            exit_phi = Phi.new(ctx.next_id, body_phi.type)
+            break_info_loop.each do |break_block, break_locals|
+              if break_val = break_locals[var_name]?
+                exit_phi.add_incoming(break_block, break_val)
+              else
+                exit_phi.add_incoming(break_block, body_phi.id)
+              end
+            end
+            ctx.emit(exit_phi)
+            ctx.register_local(var_name, exit_phi.id)
+          end
+        end
       end
 
       nil_lit = Literal.new(ctx.next_id, TypeRef::NIL, nil)
@@ -33208,6 +33264,18 @@ module Crystal::HIR
 
     private def lower_break(ctx : LoweringContext, node : CrystalV2::Compiler::Frontend::BreakNode) : ValueId
       if exit_block = @loop_exit_stack.last?
+        # Capture current variable values at break point for exit phi construction
+        if phi_nodes = @loop_phi_stack.last?
+          if break_info = @loop_break_info_stack.last?
+            break_locals = {} of String => ValueId
+            phi_nodes.each_key do |var_name|
+              if val = ctx.lookup_local(var_name)
+                break_locals[var_name] = val
+              end
+            end
+            break_info << {ctx.current_block, break_locals}
+          end
+        end
         ctx.terminate(Jump.new(exit_block))
       else
         ctx.terminate(Unreachable.new)
