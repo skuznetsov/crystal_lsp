@@ -30146,6 +30146,30 @@ module Crystal::HIR
         return interp.id
       end
 
+      # Check for Array + Array → __crystal_v2_array_concat
+      if op_str == "+"
+        left_desc2 = @module.get_type_descriptor(left_type)
+        if left_desc2 && left_desc2.kind == TypeKind::Array && left_desc2.name.starts_with?("Array(")
+          # Determine element size from array element type
+          elem_name = left_desc2.name[6...-1]  # Extract "Int32" from "Array(Int32)"
+          elem_size = case elem_name
+                      when "Bool", "Int8", "UInt8" then 1
+                      when "Int16", "UInt16"       then 2
+                      when "Int32", "UInt32", "Float32", "Char" then 4
+                      else 8  # Int64, UInt64, Float64, String, ptr, class instances
+                      end
+          # Emit element size literal
+          sz_lit = Literal.new(ctx.next_id, TypeRef::INT32, elem_size.to_i64)
+          ctx.emit(sz_lit)
+          ctx.register_type(sz_lit.id, TypeRef::INT32)
+          # Call __crystal_v2_array_concat(left, right, elem_size) → ptr (Array)
+          ext_call = ExternCall.new(ctx.next_id, left_type, "__crystal_v2_array_concat", [left_id, right_id, sz_lit.id])
+          ctx.emit(ext_call)
+          ctx.register_type(ext_call.id, left_type)
+          return ext_call.id
+        end
+      end
+
       # Check for string repetition: String * Int -> __crystal_v2_string_repeat
       if (left_type == TypeRef::STRING || left_type == TypeRef::POINTER) && op_str == "*"
         # String repetition - emit as extern call (returns Crystal String ptr)

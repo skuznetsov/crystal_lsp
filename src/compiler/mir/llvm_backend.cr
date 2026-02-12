@@ -730,6 +730,7 @@ module Crystal::MIR
       already_declared << "__crystal_v2_string_gsub" << "__crystal_v2_string_byte_slice"
       already_declared << "__crystal_v2_string_bytesize" << "__crystal_v2_string_byte_at"
       already_declared << "__crystal_v2_array_new_filled_i32" << "__crystal_v2_array_new_filled_bool"
+      already_declared << "__crystal_v2_array_concat"
       # Skip any function starting with __crystal_v2_ (runtime functions)
       runtime_prefix = "__crystal_v2_"
 
@@ -2156,6 +2157,48 @@ module Crystal::MIR
       emit_raw "  %fill_done = icmp sge i32 %i_next, %size\n"
       emit_raw "  br i1 %fill_done, label %done, label %fill_loop\n"
       emit_raw "done:\n"
+      emit_raw "  ret ptr %arr\n"
+      emit_raw "}\n\n"
+
+      # Array#+(other) → new Crystal Array with elements from both arrays
+      # Takes elem_size to correctly copy elements of any type (i32=4, ptr=8, etc.)
+      emit_raw "define ptr @__crystal_v2_array_concat(ptr %a, ptr %b, i32 %elem_size) {\n"
+      emit_raw "entry:\n"
+      # Load sizes
+      emit_raw "  %a_sz_ptr = getelementptr i8, ptr %a, i32 4\n"
+      emit_raw "  %a_sz = load i32, ptr %a_sz_ptr\n"
+      emit_raw "  %b_sz_ptr = getelementptr i8, ptr %b, i32 4\n"
+      emit_raw "  %b_sz = load i32, ptr %b_sz_ptr\n"
+      emit_raw "  %total = add i32 %a_sz, %b_sz\n"
+      # Load buffers
+      emit_raw "  %a_buf_ptr = getelementptr i8, ptr %a, i32 16\n"
+      emit_raw "  %a_buf = load ptr, ptr %a_buf_ptr\n"
+      emit_raw "  %b_buf_ptr = getelementptr i8, ptr %b, i32 16\n"
+      emit_raw "  %b_buf = load ptr, ptr %b_buf_ptr\n"
+      # Allocate new array header (24 bytes)
+      emit_raw "  %arr = call ptr @__crystal_v2_malloc64(i64 24)\n"
+      emit_raw "  store i32 0, ptr %arr\n"
+      emit_raw "  %sz_ptr = getelementptr i8, ptr %arr, i32 4\n"
+      emit_raw "  store i32 %total, ptr %sz_ptr\n"
+      emit_raw "  %cap_ptr = getelementptr i8, ptr %arr, i32 8\n"
+      emit_raw "  store i32 %total, ptr %cap_ptr\n"
+      emit_raw "  %otb_ptr = getelementptr i8, ptr %arr, i32 12\n"
+      emit_raw "  store i32 0, ptr %otb_ptr\n"
+      # Allocate buffer (elem_size bytes per element)
+      emit_raw "  %buf_bytes = mul i32 %total, %elem_size\n"
+      emit_raw "  %buf_sz64 = sext i32 %buf_bytes to i64\n"
+      emit_raw "  %buf = call ptr @__crystal_v2_malloc64(i64 %buf_sz64)\n"
+      emit_raw "  %buf_addr = getelementptr i8, ptr %arr, i32 16\n"
+      emit_raw "  store ptr %buf, ptr %buf_addr\n"
+      # Copy a's elements
+      emit_raw "  %a_bytes = mul i32 %a_sz, %elem_size\n"
+      emit_raw "  %a_bytes64 = sext i32 %a_bytes to i64\n"
+      emit_raw "  call void @llvm.memcpy.p0.p0.i64(ptr %buf, ptr %a_buf, i64 %a_bytes64, i1 false)\n"
+      # Copy b's elements after a's
+      emit_raw "  %b_offset = getelementptr i8, ptr %buf, i32 %a_bytes\n"
+      emit_raw "  %b_bytes = mul i32 %b_sz, %elem_size\n"
+      emit_raw "  %b_bytes64 = sext i32 %b_bytes to i64\n"
+      emit_raw "  call void @llvm.memcpy.p0.p0.i64(ptr %b_offset, ptr %b_buf, i64 %b_bytes64, i1 false)\n"
       emit_raw "  ret ptr %arr\n"
       emit_raw "}\n\n"
 
