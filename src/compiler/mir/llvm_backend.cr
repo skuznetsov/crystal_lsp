@@ -3539,7 +3539,19 @@ module Crystal::MIR
                         when GetElementPtr        then [inst.base]
                         when GetElementPtrDynamic then [inst.base, inst.index]
                         when UnionWrap    then [inst.value]
+                        when UnionIs      then [inst.union_value]
+                        when UnionUnwrap  then [inst.union_value]
+                        when UnionTypeIdGet then [inst.union_value]
                         when Select       then [inst.condition, inst.then_value, inst.else_value]
+                        when ArrayGet     then [inst.array_value, inst.index_value]
+                        when ArraySet     then [inst.array_value, inst.index_value, inst.value_id]
+                        when ArraySize    then [inst.array_value]
+                        when ArraySetSize then [inst.array_value, inst.size_value]
+                        when ArrayNew     then [inst.capacity_value]
+                        when ArrayLiteral then inst.elements.to_a
+                        when AddressOf    then [inst.operand]
+                        when Phi          then inst.incoming.map { |(_, v)| v }
+                        when StringInterpolation then inst.parts.to_a
                         else              [] of ValueId
                         end
 
