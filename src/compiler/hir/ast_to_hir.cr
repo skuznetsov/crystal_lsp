@@ -47385,6 +47385,10 @@ module Crystal::HIR
             return_type = inferred_return
           end
         end
+        # String#[](Int32) returns Char, not Int32/Pointer
+        if ctx.type_of(object_id) == TypeRef::STRING && index_ids.size == 1
+          return_type = TypeRef::CHAR
+        end
         # Fallback: [] typically returns a value (element or subslice)
         if return_type == TypeRef::VOID
           return_type = TypeRef::POINTER

@@ -10479,6 +10479,12 @@ module Crystal::MIR
       string_parts = [] of String
       inst.parts.each_with_index do |part_id, idx|
         part_type = @value_types[part_id]?
+        # Use HIR-level part_types for Char/Int32 disambiguation when available
+        if hir_pt = inst.part_types.try(&.[idx]?)
+          if hir_pt == TypeRef::CHAR && (part_type == TypeRef::INT32 || part_type.nil?)
+            part_type = TypeRef::CHAR
+          end
+        end
         part_llvm_type_check = part_type ? @type_mapper.llvm_type(part_type) : nil
 
         # Check for void type - void calls don't produce a value, use empty string

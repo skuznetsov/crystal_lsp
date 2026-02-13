@@ -1341,8 +1341,9 @@ module Crystal::MIR
   # String interpolation "Hello #{x}!"
   class StringInterpolation < Value
     getter parts : Array(ValueId)
+    getter part_types : Array(TypeRef)?
 
-    def initialize(id : ValueId, @parts : Array(ValueId))
+    def initialize(id : ValueId, @parts : Array(ValueId), @part_types : Array(TypeRef)? = nil)
       super(id, TypeRef::STRING)
     end
 

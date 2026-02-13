@@ -2853,13 +2853,18 @@ module Crystal
     private def lower_string_interpolation(interp : HIR::StringInterpolation) : ValueId
       builder = @builder.not_nil!
 
-      # Convert part values
+      # Convert part values and track HIR types (for Char vs Int32 distinction)
       parts = interp.parts.map { |p| get_value(p) }
+      part_types = interp.parts.map { |p|
+        hir_t = @hir_value_types[p]? || HIR::TypeRef::STRING
+        convert_type(hir_t)
+      }
 
-      # Create MIR StringInterpolation instruction
+      # Create MIR StringInterpolation instruction with type info
       mir_interp = MIR::StringInterpolation.new(
         builder.next_id,
-        parts
+        parts,
+        part_types
       )
       builder.emit(mir_interp)
     end
