@@ -3773,15 +3773,17 @@ module CrystalV2
             consume_newlines
 
             rescue_body_b = SmallVec(ExprId, 2).new
-            loop do
-              skip_trivia
-              token = current_token
-              break if token.kind == Token::Kind::Rescue || token.kind == Token::Kind::Ensure || token.kind == Token::Kind::Else || token.kind == Token::Kind::End
-              break if token.kind == Token::Kind::EOF
+            without_inline_rescue do
+              loop do
+                skip_trivia
+                token = current_token
+                break if token.kind == Token::Kind::Rescue || token.kind == Token::Kind::Ensure || token.kind == Token::Kind::Else || token.kind == Token::Kind::End
+                break if token.kind == Token::Kind::EOF
 
-              expr = parse_statement
-              rescue_body_b << expr unless expr.invalid?
-              consume_newlines
+                expr = parse_statement
+                rescue_body_b << expr unless expr.invalid?
+                consume_newlines
+              end
             end
 
             rescue_span = rescue_start.span

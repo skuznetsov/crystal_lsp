@@ -14676,8 +14676,14 @@ module Crystal::HIR
             init_arena = @function_def_arenas[init_name]? || @function_def_arenas[init_base_name]?
             init_arena ||= resolve_arena_for_def(init_def, @arena)
             callsite_types = callsite_init_types.empty? ? nil : callsite_init_types
+            # Use the defining class (from init_base_name) for super resolution context.
+            # Without this, a subclass inheriting a parent constructor would set @current_class
+            # to the subclass, causing super() inside the parent's init to resolve back to
+            # itself (infinite recursion) instead of the grandparent.
+            init_defining_class = init_base_name.split('#').first
+            init_class_info = @class_info[init_defining_class]? || class_info
             with_arena(init_arena) do
-              lower_method(class_name, class_info, init_def, callsite_types, nil, nil, init_name)
+              lower_method(init_defining_class, init_class_info, init_def, callsite_types, nil, nil, init_name)
             end
           end
         end
@@ -31731,6 +31737,10 @@ module Crystal::HIR
       all_vars = (then_locals.keys + else_locals.keys + pre_locals.keys).uniq
 
       all_vars.each do |var_name|
+        # Skip "self" — it's an implementation artifact that may appear in one branch
+        # (e.g., rescue body calls emit_self) but shouldn't leak into the merge.
+        next if var_name == "self" && !pre_locals.has_key?("self")
+
         then_val = then_locals[var_name]?
         else_val = else_locals[var_name]?
         pre_val = pre_locals[var_name]?
@@ -33843,6 +33853,7 @@ module Crystal::HIR
       rescue_locals : Hash(String, ValueId)? = nil
       body_exit_block : BlockId? = nil
       rescue_exit_block : BlockId? = nil
+      rescue_done_block : BlockId? = nil
 
       # If we have rescue clauses, set up exception handling
       if has_rescue
@@ -33902,25 +33913,55 @@ module Crystal::HIR
         try_end_rescue = TryEnd.new(ctx.next_id)
         ctx.emit(try_end_rescue)
 
-        # For now, just execute the first rescue clause's body
-        # TODO: proper exception type matching
+        # Get exception object once (as generic ptr for type checking)
+        exc_ptr = GetException.new(ctx.next_id, TypeRef::POINTER)
+        ctx.emit(exc_ptr)
+        ctx.register_type(exc_ptr.id, TypeRef::POINTER)
+
         rescue_result : ValueId = ctx.next_id
+        after_rescue_target = ensure_block || exit_block
+        rescue_done_block = ctx.create_block  # also updates outer variable
+
+        # Build chain: for each typed clause → IsA check → branch to body or next check
+        # Untyped clause → catch-all (no check)
+        next_check_block : BlockId? = nil
         rescue_clauses.each_with_index do |clause, idx|
-          # If clause has variable name, create local for exception
+          exc_type_name = ""
+          if et = clause.exception_type
+            name = String.new(et)
+            exc_type_name = name if !name.empty? && name[0].uppercase?
+          end
+
+          has_type_check = !exc_type_name.empty?
+
+          if has_type_check && idx < rescue_clauses.size - 1
+            # Typed clause with more clauses after — need conditional branch
+            check_type_ref = type_ref_for_name(exc_type_name)
+            if check_type_ref == TypeRef::VOID
+              check_type_ref = type_ref_for_name("Exception")
+            end
+
+            is_a = IsA.new(ctx.next_id, exc_ptr.id, check_type_ref)
+            ctx.emit(is_a)
+            ctx.register_type(is_a.id, TypeRef::BOOL)
+
+            body_block_clause = ctx.create_block
+            next_check_block = ctx.create_block
+            ctx.terminate(Branch.new(is_a.id, body_block_clause, next_check_block))
+            ctx.switch_to_block(body_block_clause)
+          end
+          # If untyped or last typed clause, continue in current block (catch-all)
+
+          # Bind exception variable
           var_name = clause.variable_name
           if var_name.nil?
-            if exc_type = clause.exception_type
-              exc_name = String.new(exc_type)
-              if !exc_name.empty? && exc_name[0].lowercase?
-                var_name = exc_type
-              end
+            if et = clause.exception_type
+              name = String.new(et)
+              var_name = et if !name.empty? && name[0].lowercase?
             end
           end
+
           if var_name
-            exc_type_name = clause.exception_type ? String.new(clause.exception_type.not_nil!) : ""
-            if !exc_type_name.empty? && exc_type_name[0].lowercase?
-              exc_type_name = ""
-            end
             exc_type_ref = TypeRef::VOID
             if !exc_type_name.empty?
               exc_type_ref = type_ref_for_name(exc_type_name)
@@ -33929,30 +33970,20 @@ module Crystal::HIR
               exc_type_ref = type_ref_for_name("Exception")
               exc_type_ref = TypeRef::POINTER if exc_type_ref == TypeRef::VOID
             end
-            if env_get("DEBUG_RESCUE_TYPE")
-              exc_name = exc_type_name.empty? ? "Exception" : exc_type_name
-              STDERR.puts "[RESCUE_TYPE] var=#{String.new(var_name)} type_name=#{exc_name} resolved=#{get_type_name_from_ref(exc_type_ref)}"
-            end
 
             exc_var = Local.new(ctx.next_id, exc_type_ref, String.new(var_name), ctx.current_scope, true)
             ctx.emit(exc_var)
             ctx.register_local(String.new(var_name), exc_var.id)
             ctx.register_type(exc_var.id, exc_type_ref)
 
-            # Get exception value
+            # Get exception with proper type
             get_exc = GetException.new(ctx.next_id, exc_type_ref)
             ctx.emit(get_exc)
             ctx.register_type(get_exc.id, exc_type_ref)
 
-            # Copy to variable
             copy = Copy.new(ctx.next_id, exc_type_ref, get_exc.id)
             ctx.emit(copy)
             ctx.register_type(copy.id, exc_type_ref)
-
-            # Update local to point to the copy result (exception value),
-            # not the Local alloca. Without this, phi merges and rescue body
-            # code that references 'ex' would use the alloca pointer instead
-            # of the actual exception.
             ctx.register_local(String.new(var_name), copy.id)
           end
 
@@ -33961,18 +33992,23 @@ module Crystal::HIR
             rescue_result = lower_expr(ctx, expr_id)
           end
 
-          # Only handle first clause for now
-          break
+          # Jump to rescue_done after body
+          ctx.terminate(Jump.new(rescue_done_block))
+
+          if has_type_check && idx < rescue_clauses.size - 1
+            # Switch to the next check block for the next iteration
+            ctx.switch_to_block(next_check_block.not_nil!)
+          else
+            # Last clause or untyped — no more checking
+            break
+          end
         end
 
-        # TryEnd already called at start of rescue block (before body).
-        # No need to call again here — handler was already popped.
+        ctx.switch_to_block(rescue_done_block)
 
         # Snapshot locals after rescue for rescue-merge.
         rescue_locals = ctx.save_locals
 
-        # After rescue, jump to ensure or exit
-        after_rescue_target = ensure_block || exit_block
         ctx.terminate(Jump.new(after_rescue_target))
         rescue_exit_block = after_rescue_target
       end
@@ -34004,8 +34040,8 @@ module Crystal::HIR
       # Merge locals from body/rescue when both paths converge directly to exit
       if has_rescue && body_locals && rescue_locals &&
          body_exit_block == exit_block && rescue_exit_block == exit_block &&
-         pre_locals
-        merge_branch_locals(ctx, pre_locals, body_locals, rescue_locals, body_block, rescue_block.not_nil!)
+         pre_locals && rescue_done_block
+        merge_branch_locals(ctx, pre_locals, body_locals, rescue_locals, body_block, rescue_done_block.not_nil!)
       end
 
       result_id

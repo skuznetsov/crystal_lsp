@@ -2446,8 +2446,11 @@ module Crystal
             has_subclasses = !subclasses_for(val_mir_type.name).empty?
           end
         end
-        is_concrete = hir_value_type.primitive? ||
-                      (value_desc && value_desc.kind != HIR::TypeKind::Union && !has_subclasses)
+        # POINTER is a generic opaque pointer — its runtime type is unknown
+        # (e.g., exception objects). Must NOT resolve statically.
+        is_concrete = hir_value_type != HIR::TypeRef::POINTER &&
+                      (hir_value_type.primitive? ||
+                       (value_desc && value_desc.kind != HIR::TypeKind::Union && !has_subclasses))
         if is_concrete
           # Concrete leaf type — resolve statically
           # Collect matching type_ids (check_type + subclasses)
