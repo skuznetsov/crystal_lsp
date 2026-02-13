@@ -40932,6 +40932,11 @@ module Crystal::HIR
         end
       end
 
+      # Force rindex/index to return Nil | Int32 (nullable search methods).
+      if method_name == "rindex" || method_name == "index"
+        return_type = create_union_type_for_nullable(TypeRef::INT32)
+      end
+
       # Methods that return the same type as the receiver.
       # Handle this even if return_type is NIL (often incorrectly registered for abstract modules).
       methods_returning_receiver_type = ["tap", "itself", "clamp", "abs", "ceil", "floor", "round", "truncate",
@@ -48785,6 +48790,15 @@ module Crystal::HIR
             return_type = TypeRef::POINTER
           end
         end
+      end
+
+      # Force rindex/index to return Nil | Int32 (nullable search methods).
+      # The stdlib Slice#rindex has a broken return type (includes Pointer) that
+      # pollutes String#rindex into a 3-way union (Nil | Int32 | Pointer).
+      # This prevents if-narrowing from working (unwrap_non_nil_to_block only
+      # handles 2-way unions). Override unconditionally to Nil | Int32.
+      if member_name == "rindex" || member_name == "index"
+        return_type = create_union_type_for_nullable(TypeRef::INT32)
       end
 
       # Methods that return the same type as the receiver.

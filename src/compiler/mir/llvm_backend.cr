@@ -3636,6 +3636,106 @@ module Crystal::MIR
         emit_raw "  ret %Nil$_$OR$_String.union %ret_union\n"
         emit_raw "}\n\n"
         return true
+      when "String$Hrindex$$Char"
+        # String#rindex(search : Char, offset : Int32 = size - 1) : Int32?
+        # The stdlib calls Slice(UInt8)#rindex which is a dead-code stub.
+        # Override with direct backward byte scan for ASCII chars.
+        # Always use 2-way union (Nil | Int32). The MIR return type may be
+        # polluted by broken Slice#rindex (3-way with Pointer), but we
+        # force the correct type here to match the HIR call-site type.
+        union_type = "%Nil$_$OR$_Int32.union"
+        emit_raw "; String#rindex(Char, Int32) — runtime override (backward byte scan)\n"
+        emit_raw "define #{union_type} @#{mangled}(ptr %self, i32 %search, i32 %offset) {\n"
+        emit_raw "entry:\n"
+        emit_raw "  %bs_ptr = getelementptr i8, ptr %self, i32 4\n"
+        emit_raw "  %bytesize = load i32, ptr %bs_ptr\n"
+        # Clamp offset to bytesize - 1
+        emit_raw "  %max = sub i32 %bytesize, 1\n"
+        emit_raw "  %gt = icmp sgt i32 %offset, %max\n"
+        emit_raw "  %off = select i1 %gt, i32 %max, i32 %offset\n"
+        # If offset < 0, return nil
+        emit_raw "  %neg = icmp slt i32 %off, 0\n"
+        emit_raw "  br i1 %neg, label %ret_nil, label %scan\n"
+        emit_raw "scan:\n"
+        emit_raw "  %data = getelementptr i8, ptr %self, i32 12\n"
+        emit_raw "  %byte = trunc i32 %search to i8\n"
+        emit_raw "  br label %loop\n"
+        emit_raw "loop:\n"
+        emit_raw "  %i = phi i32 [%off, %scan], [%next, %loop_next]\n"
+        emit_raw "  %i_neg = icmp slt i32 %i, 0\n"
+        emit_raw "  br i1 %i_neg, label %ret_nil, label %check_byte\n"
+        emit_raw "check_byte:\n"
+        emit_raw "  %p = getelementptr i8, ptr %data, i32 %i\n"
+        emit_raw "  %b = load i8, ptr %p\n"
+        emit_raw "  %eq = icmp eq i8 %b, %byte\n"
+        emit_raw "  br i1 %eq, label %found, label %loop_next\n"
+        emit_raw "loop_next:\n"
+        emit_raw "  %next = sub i32 %i, 1\n"
+        emit_raw "  br label %loop\n"
+        emit_raw "found:\n"
+        # Return Int32 (tag=1, payload=i)
+        emit_raw "  %f_u = alloca #{union_type}, align 8\n"
+        emit_raw "  store #{union_type} zeroinitializer, ptr %f_u\n"
+        emit_raw "  %f_tid = getelementptr {i32, [8 x i8]}, ptr %f_u, i32 0, i32 0\n"
+        emit_raw "  store i32 1, ptr %f_tid\n"
+        emit_raw "  %f_pay = getelementptr {i32, [8 x i8]}, ptr %f_u, i32 0, i32 1\n"
+        emit_raw "  store i32 %i, ptr %f_pay\n"
+        emit_raw "  %f_val = load #{union_type}, ptr %f_u\n"
+        emit_raw "  ret #{union_type} %f_val\n"
+        emit_raw "ret_nil:\n"
+        emit_raw "  %n_u = alloca #{union_type}, align 8\n"
+        emit_raw "  store #{union_type} zeroinitializer, ptr %n_u\n"
+        emit_raw "  %n_val = load #{union_type}, ptr %n_u\n"
+        emit_raw "  ret #{union_type} %n_val\n"
+        emit_raw "}\n\n"
+        return true
+      when "Slice$LUInt8$R$Hrindex$$UInt8"
+        # Slice(UInt8)#rindex(UInt8) — backward byte scan
+        # The generic Slice#rindex instantiation is broken (dead-code stub returning void).
+        # IO::FileDescriptor#write calls this to find newlines for flush_on_newline.
+        union_type = "%Nil$_$OR$_Int32.union"
+        emit_raw "; Slice(UInt8)#rindex(UInt8) — runtime override (backward byte scan)\n"
+        # Params: ptr %self (Slice struct), i8 %value (search byte), ptr %offset_ptr (unused)
+        emit_raw "define #{union_type} @#{mangled}(ptr %self, i8 %value, ptr %offset_ptr) {\n"
+        emit_raw "entry:\n"
+        # Load size from Slice offset 0
+        emit_raw "  %size = load i32, ptr %self\n"
+        emit_raw "  %empty = icmp sle i32 %size, 0\n"
+        emit_raw "  br i1 %empty, label %ret_nil, label %load_ptr\n"
+        emit_raw "load_ptr:\n"
+        # Load buffer pointer from Slice offset 8
+        emit_raw "  %buf_addr = getelementptr i8, ptr %self, i32 8\n"
+        emit_raw "  %buf = load ptr, ptr %buf_addr\n"
+        emit_raw "  %start = sub i32 %size, 1\n"
+        emit_raw "  br label %loop\n"
+        emit_raw "loop:\n"
+        emit_raw "  %i = phi i32 [%start, %load_ptr], [%next, %loop_next]\n"
+        emit_raw "  %neg = icmp slt i32 %i, 0\n"
+        emit_raw "  br i1 %neg, label %ret_nil, label %check\n"
+        emit_raw "check:\n"
+        emit_raw "  %p = getelementptr i8, ptr %buf, i32 %i\n"
+        emit_raw "  %b = load i8, ptr %p\n"
+        emit_raw "  %eq = icmp eq i8 %b, %value\n"
+        emit_raw "  br i1 %eq, label %found, label %loop_next\n"
+        emit_raw "loop_next:\n"
+        emit_raw "  %next = sub i32 %i, 1\n"
+        emit_raw "  br label %loop\n"
+        emit_raw "found:\n"
+        emit_raw "  %f_u = alloca #{union_type}, align 8\n"
+        emit_raw "  store #{union_type} zeroinitializer, ptr %f_u\n"
+        emit_raw "  %f_tag = getelementptr {i32, [8 x i8]}, ptr %f_u, i32 0, i32 0\n"
+        emit_raw "  store i32 1, ptr %f_tag\n"
+        emit_raw "  %f_pay = getelementptr {i32, [8 x i8]}, ptr %f_u, i32 0, i32 1\n"
+        emit_raw "  store i32 %i, ptr %f_pay\n"
+        emit_raw "  %f_val = load #{union_type}, ptr %f_u\n"
+        emit_raw "  ret #{union_type} %f_val\n"
+        emit_raw "ret_nil:\n"
+        emit_raw "  %n_u = alloca #{union_type}, align 8\n"
+        emit_raw "  store #{union_type} zeroinitializer, ptr %n_u\n"
+        emit_raw "  %n_val = load #{union_type}, ptr %n_u\n"
+        emit_raw "  ret #{union_type} %n_val\n"
+        emit_raw "}\n\n"
+        return true
       end
 
       # Arena::Index#valid? — null check for uninitialized __evloop_data
