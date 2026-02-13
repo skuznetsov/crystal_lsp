@@ -46362,14 +46362,21 @@ module Crystal::HIR
         @inline_caller_method_stack << old_current_method
         @inline_caller_method_is_class_stack << old_current_method_is_class
         @inline_caller_type_param_map_stack << @type_param_map.dup
-        @block_owner[block.object_id] ||= {
+        # MUST use `=` not `||=` — the same stdlib block AST node is reused across
+        # different generic instantiations. Each instantiation compiles into a different
+        # function, so the owner must always be updated to the current function context.
+        # Using `||=` caused stale function_ids from the first instantiation to persist,
+        # making `block_owned_by_current_fn` false for subsequent instantiations, which
+        # broke non-local returns (return inside block jumped to inline exit instead of
+        # doing a real method return).
+        @block_owner[block.object_id] = {
           class_name:  old_current_class,
           method_name: old_current_method,
           is_class:    old_current_method_is_class || false,
         }
-        @block_owner_function_ids[block.object_id] ||= ctx.function.id
+        @block_owner_function_ids[block.object_id] = ctx.function.id
         if self_id = caller_locals["self"]?
-          @block_owner_self_ids[block.object_id] ||= self_id
+          @block_owner_self_ids[block.object_id] = self_id
         end
         inferred_block_return = inline_block_return_type_name(block, block_param_types, old_current_class)
         if inferred_block_return

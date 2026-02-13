@@ -9845,8 +9845,19 @@ module Crystal::MIR
                 elements = tuple_type.element_types.not_nil!
                 byte_offset = 0_u64
                 elements.each_with_index do |elem, i|
-                  elem_size = elem.size > 0 ? elem.size : 8_u64
-                  elem_align = elem.alignment > 0 ? elem.alignment : 8_u32
+                  # Reference types (classes, structs) are heap-allocated and stored
+                  # as pointers in tuples — use pointer size, not full struct size.
+                  is_inline = elem.kind.primitive? || elem.kind.enum?
+                  elem_size = if is_inline && elem.size > 0
+                                elem.size
+                              else
+                                8_u64
+                              end
+                  elem_align = if is_inline && elem.alignment > 0
+                                 elem.alignment
+                               else
+                                 8_u32
+                               end
                   byte_offset = (byte_offset + elem_align - 1) & ~(elem_align.to_u64 - 1)
                   break if i == idx_const
                   byte_offset += elem_size

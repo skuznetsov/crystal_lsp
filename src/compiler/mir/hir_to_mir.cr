@@ -317,18 +317,20 @@ module Crystal
         align = 1_u32
         element_refs.each do |elem_ref|
           elem_type = @mir_module.type_registry.get(elem_ref)
-          # Use actual size/alignment, with fallback for missing or zero-sized types.
-          # Pointer types (e.g. Pointer(Void)) may be registered with size 0
-          # but actually occupy 8 bytes at runtime.
-          elem_size = if elem_type && elem_type.size > 0
+          # For reference types (classes, structs) our compiler heap-allocates them,
+          # so in a Tuple they occupy pointer size (8 bytes), not their full struct size.
+          # Only primitives and enums are stored inline with their actual size.
+          elem_kind = elem_type.try(&.kind)
+          is_inline = elem_kind && (elem_kind.primitive? || elem_kind.enum?)
+          elem_size = if is_inline && elem_type && elem_type.size > 0
                         elem_type.size
                       else
-                        8_u64  # Default pointer/reference size
+                        8_u64  # Pointer/reference size
                       end
-          elem_align = if elem_type && elem_type.alignment > 0
+          elem_align = if is_inline && elem_type && elem_type.alignment > 0
                          elem_type.alignment
                        else
-                         8_u32  # Default pointer alignment
+                         8_u32  # Pointer alignment
                        end
           size = align_u64(size, elem_align)
           size += elem_size
@@ -765,8 +767,19 @@ module Crystal
             offsets = [] of UInt32
             current_offset = 0_u64
             elements.each do |elem|
-              elem_size = elem.size > 0 ? elem.size : 8_u64
-              elem_align = elem.alignment > 0 ? elem.alignment : 8_u32
+              # For reference types (classes, structs) our compiler heap-allocates them,
+              # so in a Tuple they occupy pointer size (8), not their full struct size.
+              is_inline = elem.kind.primitive? || elem.kind.enum?
+              elem_size = if is_inline && elem.size > 0
+                            elem.size
+                          else
+                            8_u64  # Pointer/reference size
+                          end
+              elem_align = if is_inline && elem.alignment > 0
+                             elem.alignment
+                           else
+                             8_u32
+                           end
               current_offset = align_u64(current_offset, elem_align)
               offsets << current_offset.to_u32
               current_offset += elem_size
