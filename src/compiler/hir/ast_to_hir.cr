@@ -32265,6 +32265,9 @@ module Crystal::HIR
       @loop_phi_stack << phi_nodes
       @loop_break_info_stack << [] of {BlockId, Hash(String, ValueId)}
       @loop_break_value_stack << [] of {BlockId, ValueId}
+      # Apply truthy narrowing (e.g., `while current` narrows ListNode? to ListNode)
+      while_truthy_targets = truthy_narrowing_targets(node.condition)
+      apply_truthy_narrowing(ctx, while_truthy_targets)
       pushed_inline = false
       if !inline_vars.empty?
         @inline_loop_vars_stack << inline_vars
