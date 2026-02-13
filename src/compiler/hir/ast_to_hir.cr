@@ -48314,9 +48314,9 @@ module Crystal::HIR
           ctx.emit(unwrap)
           ctx.register_type(unwrap.id, TypeRef::INT32)
           # Call __crystal_v2_int_to_string on the unwrapped value
-          call = Call.new(ctx.next_id, TypeRef::POINTER, nil, "__crystal_v2_int_to_string", [unwrap.id])
+          call = Call.new(ctx.next_id, TypeRef::STRING, nil, "__crystal_v2_int_to_string", [unwrap.id])
           ctx.emit(call)
-          ctx.register_type(call.id, TypeRef::POINTER)
+          ctx.register_type(call.id, TypeRef::STRING)
           return call.id
         when "abs"
           # Unwrap Int32 and call abs intrinsic
@@ -48337,9 +48337,9 @@ module Crystal::HIR
       if receiver_type == TypeRef::INT32
         case member_name
         when "to_s"
-          call = Call.new(ctx.next_id, TypeRef::POINTER, nil, "__crystal_v2_int_to_string", [object_id])
+          call = Call.new(ctx.next_id, TypeRef::STRING, nil, "__crystal_v2_int_to_string", [object_id])
           ctx.emit(call)
-          ctx.register_type(call.id, TypeRef::POINTER)
+          ctx.register_type(call.id, TypeRef::STRING)
           return call.id
         when "abs"
           call = Call.new(ctx.next_id, TypeRef::INT32, nil, "__crystal_v2_int_abs", [object_id])
@@ -48374,9 +48374,9 @@ module Crystal::HIR
       elsif receiver_type == TypeRef::INT64
         case member_name
         when "to_s"
-          call = Call.new(ctx.next_id, TypeRef::POINTER, nil, "__crystal_v2_int64_to_string", [object_id])
+          call = Call.new(ctx.next_id, TypeRef::STRING, nil, "__crystal_v2_int64_to_string", [object_id])
           ctx.emit(call)
-          ctx.register_type(call.id, TypeRef::POINTER)
+          ctx.register_type(call.id, TypeRef::STRING)
           return call.id
         when "to_i", "to_i32", "to_i32!"
           # Truncate to i32
@@ -48407,9 +48407,9 @@ module Crystal::HIR
       elsif receiver_type == TypeRef::FLOAT64
         case member_name
         when "to_s"
-          call = Call.new(ctx.next_id, TypeRef::POINTER, nil, "__crystal_v2_f64_to_string", [object_id])
+          call = Call.new(ctx.next_id, TypeRef::STRING, nil, "__crystal_v2_f64_to_string", [object_id])
           ctx.emit(call)
-          ctx.register_type(call.id, TypeRef::POINTER)
+          ctx.register_type(call.id, TypeRef::STRING)
           return call.id
         when "to_i", "to_i32"
           call = Call.new(ctx.next_id, TypeRef::INT32, nil, "__crystal_v2_f64_to_i32", [object_id])
@@ -48439,9 +48439,9 @@ module Crystal::HIR
       elsif receiver_type == TypeRef::BOOL
         case member_name
         when "to_s"
-          call = Call.new(ctx.next_id, TypeRef::POINTER, nil, "__crystal_v2_bool_to_string", [object_id])
+          call = Call.new(ctx.next_id, TypeRef::STRING, nil, "__crystal_v2_bool_to_string", [object_id])
           ctx.emit(call)
-          ctx.register_type(call.id, TypeRef::POINTER)
+          ctx.register_type(call.id, TypeRef::STRING)
           return call.id
         end
       end
