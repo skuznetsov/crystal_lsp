@@ -12990,12 +12990,14 @@ module Crystal::HIR
               # Capture initialize parameters for new()
               # Also extract ivars from shorthand: def initialize(@value : T)
               # Note: Only capture from FIRST initialize (for multiple overloads, each gets its own mangled name)
-              if method_name == "initialize" && init_params.empty?
+              # Use init_capture.source (not init_params.empty?) to track whether we've
+              # already seen an initialize — a zero-param initialize legitimately has empty params.
+              if method_name == "initialize" && init_capture.source == :none
+                init_capture.source = :class
                 if params = member.params
                   new_params = capture_initialize_params(params, ivars, pointerof(offset), class_name)
                   init_params.clear
                   new_params.each { |param| init_params << param }
-                  init_capture.source = :class
                 end
               end
               if method_name == "initialize"
@@ -13368,8 +13370,9 @@ module Crystal::HIR
 
       # Store initialize params for allocator generation
       # Preserve existing init params on class reopening; otherwise inherit from parent.
+      # Don't inherit from parent if the class explicitly defines its own zero-param initialize.
       @init_params ||= {} of String => Array({String, TypeRef})
-      if init_params.empty?
+      if init_params.empty? && init_capture.source == :none
         if existing_params = @init_params.not_nil![class_name]?
           init_params = existing_params
         elsif parent_name
@@ -14772,6 +14775,15 @@ module Crystal::HIR
           next if call_type == TypeRef::VOID
           if param_type == TypeRef::VOID
             allocator_params[idx] = {param_name, call_type}
+          end
+        end
+        # Append extra call_arg_types that exceed init_params size (overloaded constructor
+        # has more params than the primary init captured for allocator generation).
+        if call_arg_types.size > allocator_params.size
+          (allocator_params.size...call_arg_types.size).each do |idx|
+            call_type = call_arg_types[idx]
+            next if call_type == TypeRef::VOID
+            allocator_params << {"arg#{idx}", call_type}
           end
         end
       end
