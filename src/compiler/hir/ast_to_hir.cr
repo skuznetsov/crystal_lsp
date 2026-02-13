@@ -24246,15 +24246,8 @@ module Crystal::HIR
         end
         # O(1) lookup: check exact match first, then check if base name exists
         if @function_types.has_key?(test_name) || has_function_base?(test_name)
-          resolved = if current == origin
-                       test_name
-                     elsif numeric_primitive_class_name?(origin)
-                       "#{origin}##{method_name}"
-                     else
-                       test_name
-                     end
-          @method_inheritance_cache[cache_key] = resolved
-          return resolved # Return base name - caller will mangle
+          @method_inheritance_cache[cache_key] = test_name
+          return test_name # Return base name - caller will mangle
         end
         current_base = strip_generic_args(current)
         if current_base != current
@@ -29606,7 +29599,6 @@ module Crystal::HIR
 
       # Get argument types for mangling
       arg_types = args.map { |arg| ctx.type_of(arg) }
-
       previous_base = "#{class_name}##{method_name}_previous"
       if entry = lookup_function_def_for_call(previous_base, args.size, false, arg_types)
         actual_prev_name, actual_prev_def = entry
@@ -29771,6 +29763,10 @@ module Crystal::HIR
 
       # Get self for the call
       self_id = emit_self(ctx)
+
+      # Remember callsite arg types so the deferred lowering can determine param types
+      arg_types = args.map { |arg| ctx.type_of(arg) }
+      remember_callsite_arg_types(super_method_name, arg_types, nil, nil, false)
 
       # Ensure parent method is lowered
       if env_has?("DEBUG_SUPER")
@@ -38298,7 +38294,6 @@ module Crystal::HIR
       if method_name.includes?('.')
         method_name = method_short_from_name(method_name) || method_name
       end
-
       # Direct puts/print interception: for bare single-arg puts/print, bypass the splat
       # wrapper and directly call IO#puts/print(Type) on STDOUT. This avoids the problem
       # where puts$splat is compiled once for the first call's type and reused incorrectly
@@ -48482,6 +48477,20 @@ module Crystal::HIR
             if env_get("DEBUG_ENTRY_HASH") && member_name == "hash" && info.name.includes?("Entry")
               ret_name = get_type_name_from_ref(return_type)
               STDERR.puts "[ENTRY_HASH_RESOLVED] base_method=#{base_method} resolved=#{resolved_method_name} return_type=#{ret_name}"
+            end
+            # Per-class compilation for inherited methods: when the resolved method
+            # belongs to a parent class but the receiver is a concrete subclass,
+            # use the subclass name so the function body is compiled with
+            # @current_class = subclass. This ensures inner bare calls (e.g.,
+            # type_name inside describe) dispatch to the subclass's overrides.
+            if resolved_method_name
+              resolved_owner = method_owner(resolved_method_name)
+              if !resolved_owner.empty? && resolved_owner != info.name &&
+                 @class_info.has_key?(info.name) && !info.name.includes?('|')
+                per_class_name = "#{info.name}##{member_name}"
+                # Keep return_type from parent resolution (already determined)
+                resolved_method_name = per_class_name
+              end
             end
           end
         end
