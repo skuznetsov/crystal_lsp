@@ -8216,6 +8216,48 @@ module Crystal::MIR
         end
       end
 
+      # Intercept String#index(String, offset) — stdlib compilation produces wrong method
+      # calls (IO::FileDescriptor#tell) and contaminated union return types.
+      # Redirect to our strstr-based runtime helper.
+      if callee_name == "String$Hindex$$String" || callee_name == "String$Hindex$$String_Int32"
+        if inst.args.size >= 2
+          self_val = value_ref(inst.args[0])
+          search_val = value_ref(inst.args[1])
+          offset_val = if inst.args.size >= 3
+                          value_ref(inst.args[2])
+                        else
+                          "0"
+                        end
+          # Call helper: returns i32 (-1 = not found, else byte index)
+          idx_name = "%str_idx.#{inst.id}"
+          emit "#{idx_name} = call i32 @__crystal_v2_string_index_string(ptr #{self_val}, ptr #{search_val}, i32 #{offset_val})"
+          # Build Nil|Int32 union: {i32 type_id, [8 x i8] payload}
+          # type_id=0 for Nil, type_id=1 for Int32 (local convention)
+          cmp_name = "%str_idx_nil.#{inst.id}"
+          emit "#{cmp_name} = icmp eq i32 #{idx_name}, -1"
+          union_ptr = "%str_idx_union.#{inst.id}"
+          emit "#{union_ptr} = alloca {i32, [8 x i8]}, align 8"
+          tid_ptr = "%str_idx_tid.#{inst.id}"
+          emit "#{tid_ptr} = getelementptr {i32, [8 x i8]}, ptr #{union_ptr}, i32 0, i32 0"
+          payload_ptr = "%str_idx_pay.#{inst.id}"
+          emit "#{payload_ptr} = getelementptr {i32, [8 x i8]}, ptr #{union_ptr}, i32 0, i32 1"
+          # Store nil (0) or non-nil (1) type_id
+          tid_val = "%str_idx_tidv.#{inst.id}"
+          emit "#{tid_val} = select i1 #{cmp_name}, i32 0, i32 1"
+          emit "store i32 #{tid_val}, ptr #{tid_ptr}"
+          # Store payload (the index value) — only meaningful when non-nil
+          emit "store i32 #{idx_name}, ptr #{payload_ptr}"
+          # Load as the expected return type
+          ret_type = @type_mapper.llvm_type(inst.type)
+          if ret_type == "ptr"
+            emit "#{name} = bitcast ptr #{union_ptr} to ptr"
+          else
+            emit "#{name} = load #{ret_type}, ptr #{union_ptr}"
+          end
+          return
+        end
+      end
+
       if raw_callee_name && pointer_constructor_name?(raw_callee_name) && inst.args.size == 1
         arg_id = inst.args[0]
         arg = value_ref(arg_id)
@@ -10503,12 +10545,74 @@ module Crystal::MIR
             emit "%#{base_name}.conv#{idx} = call ptr @__crystal_v2_f64_to_string(double %#{base_name}.ext#{idx})"
             string_parts << "%#{base_name}.conv#{idx}"
           elsif part_llvm_type.includes?(".union")
-            # Union type (e.g. String | Nil) - extract ptr from payload
+            # Union type — must check payload type, not always assume ptr.
+            # For Nil|Int32, payload is i32; for Nil|String, payload is ptr.
             emit "%#{base_name}.union_ptr#{idx} = alloca #{part_llvm_type}, align 8"
             emit "store #{part_llvm_type} #{normalize_union_value(part_ref, part_llvm_type)}, ptr %#{base_name}.union_ptr#{idx}"
+            emit "%#{base_name}.tid_ptr#{idx} = getelementptr #{part_llvm_type}, ptr %#{base_name}.union_ptr#{idx}, i32 0, i32 0"
+            emit "%#{base_name}.tid#{idx} = load i32, ptr %#{base_name}.tid_ptr#{idx}"
             emit "%#{base_name}.payload_ptr#{idx} = getelementptr #{part_llvm_type}, ptr %#{base_name}.union_ptr#{idx}, i32 0, i32 1"
-            emit "%#{base_name}.str_ptr#{idx} = load ptr, ptr %#{base_name}.payload_ptr#{idx}, align 4"
-            string_parts << "%#{base_name}.str_ptr#{idx}"
+
+            # Determine payload type from union LLVM type name
+            # If last $OR$ member is Int32/UInt32, payload might be i32
+            payload_is_int32 = part_llvm_type.ends_with?("_Int32.union") ||
+                               part_llvm_type.ends_with?("_UInt32.union")
+            payload_is_int64 = part_llvm_type.ends_with?("_Int64.union") ||
+                               part_llvm_type.ends_with?("_UInt64.union")
+            payload_is_bool = part_llvm_type.ends_with?("_Bool.union")
+
+            if payload_is_int32
+              # Check if nil (type_id 0) → empty string, else extract i32 and convert
+              nil_label = "#{base_name}.u_nil#{idx}"
+              val_label = "#{base_name}.u_val#{idx}"
+              merge_label = "#{base_name}.u_merge#{idx}"
+              emit "%#{base_name}.is_nil#{idx} = icmp eq i32 %#{base_name}.tid#{idx}, 0"
+              emit "br i1 %#{base_name}.is_nil#{idx}, label %#{nil_label}, label %#{val_label}"
+              emit_raw "#{nil_label}:\n"
+              emit "br label %#{merge_label}"
+              emit_raw "#{val_label}:\n"
+              emit "%#{base_name}.i32_val#{idx} = load i32, ptr %#{base_name}.payload_ptr#{idx}"
+              emit "%#{base_name}.i32_str#{idx} = call ptr @__crystal_v2_int_to_string(i32 %#{base_name}.i32_val#{idx})"
+              emit "br label %#{merge_label}"
+              emit_raw "#{merge_label}:\n"
+              emit "%#{base_name}.conv#{idx} = phi ptr [%#{base_name}.i32_str#{idx}, %#{val_label}], [@.str.empty, %#{nil_label}]"
+              string_parts << "%#{base_name}.conv#{idx}"
+            elsif payload_is_int64
+              nil_label = "#{base_name}.u_nil#{idx}"
+              val_label = "#{base_name}.u_val#{idx}"
+              merge_label = "#{base_name}.u_merge#{idx}"
+              emit "%#{base_name}.is_nil#{idx} = icmp eq i32 %#{base_name}.tid#{idx}, 0"
+              emit "br i1 %#{base_name}.is_nil#{idx}, label %#{nil_label}, label %#{val_label}"
+              emit_raw "#{nil_label}:\n"
+              emit "br label %#{merge_label}"
+              emit_raw "#{val_label}:\n"
+              emit "%#{base_name}.i64_val#{idx} = load i64, ptr %#{base_name}.payload_ptr#{idx}"
+              emit "%#{base_name}.i64_str#{idx} = call ptr @__crystal_v2_int64_to_string(i64 %#{base_name}.i64_val#{idx})"
+              emit "br label %#{merge_label}"
+              emit_raw "#{merge_label}:\n"
+              emit "%#{base_name}.conv#{idx} = phi ptr [%#{base_name}.i64_str#{idx}, %#{val_label}], [@.str.empty, %#{nil_label}]"
+              string_parts << "%#{base_name}.conv#{idx}"
+            elsif payload_is_bool
+              nil_label = "#{base_name}.u_nil#{idx}"
+              val_label = "#{base_name}.u_val#{idx}"
+              merge_label = "#{base_name}.u_merge#{idx}"
+              emit "%#{base_name}.is_nil#{idx} = icmp eq i32 %#{base_name}.tid#{idx}, 0"
+              emit "br i1 %#{base_name}.is_nil#{idx}, label %#{nil_label}, label %#{val_label}"
+              emit_raw "#{nil_label}:\n"
+              emit "br label %#{merge_label}"
+              emit_raw "#{val_label}:\n"
+              emit "%#{base_name}.bool_val#{idx} = load i8, ptr %#{base_name}.payload_ptr#{idx}"
+              emit "%#{base_name}.bool_i1#{idx} = trunc i8 %#{base_name}.bool_val#{idx} to i1"
+              emit "%#{base_name}.bool_str#{idx} = call ptr @__crystal_v2_bool_to_string(i1 %#{base_name}.bool_i1#{idx})"
+              emit "br label %#{merge_label}"
+              emit_raw "#{merge_label}:\n"
+              emit "%#{base_name}.conv#{idx} = phi ptr [%#{base_name}.bool_str#{idx}, %#{val_label}], [@.str.empty, %#{nil_label}]"
+              string_parts << "%#{base_name}.conv#{idx}"
+            else
+              # Default: payload is ptr (String, Array, or class instance)
+              emit "%#{base_name}.str_ptr#{idx} = load ptr, ptr %#{base_name}.payload_ptr#{idx}, align 4"
+              string_parts << "%#{base_name}.str_ptr#{idx}"
+            end
           else
             # Check if this is an Array type — build "[elem, elem, ...]" string
             arr_type_name = part_type ? (@module.type_registry.get(part_type).try(&.name) || "") : ""
