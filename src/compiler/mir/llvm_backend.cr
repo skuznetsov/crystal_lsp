@@ -431,6 +431,9 @@ module Crystal::MIR
     # Phi predecessor union-to-ptr extracts: for union values that must be unwrapped to ptr before phi
     # Maps (pred_block, value_id) -> (extract_name, union_llvm_type)
     @phi_union_to_ptr_extracts : Hash({BlockId, ValueId}, {String, String}) = {} of {BlockId, ValueId} => {String, String}
+    # Phi union-to-union converts: for union values that must be reinterpreted as a different union type
+    # Maps (pred_block, value_id) -> (convert_name, src_union_llvm_type, dst_union_llvm_type)
+    @phi_union_to_union_converts : Hash({BlockId, ValueId}, {String, String, String}) = {} of {BlockId, ValueId} => {String, String, String}
     # Phi union payload extracts: for union-typed slot values where phi expects a primitive
     # Maps (pred_block, value_id) -> (extract_name, load_name, target_llvm_type)
     @phi_union_payload_extracts : Hash({BlockId, ValueId}, {String, String, String}) = {} of {BlockId, ValueId} => {String, String, String}
@@ -4171,6 +4174,7 @@ module Crystal::MIR
       @cross_block_slot_type_refs.clear
       @phi_predecessor_loads.clear
       @phi_union_to_ptr_extracts.clear
+      @phi_union_to_union_converts.clear
       @phi_union_payload_extracts.clear
       @current_func_blocks.clear
       @emitted_value_types.clear
@@ -4305,6 +4309,8 @@ module Crystal::MIR
       prepass_collect_phi_predecessor_conversions(func)
       # Prepass: identify which ptr/void values need union wrapping in predecessor blocks for phi nodes
       prepass_collect_phi_predecessor_union_wraps(func)
+      # Prepass: identify which union values need reinterpretation to a different union type for phi nodes
+      prepass_collect_phi_union_to_union_converts(func)
 
       func.blocks.each do |block|
         emit_block(block, func)
@@ -4500,6 +4506,37 @@ module Crystal::MIR
 
             wrap_name = "r#{val_id}.phi_union_wrap.#{pred_block_id}"
             @phi_predecessor_union_wraps[{pred_block_id, val_id}] = {wrap_name, phi.type, variant.type_id}
+          end
+        end
+      end
+    end
+
+    # Pre-pass: identify union-typed phi incoming values that have a DIFFERENT union type than the phi.
+    # Both types share the same physical layout {i32, [N x i8]} so we reinterpret through memory.
+    private def prepass_collect_phi_union_to_union_converts(func : Function)
+      @phi_union_to_union_converts.clear
+
+      func.blocks.each do |block|
+        block.instructions.each do |inst|
+          next unless inst.is_a?(Phi)
+          phi = inst
+
+          phi_llvm_type = @type_mapper.llvm_type(phi.type)
+          next unless phi_llvm_type.includes?(".union")
+
+          phi.incoming.each do |(pred_block_id, val_id)|
+            next if @phi_union_to_union_converts.has_key?({pred_block_id, val_id})
+            # Skip if already handled by union wrap prepass
+            next if @phi_predecessor_union_wraps.has_key?({pred_block_id, val_id})
+
+            val_type = @value_types[val_id]?
+            val_llvm_type = val_type ? @type_mapper.llvm_type(val_type) : nil
+
+            # Only handle union-to-different-union case
+            next unless val_llvm_type && val_llvm_type.includes?(".union") && val_llvm_type != phi_llvm_type
+
+            convert_name = "r#{val_id}.u2u.#{pred_block_id}"
+            @phi_union_to_union_converts[{pred_block_id, val_id}] = {convert_name, val_llvm_type, phi_llvm_type}
           end
         end
       end
@@ -5370,6 +5407,8 @@ module Crystal::MIR
       emit_phi_predecessor_union_wraps(block)
       # Emit union-to-ptr extractions for union values used in successor ptr phi nodes
       emit_phi_union_to_ptr_extracts(block)
+      # Emit union-to-union reinterpretations for union values used in successor union phi nodes with different type
+      emit_phi_union_to_union_converts(block)
       # Emit union payload extractions for union-slotted values used in primitive phi nodes
       emit_phi_union_payload_extracts(block)
 
@@ -5481,6 +5520,24 @@ module Crystal::MIR
         emit "store #{union_type} #{val_ref_str}, ptr %#{extract_name}.alloca"
         emit "%#{extract_name}.pay_ptr = getelementptr #{union_type}, ptr %#{extract_name}.alloca, i32 0, i32 1"
         emit "%#{extract_name} = load ptr, ptr %#{extract_name}.pay_ptr, align 4"
+      end
+    end
+
+    # Emit union-to-union reinterpretations for union values used in successor union phi nodes
+    # where the value's union type differs from the phi's union type. Both union types have the
+    # same physical layout {i32, [N x i8]}, so we reinterpret through memory: alloca → store → load.
+    private def emit_phi_union_to_union_converts(block : BasicBlock)
+      @phi_union_to_union_converts.each do |(key, info)|
+        pred_block_id, val_id = key
+        next unless pred_block_id == block.id
+
+        convert_name, src_union_type, dst_union_type = info
+        val_ref_str = value_ref(val_id)
+
+        # Reinterpret union: alloca source type → store → load as destination type
+        emit "%#{convert_name}.alloca = alloca #{src_union_type}, align 8"
+        emit "store #{src_union_type} #{val_ref_str}, ptr %#{convert_name}.alloca"
+        emit "%#{convert_name} = load #{dst_union_type}, ptr %#{convert_name}.alloca"
       end
     end
 
@@ -7339,6 +7396,11 @@ module Crystal::MIR
           wrap_name, _, _ = wrap_info
           return "%#{wrap_name}"
         end
+        # Union-to-union reinterpretation in predecessor block
+        if convert_info = @phi_union_to_union_converts[{block, val}]?
+          convert_name, _, _ = convert_info
+          return "%#{convert_name}"
+        end
       end
       # Check for predecessor-loaded value (for cross-block SSA fix)
       if pred_load_name = @phi_predecessor_loads[{block, val}]?
@@ -7855,8 +7917,9 @@ module Crystal::MIR
           val_llvm_type && val_llvm_type.includes?(".union") && val_llvm_type != phi_type
         end
         if has_non_union_incoming || has_different_union_incoming
-          # Emit union phi with zeroinitializer for non-union or different union values
-          # We can't convert between union types in phi instruction, so use zeroinitializer (nil case)
+          # Emit union phi with proper conversion for mismatched incoming values
+          # For different union types: defer alloca+store+load reinterpret to predecessor block
+          # For non-union types: use zeroinitializer (nil case)
           incoming = incoming_pairs.map do |(block, val)|
             # Check for predecessor load first (cross-block SSA fix)
             if pred_ref = phi_incoming_ref(block, val, phi_type)
@@ -7870,8 +7933,13 @@ module Crystal::MIR
               # If value_ref returned "null", convert to zeroinitializer for union
               ref = "zeroinitializer" if ref == "null"
               "[#{ref}, %#{block_name.call(block)}]"
+            elsif val_type_str && val_type_str.includes?(".union") && val_type_str != phi_type
+              # Different union type - defer reinterpret to predecessor block
+              convert_name = "r#{val}.u2u.#{block}"
+              @phi_union_to_union_converts[{block, val}] = {convert_name, val_type_str, phi_type}
+              "[%#{convert_name}, %#{block_name.call(block)}]"
             else
-              # Type mismatch (non-union or different union) - use zeroinitializer (nil)
+              # Non-union type mismatch - use zeroinitializer (nil case)
               "[zeroinitializer, %#{block_name.call(block)}]"
             end
           end
