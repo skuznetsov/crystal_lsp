@@ -4098,12 +4098,12 @@ module CrystalV2
                 star_token = current_token
                 advance
                 skip_trivia
-                value = parse_expression(0)
+                value = without_postfix_modifiers { parse_expression(0) }
                 return PREFIX_ERROR if value.invalid?
                 span = star_token.span.cover(@arena[value].span)
                 arg = @arena.add_typed(SplatNode.new(span, value))
               else
-                arg = parse_expression(0)
+                arg = without_postfix_modifiers { parse_expression(0) }
               end
               return PREFIX_ERROR if arg.invalid?
               args_b << arg
@@ -8712,7 +8712,8 @@ module CrystalV2
           # Raise removed - it's a regular method, not a keyword
           when Token::Kind::Yield
             # Phase 10: yield (call block)
-            parse_yield
+            stmt = parse_yield
+            parse_postfix_if_modifier(stmt)
           when Token::Kind::Super
             # Allow 'super' as expression in contexts like boolean chains
             stmt = parse_super

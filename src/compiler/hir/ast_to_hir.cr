@@ -32446,6 +32446,24 @@ module Crystal::HIR
       if break_info.empty?
         # No breaks — locals point to cond_block phi nodes (normal exit only)
         phi_nodes.each do |var_name, phi|
+          # For inline vars modified in yield bodies: the cond_block PHI
+          # represents the start-of-iteration value. After the last body
+          # execution, the variable was updated but the PHI wasn't refreshed
+          # (the backedge was never taken). Use the saved backedge value which
+          # captures the last body modification. Also update the caller locals
+          # stack so the value survives inline_yield_function's restoration.
+          if inline_vars.includes?(var_name)
+            if saved = @inline_loop_var_backedge_values[var_name]?
+              ctx.register_local(var_name, saved)
+              @inline_caller_locals_stack.reverse_each do |locals|
+                if locals.has_key?(var_name)
+                  locals[var_name] = saved
+                  break
+                end
+              end
+              next
+            end
+          end
           ctx.register_local(var_name, phi.id)
         end
       else

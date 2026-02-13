@@ -503,6 +503,22 @@ module Crystal
         ordered << block
       end
 
+      # Sort blocks by minimum instruction ID to ensure definitions are
+      # processed before uses. This handles inlined code where the DFS
+      # may visit the continuation block (which uses the PHI value) before
+      # the inline body blocks (which define the PHI). The entry block
+      # must always be first.
+      entry_block_id = hir_func.entry_block
+      ordered.sort_by! do |block|
+        if block.id == entry_block_id
+          # Entry block always first
+          {0_u32, 0_u32}
+        else
+          min_id = block.instructions.first?.try(&.id) || UInt32::MAX
+          {1_u32, min_id}
+        end
+      end
+
       ordered
     end
 
@@ -3126,6 +3142,9 @@ module Crystal
     private def get_value(hir_id : HIR::ValueId) : ValueId
       if mapped = @value_map[hir_id]?
         return mapped
+      end
+      if ENV["DEBUG_GET_VALUE"]?
+        STDERR.puts "[GET_VALUE] UNMAPPED hir_id=#{hir_id} in #{@current_lowering_func_name}"
       end
       0_u32
     end
