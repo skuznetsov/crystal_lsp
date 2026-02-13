@@ -21554,10 +21554,21 @@ module Crystal::HIR
       # constants need to be initialized at runtime by storing a pointer to the string data.
       unless @constant_literal_values[full_name]?.is_a?(CrystalV2::Compiler::Semantic::MacroNumberValue) ||
              @constant_literal_values[full_name]?.is_a?(CrystalV2::Compiler::Semantic::MacroBoolValue)
+        # Defer runtime initialization for string literals and constructor calls.
+        # String literals need runtime allocation, constructor calls (Foo.new(...))
+        # need the constructor to run.
         old_a2 = @arena
         @arena = arena
         val_node = @arena[value_id]
         needs_deferred = val_node.is_a?(CrystalV2::Compiler::Frontend::StringNode)
+        # Also defer constructor calls: CallNode where callee is X.new(...)
+        if !needs_deferred && val_node.is_a?(CrystalV2::Compiler::Frontend::CallNode)
+          callee_n = @arena[val_node.callee]
+          if callee_n.is_a?(CrystalV2::Compiler::Frontend::MemberAccessNode)
+            member_n = String.new(callee_n.member)
+            needs_deferred = true if member_n == "new"
+          end
+        end
         @arena = old_a2
         if needs_deferred
           owner = owner_name || "$"
@@ -29244,6 +29255,28 @@ module Crystal::HIR
                 ctx.emit(cast)
                 ctx.register_type(cast.id, base)
                 val_id = cast.id
+              end
+            elsif val_type.id >= TypeRef::FIRST_USER_TYPE && !is_union_type?(val_type)
+              # User type (class instance, not union) — call to_s() to convert
+              # to String before adding to interpolation parts. Without this,
+              # the ptr would be treated as a String ptr in the LLVM backend,
+              # reading garbage memory. Union types are handled separately by
+              # the LLVM backend's union payload extraction.
+              type_name = get_type_name_from_ref(val_type)
+              unless @enum_info.try(&.has_key?(type_name))
+                begin
+                  to_s_name = resolve_method_call(ctx, val_id, "to_s", [] of TypeRef, false)
+                  if to_s_name && !to_s_name.empty?
+                    remember_callsite_arg_types(to_s_name, [] of TypeRef)
+                    lower_function_if_needed(to_s_name) unless @function_lowering_states[to_s_name]?.try(&.completed?)
+                    to_s_call = Call.new(ctx.next_id, TypeRef::STRING, val_id, to_s_name, [] of ValueId)
+                    ctx.emit(to_s_call)
+                    ctx.register_type(to_s_call.id, TypeRef::STRING)
+                    val_id = to_s_call.id
+                  end
+                rescue
+                  # If resolution fails, leave as-is (ptr fallback in LLVM backend)
+                end
               end
             end
             parts << val_id
