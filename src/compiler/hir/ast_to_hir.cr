@@ -16449,6 +16449,25 @@ module Crystal::HIR
       end
     end
 
+    # Skip per-class inherited method compilation for primitive types and
+    # stdlib base classes where recompilation would break things.
+    private def per_class_inherited_skip?(receiver_class : String, resolved_owner : String) : Bool
+      # Skip for primitive types
+      return true if numeric_primitive_class_name?(receiver_class)
+      return true if receiver_class == "String" || receiver_class == "Bool" ||
+                     receiver_class == "Symbol" || receiver_class == "Nil"
+      # Skip when inheriting from fundamental base classes (Object, Reference, Value, etc.)
+      # These define generic methods (to_s, inspect, hash, etc.) not meant for per-class recompilation
+      return true if resolved_owner == "Object" || resolved_owner == "Reference" ||
+                     resolved_owner == "Value" || resolved_owner == "Number" ||
+                     resolved_owner == "Int" || resolved_owner == "Float" ||
+                     resolved_owner == "Struct" || resolved_owner == "Enum" ||
+                     resolved_owner == "Comparable" || resolved_owner == "Steppable"
+      # Skip for generic stdlib types
+      return true if receiver_class.includes?("(") || resolved_owner.includes?("(")
+      false
+    end
+
     private def primitive_template_owner(class_name : String) : String?
       case class_name
       when "Int8", "Int16", "Int32", "Int64", "Int128",
@@ -48486,7 +48505,8 @@ module Crystal::HIR
             if resolved_method_name
               resolved_owner = method_owner(resolved_method_name)
               if !resolved_owner.empty? && resolved_owner != info.name &&
-                 @class_info.has_key?(info.name) && !info.name.includes?('|')
+                 @class_info.has_key?(info.name) && !info.name.includes?('|') &&
+                 !per_class_inherited_skip?(info.name, resolved_owner)
                 per_class_name = "#{info.name}##{member_name}"
                 # Keep return_type from parent resolution (already determined)
                 resolved_method_name = per_class_name
