@@ -44631,9 +44631,15 @@ module Crystal::HIR
       result_value = lower_body(ctx, block.body)
       ctx.pop_scope
 
-      # Write to NEW array
+      # Write to NEW array — use block's return type, not source element type
       if result_value
-        index_set = IndexSet.new(ctx.next_id, element_type, new_array.id, index_phi.id, result_value)
+        result_element_type = ctx.type_of(result_value)
+        # Use block result type for IndexSet (e.g. String, not Base)
+        set_type = result_element_type
+        if set_type.id == 0 || set_type == TypeRef::VOID || set_type == TypeRef::NIL
+          set_type = element_type
+        end
+        index_set = IndexSet.new(ctx.next_id, set_type, new_array.id, index_phi.id, result_value)
         ctx.emit(index_set)
       end
 
@@ -44651,6 +44657,17 @@ module Crystal::HIR
       ctx.current_block = exit_block
       set_size = ArraySetSize.new(ctx.next_id, TypeRef::VOID, new_array.id, size_val.id)
       ctx.emit(set_size)
+
+      # Update array type registration based on block return type (like intrinsic version)
+      if result_value
+        result_element_type = ctx.type_of(result_value)
+        elem_type_name = get_type_name_from_ref(result_element_type)
+        if elem_type_name != "Unknown" && elem_type_name != "Void"
+          array_type = type_ref_for_name("Array(#{elem_type_name})")
+          ctx.register_type(new_array.id, array_type)
+        end
+      end
+
       new_array.id
     end
 
