@@ -1,4 +1,5 @@
 # Regression: Multiple rounds of hash insert/delete/compaction
+# EXPECT: hash_stress_ok
 # Tests that compaction works correctly across multiple cycles
 
 h = {} of String => Int32

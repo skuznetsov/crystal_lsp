@@ -1,4 +1,5 @@
 # Basic compilation sanity check
+# EXPECT: basic_sanity_ok
 # Tests: puts, arithmetic, array, hash literal, each
 
 puts "hello world"

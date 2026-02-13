@@ -1,4 +1,5 @@
 # Regression: Hash entries lost after delete + insert (compaction)
+# EXPECT: hash_compaction_ok
 # Bug: yield suffix `unless` parsed as argument modifier, AND
 #      loop exit didn't propagate inline-modified new_entry_index
 # Fixed: parser.cr (yield postfix modifier) + ast_to_hir.cr (while loop exit)

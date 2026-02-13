@@ -1,4 +1,5 @@
 # Regression: upto with block that modifies outer variable
+# EXPECT: upto_block_var_ok
 # Bug: while loop exit didn't propagate inline-modified variable
 # Fixed: ast_to_hir.cr (while loop exit backedge value propagation)
 

@@ -38,10 +38,13 @@ ai_tests/
 
 # Debug/test files
 tmp/
-test_*.cr
+/test_*.cr
 *.db
 
 logs/__pycache__/
+
+# Regression test binaries
+regression_tests/bin/
 
 # Local build artifacts (outputs from driver/examples)
 cv2*

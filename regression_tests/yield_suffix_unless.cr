@@ -1,4 +1,5 @@
 # Regression: yield with suffix unless/if parsed incorrectly
+# EXPECT: yield_suffix_unless_ok
 # Bug: `yield entry, i unless entry.deleted?` parsed as
 #      `yield(entry, (i unless entry.deleted?))` instead of
 #      `(yield entry, i) unless entry.deleted?`
