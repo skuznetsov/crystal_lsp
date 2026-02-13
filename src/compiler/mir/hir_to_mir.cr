@@ -2871,7 +2871,15 @@ module Crystal
       # Lower raise as a call to runtime raise function
       if exc = raise_inst.exception
         exc_val = get_value(exc)
-        builder.extern_call("__crystal_v2_raise", [exc_val], TypeRef::VOID)
+        # Check if the exception value is a String (not an Exception object).
+        # In Crystal, `raise "msg"` and `raise string_var` both create RuntimeError.
+        # Only `raise exception_obj` passes the exception directly.
+        exc_type = @hir_value_types[exc]?
+        if exc_type && exc_type.id == HIR::TypeRef::STRING.id
+          builder.extern_call("__crystal_v2_raise_msg", [exc_val], TypeRef::VOID)
+        else
+          builder.extern_call("__crystal_v2_raise", [exc_val], TypeRef::VOID)
+        end
       elsif msg = raise_inst.message
         # Raise with message string
         msg_val = builder.const_string(msg)
