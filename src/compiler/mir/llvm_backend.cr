@@ -2097,6 +2097,13 @@ module Crystal::MIR
       # 3. memcmp on the data bytes
       emit_raw "define i1 @__crystal_v2_string_eq(ptr %a, ptr %b) {\n"
       emit_raw "entry:\n"
+      # Guard against null pointers (e.g., deleted hash entries with zeroed keys)
+      emit_raw "  %a_null = icmp eq ptr %a, null\n"
+      emit_raw "  br i1 %a_null, label %ret_false, label %check_b\n"
+      emit_raw "check_b:\n"
+      emit_raw "  %b_null = icmp eq ptr %b, null\n"
+      emit_raw "  br i1 %b_null, label %ret_false, label %check_same\n"
+      emit_raw "check_same:\n"
       emit_raw "  %same = icmp eq ptr %a, %b\n"
       emit_raw "  br i1 %same, label %ret_true, label %check_size\n"
       emit_raw "check_size:\n"
@@ -4083,6 +4090,44 @@ module Crystal::MIR
         emit_raw "  ret i64 %addr\n"
         emit_raw "}\n\n"
         return
+      end
+
+      # Pointer(Struct)#clear — our compiler stores structs as pointers on the heap.
+      # The standard clear does memset(slot, 0, ptr_size) which nullifies the pointer.
+      # For struct element types, we must instead zero the POINTED-TO struct data so that
+      # field-based checks (like Entry#deleted? which checks hash==0) work correctly.
+      if mangled_name.includes?("Pointer$L") && mangled_name.includes?("$Hclear")
+        # Extract element type name from mangled Pointer$L<type>$R
+        if m = mangled_name.match(/Pointer\$L(.+)\$R\$Hclear/)
+          elem_mangled = m[1]
+          # Check if element type is a heap-allocated struct/class (not primitive)
+          elem_is_struct = false
+          struct_size = 0_u64
+          @module.type_registry.types.each do |type|
+            next unless @type_mapper.mangle_name(type.name) == elem_mangled
+            if type.kind.struct? || type.kind.reference?
+              elem_is_struct = true
+              struct_size = type.size > 0 ? type.size : 8_u64
+            end
+            break
+          end
+          if elem_is_struct && struct_size > 0
+            # Emit custom clear that follows the pointer and zeros the struct data.
+            # self = pointer to the pointer slot in the array, count = number of elements.
+            emit_raw "define void @#{mangled_name}(ptr %self, i32 %count) {\n"
+            emit_raw "entry:\n"
+            emit_raw "  %elem_ptr = load ptr, ptr %self\n"
+            emit_raw "  %isnull = icmp eq ptr %elem_ptr, null\n"
+            emit_raw "  br i1 %isnull, label %done, label %do_clear\n"
+            emit_raw "do_clear:\n"
+            emit_raw "  call void @llvm.memset.p0.i64(ptr %elem_ptr, i8 0, i64 #{struct_size}, i1 false)\n"
+            emit_raw "  br label %done\n"
+            emit_raw "done:\n"
+            emit_raw "  ret void\n"
+            emit_raw "}\n\n"
+            return
+          end
+        end
       end
 
       emit_raw "define #{return_type} @#{mangled_name}(#{param_types.join(", ")}) {\n"
