@@ -37172,9 +37172,14 @@ module Crystal::HIR
         # Array#join(separator) (EARLY): intercept before method resolution.
         if method_name == "join" && call_args.size == 1 && block_expr.nil? && block_pass_expr.nil?
           recv_id = lower_expr(ctx, obj_expr)
-          if array_intrinsic_receiver?(ctx, recv_id)
-            sep_id = with_arena(call_arena) { lower_expr(ctx, call_args[0]) }
+          sep_id = with_arena(call_arena) { lower_expr(ctx, call_args[0]) }
+          if array_string_intrinsic_receiver?(ctx, recv_id)
             ext_call = ExternCall.new(ctx.next_id, TypeRef::STRING, "__crystal_v2_array_join_string", [recv_id, sep_id])
+            ctx.emit(ext_call)
+            ctx.register_type(ext_call.id, TypeRef::STRING)
+            return ext_call.id
+          elsif array_int32_intrinsic_receiver?(ctx, recv_id)
+            ext_call = ExternCall.new(ctx.next_id, TypeRef::STRING, "__crystal_v2_array_join_int32", [recv_id, sep_id])
             ctx.emit(ext_call)
             ctx.register_type(ext_call.id, TypeRef::STRING)
             return ext_call.id
@@ -41583,11 +41588,16 @@ module Crystal::HIR
         return ext_call.id
       end
 
-      # Intercept Array(String)#join(String) → runtime helper
+      # Intercept Array#join(String) → runtime helper
       if receiver_id && method_name == "join" && args.size == 1 &&
          mangled_method_name.starts_with?("Array(")
-        if array_intrinsic_receiver?(ctx, receiver_id)
+        if array_string_intrinsic_receiver?(ctx, receiver_id)
           ext_call = ExternCall.new(ctx.next_id, TypeRef::STRING, "__crystal_v2_array_join_string", [receiver_id, args[0]])
+          ctx.emit(ext_call)
+          ctx.register_type(ext_call.id, TypeRef::STRING)
+          return ext_call.id
+        elsif array_int32_intrinsic_receiver?(ctx, receiver_id)
+          ext_call = ExternCall.new(ctx.next_id, TypeRef::STRING, "__crystal_v2_array_join_int32", [receiver_id, args[0]])
           ctx.emit(ext_call)
           ctx.register_type(ext_call.id, TypeRef::STRING)
           return ext_call.id
@@ -43948,6 +43958,28 @@ module Crystal::HIR
       if desc = @module.get_type_descriptor(receiver_type)
         return desc.kind == TypeKind::Array &&
           (desc.name.starts_with?("Array(") || desc.name.starts_with?("StaticArray("))
+      end
+
+      false
+    end
+
+    private def array_string_intrinsic_receiver?(ctx : LoweringContext, receiver_id : ValueId) : Bool
+      receiver_type = ctx.type_of(receiver_id)
+      return false if receiver_type == TypeRef::VOID
+
+      if desc = @module.get_type_descriptor(receiver_type)
+        return desc.kind == TypeKind::Array && desc.name == "Array(String)"
+      end
+
+      false
+    end
+
+    private def array_int32_intrinsic_receiver?(ctx : LoweringContext, receiver_id : ValueId) : Bool
+      receiver_type = ctx.type_of(receiver_id)
+      return false if receiver_type == TypeRef::VOID
+
+      if desc = @module.get_type_descriptor(receiver_type)
+        return desc.kind == TypeKind::Array && desc.name == "Array(Int32)"
       end
 
       false
@@ -47743,8 +47775,8 @@ module Crystal::HIR
         end
       end
 
-      # Array#join intrinsic (MemberAccessNode path — no-parens call uses empty separator)
-      if member_name == "join" && array_intrinsic_receiver?(ctx, object_id)
+      # Array(String)#join intrinsic (MemberAccessNode path — no-parens call uses empty separator)
+      if member_name == "join" && array_string_intrinsic_receiver?(ctx, object_id)
         empty_sep = Literal.new(ctx.next_id, TypeRef::STRING, "")
         ctx.emit(empty_sep)
         ctx.register_type(empty_sep.id, TypeRef::STRING)
