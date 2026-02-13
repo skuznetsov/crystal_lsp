@@ -48490,6 +48490,19 @@ module Crystal::HIR
           ctx.emit(call)
           ctx.register_type(call.id, TypeRef::FLOAT64)
           return call.id
+        when "next_power_of_two"
+          # Inline intrinsic for Int32 — avoids abstract Int method which crashes
+          # due to is_a?(Int::Signed) runtime check on raw integer values.
+          # Implementation: bit-trick for next power of 2, clamped for signed int
+          call = Call.new(ctx.next_id, TypeRef::INT32, nil, "__crystal_v2_next_power_of_two_i32", [object_id])
+          ctx.emit(call)
+          ctx.register_type(call.id, TypeRef::INT32)
+          return call.id
+        when "leading_zeros_count"
+          call = Call.new(ctx.next_id, TypeRef::INT32, nil, "__crystal_v2_leading_zeros_count_i32", [object_id])
+          ctx.emit(call)
+          ctx.register_type(call.id, TypeRef::INT32)
+          return call.id
         when "times"
           # Int32#times with block - handled in lower_call for blocks
         end

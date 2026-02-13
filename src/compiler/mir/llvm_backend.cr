@@ -2960,6 +2960,40 @@ module Crystal::MIR
       emit_raw "  ret i32 %result\n"
       emit_raw "}\n\n"
 
+      # Int32 next_power_of_two (bit-trick, clamped for signed)
+      # Equivalent to Crystal's Int#next_power_of_two for Int32 (signed)
+      emit_raw "define i32 @__crystal_v2_next_power_of_two_i32(i32 %val) {\n"
+      emit_raw "fn_entry:\n"
+      emit_raw "  %le1 = icmp sle i32 %val, 1\n"
+      emit_raw "  br i1 %le1, label %ret_one, label %compute\n"
+      emit_raw "compute:\n"
+      emit_raw "  %x0 = sub i32 %val, 1\n"
+      emit_raw "  %s1 = lshr i32 %x0, 1\n"
+      emit_raw "  %x1 = or i32 %x0, %s1\n"
+      emit_raw "  %s2 = lshr i32 %x1, 2\n"
+      emit_raw "  %x2 = or i32 %x1, %s2\n"
+      emit_raw "  %s3 = lshr i32 %x2, 4\n"
+      emit_raw "  %x3 = or i32 %x2, %s3\n"
+      emit_raw "  %s4 = lshr i32 %x3, 8\n"
+      emit_raw "  %x4 = or i32 %x3, %s4\n"
+      emit_raw "  %s5 = lshr i32 %x4, 16\n"
+      emit_raw "  %x5 = or i32 %x4, %s5\n"
+      emit_raw "  %raw = add i32 %x5, 1\n"
+      # Clamp to 2^30 = 1073741824 for signed Int32 (bits - 2)
+      emit_raw "  %overflow = icmp slt i32 %raw, 0\n"
+      emit_raw "  %result = select i1 %overflow, i32 1073741824, i32 %raw\n"
+      emit_raw "  ret i32 %result\n"
+      emit_raw "ret_one:\n"
+      emit_raw "  ret i32 1\n"
+      emit_raw "}\n\n"
+
+      # Int32 leading_zeros_count (using LLVM ctlz intrinsic)
+      emit_raw "declare i32 @llvm.ctlz.i32(i32, i1)\n"
+      emit_raw "define i32 @__crystal_v2_leading_zeros_count_i32(i32 %val) {\n"
+      emit_raw "  %result = call i32 @llvm.ctlz.i32(i32 %val, i1 0)\n"
+      emit_raw "  ret i32 %result\n"
+      emit_raw "}\n\n"
+
       # int32 to int64 (sign extend)
       emit_raw "define i64 @__crystal_v2_int_to_i64(i32 %val) {\n"
       emit_raw "  %ext = sext i32 %val to i64\n"
@@ -8140,6 +8174,45 @@ module Crystal::MIR
             @value_types[inst.id] = @value_types[self_id]? || TypeRef::INT32
             return
           end
+        end
+      end
+
+      # Intercept Int#next_power_of_two — abstract Int method crashes at runtime
+      # because is_a?(Int::Signed) tries to load type_id from raw integer value.
+      # Redirect to our bit-trick intrinsic.
+      if callee_name == "Int$Hnext_power_of_two" || callee_name == "Int32$Hnext_power_of_two"
+        if inst.args.size >= 1
+          self_id = inst.args[0]
+          self_val = value_ref(self_id)
+          self_type = lookup_value_llvm_type(self_id)
+          if self_type == "ptr"
+            # Raw int encoded as ptr — ptrtoint first
+            int_name = "%npt_int.#{inst.id}"
+            emit "#{int_name} = ptrtoint ptr #{self_val} to i32"
+            emit "#{name} = call i32 @__crystal_v2_next_power_of_two_i32(i32 #{int_name})"
+          else
+            emit "#{name} = call i32 @__crystal_v2_next_power_of_two_i32(i32 #{self_val})"
+          end
+          @value_types[inst.id] = TypeRef::INT32
+          return
+        end
+      end
+
+      # Intercept Int#leading_zeros_count — same issue as next_power_of_two
+      if callee_name == "Int$Hleading_zeros_count" || callee_name == "Int32$Hleading_zeros_count"
+        if inst.args.size >= 1
+          self_id = inst.args[0]
+          self_val = value_ref(self_id)
+          self_type = lookup_value_llvm_type(self_id)
+          if self_type == "ptr"
+            int_name = "%lzc_int.#{inst.id}"
+            emit "#{int_name} = ptrtoint ptr #{self_val} to i32"
+            emit "#{name} = call i32 @__crystal_v2_leading_zeros_count_i32(i32 #{int_name})"
+          else
+            emit "#{name} = call i32 @__crystal_v2_leading_zeros_count_i32(i32 #{self_val})"
+          end
+          @value_types[inst.id] = TypeRef::INT32
+          return
         end
       end
 
