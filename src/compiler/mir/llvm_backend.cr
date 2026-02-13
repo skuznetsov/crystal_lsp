@@ -4135,9 +4135,11 @@ module Crystal::MIR
                           else                        "ptr"
                           end
 
-        # Compute value offset in Entry body: after @key field
+        # Compute value offset in Entry body: after @key field, aligned to value type
+        # Entry struct layout: @key at 0, @value at aligned(key_size, value_align), @hash after
         key_size = key_is_ptr ? 8 : 4
-        value_offset = key_size
+        value_align = (value_llvm_type == "ptr" || value_llvm_type == "i64") ? 8 : 4
+        value_offset = (key_size + value_align - 1) & ~(value_align - 1)
 
         # Find the find_entry function name
         find_entry_name = "#{hash_prefix}$Hfind_entry$$#{key_type_suffix}"
