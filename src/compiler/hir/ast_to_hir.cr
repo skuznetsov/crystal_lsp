@@ -43216,6 +43216,7 @@ module Crystal::HIR
 
       saved_locals = ctx.save_locals
       saved_current_class = @current_class
+      saved_receiver_type : TypeRef? = receiver_id ? ctx.type_of(receiver_id) : nil
       begin
         locals = ctx.all_locals
         # Bind `self` to the receiver so default expressions like `size - 1`
@@ -43262,6 +43263,13 @@ module Crystal::HIR
       ensure
         ctx.restore_locals(saved_locals)
         @current_class = saved_current_class
+        # Restore receiver type — apply_default_args may have retyped it to the
+        # function context (e.g., Enumerable) when the method is defined on a module.
+        # The caller needs the original concrete type (e.g., Array(String)) for
+        # intrinsic detection and correct codegen.
+        if receiver_id && saved_receiver_type
+          ctx.register_type(receiver_id, saved_receiver_type)
+        end
       end
 
       args
