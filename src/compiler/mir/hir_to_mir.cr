@@ -2957,23 +2957,15 @@ module Crystal
         index = get_value(idx)
         elem_type = convert_type(load.type)
         gep = builder.gep_dynamic(ptr, index, elem_type)
-        # For struct element types, the data is inline — GEP result IS the value pointer
-        if hir_type_is_struct?(load.type)
-          @inline_struct_ptrs << load.id
-          gep
-        else
-          builder.load(gep, result_type)
-        end
+        # Our compiler heap-allocates structs, so Pointer(Struct) buffers
+        # store heap pointers (not inline data). Always load the pointer
+        # from the buffer slot, then FieldGet dereferences it.
+        builder.load(gep, result_type)
       else
         # ptr.value - direct access
-        # For struct types, the pointer already points to inline struct data.
-        # Return the pointer unchanged (no load). Matches Crystal value semantics.
-        if hir_type_is_struct?(load.type)
-          @inline_struct_ptrs << load.id
-          ptr
-        else
-          builder.load(ptr, result_type)
-        end
+        # Our compiler heap-allocates structs, so *ptr contains a heap pointer.
+        # Load it so that subsequent FieldGet can dereference it correctly.
+        builder.load(ptr, result_type)
       end
     end
 
@@ -3030,9 +3022,15 @@ module Crystal
                       when "UInt64", "Int64", "Float64" then 8
                       when "UInt128", "Int128" then 16
                       else
-                        # For struct types, look up actual size from type registry
+                        # Structs and classes are heap-allocated in our ABI, so
+                        # Pointer(T) buffers store 8-byte pointers, not inline data.
+                        # Only use actual element size for inline types (tuples, enums).
                         if elem_mir_type = @mir_module.type_registry.get_by_name(elem_name)
-                          elem_mir_type.size > 0 ? elem_mir_type.size.to_i32 : 8
+                          if elem_mir_type.kind.tuple? || elem_mir_type.kind.enum?
+                            elem_mir_type.size > 0 ? elem_mir_type.size.to_i32 : 8
+                          else
+                            8 # heap-allocated → pointer-sized elements
+                          end
                         else
                           8 # class/reference instances are pointers (8 bytes)
                         end

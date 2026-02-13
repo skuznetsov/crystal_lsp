@@ -1663,6 +1663,9 @@ module Crystal::HIR
     @inline_caller_type_param_map_stack : Array(Hash(String, String)) = [] of Hash(String, String)
     # Loop-carried locals for inline yield contexts (used to keep phi-bound values stable).
     @inline_loop_vars_stack : Array(Set(String)) = [] of Set(String)
+    # Pre-revert values for inline loop vars: saved before inline_loop_vars reverts them,
+    # so the enclosing while loop can use them for PHI backedge incoming values.
+    @inline_loop_var_backedge_values : Hash(String, ValueId) = {} of String => ValueId
 
     # While inlining yield-functions, substitute `yield` with the call-site block body.
     # Use a stack to support nested inlining (a block body may itself contain `yield`).
@@ -32330,7 +32333,14 @@ module Crystal::HIR
           # Update local to point to phi
           ctx.register_local(var_name, phi.id)
           if inline_vars.includes?(var_name)
-            @inline_caller_locals_stack[-1][var_name] = phi.id
+            # Find the correct stack entry that contains this variable and update it
+            # to point to the PHI (not just [-1] which may be the wrong level).
+            @inline_caller_locals_stack.reverse_each do |locals|
+              if locals.has_key?(var_name)
+                locals[var_name] = phi.id
+                break
+              end
+            end
           end
         end
       end
@@ -32356,6 +32366,8 @@ module Crystal::HIR
       if !inline_vars.empty?
         @inline_loop_vars_stack << inline_vars
         pushed_inline = true
+        # Clear backedge values before body — they'll be populated by inline_block_body
+        inline_vars.each { |name| @inline_loop_var_backedge_values.delete(name) }
       end
       begin
         lower_body(ctx, node.body)
@@ -32373,11 +32385,21 @@ module Crystal::HIR
       # After body execution, get updated values and patch phi nodes
       assigned_vars.each do |var_name|
         if phi = phi_nodes[var_name]?
-          if updated_val = ctx.lookup_local(var_name)
+          updated_val = ctx.lookup_local(var_name)
+          # For inline vars (outer-scope variables modified in inlined block bodies),
+          # ctx.lookup_local may return the PHI itself because inline_block_body's
+          # inline_loop_vars revert restored the stack entry to the PHI value.
+          # Use the saved pre-revert value from @inline_loop_var_backedge_values instead.
+          if inline_vars.includes?(var_name)
+            if saved = @inline_loop_var_backedge_values[var_name]?
+              updated_val = saved
+            end
+          end
+          if updated_val
             # Add incoming from body block (the updated value)
             incoming_val = updated_val
             phi_type = ctx.type_of(phi.id)
-            if phi_type != ctx.type_of(updated_val)
+            if updated_val != phi.id && phi_type != ctx.type_of(updated_val)
               val_type = ctx.type_of(updated_val)
               if is_union_type?(phi_type)
                 if variant_id = get_union_variant_id(phi_type, val_type)
@@ -32395,9 +32417,21 @@ module Crystal::HIR
             if env_get("DEBUG_LOOP_PHI")
               STDERR.puts "[LOOP_PHI_BACKEDGE] var=#{var_name} phi=#{phi.id} updated_val=#{updated_val} incoming_val=#{incoming_val} body_exit=#{body_exit_block} phi_type=#{phi_type.id} val_type=#{ctx.type_of(updated_val).id} same_as_phi=#{updated_val == phi.id}"
             end
-            phi.add_incoming(body_exit_block, incoming_val)
+            # Don't add self-referential PHI incoming (would make PHI a no-op)
+            if incoming_val != phi.id
+              phi.add_incoming(body_exit_block, incoming_val)
+            end
             # Reset local to point back to phi for next iteration
             ctx.register_local(var_name, phi.id)
+            # Also restore the stack entry to the PHI for inline vars
+            if inline_vars.includes?(var_name)
+              @inline_caller_locals_stack.reverse_each do |locals|
+                if locals.has_key?(var_name)
+                  locals[var_name] = phi.id
+                  break
+                end
+              end
+            end
           end
         end
       end
@@ -32579,7 +32613,12 @@ module Crystal::HIR
           phi_nodes[var_name] = phi
           ctx.register_local(var_name, phi.id)
           if inline_vars.includes?(var_name)
-            @inline_caller_locals_stack[-1][var_name] = phi.id
+            @inline_caller_locals_stack.reverse_each do |locals|
+              if locals.has_key?(var_name)
+                locals[var_name] = phi.id
+                break
+              end
+            end
           end
         end
       end
@@ -32593,6 +32632,7 @@ module Crystal::HIR
       if !inline_vars.empty?
         @inline_loop_vars_stack << inline_vars
         pushed_inline = true
+        inline_vars.each { |name| @inline_loop_var_backedge_values.delete(name) }
       end
       begin
         lower_body(ctx, node.body)
@@ -32609,10 +32649,16 @@ module Crystal::HIR
       # After body execution, update phi nodes for next iteration
       assigned_vars.each do |var_name|
         if phi = phi_nodes[var_name]?
-          if updated_val = ctx.lookup_local(var_name)
+          updated_val = ctx.lookup_local(var_name)
+          if inline_vars.includes?(var_name)
+            if saved = @inline_loop_var_backedge_values[var_name]?
+              updated_val = saved
+            end
+          end
+          if updated_val
             incoming_val = updated_val
             phi_type = ctx.type_of(phi.id)
-            if phi_type != ctx.type_of(updated_val)
+            if updated_val != phi.id && phi_type != ctx.type_of(updated_val)
               val_type = ctx.type_of(updated_val)
               if is_union_type?(phi_type)
                 if variant_id = get_union_variant_id(phi_type, val_type)
@@ -32627,8 +32673,18 @@ module Crystal::HIR
                 incoming_val = cast.id
               end
             end
-            phi.add_incoming(body_exit_block, incoming_val)
+            if incoming_val != phi.id
+              phi.add_incoming(body_exit_block, incoming_val)
+            end
             ctx.register_local(var_name, phi.id)
+            if inline_vars.includes?(var_name)
+              @inline_caller_locals_stack.reverse_each do |locals|
+                if locals.has_key?(var_name)
+                  locals[var_name] = phi.id
+                  break
+                end
+              end
+            end
           end
         end
       end
@@ -32765,14 +32821,27 @@ module Crystal::HIR
           block_id = inline_block.object_id
           unless visited_blocks.includes?(block_id)
             visited_blocks.add(block_id)
+            # Pop the current block from the stack so inner yields in this block
+            # body resolve to the NEXT block on the stack (supporting nested yields:
+            # e.g., upto yields to each_entry_with_index body, which yields to do_compaction block).
+            popped_block = @inline_yield_block_stack.pop
+            popped_arena = @inline_yield_block_arena_stack.pop?
+            popped_param_types = @inline_yield_block_param_types_stack.pop?
             old_arena = @arena
-            if block_arena = @inline_yield_block_arena_stack.last?
-              @arena = block_arena
+            if popped_arena
+              @arena = popped_arena
             end
             begin
               block_vars = collect_assigned_vars(inline_block.body, visited_blocks)
             ensure
               @arena = old_arena
+              @inline_yield_block_stack << popped_block
+              if pa = popped_arena
+                @inline_yield_block_arena_stack << pa
+              end
+              if pp = popped_param_types
+                @inline_yield_block_param_types_stack << pp
+              end
             end
             if params = inline_block.params
               param_names = params.compact_map { |param| param.name ? String.new(param.name.not_nil!) : nil }
@@ -32789,8 +32858,10 @@ module Crystal::HIR
         return val
       end
 
-      if caller_locals = @inline_caller_locals_stack.last?
-        if val = caller_locals[name]?
+      # Search through ALL stack entries (not just last) — outer-scope variables
+      # from deeply nested inline yields may be several levels up.
+      @inline_caller_locals_stack.reverse_each do |locals|
+        if val = locals[name]?
           inline_vars.add(name)
           return val
         end
@@ -47177,6 +47248,15 @@ module Crystal::HIR
                      if loop_vars = inline_loop_vars_union
                        loop_vars.each do |name|
                          if prev = caller_locals[name]?
+                           # Save the pre-revert value so the enclosing while loop can use
+                           # it for the PHI backedge incoming value. Without this, the
+                           # updated value (e.g., new_entry_index + 1) would be lost after
+                           # the revert restores the PHI value.
+                           if updated = caller_locals_after[name]?
+                             if updated != prev
+                               @inline_loop_var_backedge_values[name] = updated
+                             end
+                           end
                            caller_locals_after[name] = prev
                          else
                            caller_locals_after.delete(name)

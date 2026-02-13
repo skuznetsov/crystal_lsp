@@ -6445,13 +6445,15 @@ module Crystal::MIR
         element_type = "i8"
       end
 
-      # CRITICAL: For struct/tuple element types that map to "ptr" in our ABI,
-      # GEP would step by sizeof(ptr)=8 instead of sizeof(struct).
-      # Use byte-level GEP (i8) with index * sizeof(element) instead.
+      # For tuple element types that map to "ptr" in our ABI, GEP would step
+      # by sizeof(ptr)=8 instead of sizeof(tuple). Use byte-level GEP instead.
+      # NOTE: Structs are heap-allocated in our ABI — Pointer(Struct) buffers
+      # store 8-byte heap pointers, so GEP with ptr stride (8) is correct.
+      # Only tuples need the size override since they're stored inline.
       struct_elem_size = inst.element_byte_size  # Explicit size from HIR (for generic structs)
       if struct_elem_size == 0 && element_type == "ptr" && inst.element_type.id > TypeRef::POINTER.id
         if mir_type = @module.type_registry.get(inst.element_type)
-          if mir_type.kind.struct? || mir_type.kind.tuple?
+          if mir_type.kind.tuple?
             struct_elem_size = mir_type.size
           end
         end
