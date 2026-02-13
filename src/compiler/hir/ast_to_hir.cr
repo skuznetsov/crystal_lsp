@@ -5920,6 +5920,9 @@ module Crystal::HIR
               ivars[idx] = IVarInfo.new(ivar_name, param_type, existing.offset)
             elsif param_type == TypeRef::VOID && existing.type != TypeRef::VOID
               param_type = existing.type
+            elsif param_type == TypeRef::NIL && existing.type != TypeRef::VOID && existing.type != TypeRef::NIL
+              # `@ivar = nil` default: use the declared ivar type (e.g., Foo?) not Nil
+              param_type = existing.type
             end
           else
             ivars << IVarInfo.new(ivar_name, param_type, offset_ptr.value)

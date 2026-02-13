@@ -1084,6 +1084,8 @@ module CrystalV2
 
             if byte == '\\'.ord.to_u8
               has_escapes = true
+              scan_offset += 2  # Skip backslash AND the escaped character (e.g., \" \n \t \\)
+              next
             end
             scan_offset += 1
           end
