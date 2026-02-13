@@ -38670,35 +38670,10 @@ module Crystal::HIR
         end
       end
 
-      # String#index(String) and String#index(Char) intercept
-      # Returns i32 (-1 = not found) to avoid DWARF-contaminated stdlib bodies
-      # Note: Crystal returns Int32? (nilable), but we return plain Int32 for now.
-      # -1 means not found. Callers using `if idx` on Int32 will always be truthy.
-      if method_name == "index" && receiver_id && (args.size == 1 || args.size == 2)
-        recv_type = ctx.type_of(receiver_id)
-        if recv_type == TypeRef::STRING || recv_type == TypeRef::POINTER
-          arg_type = prepack_arg_types.size > 0 ? prepack_arg_types[0] : nil
-          offset_id = if args.size >= 2
-                        args[1]
-                      else
-                        zero_lit = Literal.new(ctx.next_id, TypeRef::INT32, 0_i64)
-                        ctx.emit(zero_lit)
-                        ctx.register_type(zero_lit.id, TypeRef::INT32)
-                        zero_lit.id
-                      end
-          helper_name = if arg_type == TypeRef::STRING
-                          "__crystal_v2_string_index_string"
-                        elsif arg_type && (arg_type == TypeRef::CHAR || arg_type.id == TypeRef::CHAR.id)
-                          "__crystal_v2_string_index_char"
-                        else
-                          "__crystal_v2_string_index_string"
-                        end
-          raw_result = ExternCall.new(ctx.next_id, TypeRef::INT32, helper_name, [receiver_id, args[0], offset_id])
-          ctx.emit(raw_result)
-          ctx.register_type(raw_result.id, TypeRef::INT32)
-          return raw_result.id
-        end
-      end
+      # String#index(String) and String#index(Char) intercept — DISABLED
+      # Now handled by LLVM override (String$Hindex$$Char) which returns Nil | Int32 union.
+      # The old runtime helper returned plain i32 (-1 for not found), which broke
+      # nil-narrowing. The LLVM override correctly returns the union type.
 
       # String#gsub intercept → runtime helper
       if method_name == "gsub" && receiver_id && args.size == 2 && block_expr.nil?
