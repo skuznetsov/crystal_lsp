@@ -8410,8 +8410,13 @@ module Crystal::MIR
                       when "i1"
                         default_val == "true" ? "i1 1" : "i1 0"
                       when "ptr"
-                        # Bool/Nil default with ptr type = type mismatch, use null
-                        "ptr null"
+                        # String default: create string constant; otherwise null
+                        if param.type == TypeRef::STRING && default_val != "true" && default_val != "false"
+                          str_global = get_or_create_string_global(default_val)
+                          "ptr #{str_global}"
+                        else
+                          "ptr null"
+                        end
                       when "float"
                         "float #{default_val.to_f? ? default_val : "0.0"}"
                       when "double"

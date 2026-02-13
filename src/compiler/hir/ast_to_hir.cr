@@ -2259,6 +2259,8 @@ module Crystal::HIR
         String.new(node.value)
       when CrystalV2::Compiler::Frontend::BoolNode
         node.value ? "true" : "false"
+      when CrystalV2::Compiler::Frontend::StringNode
+        String.new(node.value)
       when CrystalV2::Compiler::Frontend::NilNode
         nil # nil defaults are handled differently (union types)
       else
@@ -14432,7 +14434,6 @@ module Crystal::HIR
       force : Bool = false,
     )
       func_name = "#{class_name}.new"
-
       if env_get("DEBUG_ALLOC_STATS")
         @allocator_debug_total += 1
         @allocator_debug_counts[class_name] = (@allocator_debug_counts[class_name]? || 0) + 1
@@ -14546,9 +14547,20 @@ module Crystal::HIR
 
       # Propagate default literal values from the initialize DefNode to allocator params.
       # Without this, the LLVM backend pads missing args with 0 instead of the actual default.
-      init_def_for_defaults = @function_defs["#{class_name}#initialize"]?
+      init_def_key = "#{class_name}#initialize"
+      init_def_for_defaults = @function_defs[init_def_key]?
+      unless init_def_for_defaults
+        # Try mangled key (e.g., Foo#initialize$String_String)
+        @function_defs.each_key do |k|
+          if k.starts_with?("#{class_name}#initialize$")
+            init_def_for_defaults = @function_defs[k]
+            init_def_key = k
+            break
+          end
+        end
+      end
       if init_def_for_defaults && (init_def_params = init_def_for_defaults.params)
-        init_arena_for_defaults = @function_def_arenas["#{class_name}#initialize"]? || @arena
+        init_arena_for_defaults = @function_def_arenas[init_def_key]? || @arena
         with_arena(init_arena_for_defaults) do
           param_idx = 0
           init_def_params.each do |ast_param|
@@ -14806,6 +14818,35 @@ module Crystal::HIR
         ctx.register_local(param_name, hir_param.id)
         ctx.register_type(hir_param.id, param_type)
         param_ids << hir_param.id
+      end
+
+      # Propagate default literal values from the initialize DefNode to overload params.
+      # Without this, the LLVM backend pads missing args with 0/null instead of the actual default.
+      init_def_key_ovr = "#{class_name}#initialize"
+      init_def_for_defaults = @function_defs[init_def_key_ovr]?
+      unless init_def_for_defaults
+        @function_defs.each_key do |k|
+          if k.starts_with?("#{class_name}#initialize$")
+            init_def_for_defaults = @function_defs[k]
+            init_def_key_ovr = k
+            break
+          end
+        end
+      end
+      if init_def_for_defaults && (init_def_params = init_def_for_defaults.params)
+        init_arena_for_defaults = @function_def_arenas[init_def_key_ovr]? || @arena
+        with_arena(init_arena_for_defaults) do
+          param_idx = 0
+          init_def_params.each do |ast_param|
+            next if named_only_separator?(ast_param)
+            next if ast_param.is_block
+            break if param_idx >= func.params.size
+            if default_lit = extract_param_default_literal(ast_param)
+              func.params[param_idx].default_literal = default_lit
+            end
+            param_idx += 1
+          end
+        end
       end
 
       alloc = Allocate.new(ctx.next_id, class_info.type_ref, [] of ValueId, class_info.is_struct)
