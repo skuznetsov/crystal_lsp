@@ -3660,6 +3660,120 @@ module Crystal::MIR
         return true
       end
 
+      # Hash#key_hash for primitive Int32 keys — bypass broken Object#hash vdispatch.
+      # Primitives get inttoptr'd to ptr but vdispatch tries to load type_id from the raw address → crash.
+      # Fix: compute hash directly using Crystal::Hasher.permute(sext(key, i64)).result.
+      if mangled.ends_with?("$Hkey_hash$$Int32") && mangled.includes?("Hash$L")
+        emit_raw "; #{mangled} — direct Int32 hash override (bypass vdispatch)\n"
+        emit_raw "define i32 @#{mangled}(ptr %self, i32 %key) {\n"
+        emit_raw "entry:\n"
+        emit_raw "  %hasher = call ptr @Crystal$CCHasher$Dnew(i64 0, i64 0)\n"
+        emit_raw "  %key64 = sext i32 %key to i64\n"
+        emit_raw "  %hasher2 = call ptr @Crystal$CCHasher$Hpermute$$UInt64(ptr %hasher, i64 %key64)\n"
+        emit_raw "  %hash64 = call i64 @Crystal$CCHasher$Hresult(ptr %hasher2)\n"
+        emit_raw "  %hash32 = trunc i64 %hash64 to i32\n"
+        emit_raw "  %is_zero = icmp eq i32 %hash32, 0\n"
+        emit_raw "  br i1 %is_zero, label %ret_max, label %ret_hash\n"
+        emit_raw "ret_max:\n"
+        emit_raw "  ret i32 -1\n"  # UInt32::MAX = 0xFFFFFFFF = -1 in i32
+        emit_raw "ret_hash:\n"
+        emit_raw "  ret i32 %hash32\n"
+        emit_raw "}\n\n"
+        return true
+      end
+
+      # Hash#key_hash for String keys — bypass broken Object#hash vdispatch for String.
+      # String#hash calls hasher.string(self) which uses @bytesize and raw bytes.
+      # Override: directly call String's hash infrastructure.
+      if mangled.ends_with?("$Hkey_hash$$String") && mangled.includes?("Hash$L")
+        emit_raw "; #{mangled} — direct String hash override (bypass vdispatch)\n"
+        emit_raw "define i32 @#{mangled}(ptr %self, ptr %key) {\n"
+        emit_raw "entry:\n"
+        emit_raw "  %hasher = call ptr @Crystal$CCHasher$Dnew(i64 0, i64 0)\n"
+        # String hash: read bytesize from offset 4, get data ptr at offset 12
+        # Then hash each byte (like Crystal::Hasher#bytes does)
+        emit_raw "  %bs_ptr = getelementptr i8, ptr %key, i32 4\n"
+        emit_raw "  %bytesize = load i32, ptr %bs_ptr\n"
+        emit_raw "  %data = getelementptr i8, ptr %key, i32 12\n"
+        emit_raw "  %bs64 = sext i32 %bytesize to i64\n"
+        # Call Crystal::Hasher#bytes(ptr, size) if available, otherwise do permute with bytes
+        # Simple approach: hash the bytesize and first 8 bytes as i64 chunks
+        emit_raw "  br label %hash_loop\n"
+        emit_raw "hash_loop:\n"
+        emit_raw "  %i = phi i64 [0, %entry], [%i_next, %hash_continue]\n"
+        emit_raw "  %h = phi ptr [%hasher, %entry], [%h_next, %hash_continue]\n"
+        emit_raw "  %done = icmp sge i64 %i, %bs64\n"
+        emit_raw "  br i1 %done, label %hash_finish, label %hash_body\n"
+        emit_raw "hash_body:\n"
+        emit_raw "  %remaining = sub i64 %bs64, %i\n"
+        emit_raw "  %byte_ptr = getelementptr i8, ptr %data, i64 %i\n"
+        emit_raw "  %can_read_8 = icmp sge i64 %remaining, 8\n"
+        emit_raw "  br i1 %can_read_8, label %read8, label %read1\n"
+        emit_raw "read8:\n"
+        emit_raw "  %chunk64 = load i64, ptr %byte_ptr\n"
+        emit_raw "  %h8 = call ptr @Crystal$CCHasher$Hpermute$$UInt64(ptr %h, i64 %chunk64)\n"
+        emit_raw "  %i8_next = add i64 %i, 8\n"
+        emit_raw "  br label %hash_continue\n"
+        emit_raw "read1:\n"
+        emit_raw "  %byte = load i8, ptr %byte_ptr\n"
+        emit_raw "  %byte64 = zext i8 %byte to i64\n"
+        emit_raw "  %h1 = call ptr @Crystal$CCHasher$Hpermute$$UInt64(ptr %h, i64 %byte64)\n"
+        emit_raw "  %i1_next = add i64 %i, 1\n"
+        emit_raw "  br label %hash_continue\n"
+        emit_raw "hash_continue:\n"
+        emit_raw "  %h_next = phi ptr [%h8, %read8], [%h1, %read1]\n"
+        emit_raw "  %i_next = phi i64 [%i8_next, %read8], [%i1_next, %read1]\n"
+        emit_raw "  br label %hash_loop\n"
+        emit_raw "hash_finish:\n"
+        # Also permute with the length for better distribution
+        emit_raw "  %h_len = call ptr @Crystal$CCHasher$Hpermute$$UInt64(ptr %h, i64 %bs64)\n"
+        emit_raw "  %hash64 = call i64 @Crystal$CCHasher$Hresult(ptr %h_len)\n"
+        emit_raw "  %hash32 = trunc i64 %hash64 to i32\n"
+        emit_raw "  %is_zero = icmp eq i32 %hash32, 0\n"
+        emit_raw "  br i1 %is_zero, label %ret_max, label %ret_hash\n"
+        emit_raw "ret_max:\n"
+        emit_raw "  ret i32 -1\n"
+        emit_raw "ret_hash:\n"
+        emit_raw "  ret i32 %hash32\n"
+        emit_raw "}\n\n"
+        return true
+      end
+
+      # Hash#get_entry — fix stride and dereference pointer.
+      # Our compiler heap-allocates Entry structs and stores pointers in the entries array.
+      # malloc_entries allocates with stride 8 (ptr size), but get_entry uses sizeof(Entry body).
+      # Fix: use stride 8 and load the stored pointer.
+      if mangled.includes?("$Hget_entry$$Int32") && mangled.includes?("Hash$L")
+        emit_raw "; #{mangled} — fixed stride + pointer dereference override\n"
+        emit_raw "define ptr @#{mangled}(ptr %self, i32 %index) {\n"
+        emit_raw "entry:\n"
+        emit_raw "  %entries_ptr = getelementptr i8, ptr %self, i32 8\n"
+        emit_raw "  %entries = load ptr, ptr %entries_ptr\n"
+        emit_raw "  %idx64 = sext i32 %index to i64\n"
+        emit_raw "  %offset = mul i64 %idx64, 8\n"   # stride = 8 (pointer size)
+        emit_raw "  %slot = getelementptr i8, ptr %entries, i64 %offset\n"
+        emit_raw "  %entry_ptr = load ptr, ptr %slot\n"  # load the stored pointer
+        emit_raw "  ret ptr %entry_ptr\n"
+        emit_raw "}\n\n"
+        return true
+      end
+
+      # Hash#set_entry — fix stride to match malloc_entries (8 bytes per slot).
+      if mangled.includes?("$Hset_entry$$Int32_Hash$CCEntry$L")
+        emit_raw "; #{mangled} — fixed stride override\n"
+        emit_raw "define void @#{mangled}(ptr %self, i32 %index, ptr %value) {\n"
+        emit_raw "entry:\n"
+        emit_raw "  %entries_ptr = getelementptr i8, ptr %self, i32 8\n"
+        emit_raw "  %entries = load ptr, ptr %entries_ptr\n"
+        emit_raw "  %idx64 = sext i32 %index to i64\n"
+        emit_raw "  %offset = mul i64 %idx64, 8\n"
+        emit_raw "  %slot = getelementptr i8, ptr %entries, i64 %offset\n"
+        emit_raw "  store ptr %value, ptr %slot\n"
+        emit_raw "  ret void\n"
+        emit_raw "}\n\n"
+        return true
+      end
+
       false
     end
 
