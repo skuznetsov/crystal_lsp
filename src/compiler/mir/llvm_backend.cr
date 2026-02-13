@@ -4105,7 +4105,9 @@ module Crystal::MIR
           struct_size = 0_u64
           @module.type_registry.types.each do |type|
             next unless @type_mapper.mangle_name(type.name) == elem_mangled
-            if type.kind.struct? || type.kind.reference?
+            if type.kind.struct?
+              # Only structs need the override — for reference types (classes),
+              # the standard clear (zeroing the pointer) is correct.
               elem_is_struct = true
               struct_size = type.size > 0 ? type.size : 8_u64
             end

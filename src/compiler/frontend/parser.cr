@@ -7857,6 +7857,10 @@ module CrystalV2
           args_b = SmallVec(ExprId, 4).new
           named_b = SmallVec(NamedArgument, 2).new
 
+          # Disable postfix modifiers (if/unless/while/until) inside no-parens call args.
+          # "puts s unless s.empty?" must parse as "(puts s) unless (s.empty?)", not
+          # "puts (s unless s.empty?)". With parens, "puts(s unless s.empty?)" is valid.
+
           loop do
             # Check if we're at a block instead of arguments
             # Example: .tap { } or .each do |x|
@@ -7889,7 +7893,7 @@ module CrystalV2
               else
                 # Not a block shorthand/capture, rewind amp and parse normally
                 unadvance
-                arg = parse_op_assign
+                arg = without_postfix_modifiers { parse_op_assign }
               end
             elsif current_token.kind == Token::Kind::AmpMinus
               # Phase 103K: Handle &-> (proc pointer passed as block argument)
@@ -7924,14 +7928,14 @@ module CrystalV2
                 # Should not happen since we check for Greater in prefix check
                 # But if it does, parse as expression
                 unadvance
-                arg = parse_op_assign
+                arg = without_postfix_modifiers { parse_op_assign }
               end
             elsif current_token.kind == Token::Kind::Star || current_token.kind == Token::Kind::StarStar
               # Splat arguments
               star_token = current_token
               advance
               skip_trivia
-              value_expr = parse_op_assign
+              value_expr = without_postfix_modifiers { parse_op_assign }
               if value_expr.invalid?
                 @parsing_call_args -= 1
                 return PREFIX_ERROR
@@ -7979,11 +7983,11 @@ module CrystalV2
                 else
                   # Not a typed field, rewind and parse normally
                   @index = save_idx
-                  arg = parse_op_assign
+                  arg = without_postfix_modifiers { parse_op_assign }
                 end
               else
                 # Could be: positional arg, assignment as arg, or named arg
-                arg = parse_op_assign
+                arg = without_postfix_modifiers { parse_op_assign }
               end
             end
             if arg.invalid?
@@ -8013,7 +8017,7 @@ module CrystalV2
                 if current_token.kind == Token::Kind::Eq
                   advance
                   skip_whitespace_and_optional_newlines
-                  decl_value_expr = parse_op_assign
+                  decl_value_expr = without_postfix_modifiers { parse_op_assign }
                   return PREFIX_ERROR if decl_value_expr.invalid?
                 end
 
@@ -8049,7 +8053,7 @@ module CrystalV2
               consume_newlines  # Allow newlines after colon in named arguments
 
               # Parse value (using parse_op_assign like original Crystal)
-              value_expr = parse_op_assign
+              value_expr = without_postfix_modifiers { parse_op_assign }
               if value_expr.invalid?
                 @parsing_call_args -= 1
                 return PREFIX_ERROR
