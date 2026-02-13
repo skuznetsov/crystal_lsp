@@ -11149,7 +11149,9 @@ module Crystal::HIR
                         TypeRef::VOID
                       end
           unless ivars.any? { |iv| iv.name == ivar_name }
-            ivars << IVarInfo.new(ivar_name, ivar_type, offset_ref.value)
+            ivars << IVarInfo.new(ivar_name, ivar_type, offset_ref.value,
+              default_expr_id: spec.default_value,
+              default_arena: spec.default_value ? @arena : nil)
             offset_ref.value += type_size(ivar_type)
           end
           setter_name = "#{class_name}##{storage_name}="
@@ -11171,7 +11173,9 @@ module Crystal::HIR
                         TypeRef::VOID
                       end
           unless ivars.any? { |iv| iv.name == ivar_name }
-            ivars << IVarInfo.new(ivar_name, ivar_type, offset_ref.value)
+            ivars << IVarInfo.new(ivar_name, ivar_type, offset_ref.value,
+              default_expr_id: spec.default_value,
+              default_arena: spec.default_value ? @arena : nil)
             offset_ref.value += type_size(ivar_type)
           end
           getter_base = "#{class_name}##{getter_name}"
@@ -13113,7 +13117,9 @@ module Crystal::HIR
                   # Register ivar if not already declared
                   unless ivars.any? { |iv| iv.name == ivar_name }
                     offset = align_offset(offset, type_alignment(ivar_type, is_c_struct))
-                    ivars << IVarInfo.new(ivar_name, ivar_type, offset)
+                    ivars << IVarInfo.new(ivar_name, ivar_type, offset,
+                      default_expr_id: spec.default_value,
+                      default_arena: spec.default_value ? @arena : nil)
                     offset += type_size(ivar_type, is_c_struct)
                   end
                   # Register setter method: def name=(value : Type) : Type
@@ -13148,7 +13154,9 @@ module Crystal::HIR
                   # Register ivar if not already declared
                   unless ivars.any? { |iv| iv.name == ivar_name }
                     offset = align_offset(offset, type_alignment(ivar_type, is_c_struct))
-                    ivars << IVarInfo.new(ivar_name, ivar_type, offset)
+                    ivars << IVarInfo.new(ivar_name, ivar_type, offset,
+                      default_expr_id: spec.default_value,
+                      default_arena: spec.default_value ? @arena : nil)
                     offset += type_size(ivar_type, is_c_struct)
                   end
                   # Register getter method
