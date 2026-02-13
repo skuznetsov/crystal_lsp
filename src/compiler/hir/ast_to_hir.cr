@@ -45660,6 +45660,15 @@ module Crystal::HIR
 
       entry_block = ctx.current_block
 
+      # Collect variables assigned in the block body for phi tracking
+      assigned_vars = collect_assigned_vars(block.body)
+      initial_values = {} of String => ValueId
+      assigned_vars.each do |var_name|
+        if val = ctx.lookup_local(var_name)
+          initial_values[var_name] = val
+        end
+      end
+
       # Emit constants in entry block
       zero = Literal.new(ctx.next_id, TypeRef::INT32, 0_i64)
       ctx.emit(zero)
@@ -45682,6 +45691,19 @@ module Crystal::HIR
       index_phi.add_incoming(entry_block, zero.id)
       ctx.emit(index_phi)
 
+      # Create phi nodes for outer variables modified in the block body
+      phi_nodes = {} of String => Phi
+      assigned_vars.each do |var_name|
+        if initial_val = initial_values[var_name]?
+          var_type = ctx.type_of(initial_val)
+          phi = Phi.new(ctx.next_id, var_type)
+          phi.add_incoming(entry_block, initial_val)
+          ctx.emit(phi)
+          phi_nodes[var_name] = phi
+          ctx.register_local(var_name, phi.id)
+        end
+      end
+
       cmp = BinaryOperation.new(ctx.next_id, TypeRef::BOOL, BinaryOp::Lt, index_phi.id, bytesize.id)
       ctx.emit(cmp)
       ctx.terminate(Branch.new(cmp.id, body_block, exit_block))
@@ -45696,10 +45718,9 @@ module Crystal::HIR
       ctx.register_type(char_val.id, TypeRef::CHAR)
       ctx.register_local(param_name, char_val.id)
 
-      empty_phis = {} of String => Phi
       @loop_exit_stack << exit_block
       @loop_cond_stack << incr_block
-      @loop_phi_stack << empty_phis
+      @loop_phi_stack << phi_nodes
       @loop_break_info_stack << [] of {BlockId, Hash(String, ValueId)}
       begin
         lower_body(ctx, block.body)
@@ -45709,7 +45730,17 @@ module Crystal::HIR
         @loop_phi_stack.pop?
       end
       break_info = @loop_break_info_stack.pop
+      body_exit_block = ctx.current_block
       ctx.pop_scope
+
+      # Patch phi nodes with updated values from the body
+      assigned_vars.each do |var_name|
+        if phi = phi_nodes[var_name]?
+          if updated_val = ctx.lookup_local(var_name)
+            phi.add_incoming(body_exit_block, updated_val)
+          end
+        end
+      end
 
       ctx.terminate(Jump.new(incr_block))
 
@@ -45720,10 +45751,22 @@ module Crystal::HIR
       new_i = BinaryOperation.new(ctx.next_id, TypeRef::INT32, BinaryOp::Add, index_phi.id, one.id)
       ctx.emit(new_i)
       index_phi.add_incoming(incr_block, new_i.id)
+      # Also forward outer variable phis through incr block
+      phi_nodes.each do |var_name, phi|
+        if updated_val = ctx.lookup_local(var_name)
+          # Don't re-add if it was already added from body_exit_block
+          unless updated_val == phi.id
+            phi.add_incoming(incr_block, updated_val)
+          end
+        end
+      end
       ctx.terminate(Jump.new(cond_block))
 
-      # Exit block
+      # Exit block — locals point to phi values
       ctx.current_block = exit_block
+      phi_nodes.each do |var_name, phi|
+        ctx.register_local(var_name, phi.id)
+      end
       nil_lit = Literal.new(ctx.next_id, TypeRef::NIL, nil)
       ctx.emit(nil_lit)
       ctx.register_type(nil_lit.id, TypeRef::NIL)
