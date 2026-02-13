@@ -38784,7 +38784,7 @@ module Crystal::HIR
       # Array.new(size, value) intercept → runtime helper for filled array
       if method_name == "new" && args.size == 2
         owner = static_class_name || class_name_str
-        if owner && owner.starts_with?("Array")
+        if owner && (owner == "Array" || owner.starts_with?("Array("))
           size_id = args[0]
           value_id = args[1]
           value_type = ctx.type_of(value_id)
@@ -47201,8 +47201,8 @@ module Crystal::HIR
 
       # Check if this is an array-like type (which uses IndexGet for element access)
       is_array_type = type_desc && (type_desc.kind == TypeKind::Array ||
-                                    type_desc.name.starts_with?("Array") ||
-                                    type_desc.name.starts_with?("StaticArray"))
+                                    type_desc.name == "Array" || type_desc.name.starts_with?("Array(") ||
+                                    type_desc.name == "StaticArray" || type_desc.name.starts_with?("StaticArray("))
       # Check if the index is a Range type - if so, we need to call [] method instead of IndexGet
       index_is_range = if index_ids.size == 1
                          idx_type = ctx.type_of(index_ids.first)
@@ -47229,7 +47229,7 @@ module Crystal::HIR
             union_desc.variants.each do |variant|
               variant_hir_ref = mir_to_hir_type_ref(variant.type_ref)
               if variant_desc = @module.get_type_descriptor(variant_hir_ref)
-                if variant_desc.kind == TypeKind::Array || variant_desc.name.starts_with?("Array") || variant_desc.name.starts_with?("StaticArray")
+                if variant_desc.kind == TypeKind::Array || variant_desc.name == "Array" || variant_desc.name.starts_with?("Array(") || variant_desc.name == "StaticArray" || variant_desc.name.starts_with?("StaticArray(")
                   element_type = variant_desc.type_params.first? || TypeRef::INT32
                   break
                 end
@@ -49367,9 +49367,9 @@ module Crystal::HIR
 
         # Check if this is an array-like type (which uses IndexSet for element assignment)
         is_array_type = type_desc && (type_desc.kind == TypeKind::Array ||
-                                      type_desc.name.starts_with?("Array") ||
-                                      type_desc.name.starts_with?("StaticArray") ||
-                                      type_desc.name.starts_with?("Slice"))
+                                      type_desc.name == "Array" || type_desc.name.starts_with?("Array(") ||
+                                      type_desc.name == "StaticArray" || type_desc.name.starts_with?("StaticArray(") ||
+                                      type_desc.name == "Slice" || type_desc.name.starts_with?("Slice("))
 
         if is_array_type && index_ids.size == 1
           # Array element assignment: arr[i] = val -> IndexSet
@@ -49915,9 +49915,9 @@ module Crystal::HIR
         end
 
         is_array_type = type_desc && (type_desc.kind == TypeKind::Array ||
-                                      type_desc.name.starts_with?("Array") ||
-                                      type_desc.name.starts_with?("StaticArray") ||
-                                      type_desc.name.starts_with?("Slice"))
+                                      type_desc.name == "Array" || type_desc.name.starts_with?("Array(") ||
+                                      type_desc.name == "StaticArray" || type_desc.name.starts_with?("StaticArray(") ||
+                                      type_desc.name == "Slice" || type_desc.name.starts_with?("Slice("))
 
         if is_array_type && index_ids.size == 1
           element_type = type_desc.not_nil!.type_params.first? || ctx.type_of(value_id)
