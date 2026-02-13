@@ -8922,6 +8922,22 @@ module Crystal::MIR
     end
 
     private def emit_extern_call(inst : ExternCall, name : String)
+      # Intercept __crystal_v2_select_ptr(is_a_bool, obj) → select i1, ptr, ptr null
+      # Used by as?() implementation: returns obj if type matches, null if not.
+      if inst.extern_name == "__crystal_v2_select_ptr" && inst.args.size == 2
+        cond_val = value_ref(inst.args[0])
+        obj_val = value_ref(inst.args[1])
+        cond_type = lookup_value_llvm_type(inst.args[0])
+        if cond_type != "i1"
+          cond_i1 = "%as_q_cond.#{inst.id}"
+          emit "#{cond_i1} = trunc #{cond_type} #{cond_val} to i1"
+          cond_val = cond_i1
+        end
+        emit "#{name} = select i1 #{cond_val}, ptr #{obj_val}, ptr null"
+        @value_types[inst.id] = @value_types[inst.args[1]]? || TypeRef::POINTER
+        return
+      end
+
       if ENV.has_key?("DEBUG_EXTERN_CALL") && inst.extern_name.includes?("byte_range")
         STDERR.puts "[EXTERN_CALL] extern_name=#{inst.extern_name} args=#{inst.args.size}"
       end

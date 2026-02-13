@@ -1007,6 +1007,8 @@ module Crystal::HIR
     # Functions whose explicit returns are all `return yield` (block-return-dependent).
     @yield_return_functions : Set(String)
     @yield_return_checked : Set(String)
+    # Values produced by as?() — need null checks in lower_truthy_check
+    @as_question_results : Set(ValueId)
 
     # Cache for def_contains_yield? keyed by DefNode object_id → Bool.
     # Same DefNode always yields the same result regardless of fallback arena.
@@ -1831,6 +1833,7 @@ module Crystal::HIR
       @yield_functions = Set(String).new
       @yield_return_functions = Set(String).new
       @yield_return_checked = Set(String).new
+      @as_question_results = Set(ValueId).new
       # Note: @lowered_functions and @lowering_functions removed.
       # Use @function_lowering_states with FunctionLoweringState enum instead.
       @pending_arg_types = {} of String => CallsiteArgs
@@ -31330,6 +31333,18 @@ module Crystal::HIR
         return not_nil.id
       end
 
+      # as?() results are typed as the target class but can be null at runtime.
+      # Emit a ptr != null check for these values.
+      if @as_question_results.includes?(value_id)
+        nil_val = Literal.new(ctx.next_id, TypeRef::POINTER, 0_i64)
+        ctx.emit(nil_val)
+        ctx.register_type(nil_val.id, TypeRef::POINTER)
+        ne_check = BinaryOperation.new(ctx.next_id, TypeRef::BOOL, BinaryOp::Ne, value_id, nil_val.id)
+        ctx.emit(ne_check)
+        ctx.register_type(ne_check.id, TypeRef::BOOL)
+        return ne_check.id
+      end
+
       # Non-nilable, non-bool types are always truthy.
       lit = Literal.new(ctx.next_id, TypeRef::BOOL, true)
       ctx.emit(lit)
@@ -49172,6 +49187,10 @@ module Crystal::HIR
           if caps = @proc_captures_by_value[value_id]?
             @proc_captures_by_value[copy.id] = caps
           end
+          # Propagate as? nullable marking through copies
+          if @as_question_results.includes?(value_id)
+            @as_question_results.add(copy.id)
+          end
           update_typeof_local(name, value_type)
           if concrete_name = concrete_type_name_for(value_type)
             existing_name = lookup_typeof_local_name(name)
@@ -49197,6 +49216,10 @@ module Crystal::HIR
           # Propagate proc captures through assignment copies
           if caps = @proc_captures_by_value[value_id]?
             @proc_captures_by_value[copy.id] = caps
+          end
+          # Propagate as? nullable marking through copies
+          if @as_question_results.includes?(value_id)
+            @as_question_results.add(copy.id)
           end
           update_typeof_local(name, value_type)
           if concrete_name = concrete_type_name_for(value_type)
@@ -50806,11 +50829,21 @@ module Crystal::HIR
     private def lower_as_question(ctx : LoweringContext, node : CrystalV2::Compiler::Frontend::AsQuestionNode) : ValueId
       value_id = lower_expr(ctx, node.expression)
       # target_type is Slice(UInt8) - type name as bytes
-      target_type = type_ref_for_name(String.new(node.target_type))
+      target_type_name = String.new(node.target_type)
+      target_type = type_ref_for_name(target_type_name)
 
-      cast = Cast.new(ctx.next_id, target_type, value_id, target_type, safe: true)
-      ctx.emit(cast)
-      cast.id
+      # Emit is_a?(Type) check → Bool
+      is_a_result = emit_is_a_check(ctx, value_id, target_type_name)
+      # Emit: __crystal_v2_select_ptr(is_a_bool, obj) → ptr (or null)
+      # The LLVM backend emits: select i1 %is_a, ptr %obj, ptr null
+      # Result is nilable: non-null = matches target type, null = nil
+      select_call = Call.new(ctx.next_id, target_type,
+                             nil, "__crystal_v2_select_ptr", [is_a_result, value_id])
+      ctx.emit(select_call)
+      ctx.register_type(select_call.id, target_type)
+      # Mark this value as potentially null so lower_truthy_check emits null check
+      @as_question_results.add(select_call.id)
+      select_call.id
     end
 
     private def lower_is_a(ctx : LoweringContext, node : CrystalV2::Compiler::Frontend::IsANode) : ValueId
