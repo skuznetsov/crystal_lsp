@@ -33341,6 +33341,15 @@ module Crystal::HIR
                      nil
                    end
 
+      # Extract subject variable name for type narrowing in when branches
+      subject_var_name : String? = nil
+      if subj = node.value
+        subj_node = @arena[subj]
+        if subj_node.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode)
+          subject_var_name = String.new(subj_node.name)
+        end
+      end
+
       merge_block = ctx.create_block
       incoming = [] of Tuple(BlockId, ValueId)
       branch_locals = [] of Tuple(BlockId, Hash(String, ValueId)) # Track locals for each branch
@@ -33380,6 +33389,34 @@ module Crystal::HIR
         # When body - restore locals before each branch
         ctx.current_block = when_block
         ctx.restore_locals(pre_case_locals)
+
+        # Apply type narrowing for when branches with type checks (case e when NumE)
+        # Only narrow for class/abstract class subjects (ptr type), NOT for union types.
+        # Union types (Float32|Float64 etc.) already handle dispatch correctly without narrowing.
+        if svn = subject_var_name
+          subj_local_id = ctx.lookup_local(svn)
+          subj_type = subj_local_id ? ctx.type_of(subj_local_id) : nil
+          should_narrow = subj_type && !is_union_type?(subj_type)
+          if should_narrow
+            when_branch.conditions.each do |cond_expr|
+              cond_node = @arena[cond_expr]
+              type_name = case cond_node
+                          when CrystalV2::Compiler::Frontend::ConstantNode
+                            n = String.new(cond_node.name)
+                            is_type_name?(n) ? n : nil
+                          when CrystalV2::Compiler::Frontend::IdentifierNode
+                            n = String.new(cond_node.name)
+                            is_type_name?(n) ? n : nil
+                          else
+                            nil
+                          end
+              if type_name
+                apply_is_a_narrowing(ctx, [{svn, type_ref_for_name(type_name)}])
+              end
+            end
+          end
+        end
+
         ctx.push_scope(ScopeKind::Block)
         result = lower_body(ctx, when_branch.body)
         exit_block = ctx.current_block
