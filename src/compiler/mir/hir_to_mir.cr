@@ -1204,10 +1204,6 @@ module Crystal
 
       if func
         callee_id = func.id
-        # Debug disabled for performance:
-        # if call.method_name.includes?("format_gutter")
-        #   STDERR.puts "[MIR-COERCE] func=#{func.name} params=#{func.params.map(&.type.id).join(",")}"
-        # end
         # Build hir_args that matches mir_args ordering (receiver first, then explicit args)
         hir_args_for_coerce = if recv = call.receiver
                                  [recv] + call.args

@@ -3775,8 +3775,9 @@ module Crystal::MIR
       end
 
       # Hash#[]? — fix return type to be Nil | V union instead of raw V.
-      # The MIR compiles []? → fetch(key, nil) which returns raw V (losing nil distinction).
-      # Fix: call find_entry directly and return proper union.
+      # Hash#[]? override: call find_entry directly and return Nil | V union.
+      # The HIR types []? as returning a nilable union (Nil | V), so both the
+      # function definition and call site must use the union ABI.
       if mangled.includes?("$H$IDXQ$") && mangled.includes?("Hash$L")
         # Determine key type from the mangled name suffix
         key_type_suffix = mangled.split("$H$IDXQ$$").last?
@@ -3790,12 +3791,19 @@ module Crystal::MIR
                         end
         key_is_ptr = key_llvm_type == "ptr" || key_llvm_type == "i64"
 
-        # Determine value type from the Hash type params in the mangled name
-        # Hash$LK$C$_V$R → the value type follows "$C$_" and precedes "$R$H"
-        value_type_str = ""
-        if m = mangled.match(/Hash\$L[^$]+\$C\$_([^$]+)\$R/)
-          value_type_str = m[1]
-        end
+        # Extract value type from the Hash mangled name.
+        # Hash$L<Key>$C$_<Value>$R → find first $C$_ after Hash$L, value is rest minus final $R
+        hash_prefix = mangled.split("$H$IDXQ$").first
+        inner = hash_prefix.sub("Hash$L", "")
+        # Strip trailing $R (closing Hash)
+        inner = inner.ends_with?("$R") ? inner[0...-2] : inner
+        # Split on first $C$_ to get key and value parts
+        sep_idx = inner.index("$C$_")
+        value_type_str = if sep_idx
+                           inner[(sep_idx + 4)..]  # after "$C$_"
+                         else
+                           ""
+                         end
         value_llvm_type = case value_type_str
                           when "Int32", "UInt32" then "i32"
                           when "Int64", "UInt64" then "i64"
@@ -3804,26 +3812,26 @@ module Crystal::MIR
                           end
 
         # Compute value offset in Entry body: after @key field
-        # key_size = 8 for ptr/i64, 4 for i32
         key_size = key_is_ptr ? 8 : 4
-        value_offset = key_size  # @key at 0, @value at key_size
+        value_offset = key_size
 
         # Find the find_entry function name
-        # Hash$LK$C$_V$R$Hfind_entry$$KeyType
-        hash_prefix = mangled.split("$H$IDXQ$").first
         find_entry_name = "#{hash_prefix}$Hfind_entry$$#{key_type_suffix}"
 
-        # Union type name for Nil | Entry
+        # Union type name for Nil | Entry (returned by find_entry)
         entry_type_name = hash_prefix.sub("Hash$L", "Hash$CCEntry$L")
         nil_or_entry_union = "%Nil$_$OR$_#{entry_type_name}.union"
 
-        # Value union type name (Nil | V)
-        value_union_name = case value_llvm_type
-                           when "i32" then "%Nil$_$OR$_Int32.union"
-                           when "i64" then "%Nil$_$OR$_Int64.union"
-                           when "i1"  then "%Nil$_$OR$_Bool.union"
-                           else            "%Nil$_$OR$_String.union" # guess
-                           end
+        # Nil | V union type name — this is what []? returns
+        value_type_name = case value_type_str
+                          when "Int32"  then "Int32"
+                          when "UInt32" then "UInt32"
+                          when "Int64"  then "Int64"
+                          when "UInt64" then "UInt64"
+                          when "Bool"   then "Bool"
+                          else               value_type_str
+                          end
+        value_union_name = "%Nil$_$OR$_#{value_type_name}.union"
 
         emit_raw "; #{mangled} — union return override for Hash#[]?\n"
         emit_raw "define #{value_union_name} @#{mangled}(ptr %self, #{key_llvm_type} %key) {\n"
@@ -3840,21 +3848,22 @@ module Crystal::MIR
         emit_raw "  %entry_p = load ptr, ptr %pay_ptr, align 4\n"
         emit_raw "  %val_ptr = getelementptr i8, ptr %entry_p, i32 #{value_offset}\n"
         emit_raw "  %val = load #{value_llvm_type}, ptr %val_ptr\n"
-        # Build result union: type_id=1, payload=val
+        # Build result union: type_id = variant_id for V (non-nil), payload = val
         emit_raw "  %result_ptr = alloca #{value_union_name}, align 8\n"
+        emit_raw "  store #{value_union_name} zeroinitializer, ptr %result_ptr\n"
         emit_raw "  %rtid = getelementptr #{value_union_name}, ptr %result_ptr, i32 0, i32 0\n"
         emit_raw "  store i32 1, ptr %rtid\n"
         emit_raw "  %rpay = getelementptr #{value_union_name}, ptr %result_ptr, i32 0, i32 1\n"
-        emit_raw "  store #{value_llvm_type} %val, ptr %rpay, align 4\n"
+        emit_raw "  store #{value_llvm_type} %val, ptr %rpay\n"
         emit_raw "  %result_found = load #{value_union_name}, ptr %result_ptr\n"
         emit_raw "  ret #{value_union_name} %result_found\n"
         emit_raw "notfound_bb:\n"
-        # Build nil union: type_id=0
-        emit_raw "  %nil_ptr = alloca #{value_union_name}, align 8\n"
-        emit_raw "  store #{value_union_name} zeroinitializer, ptr %nil_ptr\n"
-        emit_raw "  %result_nil = load #{value_union_name}, ptr %nil_ptr\n"
-        emit_raw "  ret #{value_union_name} %result_nil\n"
+        emit_raw "  ret #{value_union_name} zeroinitializer\n"
         emit_raw "}\n\n"
+        # Record the actual return type so call sites use the correct ABI
+        mangled = mangle_function_name(func.name)
+        @emitted_function_return_types[mangled] = value_union_name
+        @emitted_functions << mangled
         return true
       end
 
@@ -7758,21 +7767,26 @@ module Crystal::MIR
       # But if callee returns void and inst.type is not void, use inst.type
       # (this handles cases where method resolution found wrong overload)
       inst_return_type = @type_mapper.llvm_type(inst.type)
-      return_type = if callee_func
+      # Check if we already emitted this function with a DIFFERENT return type
+      # (e.g., []? override returns union but MIR callee says i32)
+      emitted_ret = @emitted_function_return_types[callee_name]?
+      return_type = if emitted_ret && emitted_ret != "void"
+                      # Use the ACTUAL emitted function's return type for ABI correctness
+                      emitted_ret
+                    elsif callee_func
                       callee_ret = @type_mapper.llvm_type(callee_func.return_type)
+                      # If inst.type is a union (nilable) but callee says non-union,
+                      # use inst.type — the HIR correctly typed this as nilable
+                      if inst_return_type.includes?(".union") && !callee_ret.includes?(".union")
+                        inst_return_type
                       # Prefer inst.type when callee returns void but MIR expects a value
-                      if callee_ret == "void" && inst_return_type != "void"
+                      elsif callee_ret == "void" && inst_return_type != "void"
                         inst_return_type
                       else
                         callee_ret
                       end
                     else
-                      # Unresolved function - check if we already emitted this function
-                      # and use its actual return type for ABI consistency
-                      emitted_ret = @emitted_function_return_types[callee_name]?
-                      if emitted_ret && emitted_ret != "void"
-                        emitted_ret
-                      elsif inst_return_type == "void"
+                      if inst_return_type == "void"
                         "ptr"
                       else
                         inst_return_type

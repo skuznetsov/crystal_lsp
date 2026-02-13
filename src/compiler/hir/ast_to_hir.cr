@@ -40179,11 +40179,28 @@ module Crystal::HIR
         end
       end
 
-      if receiver_id &&
-         method_name.ends_with?('?') &&
-         (return_type == TypeRef::BOOL || return_type == TypeRef::VOID || return_type == TypeRef::NIL)
-        if inferred = infer_unannotated_query_return_type(method_name, ctx.type_of(receiver_id))
-          return_type = inferred
+      if receiver_id && method_name.ends_with?('?')
+        # For Hash#[]? and similar query methods, infer nilable return type.
+        # Hash#[]? has an LLVM override that returns Nil | V union, so the call site
+        # must also use the union type. Without this, `if val = h[key]?` treats val as
+        # the raw value type (always truthy) instead of Nil | V (properly nilable).
+        recv_type_for_infer = ctx.type_of(receiver_id)
+        recv_desc_for_infer = @module.get_type_descriptor(recv_type_for_infer)
+        # Only apply nilable inference for Hash receivers (which have LLVM override)
+        # and when return type is not already nilable/bool
+        is_hash_receiver = recv_desc_for_infer && recv_desc_for_infer.kind == TypeKind::Hash
+        should_infer_nilable = if is_hash_receiver && method_name == "[]?"
+                                 true
+                               else
+                                 (return_type == TypeRef::BOOL ||
+                                  return_type == TypeRef::VOID ||
+                                  return_type == TypeRef::NIL) &&
+                                 NILABLE_QUERY_METHODS.includes?(method_name)
+                               end
+        if should_infer_nilable
+          if inferred = infer_unannotated_query_return_type(method_name, recv_type_for_infer)
+            return_type = inferred
+          end
         end
       end
       if receiver_id && (method_name == "first" || method_name == "last" || method_name == "first?" || method_name == "last?")
@@ -41398,20 +41415,29 @@ module Crystal::HIR
 
       # If we still have a fallback type, prefer a registered function type when available.
       # But don't override a concrete receiver-derived type with NIL.
+      # Also don't override a nilable union type (from NILABLE_QUERY_METHODS like []?) with
+      # the function's non-union return type — the function returns V but the CALL returns Nil | V.
+      is_nilable_query = NILABLE_QUERY_METHODS.includes?(method_name)
       resolved_return_type = get_function_return_type(mangled_method_name)
       if resolved_return_type == TypeRef::VOID && mangled_method_name != base_method_name
         resolved_return_type = get_function_return_type(base_method_name)
       end
       if resolved_return_type != TypeRef::VOID && resolved_return_type != TypeRef::NIL && resolved_return_type != return_type
         if !(unresolved_generic_return_type?(resolved_return_type) && !unresolved_generic_return_type?(return_type))
-          return_type = resolved_return_type
+          # Don't downgrade nilable union to non-union for nilable query methods
+          unless is_nilable_query && is_union_or_nilable_type?(return_type)
+            return_type = resolved_return_type
+          end
         end
       end
       # Prefer the actual lowered function return type when available.
       if func = @module.function_by_name(mangled_method_name)
         func_rt = func.return_type
         if func_rt != TypeRef::VOID && func_rt != TypeRef::NIL && func_rt != return_type
-          return_type = func_rt
+          # Don't downgrade nilable union to non-union for nilable query methods
+          unless is_nilable_query && is_union_or_nilable_type?(return_type)
+            return_type = func_rt
+          end
         end
       end
 
