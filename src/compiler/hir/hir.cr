@@ -1294,6 +1294,60 @@ module Crystal::HIR
       @module_includers = {} of String => Array(String)
       @lib_names = Set(String).new
       @primitive_methods = {} of String => String
+      register_builtin_primitives
+    end
+
+    private def register_builtin_primitives
+      # Crystal defines these via macros in primitives.cr that our compiler can't
+      # fully expand. Hardcode them so lower_primitive_call can emit BinaryOp/Cast nodes.
+      int_types = ["Int8", "Int16", "Int32", "Int64", "Int128", "UInt8", "UInt16", "UInt32", "UInt64", "UInt128"]
+      float_types = ["Float32", "Float64"]
+      num_types = int_types + float_types
+      binary_ops = ["+", "-", "*", "//"]
+      comparison_ops = ["==", "!=", "<", "<=", ">", ">="]
+      bitwise_ops = ["&", "|", "^", "<<", ">>"]
+
+      # Register all numeric binary/comparison primitives
+      num_types.each do |t1|
+        num_types.each do |t2|
+          comparison_ops.each do |op|
+            @primitive_methods["#{t1}##{op}"] ||= "binary"
+          end
+          binary_ops.each do |op|
+            @primitive_methods["#{t1}##{op}"] ||= "binary"
+          end
+        end
+      end
+      # Bitwise only for integers
+      int_types.each do |t1|
+        bitwise_ops.each do |op|
+          @primitive_methods["#{t1}##{op}"] ||= "binary"
+        end
+      end
+      # Conversion primitives
+      num_types.each do |t|
+        ["to_i8", "to_i16", "to_i32", "to_i64", "to_i128",
+         "to_u8", "to_u16", "to_u32", "to_u64", "to_u128",
+         "to_f32", "to_f64",
+         "to_i8!", "to_i16!", "to_i32!", "to_i64!", "to_i128!",
+         "to_u8!", "to_u16!", "to_u32!", "to_u64!", "to_u128!",
+         "to_f32!", "to_f64!"].each do |conv|
+          @primitive_methods["#{t}##{conv}"] ||= "convert"
+        end
+      end
+      # Abstract parent types (Int, Float, Number) — needed for methods defined on
+      # abstract types that call self > other, self < other, etc.
+      abstract_types = ["Int", "Float", "Number", "Int::Signed", "Int::Unsigned"]
+      abstract_types.each do |t|
+        (comparison_ops + binary_ops).each do |op|
+          @primitive_methods["#{t}##{op}"] ||= "binary"
+        end
+      end
+      # Char primitives
+      ["==", "!=", "<", "<=", ">", ">="].each do |op|
+        @primitive_methods["Char##{op}"] ||= "binary"
+      end
+      @primitive_methods["Char#ord"] ||= "convert"
     end
 
     def register_class_parent(name : String, parent : String?) : Nil

@@ -31443,8 +31443,10 @@ module Crystal::HIR
       end
       # Infer return type: comparison ops return Bool, arithmetic ops return left type
       return_type = case op
-                    when "==", "!=", "<", "<=", ">", ">=", "===", "<=>"
+                    when "==", "!=", "<", "<=", ">", ">=", "==="
                       TypeRef::BOOL
+                    when "<=>"
+                      TypeRef::INT32
                     else
                       left_type
                     end

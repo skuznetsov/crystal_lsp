@@ -841,6 +841,81 @@ module Crystal::MIR
                "}\n"
       end
 
+      # Primitive integer comparison/arithmetic methods: Int32#>(Int32) etc.
+      # These are @[Primitive(:binary)] in stdlib but our compiler treats self as ptr.
+      # Pattern: <Type>$H$<OP>$$<ArgType>(ptr %self, <llvm_type> %other)
+      if m = name.match(/\A(Int8|Int16|Int32|Int64|Int128|UInt8|UInt16|UInt32|UInt64|UInt128)\$H\$(GT|LT|GE|LE|EQ|NE|ADD|SUB|MUL|AND|OR|XOR)\$\$(.+)\z/)
+        recv_type_name = m[1]
+        op_name = m[2]
+        llvm_type = case recv_type_name
+                    when "Int8", "UInt8"   then "i8"
+                    when "Int16", "UInt16" then "i16"
+                    when "Int32", "UInt32" then "i32"
+                    when "Int64", "UInt64" then "i64"
+                    when "Int128", "UInt128" then "i128"
+                    else "i32"
+                    end
+        is_signed = recv_type_name.starts_with?("Int") && !recv_type_name.starts_with?("UInt")
+        op_ir = case op_name
+                when "GT" then is_signed ? "icmp sgt" : "icmp ugt"
+                when "LT" then is_signed ? "icmp slt" : "icmp ult"
+                when "GE" then is_signed ? "icmp sge" : "icmp uge"
+                when "LE" then is_signed ? "icmp sle" : "icmp ule"
+                when "EQ" then "icmp eq"
+                when "NE" then "icmp ne"
+                when "ADD" then "add"
+                when "SUB" then "sub"
+                when "MUL" then "mul"
+                when "AND" then "and"
+                when "OR"  then "or"
+                when "XOR" then "xor"
+                else nil
+                end
+        if op_ir
+          is_cmp = op_ir.starts_with?("icmp")
+          ret_type = is_cmp ? "i1" : llvm_type
+          return "; #{recv_type_name}##{op_name} primitive\n" \
+                 "define #{ret_type} @#{name}(ptr %self, #{llvm_type} %other) {\n" \
+                 "  %self_val = ptrtoint ptr %self to #{llvm_type}\n" \
+                 "  %result = #{op_ir} #{llvm_type} %self_val, %other\n" \
+                 "  ret #{ret_type} %result\n" \
+                 "}\n"
+        end
+      end
+
+      # Int#remainder(Int32) and Int#tdiv(Int32) — also primitive but use self:ptr
+      # These call check_div_argument which also has ptr self — handle specifically
+      if m = name.match(/\AInt\$H(remainder|tdiv)\$\$(Int8|Int16|Int32|Int64|UInt8|UInt16|UInt32|UInt64)\z/)
+        method = m[1]
+        arg_type_name = m[2]
+        llvm_type = case arg_type_name
+                    when "Int8", "UInt8"   then "i8"
+                    when "Int16", "UInt16" then "i16"
+                    when "Int32", "UInt32" then "i32"
+                    when "Int64", "UInt64" then "i64"
+                    else "i32"
+                    end
+        is_signed = !arg_type_name.starts_with?("UInt")
+        if method == "remainder"
+          div_op = is_signed ? "srem" : "urem"
+          return "; Int#remainder(#{arg_type_name}) primitive\n" \
+                 "define #{llvm_type} @#{name}(ptr %self, #{llvm_type} %other) {\n" \
+                 "  %self_val = ptrtoint ptr %self to #{llvm_type}\n" \
+                 "  %result = #{div_op} #{llvm_type} %self_val, %other\n" \
+                 "  ret #{llvm_type} %result\n" \
+                 "}\n"
+        else # tdiv
+          div_op = is_signed ? "sdiv" : "udiv"
+          return "; Int#tdiv(#{arg_type_name}) primitive\n" \
+                 "define ptr @#{name}(ptr %self, #{llvm_type} %other) {\n" \
+                 "  %self_val = ptrtoint ptr %self to #{llvm_type}\n" \
+                 "  %result = #{div_op} #{llvm_type} %self_val, %other\n" \
+                 "  %result_ptr = inttoptr #{llvm_type} %result to ptr\n" \
+                 "  ret ptr %result_ptr\n" \
+                 "}\n"
+        end
+      end
+
       return nil unless is_nil_method || is_unknown_method || is_wrong_receiver || is_v2_mangled
 
       # Build a minimal function body that returns a zero/default value
@@ -4193,6 +4268,162 @@ module Crystal::MIR
         return true
       end
 
+      # ── Primitive integer/float binary operations ──
+      # Crystal defines these via @[Primitive(:binary)] with empty bodies.
+      # Our compiler compiles them to trivial stubs (ret 0). Override with correct ops.
+      mangled = mangle_function_name(func.name)
+      if emit_primitive_binary_override(func, mangled)
+        return true
+      end
+
+      false
+    end
+
+    # Emit correct primitive binary operation for integer/float methods with
+    # empty @[Primitive(:binary)] bodies from the Crystal stdlib.
+    private def emit_primitive_binary_override(func : Function, mangled : String) : Bool
+      # Match: <Type>$H$<OP>$$<ArgType> patterns
+      # Operator mangling: $GT = >, $LT = <, $GE = >=, $LE = <=, $EQ = ==,
+      # $NE = !=, $ADD = +, $SUB = -, $MUL = *, $AND = &, $OR = |, $XOR = ^,
+      # $SHL = <<, $SHR = >>
+      int_types = {"Int8" => {"i8", true}, "Int16" => {"i16", true}, "Int32" => {"i32", true},
+                   "Int64" => {"i64", true}, "Int128" => {"i128", true},
+                   "UInt8" => {"i8", false}, "UInt16" => {"i16", false}, "UInt32" => {"i32", false},
+                   "UInt64" => {"i64", false}, "UInt128" => {"i128", false}}
+
+      # Check if this is a trivial function (2 blocks or less, no meaningful operations)
+      is_trivial = func.blocks.size <= 3 && func.blocks.all? { |b| b.instructions.size <= 2 }
+      return false unless is_trivial
+
+      # Extract type and operator from mangled name
+      int_types.each do |type_name, type_info|
+        llvm_type, is_signed = type_info
+        prefix = "#{type_name}$H$"
+
+        next unless mangled.starts_with?(prefix)
+        rest = mangled[prefix.size..]
+
+        # Match operator
+        op_match = nil
+        ret_type = ""
+        ir_op = ""
+        case rest
+        when /\AGT\$\$/
+          ir_op = is_signed ? "icmp sgt" : "icmp ugt"
+          ret_type = "i1"
+          op_match = true
+        when /\ALT\$\$/
+          ir_op = is_signed ? "icmp slt" : "icmp ult"
+          ret_type = "i1"
+          op_match = true
+        when /\AGE\$\$/
+          ir_op = is_signed ? "icmp sge" : "icmp uge"
+          ret_type = "i1"
+          op_match = true
+        when /\ALE\$\$/
+          ir_op = is_signed ? "icmp sle" : "icmp ule"
+          ret_type = "i1"
+          op_match = true
+        when /\AEQ\$\$/
+          ir_op = "icmp eq"
+          ret_type = "i1"
+          op_match = true
+        when /\ANE\$\$/
+          ir_op = "icmp ne"
+          ret_type = "i1"
+          op_match = true
+        when /\AADD\$\$/
+          ir_op = "add"
+          ret_type = llvm_type
+          op_match = true
+        when /\ASUB\$\$/
+          ir_op = "sub"
+          ret_type = llvm_type
+          op_match = true
+        when /\AMUL\$\$/
+          ir_op = "mul"
+          ret_type = llvm_type
+          op_match = true
+        when /\AAND\$\$/
+          ir_op = "and"
+          ret_type = llvm_type
+          op_match = true
+        when /\AOR\$\$/
+          ir_op = "or"
+          ret_type = llvm_type
+          op_match = true
+        when /\AXOR\$\$/
+          ir_op = "xor"
+          ret_type = llvm_type
+          op_match = true
+        when /\ASHL\$\$/
+          ir_op = "shl"
+          ret_type = llvm_type
+          op_match = true
+        when /\ASHR\$\$/
+          ir_op = is_signed ? "ashr" : "lshr"
+          ret_type = llvm_type
+          op_match = true
+        end
+
+        next unless op_match
+
+        # Determine the self type in the function params
+        self_llvm = func.params.size >= 1 ? @type_mapper.llvm_type(func.params[0].type) : llvm_type
+        other_llvm = func.params.size >= 2 ? @type_mapper.llvm_type(func.params[1].type) : llvm_type
+
+        # If self is ptr (because Int primitive methods declare self as class receiver),
+        # we need ptrtoint to extract the actual integer value.
+        needs_self_ptrtoint = self_llvm == "ptr"
+        actual_self_llvm = needs_self_ptrtoint ? llvm_type : self_llvm
+
+        # Determine the other type's signedness
+        other_is_signed = is_signed # default: same as receiver
+        if func.params.size >= 2
+          other_type_ref = func.params[1].type
+          other_is_signed = other_type_ref.id >= TypeRef::INT8.id && other_type_ref.id <= TypeRef::INT128.id
+        end
+
+        emit_raw "; #{type_name}##{rest.split("$$").first} primitive override\n"
+        emit_raw "define #{ret_type} @#{mangled}(#{self_llvm} %self, #{other_llvm} %other) {\n"
+
+        # Get self value (ptrtoint if needed)
+        self_val = if needs_self_ptrtoint
+                     emit_raw "  %self_val = ptrtoint ptr %self to #{actual_self_llvm}\n"
+                     "%self_val"
+                   else
+                     "%self"
+                   end
+        other_val = "%other"
+
+        # Handle type mismatch: extend both to the wider type
+        op_type = actual_self_llvm
+        if actual_self_llvm != other_llvm
+          self_bits = actual_self_llvm[1..].to_i? || 32
+          other_bits = other_llvm[1..].to_i? || 32
+          if self_bits < other_bits
+            op_type = other_llvm
+            ext = is_signed ? "sext" : "zext"
+            emit_raw "  %self_ext = #{ext} #{actual_self_llvm} #{self_val} to #{other_llvm}\n"
+            self_val = "%self_ext"
+          elsif other_bits < self_bits
+            op_type = actual_self_llvm
+            ext = other_is_signed ? "sext" : "zext"
+            emit_raw "  %other_ext = #{ext} #{other_llvm} %other to #{actual_self_llvm}\n"
+            other_val = "%other_ext"
+          end
+          # For arithmetic, result type might need to be the wider type
+          ret_type = op_type unless ret_type == "i1"
+        end
+
+        emit_raw "  %result = #{ir_op} #{op_type} #{self_val}, #{other_val}\n"
+        emit_raw "  ret #{ret_type} %result\n"
+        emit_raw "}\n\n"
+        @emitted_functions << mangled
+        @emitted_function_return_types[mangled] = ret_type
+        return true
+      end
+
       false
     end
 
@@ -6702,7 +6933,7 @@ module Crystal::MIR
           is_signed = false
         end
       else
-        is_signed = left_is_signed || (operand_type.id <= TypeRef::INT128.id)
+        is_signed = left_is_signed || right_is_signed || (operand_type.id <= TypeRef::INT128.id)
       end
 
       # Use float operations for float/double types
