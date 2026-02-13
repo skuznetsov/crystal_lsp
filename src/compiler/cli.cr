@@ -645,6 +645,9 @@ module CrystalV2
           hir_converter.lower_main_from_def(main_def[0])
         end
 
+        after_lower_main = hir_converter.module.function_count
+        STDERR.puts "[PHASE_STATS] After lower_main: #{after_lower_main} functions" if ENV.has_key?("CRYSTAL_V2_PHASE_STATS")
+
         # Ensure top-level `fun main` is lowered as a real entrypoint (C ABI).
         did_flush = false
         if fun_main = def_nodes.find { |(n, _)| n.receiver.try { |recv| String.new(recv) == HIR::AstToHir::FUN_DEF_RECEIVER } && String.new(n.name) == "main" }
@@ -673,7 +676,10 @@ module CrystalV2
         if !reachable.empty? && reachable.size < hir_module.functions.size
           total_before = hir_module.functions.size
           hir_module.functions.select! { |func| reachable.includes?(func.name) }
-          log(options, out_io, "  Reachable functions: #{hir_module.functions.size}/#{total_before}")
+          discarded = total_before - hir_module.functions.size
+          rta_msg = "  Reachable functions: #{hir_module.functions.size}/#{total_before} (discarded #{discarded}, #{(discarded * 100.0 / total_before).round(1)}%)"
+          log(options, out_io, rta_msg)
+          STDERR.puts "[PHASE_STATS] RTA: #{rta_msg.strip}" if ENV.has_key?("CRYSTAL_V2_PHASE_STATS")
         end
         timings["hir_reachable_funcs"] = hir_module.functions.size.to_f if options.stats
 

@@ -26136,12 +26136,60 @@ module Crystal::HIR
 
     # Public method to flush pending functions from external callers (e.g., CLI after lower_def)
     def flush_pending_functions
+      phase_stats = env_has?("CRYSTAL_V2_PHASE_STATS")
+
+      if phase_stats
+        before = @module.function_count
+        t0 = Time.instant
+      end
+
       process_pending_lower_functions
+
+      if phase_stats
+        after1 = @module.function_count
+        t1 = Time.instant
+        STDERR.puts "[PHASE_STATS] process_pending: #{before} -> #{after1} (+#{after1 - before.not_nil!}) in #{(t1.not_nil! - t0.not_nil!).total_milliseconds.round(1)}ms"
+      end
+
       # Fix #2: Emit all tracked signatures to ensure functions called from
       # conditional branches or with specific type instantiations are lowered.
       emit_all_tracked_signatures
+
+      if phase_stats
+        after2 = @module.function_count
+        t2 = Time.instant
+        STDERR.puts "[PHASE_STATS] emit_tracked_sigs: #{after1} -> #{after2} (+#{after2 - after1.not_nil!}) in #{(t2.not_nil! - t1.not_nil!).total_milliseconds.round(1)}ms"
+      end
+
       # Final pass: lower any remaining call targets that already appear in HIR.
       lower_missing_call_targets
+
+      if phase_stats
+        after3 = @module.function_count
+        t3 = Time.instant
+        STDERR.puts "[PHASE_STATS] lower_missing: #{after2} -> #{after3} (+#{after3 - after2.not_nil!}) in #{(t3.not_nil! - t2.not_nil!).total_milliseconds.round(1)}ms"
+        # Function-owner histogram
+        prefix_counts = Hash(String, Int32).new(0)
+        @module.functions.each do |func|
+          owner = if hash_idx = func.name.rindex('#')
+                    func.name[0, hash_idx]
+                  elsif dot_idx = func.name.rindex('.')
+                    func.name[0, dot_idx]
+                  else
+                    "(top-level)"
+                  end
+          base_owner = if paren = owner.index('(')
+                         owner[0, paren]
+                       else
+                         owner
+                       end
+          prefix_counts[base_owner] += 1
+        end
+        top20 = prefix_counts.to_a.sort_by { |_, c| -c }.first(20)
+        STDERR.puts "[PHASE_STATS] Top type prefixes (#{after3} total functions):"
+        top20.each { |name, count| STDERR.puts "  #{name}: #{count}" }
+      end
+
       if env_get("DEBUG_MONO_SOURCES") && !@mono_sources_reported && !@mono_source_counts.empty?
         top_n = env_get("DEBUG_MONO_SOURCES_TOP").try(&.to_i?) || 15
         STDERR.puts "[MONO_SOURCES] top=#{top_n} total=#{@mono_source_counts.size}"
