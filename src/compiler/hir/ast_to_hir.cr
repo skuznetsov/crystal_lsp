@@ -20738,6 +20738,290 @@ module Crystal::HIR
       end
     end
 
+    # ============================================================
+    # AST Reachability Analysis — Call Scanner
+    # ============================================================
+    # Scans AST DefNode bodies to extract method names, type constructors,
+    # and operator names WITHOUT lowering. Used for pre-lowering reachability
+    # to avoid lowering thousands of unreachable functions.
+
+    # Collected call info from AST scanning
+    class ASTCallInfo
+      property method_names : Set(String)
+      property type_constructors : Set(String)
+
+      def initialize
+        @method_names = Set(String).new
+        @type_constructors = Set(String).new
+      end
+    end
+
+    # Scan a single expression in a given arena, collecting call/type info
+    private def scan_ast_calls_in_expr(expr_id : ExprId, arena : CrystalV2::Compiler::Frontend::ArenaLike, info : ASTCallInfo)
+      return if expr_id.invalid?
+      return if expr_id.index >= arena.size
+      node = arena[expr_id]?
+      return unless node
+
+      case node
+      when CrystalV2::Compiler::Frontend::CallNode
+        if callee_id = node.callee
+          if callee_id.index < arena.size
+            callee_node = arena[callee_id]?
+            if callee_node.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode)
+              name = String.new(callee_node.name)
+              info.method_names.add(name)
+            elsif callee_node.is_a?(CrystalV2::Compiler::Frontend::MemberAccessNode)
+              member = String.new(callee_node.member)
+              info.method_names.add(member)
+              # Detect Type.new(...) pattern → type constructor
+              if member == "new" && callee_node.object.index < arena.size
+                obj_node = arena[callee_node.object]?
+                if obj_node.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode)
+                  info.type_constructors.add(String.new(obj_node.name))
+                elsif obj_node.is_a?(CrystalV2::Compiler::Frontend::MemberAccessNode)
+                  # Nested::Type.new — collect full path
+                  info.type_constructors.add(String.new(obj_node.member))
+                end
+              end
+              scan_ast_calls_in_expr(callee_node.object, arena, info)
+            else
+              scan_ast_calls_in_expr(callee_id, arena, info)
+            end
+          end
+        end
+        node.args.each { |arg| scan_ast_calls_in_expr(arg, arena, info) }
+        if block_id = node.block
+          scan_ast_calls_in_expr(block_id, arena, info)
+        end
+        if named = node.named_args
+          named.each { |na| scan_ast_calls_in_expr(na.value, arena, info) }
+        end
+
+      when CrystalV2::Compiler::Frontend::MemberAccessNode
+        info.method_names.add(String.new(node.member))
+        scan_ast_calls_in_expr(node.object, arena, info)
+
+      when CrystalV2::Compiler::Frontend::BinaryNode
+        info.method_names.add(String.new(node.operator))
+        scan_ast_calls_in_expr(node.left, arena, info)
+        scan_ast_calls_in_expr(node.right, arena, info)
+
+      when CrystalV2::Compiler::Frontend::UnaryNode
+        scan_ast_calls_in_expr(node.operand, arena, info)
+
+      when CrystalV2::Compiler::Frontend::TernaryNode
+        scan_ast_calls_in_expr(node.condition, arena, info)
+        scan_ast_calls_in_expr(node.true_branch, arena, info)
+        scan_ast_calls_in_expr(node.false_branch, arena, info)
+
+      when CrystalV2::Compiler::Frontend::AssignNode
+        scan_ast_calls_in_expr(node.target, arena, info)
+        scan_ast_calls_in_expr(node.value, arena, info)
+
+      when CrystalV2::Compiler::Frontend::MultipleAssignNode
+        node.targets.each { |t| scan_ast_calls_in_expr(t, arena, info) }
+        scan_ast_calls_in_expr(node.value, arena, info)
+
+      when CrystalV2::Compiler::Frontend::GroupingNode
+        scan_ast_calls_in_expr(node.expression, arena, info)
+
+      when CrystalV2::Compiler::Frontend::MacroExpressionNode
+        scan_ast_calls_in_expr(node.expression, arena, info)
+
+      when CrystalV2::Compiler::Frontend::ConstantNode
+        scan_ast_calls_in_expr(node.value, arena, info)
+
+      when CrystalV2::Compiler::Frontend::ReturnNode
+        if v = node.value
+          scan_ast_calls_in_expr(v, arena, info)
+        end
+
+      when CrystalV2::Compiler::Frontend::BreakNode
+        if v = node.value
+          scan_ast_calls_in_expr(v, arena, info)
+        end
+
+      when CrystalV2::Compiler::Frontend::YieldNode
+        if args = node.args
+          args.each { |arg| scan_ast_calls_in_expr(arg, arena, info) }
+        end
+
+      when CrystalV2::Compiler::Frontend::SuperNode
+        if args = node.args
+          args.each { |arg| scan_ast_calls_in_expr(arg, arena, info) }
+        end
+
+      when CrystalV2::Compiler::Frontend::IndexNode
+        scan_ast_calls_in_expr(node.object, arena, info)
+        info.method_names.add("[]")
+        node.indexes.each { |idx| scan_ast_calls_in_expr(idx, arena, info) }
+
+      when CrystalV2::Compiler::Frontend::IfNode
+        scan_ast_calls_in_expr(node.condition, arena, info)
+        scan_ast_calls_body(node.then_body, arena, info)
+        if elsifs = node.elsifs
+          elsifs.each do |branch|
+            scan_ast_calls_in_expr(branch.condition, arena, info)
+            scan_ast_calls_body(branch.body, arena, info)
+          end
+        end
+        if else_body = node.else_body
+          scan_ast_calls_body(else_body, arena, info)
+        end
+
+      when CrystalV2::Compiler::Frontend::UnlessNode
+        scan_ast_calls_in_expr(node.condition, arena, info)
+        scan_ast_calls_body(node.then_branch, arena, info)
+        if else_branch = node.else_branch
+          scan_ast_calls_body(else_branch, arena, info)
+        end
+
+      when CrystalV2::Compiler::Frontend::WhileNode
+        scan_ast_calls_in_expr(node.condition, arena, info)
+        scan_ast_calls_body(node.body, arena, info)
+
+      when CrystalV2::Compiler::Frontend::UntilNode
+        scan_ast_calls_in_expr(node.condition, arena, info)
+        scan_ast_calls_body(node.body, arena, info)
+
+      when CrystalV2::Compiler::Frontend::LoopNode
+        scan_ast_calls_body(node.body, arena, info)
+
+      when CrystalV2::Compiler::Frontend::BlockNode
+        scan_ast_calls_body(node.body, arena, info)
+
+      when CrystalV2::Compiler::Frontend::ProcLiteralNode
+        scan_ast_calls_body(node.body, arena, info)
+
+      when CrystalV2::Compiler::Frontend::CaseNode
+        if v = node.value
+          scan_ast_calls_in_expr(v, arena, info)
+        end
+        node.when_branches.each { |w| scan_ast_calls_body(w.body, arena, info) }
+        if else_branch = node.else_branch
+          scan_ast_calls_body(else_branch, arena, info)
+        end
+
+      when CrystalV2::Compiler::Frontend::ArrayLiteralNode
+        node.elements.each { |el| scan_ast_calls_in_expr(el, arena, info) }
+        info.type_constructors.add("Array")
+
+      when CrystalV2::Compiler::Frontend::HashLiteralNode
+        node.entries.each do |entry|
+          scan_ast_calls_in_expr(entry.key, arena, info)
+          scan_ast_calls_in_expr(entry.value, arena, info)
+        end
+        info.type_constructors.add("Hash")
+
+      when CrystalV2::Compiler::Frontend::TupleLiteralNode
+        node.elements.each { |el| scan_ast_calls_in_expr(el, arena, info) }
+        info.type_constructors.add("Tuple")
+
+      when CrystalV2::Compiler::Frontend::NamedTupleLiteralNode
+        node.entries.each { |entry| scan_ast_calls_in_expr(entry.value, arena, info) }
+        info.type_constructors.add("NamedTuple")
+
+      when CrystalV2::Compiler::Frontend::RangeNode
+        scan_ast_calls_in_expr(node.begin_expr, arena, info)
+        scan_ast_calls_in_expr(node.end_expr, arena, info)
+        info.type_constructors.add("Range")
+
+      when CrystalV2::Compiler::Frontend::StringInterpolationNode
+        node.pieces.each do |piece|
+          if piece.kind == CrystalV2::Compiler::Frontend::StringPiece::Kind::Expression
+            if expr = piece.expr
+              scan_ast_calls_in_expr(expr, arena, info)
+            end
+          end
+        end
+        info.method_names.add("to_s")
+
+      when CrystalV2::Compiler::Frontend::BeginNode
+        scan_ast_calls_body(node.body, arena, info)
+        if clauses = node.rescue_clauses
+          clauses.each { |cl| scan_ast_calls_body(cl.body, arena, info) }
+        end
+        if else_body = node.else_body
+          scan_ast_calls_body(else_body, arena, info)
+        end
+        if ensure_body = node.ensure_body
+          scan_ast_calls_body(ensure_body, arena, info)
+        end
+
+      when CrystalV2::Compiler::Frontend::IsANode
+        scan_ast_calls_in_expr(node.expr, arena, info)
+
+      when CrystalV2::Compiler::Frontend::AsNode
+        scan_ast_calls_in_expr(node.expr, arena, info)
+
+      when CrystalV2::Compiler::Frontend::SafeNavigationNode
+        info.method_names.add(String.new(node.member))
+        scan_ast_calls_in_expr(node.object, arena, info)
+
+      when CrystalV2::Compiler::Frontend::MacroIfNode
+        scan_ast_calls_in_expr(node.condition, arena, info)
+        scan_ast_calls_in_expr(node.then_body, arena, info)
+        if else_body = node.else_body
+          scan_ast_calls_in_expr(else_body, arena, info)
+        end
+
+      when CrystalV2::Compiler::Frontend::MacroForNode
+        scan_ast_calls_in_expr(node.iterable, arena, info)
+        scan_ast_calls_in_expr(node.body, arena, info)
+
+      else
+        # Leaf nodes (Number, String, Bool, Nil, Identifier, Self, etc.) — nothing to scan
+      end
+    end
+
+    # Scan an array of expressions (body)
+    private def scan_ast_calls_body(exprs : Array(ExprId), arena : CrystalV2::Compiler::Frontend::ArenaLike, info : ASTCallInfo)
+      exprs.each { |expr| scan_ast_calls_in_expr(expr, arena, info) }
+    end
+
+    # Build reverse index: base method name → [full @function_defs keys]
+    # This allows O(1) lookup from a bare method name to all possible implementations
+    def build_method_reverse_index : Hash(String, Array(String))
+      index = Hash(String, Array(String)).new(initial_capacity: 4096)
+      @function_defs.each_key do |full_name|
+        short = method_short_from_name(full_name)
+        if short
+          arr = index[short]? || (index[short] = [] of String)
+          arr << full_name
+        end
+      end
+      index
+    end
+
+    # Scan a DefNode body and return collected call info
+    def scan_def_body(def_name : String) : ASTCallInfo?
+      def_node = @function_defs[def_name]?
+      return nil unless def_node
+      arena = @function_def_arenas[def_name]?
+      return nil unless arena
+      body = def_node.body
+      return nil unless body
+
+      info = ASTCallInfo.new
+      scan_ast_calls_body(body, arena, info)
+      info
+    end
+
+    # Public accessor for function_defs count
+    def function_defs_count : Int32
+      @function_defs.size
+    end
+
+    # Iterate all function_defs keys
+    def each_function_def_name(& : String ->) : Nil
+      @function_defs.each_key { |k| yield k }
+    end
+
+    # ============================================================
+    # End AST Reachability — Call Scanner
+    # ============================================================
+
     private def contains_return_in_expr?(expr_id : ExprId) : Bool
       return false if expr_id.invalid?
       node = @arena[expr_id]
