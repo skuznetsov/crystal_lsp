@@ -14744,6 +14744,20 @@ module Crystal::HIR
         end
       end
 
+      # Slice.new(size : Int32) — explicit self.new allocates memory then creates Slice.
+      # Auto-allocator would wrongly map Int32 → @pointer (ptrtoint). Intercept and fix.
+      init_params2 = @init_params[class_name]? || [] of {String, TypeRef}
+      if init_params2.size >= 2 && class_name.includes?("Slice")
+        non_void_call2 = call_arg_types.reject { |t| t == TypeRef::VOID }
+        # Slice.new(Int32, ...) but init expects (Pointer, Int32, Bool)
+        if non_void_call2.size >= 1 && non_void_call2[0] == TypeRef::INT32
+          if init_params2[0][1].id >= TypeRef::FIRST_USER_TYPE || init_params2[0][0] == "pointer"
+            generate_slice_new_allocator(class_name, class_info, call_arg_types, overload_name)
+            return
+          end
+        end
+      end
+
       init_params = @init_params[class_name]? || [] of {String, TypeRef}
       allocator_params = init_params.map { |param| {param[0], param[1]} }
       if allocator_params.empty?
@@ -14949,6 +14963,60 @@ module Crystal::HIR
 
       internal_call = Call.new(ctx.next_id, class_info.type_ref, nil, internal_name,
         [path_id, fd_get.id, mode_id, blocking_get.id, nil_lit1.id, nil_lit2.id])
+      ctx.emit(internal_call)
+      ctx.register_type(internal_call.id, class_info.type_ref)
+
+      ctx.terminate(Return.new(internal_call.id))
+    end
+
+    # Generate custom allocator for Slice.new(size : Int32).
+    # The explicit self.new allocates memory: `pointer = Pointer(T).malloc(size)`
+    # then calls `new(pointer, size, read_only: false)`.
+    # We replicate this by calling __crystal_v2_malloc64(size) and delegating
+    # to the 3-arg allocator.
+    private def generate_slice_new_allocator(
+      class_name : String,
+      class_info : ClassInfo,
+      call_arg_types : Array(TypeRef),
+      overload_name : String,
+    ) : Nil
+      func = @module.create_function(overload_name, class_info.type_ref)
+      ctx = LoweringContext.new(func, @module, @arena)
+
+      # Add ALL params from call_arg_types (same as File.new fix — keep full count)
+      size_id = nil.as(ValueId?)
+      call_arg_types.each_with_index do |type_ref, idx|
+        hir_param = func.add_param("arg#{idx}", type_ref)
+        ctx.register_type(hir_param.id, type_ref)
+        # Track the first Int32 param as the size
+        if type_ref == TypeRef::INT32 && size_id.nil?
+          size_id = hir_param.id
+        end
+      end
+
+      size_id = size_id || raise "Slice.new allocator: missing size arg"
+
+      # Call __crystal_v2_malloc64(size) → ptr to allocated buffer
+      # Pass i32 directly — LLVM backend's emit_extern_call handles i32→i64 promotion
+      malloc_call = ExternCall.new(ctx.next_id, TypeRef::POINTER, "__crystal_v2_malloc64", [size_id])
+      ctx.emit(malloc_call)
+      ctx.register_type(malloc_call.id, TypeRef::POINTER)
+      buffer_ptr = malloc_call.id
+
+      # Build args for internal 3-arg allocator: Slice.new(pointer, size, read_only=false)
+      false_lit = Literal.new(ctx.next_id, TypeRef::BOOL, false)
+      ctx.emit(false_lit)
+      ctx.register_type(false_lit.id, TypeRef::BOOL)
+
+      # Determine element type from class_name for correct type mapping
+      internal_types = [TypeRef::POINTER, TypeRef::INT32, TypeRef::BOOL]
+      internal_name = mangle_function_name("#{class_name}.new", internal_types)
+
+      # Ensure the internal 3-arg allocator exists
+      generate_allocator_overload(class_name, class_info, internal_types)
+
+      internal_call = Call.new(ctx.next_id, class_info.type_ref, nil, internal_name,
+        [buffer_ptr, size_id, false_lit.id])
       ctx.emit(internal_call)
       ctx.register_type(internal_call.id, class_info.type_ref)
 

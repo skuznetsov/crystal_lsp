@@ -3553,6 +3553,113 @@ module Crystal::MIR
         return true
       end
 
+      # IO::FileDescriptor#read(Slice(UInt8)) — bypass broken buffered IO + event loop stack.
+      # Direct read() syscall using fd from the object and buffer from the Slice.
+      if mangled == "IO$CCFileDescriptor$Hread$$Slice$LUInt8$R"
+        emit_raw "; IO::FileDescriptor#read(Slice(UInt8)) — direct syscall override\n"
+        emit_raw "define i32 @#{mangled}(ptr %self, ptr %slice) {\n"
+        emit_raw "entry:\n"
+        # Load fd: self.@fd is at offset 72 (stored as boxed ptr → i32)
+        emit_raw "  %fd_box_ptr = getelementptr i8, ptr %self, i32 72\n"
+        emit_raw "  %fd_box = load ptr, ptr %fd_box_ptr\n"
+        emit_raw "  %fd = load i32, ptr %fd_box\n"
+        # Load slice.@size from offset 0
+        emit_raw "  %size_ptr = getelementptr i8, ptr %slice, i32 0\n"
+        emit_raw "  %size = load i32, ptr %size_ptr\n"
+        # Early return if size == 0
+        emit_raw "  %is_zero = icmp eq i32 %size, 0\n"
+        emit_raw "  br i1 %is_zero, label %ret_zero, label %do_read\n"
+        emit_raw "ret_zero:\n"
+        emit_raw "  ret i32 0\n"
+        emit_raw "do_read:\n"
+        # Load slice.@pointer from offset 8
+        emit_raw "  %buf_ptr_ptr = getelementptr i8, ptr %slice, i32 8\n"
+        emit_raw "  %buf_ptr = load ptr, ptr %buf_ptr_ptr\n"
+        # Call read(fd, buf, size) — returns i64 on macOS
+        emit_raw "  %nbytes = call i64 @read(i32 %fd, ptr %buf_ptr, i32 %size)\n"
+        # If read returned error (-1), return 0
+        emit_raw "  %is_err = icmp slt i64 %nbytes, 0\n"
+        emit_raw "  br i1 %is_err, label %ret_zero, label %ret_ok\n"
+        emit_raw "ret_ok:\n"
+        emit_raw "  %result = trunc i64 %nbytes to i32\n"
+        emit_raw "  ret i32 %result\n"
+        emit_raw "}\n\n"
+        return true
+      end
+
+      # IO::FileDescriptor#gets(Char, Bool) — bypass broken buffered IO.
+      # Read byte-by-byte using direct syscall until delimiter found.
+      # Returns Nil | String union.
+      if mangled == "IO$CCFileDescriptor$Hgets$$Char_Bool" ||
+         mangled == "File$Hgets$$Char_Bool"
+        emit_raw "; #{mangled} — direct syscall gets override\n"
+        emit_raw "define %Nil$_$OR$_String.union @#{mangled}(ptr %self, i32 %delimiter, i1 %chomp) {\n"
+        emit_raw "entry:\n"
+        # Load fd via double-deref at offset 72
+        emit_raw "  %fd_box_ptr = getelementptr i8, ptr %self, i32 72\n"
+        emit_raw "  %fd_box = load ptr, ptr %fd_box_ptr\n"
+        emit_raw "  %fd = load i32, ptr %fd_box\n"
+        # Allocate buffer (4096 bytes) and a 1-byte read buffer
+        emit_raw "  %buf = call ptr @__crystal_v2_malloc64(i64 4096)\n"
+        emit_raw "  %byte_buf = alloca i8\n"
+        emit_raw "  %delim_byte = trunc i32 %delimiter to i8\n"
+        emit_raw "  br label %loop\n"
+        emit_raw "loop:\n"
+        emit_raw "  %pos = phi i32 [0, %entry], [%next_pos, %store_byte]\n"
+        # Read one byte
+        emit_raw "  %nbytes = call i64 @read(i32 %fd, ptr %byte_buf, i32 1)\n"
+        emit_raw "  %is_eof = icmp sle i64 %nbytes, 0\n"
+        emit_raw "  br i1 %is_eof, label %eof, label %got_byte\n"
+        emit_raw "got_byte:\n"
+        emit_raw "  %byte = load i8, ptr %byte_buf\n"
+        emit_raw "  %is_delim = icmp eq i8 %byte, %delim_byte\n"
+        emit_raw "  br i1 %is_delim, label %found_delim, label %store_byte\n"
+        emit_raw "store_byte:\n"
+        # Store byte in buffer (bounds check: stop at 4095)
+        emit_raw "  %buf_slot = getelementptr i8, ptr %buf, i32 %pos\n"
+        emit_raw "  store i8 %byte, ptr %buf_slot\n"
+        emit_raw "  %next_pos = add i32 %pos, 1\n"
+        emit_raw "  %at_limit = icmp sge i32 %next_pos, 4095\n"
+        emit_raw "  br i1 %at_limit, label %build_str, label %loop\n"
+        emit_raw "found_delim:\n"
+        # If chomp, don't include delimiter. If !chomp, include it.
+        emit_raw "  br i1 %chomp, label %build_str, label %incl_delim\n"
+        emit_raw "incl_delim:\n"
+        emit_raw "  %slot2 = getelementptr i8, ptr %buf, i32 %pos\n"
+        emit_raw "  store i8 %byte, ptr %slot2\n"
+        emit_raw "  %pos_d = add i32 %pos, 1\n"
+        emit_raw "  %str2 = call ptr @String$Dnew$$Pointer$LUInt8$R_Int32_Int32(ptr %buf, i32 %pos_d, i32 %pos_d)\n"
+        emit_raw "  %u2 = alloca %Nil$_$OR$_String.union, align 8\n"
+        emit_raw "  %u2tid = getelementptr %Nil$_$OR$_String.union, ptr %u2, i32 0, i32 0\n"
+        emit_raw "  store i32 1, ptr %u2tid\n"
+        emit_raw "  %u2pay = getelementptr %Nil$_$OR$_String.union, ptr %u2, i32 0, i32 1\n"
+        emit_raw "  store ptr %str2, ptr %u2pay, align 4\n"
+        emit_raw "  %rv2 = load %Nil$_$OR$_String.union, ptr %u2\n"
+        emit_raw "  ret %Nil$_$OR$_String.union %rv2\n"
+        emit_raw "eof:\n"
+        # If we read 0 bytes total, return nil
+        emit_raw "  %has_data = icmp sgt i32 %pos, 0\n"
+        emit_raw "  br i1 %has_data, label %build_str, label %do_nil\n"
+        emit_raw "do_nil:\n"
+        emit_raw "  %un = alloca %Nil$_$OR$_String.union, align 8\n"
+        emit_raw "  %untid = getelementptr %Nil$_$OR$_String.union, ptr %un, i32 0, i32 0\n"
+        emit_raw "  store i32 0, ptr %untid\n"
+        emit_raw "  %rvn = load %Nil$_$OR$_String.union, ptr %un\n"
+        emit_raw "  ret %Nil$_$OR$_String.union %rvn\n"
+        emit_raw "build_str:\n"
+        # Create Crystal String from buffer using String.new(UInt8*, Int32, Int32)
+        emit_raw "  %str1 = call ptr @String$Dnew$$Pointer$LUInt8$R_Int32_Int32(ptr %buf, i32 %pos, i32 %pos)\n"
+        emit_raw "  %u1 = alloca %Nil$_$OR$_String.union, align 8\n"
+        emit_raw "  %u1tid = getelementptr %Nil$_$OR$_String.union, ptr %u1, i32 0, i32 0\n"
+        emit_raw "  store i32 1, ptr %u1tid\n"
+        emit_raw "  %u1pay = getelementptr %Nil$_$OR$_String.union, ptr %u1, i32 0, i32 1\n"
+        emit_raw "  store ptr %str1, ptr %u1pay, align 4\n"
+        emit_raw "  %rv1 = load %Nil$_$OR$_String.union, ptr %u1\n"
+        emit_raw "  ret %Nil$_$OR$_String.union %rv1\n"
+        emit_raw "}\n\n"
+        return true
+      end
+
       false
     end
 
