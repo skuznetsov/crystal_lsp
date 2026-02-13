@@ -10577,57 +10577,29 @@ module Crystal::MIR
                                part_llvm_type.ends_with?("_UInt64.union")
             payload_is_bool = part_llvm_type.ends_with?("_Bool.union")
 
+            # Use branchless select to avoid splitting basic blocks (breaks phi predecessors).
+            emit "%#{base_name}.is_nil#{idx} = icmp eq i32 %#{base_name}.tid#{idx}, 0"
             if payload_is_int32
-              # Check if nil (type_id 0) → empty string, else extract i32 and convert
-              nil_label = "#{base_name}.u_nil#{idx}"
-              val_label = "#{base_name}.u_val#{idx}"
-              merge_label = "#{base_name}.u_merge#{idx}"
-              emit "%#{base_name}.is_nil#{idx} = icmp eq i32 %#{base_name}.tid#{idx}, 0"
-              emit "br i1 %#{base_name}.is_nil#{idx}, label %#{nil_label}, label %#{val_label}"
-              emit_raw "#{nil_label}:\n"
-              emit "br label %#{merge_label}"
-              emit_raw "#{val_label}:\n"
               emit "%#{base_name}.i32_val#{idx} = load i32, ptr %#{base_name}.payload_ptr#{idx}"
               emit "%#{base_name}.i32_str#{idx} = call ptr @__crystal_v2_int_to_string(i32 %#{base_name}.i32_val#{idx})"
-              emit "br label %#{merge_label}"
-              emit_raw "#{merge_label}:\n"
-              emit "%#{base_name}.conv#{idx} = phi ptr [%#{base_name}.i32_str#{idx}, %#{val_label}], [@.str.empty, %#{nil_label}]"
+              emit "%#{base_name}.conv#{idx} = select i1 %#{base_name}.is_nil#{idx}, ptr @.str.empty, ptr %#{base_name}.i32_str#{idx}"
               string_parts << "%#{base_name}.conv#{idx}"
             elsif payload_is_int64
-              nil_label = "#{base_name}.u_nil#{idx}"
-              val_label = "#{base_name}.u_val#{idx}"
-              merge_label = "#{base_name}.u_merge#{idx}"
-              emit "%#{base_name}.is_nil#{idx} = icmp eq i32 %#{base_name}.tid#{idx}, 0"
-              emit "br i1 %#{base_name}.is_nil#{idx}, label %#{nil_label}, label %#{val_label}"
-              emit_raw "#{nil_label}:\n"
-              emit "br label %#{merge_label}"
-              emit_raw "#{val_label}:\n"
               emit "%#{base_name}.i64_val#{idx} = load i64, ptr %#{base_name}.payload_ptr#{idx}"
               emit "%#{base_name}.i64_str#{idx} = call ptr @__crystal_v2_int64_to_string(i64 %#{base_name}.i64_val#{idx})"
-              emit "br label %#{merge_label}"
-              emit_raw "#{merge_label}:\n"
-              emit "%#{base_name}.conv#{idx} = phi ptr [%#{base_name}.i64_str#{idx}, %#{val_label}], [@.str.empty, %#{nil_label}]"
+              emit "%#{base_name}.conv#{idx} = select i1 %#{base_name}.is_nil#{idx}, ptr @.str.empty, ptr %#{base_name}.i64_str#{idx}"
               string_parts << "%#{base_name}.conv#{idx}"
             elsif payload_is_bool
-              nil_label = "#{base_name}.u_nil#{idx}"
-              val_label = "#{base_name}.u_val#{idx}"
-              merge_label = "#{base_name}.u_merge#{idx}"
-              emit "%#{base_name}.is_nil#{idx} = icmp eq i32 %#{base_name}.tid#{idx}, 0"
-              emit "br i1 %#{base_name}.is_nil#{idx}, label %#{nil_label}, label %#{val_label}"
-              emit_raw "#{nil_label}:\n"
-              emit "br label %#{merge_label}"
-              emit_raw "#{val_label}:\n"
               emit "%#{base_name}.bool_val#{idx} = load i8, ptr %#{base_name}.payload_ptr#{idx}"
               emit "%#{base_name}.bool_i1#{idx} = trunc i8 %#{base_name}.bool_val#{idx} to i1"
               emit "%#{base_name}.bool_str#{idx} = call ptr @__crystal_v2_bool_to_string(i1 %#{base_name}.bool_i1#{idx})"
-              emit "br label %#{merge_label}"
-              emit_raw "#{merge_label}:\n"
-              emit "%#{base_name}.conv#{idx} = phi ptr [%#{base_name}.bool_str#{idx}, %#{val_label}], [@.str.empty, %#{nil_label}]"
+              emit "%#{base_name}.conv#{idx} = select i1 %#{base_name}.is_nil#{idx}, ptr @.str.empty, ptr %#{base_name}.bool_str#{idx}"
               string_parts << "%#{base_name}.conv#{idx}"
             else
-              # Default: payload is ptr (String, Array, or class instance)
+              # Payload is ptr (String, Array, or class instance) — load always safe from alloca
               emit "%#{base_name}.str_ptr#{idx} = load ptr, ptr %#{base_name}.payload_ptr#{idx}, align 4"
-              string_parts << "%#{base_name}.str_ptr#{idx}"
+              emit "%#{base_name}.conv#{idx} = select i1 %#{base_name}.is_nil#{idx}, ptr @.str.empty, ptr %#{base_name}.str_ptr#{idx}"
+              string_parts << "%#{base_name}.conv#{idx}"
             end
           else
             # Check if this is an Array type — build "[elem, elem, ...]" string
