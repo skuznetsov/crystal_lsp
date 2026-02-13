@@ -3774,6 +3774,90 @@ module Crystal::MIR
         return true
       end
 
+      # Hash#[]? — fix return type to be Nil | V union instead of raw V.
+      # The MIR compiles []? → fetch(key, nil) which returns raw V (losing nil distinction).
+      # Fix: call find_entry directly and return proper union.
+      if mangled.includes?("$H$IDXQ$") && mangled.includes?("Hash$L")
+        # Determine key type from the mangled name suffix
+        key_type_suffix = mangled.split("$H$IDXQ$$").last?
+        key_llvm_type = case key_type_suffix
+                        when "String" then "ptr"
+                        when "Int32"  then "i32"
+                        when "Int64"  then "i64"
+                        when "UInt32" then "i32"
+                        when "UInt64" then "i64"
+                        else               "ptr"
+                        end
+        key_is_ptr = key_llvm_type == "ptr" || key_llvm_type == "i64"
+
+        # Determine value type from the Hash type params in the mangled name
+        # Hash$LK$C$_V$R → the value type follows "$C$_" and precedes "$R$H"
+        value_type_str = ""
+        if m = mangled.match(/Hash\$L[^$]+\$C\$_([^$]+)\$R/)
+          value_type_str = m[1]
+        end
+        value_llvm_type = case value_type_str
+                          when "Int32", "UInt32" then "i32"
+                          when "Int64", "UInt64" then "i64"
+                          when "Bool"            then "i1"
+                          else                        "ptr"
+                          end
+
+        # Compute value offset in Entry body: after @key field
+        # key_size = 8 for ptr/i64, 4 for i32
+        key_size = key_is_ptr ? 8 : 4
+        value_offset = key_size  # @key at 0, @value at key_size
+
+        # Find the find_entry function name
+        # Hash$LK$C$_V$R$Hfind_entry$$KeyType
+        hash_prefix = mangled.split("$H$IDXQ$").first
+        find_entry_name = "#{hash_prefix}$Hfind_entry$$#{key_type_suffix}"
+
+        # Union type name for Nil | Entry
+        entry_type_name = hash_prefix.sub("Hash$L", "Hash$CCEntry$L")
+        nil_or_entry_union = "%Nil$_$OR$_#{entry_type_name}.union"
+
+        # Value union type name (Nil | V)
+        value_union_name = case value_llvm_type
+                           when "i32" then "%Nil$_$OR$_Int32.union"
+                           when "i64" then "%Nil$_$OR$_Int64.union"
+                           when "i1"  then "%Nil$_$OR$_Bool.union"
+                           else            "%Nil$_$OR$_String.union" # guess
+                           end
+
+        emit_raw "; #{mangled} — union return override for Hash#[]?\n"
+        emit_raw "define #{value_union_name} @#{mangled}(ptr %self, #{key_llvm_type} %key) {\n"
+        emit_raw "entry:\n"
+        emit_raw "  %entry_union = call #{nil_or_entry_union} @#{find_entry_name}(ptr %self, #{key_llvm_type} %key)\n"
+        emit_raw "  %eu_ptr = alloca #{nil_or_entry_union}, align 8\n"
+        emit_raw "  store #{nil_or_entry_union} %entry_union, ptr %eu_ptr\n"
+        emit_raw "  %tid_ptr = getelementptr #{nil_or_entry_union}, ptr %eu_ptr, i32 0, i32 0\n"
+        emit_raw "  %tid = load i32, ptr %tid_ptr\n"
+        emit_raw "  %found = icmp ne i32 %tid, 0\n"
+        emit_raw "  br i1 %found, label %found_bb, label %notfound_bb\n"
+        emit_raw "found_bb:\n"
+        emit_raw "  %pay_ptr = getelementptr #{nil_or_entry_union}, ptr %eu_ptr, i32 0, i32 1\n"
+        emit_raw "  %entry_p = load ptr, ptr %pay_ptr, align 4\n"
+        emit_raw "  %val_ptr = getelementptr i8, ptr %entry_p, i32 #{value_offset}\n"
+        emit_raw "  %val = load #{value_llvm_type}, ptr %val_ptr\n"
+        # Build result union: type_id=1, payload=val
+        emit_raw "  %result_ptr = alloca #{value_union_name}, align 8\n"
+        emit_raw "  %rtid = getelementptr #{value_union_name}, ptr %result_ptr, i32 0, i32 0\n"
+        emit_raw "  store i32 1, ptr %rtid\n"
+        emit_raw "  %rpay = getelementptr #{value_union_name}, ptr %result_ptr, i32 0, i32 1\n"
+        emit_raw "  store #{value_llvm_type} %val, ptr %rpay, align 4\n"
+        emit_raw "  %result_found = load #{value_union_name}, ptr %result_ptr\n"
+        emit_raw "  ret #{value_union_name} %result_found\n"
+        emit_raw "notfound_bb:\n"
+        # Build nil union: type_id=0
+        emit_raw "  %nil_ptr = alloca #{value_union_name}, align 8\n"
+        emit_raw "  store #{value_union_name} zeroinitializer, ptr %nil_ptr\n"
+        emit_raw "  %result_nil = load #{value_union_name}, ptr %nil_ptr\n"
+        emit_raw "  ret #{value_union_name} %result_nil\n"
+        emit_raw "}\n\n"
+        return true
+      end
+
       false
     end
 
