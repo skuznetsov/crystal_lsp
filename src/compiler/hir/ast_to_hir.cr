@@ -33908,6 +33908,9 @@ module Crystal::HIR
       body_exit_block : BlockId? = nil
       rescue_exit_block : BlockId? = nil
       rescue_done_block : BlockId? = nil
+      body_value_block : BlockId? = nil    # actual block before jump to exit (body path)
+      rescue_value_block : BlockId? = nil  # actual block before jump to exit (rescue path)
+      rescue_result : ValueId = ValueId.new(0)  # rescue block's return value
 
       # If we have rescue clauses, set up exception handling
       if has_rescue
@@ -33951,6 +33954,9 @@ module Crystal::HIR
         body_locals = ctx.save_locals
       end
 
+      # Capture actual current block (may differ from body_block due to nested control flow)
+      body_value_block = ctx.current_block
+
       # After body, jump to else (if exists) or ensure (if exists) or exit
       after_body_target = else_block || ensure_block || exit_block
       ctx.terminate(Jump.new(after_body_target))
@@ -33972,13 +33978,14 @@ module Crystal::HIR
         ctx.emit(exc_ptr)
         ctx.register_type(exc_ptr.id, TypeRef::POINTER)
 
-        rescue_result : ValueId = ctx.next_id
+        rescue_result = ctx.next_id
         after_rescue_target = ensure_block || exit_block
         rescue_done_block = ctx.create_block  # also updates outer variable
 
         # Build chain: for each typed clause → IsA check → branch to body or next check
         # Untyped clause → catch-all (no check)
         next_check_block : BlockId? = nil
+        rescue_clause_exits = [] of {BlockId, ValueId}  # {exit_block, value} for PHI
         rescue_clauses.each_with_index do |clause, idx|
           exc_type_name = ""
           if et = clause.exception_type
@@ -34046,6 +34053,10 @@ module Crystal::HIR
             rescue_result = lower_expr(ctx, expr_id)
           end
 
+          # Track clause exit for PHI merging
+          clause_exit_block = ctx.current_block
+          rescue_clause_exits << {clause_exit_block, rescue_result}
+
           # Jump to rescue_done after body
           ctx.terminate(Jump.new(rescue_done_block))
 
@@ -34060,8 +34071,28 @@ module Crystal::HIR
 
         ctx.switch_to_block(rescue_done_block)
 
+        # If multiple rescue clauses, create PHI at rescue_done_block
+        if rescue_clause_exits.size > 1
+          clause_types = rescue_clause_exits.map { |(_, val)| ctx.type_of(val) }.reject { |t| t == TypeRef::VOID }.uniq
+          rescue_phi_type = clause_types.first? || TypeRef::VOID
+          if rescue_phi_type != TypeRef::VOID
+            rescue_phi = Phi.new(ctx.next_id, rescue_phi_type)
+            rescue_clause_exits.each do |(blk, val)|
+              rescue_phi.add_incoming(blk, val)
+            end
+            ctx.emit(rescue_phi)
+            ctx.register_type(rescue_phi.id, rescue_phi_type)
+            rescue_result = rescue_phi.id
+          end
+        elsif rescue_clause_exits.size == 1
+          # Single clause — rescue_result already set correctly
+        end
+
         # Snapshot locals after rescue for rescue-merge.
         rescue_locals = ctx.save_locals
+
+        # Capture rescue value block (rescue_done_block is where rescue values arrive)
+        rescue_value_block = rescue_done_block
 
         ctx.terminate(Jump.new(after_rescue_target))
         rescue_exit_block = after_rescue_target
@@ -34082,6 +34113,16 @@ module Crystal::HIR
       if has_ensure
         ensure_body = node.ensure_body.not_nil!
         ctx.switch_to_block(ensure_block.not_nil!)
+
+        # Merge locals from body/rescue BEFORE ensure body so ensure
+        # sees the correct variable values from whichever path executed
+        if has_rescue && body_locals && rescue_locals && pre_locals && rescue_done_block
+          merge_target = ensure_block.not_nil!
+          if body_exit_block == merge_target && rescue_exit_block == merge_target
+            merge_branch_locals(ctx, pre_locals, body_locals, rescue_locals, body_block, rescue_done_block.not_nil!)
+          end
+        end
+
         ensure_body.each do |expr_id|
           lower_expr(ctx, expr_id) # ensure result is discarded
         end
@@ -34091,11 +34132,85 @@ module Crystal::HIR
       # Continue from exit block
       ctx.switch_to_block(exit_block)
 
-      # Merge locals from body/rescue when both paths converge directly to exit
-      if has_rescue && body_locals && rescue_locals &&
+      # Merge locals when both paths converge to exit (no ensure)
+      if !has_ensure && has_rescue && body_locals && rescue_locals &&
          body_exit_block == exit_block && rescue_exit_block == exit_block &&
          pre_locals && rescue_done_block
         merge_branch_locals(ctx, pre_locals, body_locals, rescue_locals, body_block, rescue_done_block.not_nil!)
+      end
+
+      # Create PHI to merge body value and rescue value when both paths
+      # converge to exit_block (no else/ensure in between)
+      if has_rescue && body_value_block && rescue_value_block &&
+         !has_else && !has_ensure
+        body_type = ctx.type_of(result_id)
+        rescue_type = ctx.type_of(rescue_result)
+
+        # If body ends with raise/return (VOID type), it never flows to exit.
+        # Use rescue value directly — no PHI needed.
+        if body_type == TypeRef::VOID && rescue_type != TypeRef::VOID
+          result_id = rescue_result
+        elsif body_type != TypeRef::VOID && rescue_type == TypeRef::VOID
+          # Rescue never flows (re-raises) — use body value directly
+          # result_id already set
+        elsif body_type != TypeRef::VOID && rescue_type != TypeRef::VOID
+          # Determine PHI type
+          if body_type == rescue_type
+            phi_type = body_type
+          else
+            value_types = [body_type, rescue_type].reject { |t| t == TypeRef::NIL }.uniq
+            if value_types.size <= 1
+              phi_type = value_types.first? || TypeRef::NIL
+            elsif value_types.all? { |t| numeric_primitive?(t) }
+              phi_type = value_types.first
+            else
+              if union_ref = find_covering_union_type(value_types)
+                phi_type = union_ref
+              else
+                phi_type = body_type
+              end
+            end
+          end
+
+          # Coerce values to PHI type if needed
+          coerced_body = result_id
+          coerced_rescue = rescue_result
+          if body_type != phi_type
+            if is_union_type?(phi_type)
+              variant_id = get_union_variant_id(phi_type, body_type)
+              if variant_id >= 0
+                wrap = UnionWrap.new(ctx.next_id, phi_type, result_id, variant_id)
+                ctx.emit_to_block(body_value_block.not_nil!, wrap)
+                coerced_body = wrap.id
+              end
+            elsif numeric_primitive?(body_type) && numeric_primitive?(phi_type)
+              cast = Cast.new(ctx.next_id, phi_type, result_id, phi_type, safe: false)
+              ctx.emit_to_block(body_value_block.not_nil!, cast)
+              coerced_body = cast.id
+            end
+          end
+          if rescue_type != phi_type
+            if is_union_type?(phi_type)
+              variant_id = get_union_variant_id(phi_type, rescue_type)
+              if variant_id >= 0
+                wrap = UnionWrap.new(ctx.next_id, phi_type, rescue_result, variant_id)
+                ctx.emit_to_block(rescue_value_block.not_nil!, wrap)
+                coerced_rescue = wrap.id
+              end
+            elsif numeric_primitive?(rescue_type) && numeric_primitive?(phi_type)
+              cast = Cast.new(ctx.next_id, phi_type, rescue_result, phi_type, safe: false)
+              ctx.emit_to_block(rescue_value_block.not_nil!, cast)
+              coerced_rescue = cast.id
+            end
+          end
+
+          phi = Phi.new(ctx.next_id, phi_type)
+          phi.add_incoming(body_value_block.not_nil!, coerced_body)
+          phi.add_incoming(rescue_value_block.not_nil!, coerced_rescue)
+          ctx.emit(phi)
+          ctx.register_type(phi.id, phi_type)
+          result_id = phi.id
+        end
       end
 
       result_id
