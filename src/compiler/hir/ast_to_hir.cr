@@ -32593,8 +32593,13 @@ module Crystal::HIR
         # Nested loop - check its body
         collect_assigned_vars(node.body, visited_blocks).each { |v| vars << v }
       when CrystalV2::Compiler::Frontend::IfNode
-        # Check all branches
+        # Check all branches including elsif
         collect_assigned_vars(node.then_body, visited_blocks).each { |v| vars << v }
+        if elsifs = node.elsifs
+          elsifs.each do |elsif_branch|
+            collect_assigned_vars(elsif_branch.body, visited_blocks).each { |v| vars << v }
+          end
+        end
         if else_body = node.else_body
           collect_assigned_vars(else_body, visited_blocks).each { |v| vars << v }
         end
