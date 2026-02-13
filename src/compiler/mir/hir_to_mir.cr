@@ -2426,10 +2426,21 @@ module Crystal
       # from a raw value (e.g. Int32 treated as pointer → segfault).
       if hir_value_type = @hir_value_types[isa.value]?
         value_desc = @hir_module.get_type_descriptor(hir_value_type)
+        mir_value_type_for_static = convert_type(hir_value_type)
+        # Only resolve statically for truly concrete types: primitives, or
+        # class types that have NO subclasses (leaf classes). Classes with
+        # subclasses can have any runtime type_id → need runtime check.
+        has_subclasses = false
+        if value_desc && value_desc.kind != HIR::TypeKind::Union && !hir_value_type.primitive?
+          val_mir_type = @mir_module.type_registry.get(mir_value_type_for_static)
+          if val_mir_type
+            has_subclasses = !subclasses_for(val_mir_type.name).empty?
+          end
+        end
         is_concrete = hir_value_type.primitive? ||
-                      (value_desc && value_desc.kind != HIR::TypeKind::Union)
+                      (value_desc && value_desc.kind != HIR::TypeKind::Union && !has_subclasses)
         if is_concrete
-          # Concrete type — resolve statically
+          # Concrete leaf type — resolve statically
           # Collect matching type_ids (check_type + subclasses)
           matching_type_ids = Set(UInt32).new
           matching_type_ids << mir_check_type.id
@@ -2440,8 +2451,7 @@ module Crystal
               end
             end
           end
-          mir_value_type = convert_type(hir_value_type)
-          is_match = matching_type_ids.includes?(mir_value_type.id)
+          is_match = matching_type_ids.includes?(mir_value_type_for_static.id)
           return builder.const_int(is_match ? 1_i64 : 0_i64, TypeRef::BOOL)
         end
       end
@@ -2468,10 +2478,14 @@ module Crystal
         null_val = builder.const_int(0_i64, TypeRef::POINTER)
         return builder.eq(obj, null_val)
       elsif val_is_ptr_type && mir_check_type != TypeRef::NIL
-        # is_a?(SomeClass) on a ptr value → ptr != null
-        # For simple nilable checks, non-null means it IS the type
-        null_val = builder.const_int(0_i64, TypeRef::POINTER)
-        return builder.ne(obj, null_val)
+        # ptr != null is ONLY valid when the static type matches the check type
+        # (i.e., simple nilable checks like `x : Foo?` → is_a?(Foo)).
+        # For class hierarchies (Base → is_a?(SubClass)), need runtime type_id check.
+        if mir_val_type && mir_val_type.id == mir_check_type.id
+          null_val = builder.const_int(0_i64, TypeRef::POINTER)
+          return builder.ne(obj, null_val)
+        end
+        # Otherwise fall through to runtime type_id check below
       end
 
       # Collect all type_ids that should match: the check_type itself
