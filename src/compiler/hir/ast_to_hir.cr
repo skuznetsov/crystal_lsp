@@ -32617,6 +32617,18 @@ module Crystal::HIR
         collect_assigned_vars_in_expr(node.right, vars, visited_blocks)
       when CrystalV2::Compiler::Frontend::CallNode
         node.args.each { |arg| collect_assigned_vars_in_expr(arg, vars, visited_blocks) }
+        # Also check block body for outer variables modified inside blocks
+        if block_id = node.block
+          block_node = @arena[block_id]
+          if block_node.is_a?(CrystalV2::Compiler::Frontend::BlockNode)
+            block_vars = collect_assigned_vars(block_node.body, visited_blocks)
+            if params = block_node.params
+              param_names = params.compact_map { |param| param.name ? String.new(param.name.not_nil!) : nil }
+              block_vars.reject! { |name| param_names.includes?(name) }
+            end
+            block_vars.each { |v| vars << v }
+          end
+        end
       when CrystalV2::Compiler::Frontend::GroupingNode
         collect_assigned_vars_in_expr(node.expression, vars, visited_blocks)
       when CrystalV2::Compiler::Frontend::YieldNode
@@ -38683,14 +38695,26 @@ module Crystal::HIR
         end
       end
 
-      # String#gsub(String, String) intercept → runtime helper
+      # String#gsub intercept → runtime helper
       if method_name == "gsub" && receiver_id && args.size == 2 && block_expr.nil?
         recv_type = ctx.type_of(receiver_id)
         if recv_type == TypeRef::STRING || recv_type == TypeRef::POINTER
-          ext_call = ExternCall.new(ctx.next_id, TypeRef::STRING, "__crystal_v2_string_gsub", [receiver_id, args[0], args[1]])
-          ctx.emit(ext_call)
-          ctx.register_type(ext_call.id, TypeRef::STRING)
-          return ext_call.id
+          arg0_type = ctx.type_of(args[0])
+          arg1_type = ctx.type_of(args[1])
+          if arg0_type == TypeRef::CHAR && arg1_type == TypeRef::CHAR
+            # gsub(Char, Char) → __crystal_v2_string_gsub_char
+            ext_call = ExternCall.new(ctx.next_id, TypeRef::STRING, "__crystal_v2_string_gsub_char", [receiver_id, args[0], args[1]])
+            ctx.emit(ext_call)
+            ctx.register_type(ext_call.id, TypeRef::STRING)
+            return ext_call.id
+          elsif (arg0_type == TypeRef::STRING || arg0_type == TypeRef::POINTER) &&
+                (arg1_type == TypeRef::STRING || arg1_type == TypeRef::POINTER)
+            # gsub(String, String) → __crystal_v2_string_gsub
+            ext_call = ExternCall.new(ctx.next_id, TypeRef::STRING, "__crystal_v2_string_gsub", [receiver_id, args[0], args[1]])
+            ctx.emit(ext_call)
+            ctx.register_type(ext_call.id, TypeRef::STRING)
+            return ext_call.id
+          end
         end
       end
 
