@@ -65,6 +65,10 @@ module Crystal
 
     # Memory strategy (note: we use inline selection, not global assigner)
 
+    # Track HIR values that point to inline struct data (from Pointer(Struct).value).
+    # These need special FieldGet handling: GEP without load for struct-typed fields.
+    @inline_struct_ptrs : Set(HIR::ValueId) = Set(HIR::ValueId).new
+
     # Statistics
     getter stats : LoweringStats = LoweringStats.new
 
@@ -390,6 +394,7 @@ module Crystal
       @pending_phis.clear
       @stack_slot_values.clear
       @stack_slot_types.clear
+      @inline_struct_ptrs.clear
       @builder = Builder.new(mir_func)
 
       # Map HIR params to MIR params (already added in stub)
@@ -897,10 +902,20 @@ module Crystal
       builder = @builder.not_nil!
       obj_ptr = get_value(field.object)
 
-      # GEP to field address + load
+      # GEP to field address
       # field_offset is byte offset from object start
       field_ptr = builder.gep(obj_ptr, [field.field_offset.to_u32], TypeRef::POINTER)
-      builder.load(field_ptr, convert_type(field.type))
+
+      # When the object was obtained from Pointer(Struct).value (inline struct data),
+      # struct-typed fields are also stored inline — return the GEP pointer without loading.
+      # For non-inline objects (normal heap-allocated), always load as before.
+      if @inline_struct_ptrs.includes?(field.object) && hir_type_is_struct?(field.type)
+        # Tag the result as also pointing to inline struct data
+        @inline_struct_ptrs << field.id
+        field_ptr
+      else
+        builder.load(field_ptr, convert_type(field.type))
+      end
     end
 
     private def lower_field_set(field : HIR::FieldSet) : ValueId
@@ -912,6 +927,23 @@ module Crystal
       field_ptr = builder.gep(obj_ptr, [field.field_offset.to_u32], TypeRef::POINTER)
       builder.store(field_ptr, value)
       value
+    end
+
+    # Check if a HIR TypeRef refers to a struct (value type).
+    private def hir_type_is_struct?(type : HIR::TypeRef) : Bool
+      return false if type.id < HIR::TypeRef::FIRST_USER_TYPE
+      desc = @hir_module.get_type_descriptor(type)
+      return false unless desc
+      desc.kind == HIR::TypeKind::Struct
+    end
+
+    # Get the inline size of a struct type (from class_info via MIR type registry).
+    private def hir_type_inline_size(type : HIR::TypeRef) : Int32
+      mir_ref = convert_type(type)
+      if mir_type = @mir_module.type_registry.get(mir_ref)
+        return mir_type.size.to_i32 if mir_type.size > 0
+      end
+      0
     end
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -2886,10 +2918,23 @@ module Crystal
         index = get_value(idx)
         elem_type = convert_type(load.type)
         gep = builder.gep_dynamic(ptr, index, elem_type)
-        builder.load(gep, result_type)
+        # For struct element types, the data is inline — GEP result IS the value pointer
+        if hir_type_is_struct?(load.type)
+          @inline_struct_ptrs << load.id
+          gep
+        else
+          builder.load(gep, result_type)
+        end
       else
-        # ptr.value - direct load
-        builder.load(ptr, result_type)
+        # ptr.value - direct access
+        # For struct types, the pointer already points to inline struct data.
+        # Return the pointer unchanged (no load). Matches Crystal value semantics.
+        if hir_type_is_struct?(load.type)
+          @inline_struct_ptrs << load.id
+          ptr
+        else
+          builder.load(ptr, result_type)
+        end
       end
     end
 
@@ -2923,7 +2968,7 @@ module Crystal
       elem_type = convert_type(add.element_type)
 
       # GEP with dynamic offset computes ptr + offset * sizeof(elem)
-      builder.gep_dynamic(ptr, offset, elem_type)
+      builder.gep_dynamic(ptr, offset, elem_type, add.element_byte_size)
     end
 
     private def lower_pointer_realloc(realloc : HIR::PointerRealloc) : ValueId
@@ -2945,7 +2990,13 @@ module Crystal
                       when "UInt32", "Int32", "Float32", "Char" then 4
                       when "UInt64", "Int64", "Float64" then 8
                       when "UInt128", "Int128" then 16
-                      else 8 # class/struct instances are pointers (8 bytes)
+                      else
+                        # For struct types, look up actual size from type registry
+                        if elem_mir_type = @mir_module.type_registry.get_by_name(elem_name)
+                          elem_mir_type.size > 0 ? elem_mir_type.size.to_i32 : 8
+                        else
+                          8 # class/reference instances are pointers (8 bytes)
+                        end
                       end
         end
       end

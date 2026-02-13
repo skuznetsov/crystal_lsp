@@ -441,13 +441,18 @@ module Crystal::HIR
     getter pointer : ValueId
     getter offset : ValueId
     getter element_type : TypeRef
+    # Explicit element byte size for struct types where TypeRef maps to ptr (8)
+    # but actual size differs. 0 = use default from type system.
+    getter element_byte_size : UInt64
 
-    def initialize(id : ValueId, type : TypeRef, @pointer : ValueId, @offset : ValueId, @element_type : TypeRef)
+    def initialize(id : ValueId, type : TypeRef, @pointer : ValueId, @offset : ValueId, @element_type : TypeRef, @element_byte_size : UInt64 = 0_u64)
       super(id, type)
     end
 
     def to_s(io : IO) : Nil
-      io << "%" << @id << " = ptr_add %" << @pointer << " + %" << @offset << " (elem=" << @element_type.id << ")"
+      io << "%" << @id << " = ptr_add %" << @pointer << " + %" << @offset << " (elem=" << @element_type.id
+      io << " size=" << @element_byte_size if @element_byte_size > 0
+      io << ")"
     end
   end
 
@@ -1394,6 +1399,9 @@ module Crystal::HIR
     end
 
     def create_function(name : String, return_type : TypeRef) : Function
+      if ENV.has_key?("DBG_FILE_NEW") && (name.includes?("File") || name.includes?("file"))
+        STDERR.puts "[FUNC_CREATE_FILE] name=#{name} return=#{return_type.id}"
+      end
       # Check for duplicates
       if existing = @functions_by_name[name]?
         if existing.return_type == TypeRef::VOID && return_type != TypeRef::VOID

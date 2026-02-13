@@ -882,8 +882,9 @@ module Crystal::MIR
     getter base : ValueId
     getter index : ValueId  # Dynamic index (ValueId instead of UInt32)
     getter element_type : TypeRef  # Type of elements being indexed
+    getter element_byte_size : UInt64  # 0 = use default from element_type
 
-    def initialize(id : ValueId, type : TypeRef, @base : ValueId, @index : ValueId, @element_type : TypeRef)
+    def initialize(id : ValueId, type : TypeRef, @base : ValueId, @index : ValueId, @element_type : TypeRef, @element_byte_size : UInt64 = 0_u64)
       super(id, type)
     end
 
@@ -2028,8 +2029,8 @@ module Crystal::MIR
     end
 
     # GEP with dynamic index for pointer arithmetic
-    def gep_dynamic(base : ValueId, index : ValueId, element_type : TypeRef) : ValueId
-      emit(GetElementPtrDynamic.new(@function.next_value_id, TypeRef::POINTER, base, index, element_type))
+    def gep_dynamic(base : ValueId, index : ValueId, element_type : TypeRef, element_byte_size : UInt64 = 0_u64) : ValueId
+      emit(GetElementPtrDynamic.new(@function.next_value_id, TypeRef::POINTER, base, index, element_type, element_byte_size))
     end
 
     def addressof(operand : ValueId, result_type : TypeRef) : ValueId

@@ -1593,6 +1593,27 @@ module Crystal::MIR
       emit_raw "  ret void\n"
       emit_raw "}\n\n"
 
+      # File.new(path, mode) helper — opens file via POSIX open(), returns ptr to {i32 fd, i1 blocking}
+      # Takes plain ptr args (no union by-value) to avoid ARM64 ABI decomposition issues.
+      emit_raw "define ptr @__crystal_v2_file_open(ptr %path, ptr %mode) {\n"
+      emit_raw "entry:\n"
+      emit_raw "  %cstr = getelementptr i8, ptr %path, i32 12\n"
+      emit_raw "  %flags = call i32 @Crystal$CCSystem$CCFile$Dopen_flag$$String(ptr %mode)\n"
+      emit_raw "  %fd = call i32 (ptr, i32, ...) @open(ptr %cstr, i32 %flags, i32 438)\n"
+      emit_raw "  %fd_neg = icmp slt i32 %fd, 0\n"
+      emit_raw "  br i1 %fd_neg, label %error, label %success\n"
+      emit_raw "error:\n"
+      emit_raw "  call void @perror(ptr @.str.dbg_open_label)\n"
+      emit_raw "  call void @__crystal_v2_raise_msg(ptr @.str.file_open_error)\n"
+      emit_raw "  unreachable\n"
+      emit_raw "success:\n"
+      emit_raw "  %tup = call ptr @__crystal_v2_malloc64(i64 8)\n"
+      emit_raw "  store i32 %fd, ptr %tup\n"
+      emit_raw "  %cof_ptr = getelementptr i8, ptr %tup, i32 4\n"
+      emit_raw "  store i1 1, ptr %cof_ptr\n"
+      emit_raw "  ret ptr %tup\n"
+      emit_raw "}\n\n"
+
       # IO functions - use printf
       emit_raw "define void @__crystal_v2_puts(ptr %str) {\n"
       emit_raw "  call i32 @puts(ptr %str)\n"
@@ -5459,6 +5480,18 @@ module Crystal::MIR
         element_type = "i8"
       end
 
+      # CRITICAL: For struct/tuple element types that map to "ptr" in our ABI,
+      # GEP would step by sizeof(ptr)=8 instead of sizeof(struct).
+      # Use byte-level GEP (i8) with index * sizeof(element) instead.
+      struct_elem_size = inst.element_byte_size  # Explicit size from HIR (for generic structs)
+      if struct_elem_size == 0 && element_type == "ptr" && inst.element_type.id > TypeRef::POINTER.id
+        if mir_type = @module.type_registry.get(inst.element_type)
+          if mir_type.kind.struct? || mir_type.kind.tuple?
+            struct_elem_size = mir_type.size
+          end
+        end
+      end
+
       # Check base type - GEP requires pointer base
       base_type = @value_types[inst.base]?
       base_type_str = base_type ? @type_mapper.llvm_type(base_type) : "ptr"
@@ -5516,23 +5549,21 @@ module Crystal::MIR
         index = "%#{base_name}.idx64"
         index_type_str = "i64"
       end
+      # Normalize index to i64
+      idx64 = index  # Will hold i64-typed index
       if index_type_str == "i64"
-        emit "#{name} = getelementptr #{element_type}, ptr #{base}, i64 #{index}"
+        # Already i64
       elsif index_type_str == "ptr"
-        # Convert ptr to i64 with ptrtoint
         ext_name = "#{name}.idx64"
         emit "#{ext_name} = ptrtoint ptr #{index} to i64"
-        emit "#{name} = getelementptr #{element_type}, ptr #{base}, i64 #{ext_name}"
+        idx64 = ext_name
       elsif index_type_str == "void"
-        # Void index - use 0 as default
-        emit "#{name} = getelementptr #{element_type}, ptr #{base}, i64 0"
+        idx64 = "0"
       elsif index_type_str == "float" || index_type_str == "double"
-        # Convert float to i64 with fptosi
         ext_name = "#{name}.idx64"
         emit "#{ext_name} = fptosi #{index_type_str} #{index} to i64"
-        emit "#{name} = getelementptr #{element_type}, ptr #{base}, i64 #{ext_name}"
+        idx64 = ext_name
       else
-        # Convert integer index to i64 (extend or truncate based on width).
         ext_name = "#{name}.idx64"
         bits = nil.as(Int32?)
         if index_type_str.starts_with?('i')
@@ -5547,7 +5578,17 @@ module Crystal::MIR
           op = is_unsigned ? "zext" : "sext"
           emit "#{ext_name} = #{op} #{index_type_str} #{index} to i64"
         end
-        emit "#{name} = getelementptr #{element_type}, ptr #{base}, i64 #{ext_name}"
+        idx64 = ext_name
+      end
+
+      # For struct element types, multiply index by sizeof(struct) and use byte-level GEP.
+      # Without this, GEP ptr steps by sizeof(ptr)=8 instead of sizeof(struct).
+      if struct_elem_size > 0 && struct_elem_size != 8
+        byte_name = "#{name}.byte_offset"
+        emit "#{byte_name} = mul i64 #{idx64}, #{struct_elem_size}"
+        emit "#{name} = getelementptr i8, ptr #{base}, i64 #{byte_name}"
+      else
+        emit "#{name} = getelementptr #{element_type}, ptr #{base}, i64 #{idx64}"
       end
       @value_types[inst.id] = TypeRef::POINTER  # GEP always returns pointer
     end
@@ -10247,7 +10288,14 @@ module Crystal::MIR
         @indent -= 1
         emit "]"
       when Unreachable
-        emit "unreachable"
+        # For void functions, a block with Unreachable terminator (the default)
+        # may simply be missing an explicit Return. Emit ret void to prevent
+        # trap/crash when the block is actually reached at runtime (e.g., GC callbacks).
+        if @current_return_type == "void"
+          emit "ret void"
+        else
+          emit "unreachable"
+        end
       end
     end
 

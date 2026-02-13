@@ -14497,6 +14497,9 @@ module Crystal::HIR
 
       # Get initialize parameters for this class
       init_params = @init_params[class_name]? || [] of {String, TypeRef}
+      if class_name == "File" && env_get("DBG_FILE_NEW")
+        STDERR.puts "[FILE_ALLOC] class=File init_params=#{init_params.map { |n, t| "#{n}:#{t.id}" }.join(", ")} func=#{func_name}"
+      end
       allocator_params = init_params.map { |param| {param[0], param[1]} }
       if call_arg_types && call_arg_types.any? { |t| t != TypeRef::VOID }
         allocator_params.each_with_index do |(param_name, param_type), idx|
@@ -14710,6 +14713,7 @@ module Crystal::HIR
     ) : Nil
       return unless call_arg_types
       return if call_arg_types.empty?
+
       return if call_arg_types.all? { |t| t == TypeRef::VOID }
 
       # Re-lookup class_info to get the latest version with all ivars
@@ -14721,6 +14725,24 @@ module Crystal::HIR
       overload_name = mangle_function_name(base_name, call_arg_types)
       return if overload_name == base_name
       return if @module.has_function?(overload_name)
+
+      # When auto-allocator init params have a hard type mismatch with call args
+      # (e.g., File.new(path, mode) where init expects fd:Int but call passes String),
+      # generate a custom allocator that calls __crystal_v2_file_open to get the fd
+      # instead of the wrong ptrtoint conversion.
+      init_params = @init_params[class_name]? || [] of {String, TypeRef}
+      if init_params.size > 0 && class_name == "File"
+        non_void_call = call_arg_types.reject { |t| t == TypeRef::VOID }
+        # File.new(String, String, ...) — first two concrete args are both String
+        # but initialize expects (String path, Int32 fd, String mode, ...)
+        if non_void_call.size >= 2 && non_void_call[0] == TypeRef::STRING && non_void_call[1] == TypeRef::STRING
+          if init_params.size >= 2 && init_params[1][1] == TypeRef::INT32
+            # Generate File.new that opens the file via __crystal_v2_file_open
+            generate_file_new_allocator(class_name, class_info, call_arg_types, overload_name)
+            return
+          end
+        end
+      end
 
       init_params = @init_params[class_name]? || [] of {String, TypeRef}
       allocator_params = init_params.map { |param| {param[0], param[1]} }
@@ -14856,6 +14878,81 @@ module Crystal::HIR
       return false if class_name.starts_with?("Pointer(") || class_name.starts_with?("Pointer_")
       return false if primitive_self_type(class_name)
       true
+    end
+
+    # Generate File.new(path, mode) allocator that correctly opens the file.
+    # File's initialize expects (path, fd:Int, mode, ...) but the call passes
+    # (path, mode). This method calls __crystal_v2_file_open(path, mode) to get
+    # the fd, then delegates to the normal allocator with (path, fd, mode, ...).
+    private def generate_file_new_allocator(
+      class_name : String,
+      class_info : ClassInfo,
+      call_arg_types : Array(TypeRef),
+      overload_name : String,
+    ) : Nil
+      func = @module.create_function(overload_name, class_info.type_ref)
+      ctx = LoweringContext.new(func, @module, @arena)
+
+      # Add ALL params matching call_arg_types (including VOID) to match the normal
+      # allocator's param count. The LLVM backend strips the first arg when callee has
+      # N-1 params vs N caller args (self arg mismatch), so we need the full param list.
+      path_id = nil.as(ValueId?)
+      mode_id = nil.as(ValueId?)
+      call_arg_types.each_with_index do |type_ref, idx|
+        hir_param = func.add_param("arg#{idx}", type_ref)
+        ctx.register_type(hir_param.id, type_ref)
+        # Track first two non-VOID String params as path and mode
+        if type_ref == TypeRef::STRING
+          if path_id.nil?
+            path_id = hir_param.id
+          elsif mode_id.nil?
+            mode_id = hir_param.id
+          end
+        end
+      end
+
+      path_id = path_id || raise "File.new allocator: missing path arg"
+      mode_id = mode_id || raise "File.new allocator: missing mode arg"
+
+      # Call __crystal_v2_file_open(path, mode) → ptr to {i32 fd, i1 blocking}
+      open_call = ExternCall.new(ctx.next_id, TypeRef::POINTER, "__crystal_v2_file_open", [path_id, mode_id])
+      ctx.emit(open_call)
+      ctx.register_type(open_call.id, TypeRef::POINTER)
+      tup_ptr = open_call.id
+
+      # Extract fd: load i32 from byte offset 0 of tuple
+      fd_get = FieldGet.new(ctx.next_id, TypeRef::INT32, tup_ptr, "fd", 0)
+      ctx.emit(fd_get)
+      ctx.register_type(fd_get.id, TypeRef::INT32)
+
+      # Extract blocking: load i1 from byte offset 4 of tuple
+      blocking_get = FieldGet.new(ctx.next_id, TypeRef::BOOL, tup_ptr, "blocking", 4)
+      ctx.emit(blocking_get)
+      ctx.register_type(blocking_get.id, TypeRef::BOOL)
+
+      # Build args for the internal allocator: File.new(path, fd, mode, blocking, nil, nil)
+      # The internal allocator expects: String, Int32, String, Bool, Nil, Nil
+      internal_types = [TypeRef::STRING, TypeRef::INT32, TypeRef::STRING, TypeRef::BOOL, TypeRef::NIL, TypeRef::NIL]
+      internal_name = mangle_function_name("#{class_name}.new", internal_types)
+
+      # Ensure the internal allocator exists
+      generate_allocator_overload(class_name, class_info, internal_types)
+
+      # Emit call to internal File.new(path, fd, mode, blocking, nil, nil)
+      # Create nil literals for encoding and invalid
+      nil_lit1 = Literal.new(ctx.next_id, TypeRef::NIL, nil)
+      ctx.emit(nil_lit1)
+      ctx.register_type(nil_lit1.id, TypeRef::NIL)
+      nil_lit2 = Literal.new(ctx.next_id, TypeRef::NIL, nil)
+      ctx.emit(nil_lit2)
+      ctx.register_type(nil_lit2.id, TypeRef::NIL)
+
+      internal_call = Call.new(ctx.next_id, class_info.type_ref, nil, internal_name,
+        [path_id, fd_get.id, mode_id, blocking_get.id, nil_lit1.id, nil_lit2.id])
+      ctx.emit(internal_call)
+      ctx.register_type(internal_call.id, class_info.type_ref)
+
+      ctx.terminate(Return.new(internal_call.id))
     end
 
     # Generate synthetic getter method: def name; @name; end
@@ -16394,7 +16491,42 @@ module Crystal::HIR
         idx = index
         idx += types.size if idx < 0
         return nil if idx < 0 || idx >= types.size
-        return types[idx]
+        elem = types[idx]
+        if env_get("DBG_TUPLE_ELEM")
+          STDERR.puts "[TUPLE_ELEM] idx=#{idx} elem_id=#{elem.id} name=#{get_type_name_from_ref(elem)} desc=#{desc.name}"
+        end
+        # Resolve type aliases for non-primitive tuple elements.
+        # e.g., IO::FileDescriptor::Handle is an alias for Int32 but may be
+        # interned before the alias is registered, leaving a non-primitive TypeRef.
+        if elem.id >= TypeRef::FIRST_USER_TYPE
+          elem_name = get_type_name_from_ref(elem)
+          resolved_name = resolve_type_alias_chain(elem_name)
+          if resolved_name != elem_name
+            if prim = builtin_type_ref_for(resolved_name)
+              elem = prim
+            end
+          else
+            # Cross-namespace: IO::FileDescriptor::Handle → look up through included modules
+            # to find Crystal::System::FileDescriptor::Handle → Int32
+            if (sep = elem_name.rindex("::"))
+              namespace = elem_name[0...sep]
+              short = elem_name[(sep + 2)..]
+              if modules = @class_included_modules[namespace]?
+                modules.each do |mod_name|
+                  full_alias = "#{mod_name}::#{short}"
+                  alias_target = resolve_type_alias_chain(full_alias)
+                  if alias_target != full_alias
+                    if prim = builtin_type_ref_for(alias_target)
+                      elem = prim
+                      break
+                    end
+                  end
+                end
+              end
+            end
+          end
+        end
+        return elem
       end
 
       merged = types.first
@@ -36017,6 +36149,14 @@ module Crystal::HIR
                   explicit_new = function_def_overloads(base_new).any? { |key| key != base_new }
                 end
                 has_call_types = call_arg_types && call_arg_types.any? { |t| t != TypeRef::VOID }
+                if owner == "File" && env_get("DBG_FILE_NEW")
+                  arg_strs = call_arg_types.try(&.map { |t| t.id.to_s }) || [] of String
+                  STDERR.puts "[FILE_NEW_RESOLVE] owner=File explicit_new=#{explicit_new} has_call_types=#{has_call_types} call_args=[#{arg_strs.join(",")}] allocator_ok=#{allocator_supported?(owner)}"
+                  if explicit_new && has_call_types
+                    matched_dbg = lookup_function_def_for_call(base_new, call_arg_types.not_nil!.size, false, call_arg_types)
+                    STDERR.puts "[FILE_NEW_RESOLVE] matched=#{matched_dbg.nil? ? "nil" : matched_dbg[0]}"
+                  end
+                end
                 if allocator_supported?(owner)
                   if explicit_new && has_call_types
                     matched = lookup_function_def_for_call(base_new, call_arg_types.not_nil!.size, false, call_arg_types)
@@ -49263,6 +49403,12 @@ module Crystal::HIR
       if value_node = @arena[node.value]
         if tuple_node = value_node.as?(CrystalV2::Compiler::Frontend::TupleLiteralNode)
           element_ids = tuple_node.elements.map { |elem| lower_expr(ctx, elem) }
+          if env_get("DBG_MULTI_ASSIGN")
+            element_ids.each_with_index do |eid, i|
+              etype = ctx.type_of(eid)
+              STDERR.puts "[MULTI_ASSIGN_TUPLE] idx=#{i} value_id=#{eid} type=#{etype.id} name=#{get_type_name_from_ref(etype)} scope=#{@current_class || ""}##{@current_method || ""}"
+            end
+          end
           node.targets.each_with_index do |target_expr, idx|
             next unless value_id = element_ids[idx]?
             assign_value_to_target(ctx, target_expr, value_id)
@@ -49277,6 +49423,11 @@ module Crystal::HIR
 
       rhs_id = lower_expr(ctx, node.value)
       rhs_type = ctx.type_of(rhs_id)
+
+      if env_get("DBG_MULTI_ASSIGN")
+        rhs_name = get_type_name_from_ref(rhs_type)
+        STDERR.puts "[MULTI_ASSIGN] rhs_type=#{rhs_type.id} name=#{rhs_name} targets=#{node.targets.size} scope=#{@current_class || ""}##{@current_method || ""}"
+      end
 
       # For each target, emit index operation to destructure
       node.targets.each_with_index do |target_expr, idx|
@@ -51685,6 +51836,9 @@ module Crystal::HIR
         substituted_params = raw_params.map do |param|
           param = param.strip
           param = @type_param_map[param]? || param
+          # Resolve type aliases (e.g., Crystal::System::FileDescriptor::Handle → Int32)
+          alias_resolved = resolve_type_alias_chain(param)
+          param = alias_resolved if alias_resolved != param
           normalize_tuple_literal_type_name(param)
         end
 
