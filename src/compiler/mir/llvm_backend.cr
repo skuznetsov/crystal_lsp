@@ -552,6 +552,36 @@ module Crystal::MIR
       nil
     end
 
+    @[AlwaysInline]
+    private def posix_open_flag_creat : Int32
+      # Linux/Android use O_CREAT=64, Darwin/BSD use O_CREAT=0x200.
+      if @target_triple.includes?("linux") || @target_triple.includes?("android")
+        64
+      else
+        0x200
+      end
+    end
+
+    @[AlwaysInline]
+    private def posix_open_flag_trunc : Int32
+      # Linux/Android use O_TRUNC=512, Darwin/BSD use O_TRUNC=0x400.
+      if @target_triple.includes?("linux") || @target_triple.includes?("android")
+        512
+      else
+        0x400
+      end
+    end
+
+    @[AlwaysInline]
+    private def posix_open_flag_append : Int32
+      # Linux/Android use O_APPEND=1024, Darwin/BSD use O_APPEND=0x8.
+      if @target_triple.includes?("linux") || @target_triple.includes?("android")
+        1024
+      else
+        0x8
+      end
+    end
+
     def generate : String
       STDERR.puts "  [LLVM] emit_header..." if @progress
       emit_header
@@ -781,7 +811,7 @@ module Crystal::MIR
       already_declared << "printf" << "puts" << "exit" << "abort"
       already_declared << "strlen" << "strcpy" << "strcat" << "sprintf"
       already_declared << "strstr" << "write" << "strchr" << "strtod" << "snprintf"
-      already_declared << "strcmp" << "qsort"
+      already_declared << "strcmp" << "memcmp" << "qsort"
       already_declared << "open" << "lseek" << "read" << "close"
       already_declared << "strtol"
       already_declared << "setjmp" << "longjmp"
@@ -1670,6 +1700,10 @@ module Crystal::MIR
         emit_raw "@.str.false = private constant { i32, i32, i32, [6 x i8] } { i32 #{@string_type_id}, i32 5, i32 5, [6 x i8] c\"false\\00\" }, align 8\n"
       end
       emit_raw "\n"
+      open_w = 1 | posix_open_flag_creat | posix_open_flag_trunc
+      open_w_plus = 2 | posix_open_flag_creat | posix_open_flag_trunc
+      open_a = 1 | posix_open_flag_creat | posix_open_flag_append
+      open_a_plus = 2 | posix_open_flag_creat | posix_open_flag_append
 
       # Memory allocation - use calloc for zero-initialized memory
       # Crystal semantics require zero-init (like GC_MALLOC in original compiler).
@@ -1732,12 +1766,45 @@ module Crystal::MIR
       emit_raw "  ret void\n"
       emit_raw "}\n\n"
 
+      # Convert Crystal file mode string to POSIX open flags.
+      # Supports: "r", "w", "a" and their '+' variants.
+      emit_raw "define i32 @__crystal_v2_mode_to_open_flags(ptr %mode) {\n"
+      emit_raw "entry:\n"
+      emit_raw "  %mode_cstr = getelementptr i8, ptr %mode, i32 12\n"
+      emit_raw "  %m0 = load i8, ptr %mode_cstr\n"
+      emit_raw "  switch i8 %m0, label %ret_rdonly [\n"
+      emit_raw "    i8 114, label %mode_r\n"
+      emit_raw "    i8 119, label %mode_w\n"
+      emit_raw "    i8 97, label %mode_a\n"
+      emit_raw "  ]\n"
+      emit_raw "mode_r:\n"
+      emit_raw "  %m1r_ptr = getelementptr i8, ptr %mode_cstr, i32 1\n"
+      emit_raw "  %m1r = load i8, ptr %m1r_ptr\n"
+      emit_raw "  %r_plus = icmp eq i8 %m1r, 43\n"
+      emit_raw "  %r_flags = select i1 %r_plus, i32 2, i32 0\n"
+      emit_raw "  ret i32 %r_flags\n"
+      emit_raw "mode_w:\n"
+      emit_raw "  %m1w_ptr = getelementptr i8, ptr %mode_cstr, i32 1\n"
+      emit_raw "  %m1w = load i8, ptr %m1w_ptr\n"
+      emit_raw "  %w_plus = icmp eq i8 %m1w, 43\n"
+      emit_raw "  %w_flags = select i1 %w_plus, i32 #{open_w_plus}, i32 #{open_w}\n"
+      emit_raw "  ret i32 %w_flags\n"
+      emit_raw "mode_a:\n"
+      emit_raw "  %m1a_ptr = getelementptr i8, ptr %mode_cstr, i32 1\n"
+      emit_raw "  %m1a = load i8, ptr %m1a_ptr\n"
+      emit_raw "  %a_plus = icmp eq i8 %m1a, 43\n"
+      emit_raw "  %a_flags = select i1 %a_plus, i32 #{open_a_plus}, i32 #{open_a}\n"
+      emit_raw "  ret i32 %a_flags\n"
+      emit_raw "ret_rdonly:\n"
+      emit_raw "  ret i32 0\n"
+      emit_raw "}\n\n"
+
       # File.new(path, mode) helper — opens file via POSIX open(), returns ptr to {i32 fd, i1 blocking}
       # Takes plain ptr args (no union by-value) to avoid ARM64 ABI decomposition issues.
       emit_raw "define ptr @__crystal_v2_file_open(ptr %path, ptr %mode) {\n"
       emit_raw "entry:\n"
       emit_raw "  %cstr = getelementptr i8, ptr %path, i32 12\n"
-      emit_raw "  %flags = call i32 @Crystal$CCSystem$CCFile$Dopen_flag$$String(ptr %mode)\n"
+      emit_raw "  %flags = call i32 @__crystal_v2_mode_to_open_flags(ptr %mode)\n"
       emit_raw "  %fd = call i32 (ptr, i32, ...) @open(ptr %cstr, i32 %flags, i32 438)\n"
       emit_raw "  %fd_neg = icmp slt i32 %fd, 0\n"
       emit_raw "  br i1 %fd_neg, label %error, label %success\n"
@@ -1785,6 +1852,7 @@ module Crystal::MIR
       emit_raw "declare double @strtod(ptr, ptr)\n"
       emit_raw "declare i32 @snprintf(ptr, i64, ptr, ...)\n"
       emit_raw "declare i32 @strcmp(ptr, ptr)\n"
+      emit_raw "declare i32 @memcmp(ptr, ptr, i32)\n"
       emit_raw "declare void @qsort(ptr, i64, i64, ptr)\n"
       emit_raw "declare i64 @strtol(ptr, ptr, i32)\n"
       emit_raw "declare double @llvm.copysign.f64(double, double)\n"
@@ -3616,19 +3684,11 @@ module Crystal::MIR
       emit_raw "}\n\n"
 
       emit_raw "define void @__crystal_v2_raise_msg(ptr %msg) {\n"
-      emit_raw "  ; Wrap message string into Nil|String union (type_id=1 for non-nil String)\n"
-      emit_raw "  %msg_union = alloca %Nil$_$OR$_String.union, align 8\n"
-      emit_raw "  store %Nil$_$OR$_String.union zeroinitializer, ptr %msg_union\n"
-      emit_raw "  %msg_tid = getelementptr %Nil$_$OR$_String.union, ptr %msg_union, i32 0, i32 0\n"
-      emit_raw "  store i32 1, ptr %msg_tid\n"
-      emit_raw "  %msg_pay = getelementptr %Nil$_$OR$_String.union, ptr %msg_union, i32 0, i32 1\n"
-      emit_raw "  store ptr %msg, ptr %msg_pay\n"
-      emit_raw "  %msg_val = load %Nil$_$OR$_String.union, ptr %msg_union\n"
-      emit_raw "  ; Create nil cause union\n"
-      emit_raw "  ; Call RuntimeError.new(message, cause) to create proper Exception object\n"
-      emit_raw "  %exc = call ptr @RuntimeError$Dnew$$String(%Nil$_$OR$_String.union %msg_val, %Nil$_$OR$_Exception.union zeroinitializer)\n"
-      emit_raw "  ; Now raise the proper exception object\n"
-      emit_raw "  call void @__crystal_v2_raise(ptr %exc)\n"
+      emit_raw "  ; Bootstrap-safe fallback: print message and abort without relying\n"
+      emit_raw "  ; on mangled Crystal constructors in backend runtime helpers.\n"
+      emit_raw "  %cmsg = getelementptr i8, ptr %msg, i32 12\n"
+      emit_raw "  call i32 @puts(ptr %cmsg)\n"
+      emit_raw "  call void @abort()\n"
       emit_raw "  unreachable\n"
       emit_raw "}\n\n"
 
@@ -3992,7 +4052,7 @@ module Crystal::MIR
         # Get filename C string: Crystal String data starts at offset 12
         emit_raw "  %cstr = getelementptr i8, ptr %p0, i32 12\n"
         # Get open flags from mode string
-        emit_raw "  %flags = call i32 @Crystal$CCSystem$CCFile$Dopen_flag$$String(ptr %p1)\n"
+        emit_raw "  %flags = call i32 @__crystal_v2_mode_to_open_flags(ptr %p1)\n"
         # Call POSIX open(path, flags, 0666)
         emit_raw "  %fd = call i32 (ptr, i32, ...) @open(ptr %cstr, i32 %flags, i32 438)\n"
         emit_raw "  %fd_neg = icmp slt i32 %fd, 0\n"
@@ -5840,6 +5900,7 @@ module Crystal::MIR
         # but the slot was allocated with the prepass type
         llvm_type = @cross_block_slot_types[val_id]? || "i64"
         emit "%#{load_name} = load #{llvm_type}, ptr %#{slot_name}"
+        record_emitted_type("%#{load_name}", llvm_type)
       end
     end
 
@@ -6447,6 +6508,16 @@ module Crystal::MIR
       # Look up the type of the value being stored
       val_type = @value_types[inst.value]? || TypeRef::POINTER
       val_type_str = @type_mapper.llvm_type(val_type)
+      actual_val_type = @emitted_value_types[val]?
+
+      # Fallback: values loaded from cross-block slots are named like %rN.fromslot.*
+      # Their real LLVM type is the slot type, not necessarily @value_types[N].
+      if !actual_val_type && val.starts_with?('%')
+        if match = val.match(/^%r(\d+)\.fromslot/)
+          slot_id = ValueId.new(match[1].to_i)
+          actual_val_type = @cross_block_slot_types[slot_id]?
+        end
+      end
 
       # Fix for VOID types - use a reasonable default type
       if val_type_str == "void"
@@ -6466,6 +6537,54 @@ module Crystal::MIR
       if (val_type_str == "float" || val_type_str == "double") && !val.starts_with?('%')
         # Convert integer literals to float literals (e.g., "0" -> "0.0", "3" -> "3.0")
         val = "#{val}.0" if val.matches?(/^-?\d+$/)
+      end
+
+      # Reconcile real SSA type with the intended store type.
+      # This matters for cross-block slot values where a pointer value can be
+      # temporarily represented as an integer slot payload (or vice versa).
+      if actual_val_type && actual_val_type != "void" && actual_val_type != val_type_str
+        if val.starts_with?('%')
+          base = "r#{inst.id}.store_cast"
+          if actual_val_type.starts_with?('i') && val_type_str == "ptr"
+            emit "%#{base} = inttoptr #{actual_val_type} #{val} to ptr"
+            val = "%#{base}"
+            val_type_str = "ptr"
+          elsif actual_val_type == "ptr" && val_type_str.starts_with?('i')
+            emit "%#{base} = ptrtoint ptr #{val} to #{val_type_str}"
+            val = "%#{base}"
+          elsif actual_val_type.starts_with?('i') && val_type_str.starts_with?('i') &&
+                !actual_val_type.includes?('.') && !val_type_str.includes?('.')
+            from_bits = actual_val_type[1..].to_i? || 64
+            to_bits = val_type_str[1..].to_i? || 64
+            if from_bits < to_bits
+              emit "%#{base} = sext #{actual_val_type} #{val} to #{val_type_str}"
+              val = "%#{base}"
+            elsif from_bits > to_bits
+              emit "%#{base} = trunc #{actual_val_type} #{val} to #{val_type_str}"
+              val = "%#{base}"
+            end
+          elsif (actual_val_type == "double" || actual_val_type == "float") && val_type_str.starts_with?('i')
+            op = unsigned_type_ref?(val_type) ? "fptoui" : "fptosi"
+            emit "%#{base} = #{op} #{actual_val_type} #{val} to #{val_type_str}"
+            val = "%#{base}"
+          elsif actual_val_type.starts_with?('i') && (val_type_str == "double" || val_type_str == "float")
+            op = unsigned_type_ref?(val_type) ? "uitofp" : "sitofp"
+            emit "%#{base} = #{op} #{actual_val_type} #{val} to #{val_type_str}"
+            val = "%#{base}"
+          elsif actual_val_type == "float" && val_type_str == "double"
+            emit "%#{base} = fpext float #{val} to double"
+            val = "%#{base}"
+          elsif actual_val_type == "double" && val_type_str == "float"
+            emit "%#{base} = fptrunc double #{val} to float"
+            val = "%#{base}"
+          else
+            # Conservative fallback: if conversion is unknown, keep IR type consistent.
+            val_type_str = actual_val_type
+          end
+        else
+          # Literal mismatch (rare) - keep IR type consistent.
+          val_type_str = actual_val_type
+        end
       end
 
       # Union types can't store raw integer literals like 0/null.

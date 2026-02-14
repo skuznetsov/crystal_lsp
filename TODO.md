@@ -102,6 +102,19 @@ about syntax or types and should match what the original compiler would report.
       - `crystal build --release src/crystal_v2.cr -o /tmp/crystal_v2_rel_guard2 --error-trace`;
       - release `bootstrap_array` no longer hits stack overflow (`/tmp/bootstrap_array_rel_guard2.stderr`), now fails later on existing LLVM issue: `undefined value '@Crystal$CCSystem$CCFile$Dopen_flag$$String'`.
       - A/B heavy compile timing (`spec/hir/return_type_inference_spec.cr`): old `./bin/crystal_v2_release` = `24.42s`, new `/tmp/crystal_v2_rel_guard2` = `20.51s` (both still fail later on known issues).
+  - Update (2026-02-14): fixed release-time LLVM undefined-symbol chain in backend runtime helpers (legacy hardcoded mangled calls).
+    - changes (`src/compiler/mir/llvm_backend.cr`):
+      - replaced hardcoded `Crystal::System::File.open_flag` runtime call with local helper `__crystal_v2_mode_to_open_flags`;
+      - made helper platform-aware (`linux/android` vs `darwin/bsd`) for `O_CREAT/O_TRUNC/O_APPEND` constants;
+      - replaced hardcoded `RuntimeError.new` call in `__crystal_v2_raise_msg` with bootstrap-safe fallback (`puts` + `abort`) to avoid stale mangled constructor dependency;
+      - added `memcmp` runtime declaration and dedup guard in `emit_undefined_extern_declarations` (prevent `declare @memcmp(ptr,ptr,i32)` vs `declare @memcmp(...)` conflicts).
+    - validation:
+      - `crystal build src/crystal_v2.cr -o /tmp/crystal_v2_dbg_openflags4 --error-trace` => `EXIT 0`;
+      - `/tmp/crystal_v2_dbg_openflags4 regression_tests/test_file_io.cr` + `scripts/run_safe.sh` => `EXIT 0` (`file_io_ok`);
+      - `/tmp/crystal_v2_dbg_openflags4 examples/bootstrap_array.cr -o /tmp/bootstrap_array_dbg_openflags4` + `run_safe` => `EXIT 0`;
+      - `crystal build --release src/crystal_v2.cr -o /tmp/crystal_v2_rel_openflags4 --error-trace` => `EXIT 0`;
+      - `CRYSTAL_V2_AST_FILTER=1 CRYSTAL_V2_PHASE_STATS=1 /tmp/crystal_v2_rel_openflags4 examples/bootstrap_array.cr -o /tmp/bootstrap_array_rel_openflags4` => `EXIT 0` in ~`1.09s`, no `open_flag` / `RuntimeError$Dnew` / `memcmp` undefined errors in IR;
+      - runtime status: `/tmp/bootstrap_array_rel_openflags4` still crashes at start (`EXIT 139`) — now a runtime/codegen bug, not LLVM undefined-symbol compile failure.
   - Update (2026-02-14): reduced split/join churn in type/context resolution hot path (`ast_to_hir`):
     - `resolve_path_string_in_context` no longer uses `split("::")` + `join("::")`; switched to index/byte-slice reconstruction (`head` + `tail`) with the same fallback behavior.
     - `resolve_class_name_in_context` namespace descent no longer allocates `parts = namespace.split("::")` and repeated joins per iteration; replaced with a decremental `candidate_ns` loop using `rindex("::")`.
