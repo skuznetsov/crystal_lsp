@@ -1139,6 +1139,11 @@ module Crystal::HIR
     @function_lookup_args_hash_owner : UInt64 = 0
     @function_lookup_args_hash_value : UInt64 = 0
     @function_lookup_base_epoch : Hash(String, Int32) = {} of String => Int32
+    # Cache allocator-related method names by class to reduce string churn in
+    # generate_allocator / generate_allocator_overload hot paths.
+    @allocator_new_name_cache : Hash(String, String) = {} of String => String
+    @allocator_init_name_cache : Hash(String, String) = {} of String => String
+    @allocator_instance_new_name_cache : Hash(String, String) = {} of String => String
     # Debug-only: lower node histogram (enabled via DEBUG_LOWER_HISTO)
     @lower_histo_counts : Hash(String, Int32) = {} of String => Int32
     @lower_histo_last : Time::Instant? = nil
@@ -14865,6 +14870,45 @@ module Crystal::HIR
       end
     end
 
+    @[AlwaysInline]
+    private def allocator_new_name_for(class_name : String) : String
+      if cached = @allocator_new_name_cache[class_name]?
+        return cached
+      end
+      built = String.build(class_name.bytesize + 4) do |io|
+        io << class_name
+        io << ".new"
+      end
+      @allocator_new_name_cache[class_name] = built
+      built
+    end
+
+    @[AlwaysInline]
+    private def allocator_init_name_for(class_name : String) : String
+      if cached = @allocator_init_name_cache[class_name]?
+        return cached
+      end
+      built = String.build(class_name.bytesize + 11) do |io|
+        io << class_name
+        io << "#initialize"
+      end
+      @allocator_init_name_cache[class_name] = built
+      built
+    end
+
+    @[AlwaysInline]
+    private def allocator_instance_new_name_for(class_name : String) : String
+      if cached = @allocator_instance_new_name_cache[class_name]?
+        return cached
+      end
+      built = String.build(class_name.bytesize + 4) do |io|
+        io << class_name
+        io << "#new"
+      end
+      @allocator_instance_new_name_cache[class_name] = built
+      built
+    end
+
     # Generate allocator: ClassName.new(...) -> allocates and returns instance
     private def generate_allocator(
       class_name : String,
@@ -14872,7 +14916,6 @@ module Crystal::HIR
       call_arg_types : Array(TypeRef)? = nil,
       force : Bool = false,
     )
-      func_name = "#{class_name}.new"
       if env_get("DEBUG_ALLOC_STATS")
         @allocator_debug_total += 1
         @allocator_debug_counts[class_name] = (@allocator_debug_counts[class_name]? || 0) + 1
@@ -14935,6 +14978,7 @@ module Crystal::HIR
       end
 
       @generated_allocators.add(class_name)
+      func_name = allocator_new_name_for(class_name)
 
       # Also check if function already exists in HIR module (belt and suspenders)
       if @module.has_function?(func_name)
@@ -14986,7 +15030,7 @@ module Crystal::HIR
 
       # Propagate default literal values from the initialize DefNode to allocator params.
       # Without this, the LLVM backend pads missing args with 0 instead of the actual default.
-      init_def_key = "#{class_name}#initialize"
+      init_def_key = allocator_init_name_for(class_name)
       init_def_for_defaults = @function_defs[init_def_key]?
       unless init_def_for_defaults
         # Try mangled key (e.g., Foo#initialize$String_String)
@@ -15146,7 +15190,7 @@ module Crystal::HIR
       ctx.terminate(Return.new(alloc.id))
 
       # Generate instance #new wrapper for cases where type literals are lowered as receivers.
-      instance_name = "#{class_name}#new"
+      instance_name = allocator_instance_new_name_for(class_name)
       unless @module.has_function?(instance_name) || @function_types.has_key?(instance_name) || has_function_base?(instance_name)
         instance_func = @module.create_function(instance_name, class_info.type_ref)
         instance_ctx = LoweringContext.new(instance_func, @module, @arena)
@@ -15163,7 +15207,7 @@ module Crystal::HIR
           wrapper_param_ids << hir_param.id
         end
 
-        new_call = Call.new(instance_ctx.next_id, class_info.type_ref, nil, "#{class_name}.new", wrapper_param_ids)
+        new_call = Call.new(instance_ctx.next_id, class_info.type_ref, nil, func_name, wrapper_param_ids)
         instance_ctx.emit(new_call)
         instance_ctx.register_type(new_call.id, class_info.type_ref)
         instance_ctx.terminate(Return.new(new_call.id))
@@ -15187,7 +15231,7 @@ module Crystal::HIR
         class_info = latest
       end
 
-      base_name = "#{class_name}.new"
+      base_name = allocator_new_name_for(class_name)
       overload_name = mangle_function_name(base_name, call_arg_types)
       return if overload_name == base_name
       return if @module.has_function?(overload_name)
@@ -15261,7 +15305,7 @@ module Crystal::HIR
 
       # Propagate default literal values from the initialize DefNode to overload params.
       # Without this, the LLVM backend pads missing args with 0/null instead of the actual default.
-      init_def_key_ovr = "#{class_name}#initialize"
+      init_def_key_ovr = allocator_init_name_for(class_name)
       init_def_for_defaults = @function_defs[init_def_key_ovr]?
       unless init_def_for_defaults
         @function_defs.each_key do |k|
