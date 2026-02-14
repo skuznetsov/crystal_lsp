@@ -1860,6 +1860,7 @@ module Crystal::HIR
     @deferred_module_contexts : Hash(String, Array(DeferredModuleContext))
     @lazy_module_methods : Bool
     @module_defs_cache_version : Int32
+    @module_include_alias_cache : Hash({String, String?, Int32, Int32}, String)
     @module_def_lookup_cache_version : Int32
     @module_def_lookup_cache : Hash(String, Tuple(CrystalV2::Compiler::Frontend::DefNode, CrystalV2::Compiler::Frontend::ArenaLike)?)
     @module_class_def_lookup_cache : Hash(String, Tuple(CrystalV2::Compiler::Frontend::DefNode, CrystalV2::Compiler::Frontend::ArenaLike)?)
@@ -2156,6 +2157,7 @@ module Crystal::HIR
       @deferred_module_contexts = {} of String => Array(DeferredModuleContext)
       @lazy_module_methods = false
       @module_defs_cache_version = 0
+      @module_include_alias_cache = {} of {String, String?, Int32, Int32} => String
       @module_def_lookup_cache_version = 0
       @module_def_lookup_cache = {} of String => Tuple(CrystalV2::Compiler::Frontend::DefNode, CrystalV2::Compiler::Frontend::ArenaLike)?
       @module_class_def_lookup_cache = {} of String => Tuple(CrystalV2::Compiler::Frontend::DefNode, CrystalV2::Compiler::Frontend::ArenaLike)?
@@ -2437,10 +2439,15 @@ module Crystal::HIR
       end
       @module.register_module_includer(resolved_module_name, class_name)
       module_base = strip_generic_args(resolved_module_name)
-      parts = module_base.split("::")
-      parts.each_index do |idx|
-        suffix = parts[idx..].join("::")
+      suffix_start = 0
+      loop do
+        suffix = module_base[suffix_start..]
+        break unless suffix
         (@module_includer_keys_by_suffix[suffix] ||= Set(String).new) << resolved_module_name
+
+        next_sep = module_base.index("::", suffix_start)
+        break unless next_sep
+        suffix_start = next_sep + 2
       end
       # Also record reverse mapping (class -> modules it includes)
       class_set = @class_included_modules[class_name]? || begin
@@ -2468,48 +2475,59 @@ module Crystal::HIR
     private def resolve_module_alias_for_include(module_name : String) : String
       return module_name if module_name.empty?
 
-      candidates = [] of String
-      candidates << module_name
+      cache_key = {module_name, @current_class, @module_defs_cache_version, @resolved_type_name_cache_epoch}
+      if cached = @module_include_alias_cache[cache_key]?
+        return cached
+      end
+
+      resolved = resolve_module_alias_prefix(module_name)
+      if @module_defs.has_key?(resolved)
+        @module_include_alias_cache[cache_key] = resolved
+        return resolved
+      end
 
       if current = @current_class
-        if current.includes?("::")
-          parts = current.split("::")
-          parts.pop
-          while parts.size > 0
-            candidates << "#{parts.join("::")}::#{module_name}"
-            parts.pop
+        scope = current
+        while scope.includes?("::")
+          break unless sep = scope.rindex("::")
+          scope = scope[0, sep]
+          candidate = "#{scope}::#{module_name}"
+          resolved_candidate = resolve_module_alias_prefix(candidate)
+          if @module_defs.has_key?(resolved_candidate)
+            @module_include_alias_cache[cache_key] = resolved_candidate
+            return resolved_candidate
           end
         end
       end
 
-      candidates.each do |candidate|
-        resolved = resolve_module_alias_prefix(candidate)
-        return resolved if @module_defs.has_key?(resolved)
-      end
-
+      @module_include_alias_cache[cache_key] = module_name
       module_name
     end
 
     private def resolve_module_alias_prefix(module_name : String) : String
       return resolve_type_alias_chain(module_name) unless module_name.includes?("::")
 
-      parts = module_name.split("::")
-      (parts.size - 1).downto(1) do |i|
-        prefix = parts[0, i].join("::")
+      probe = module_name
+      while sep = probe.rindex("::")
+        prefix = module_name[0, sep]
+        suffix = module_name[(sep + 2)..]
         resolved_prefix = resolve_type_alias_chain(prefix)
         if resolved_prefix != prefix
-          result = ([resolved_prefix] + parts[i..]).join("::")
+          result = "#{resolved_prefix}::#{suffix}"
           # If the resolved prefix lost its namespace (e.g. Regex::Engine → PCRE2),
           # re-qualify under the original prefix's namespace so we get Regex::PCRE2::MatchData.
           unless result.includes?("::") && @module_defs.has_key?(result)
-            if !resolved_prefix.includes?("::") && i > 0
-              ns = parts[0, i - 1].join("::")
-              requalified = ns.empty? ? result : "#{ns}::#{result}"
-              result = requalified if @module_defs.has_key?(requalified)
+            unless resolved_prefix.includes?("::")
+              if parent_sep = prefix.rindex("::")
+                ns = prefix[0, parent_sep]
+                requalified = "#{ns}::#{result}"
+                result = requalified if @module_defs.has_key?(requalified)
+              end
             end
           end
           return result
         end
+        probe = prefix
       end
 
       resolve_type_alias_chain(module_name)
@@ -2964,53 +2982,88 @@ module Crystal::HIR
     # aren't registered (because the defining file wasn't in the require chain),
     # search sibling .cr files for the enum definition, parse it, and register it.
     @lazy_enum_searched = Set(String).new
+    @lazy_enum_indexed_dirs = Set(String).new
+    @lazy_enum_candidate_files = {} of String => Array(String)
 
     private def lazy_discover_enum_from_source(qualified_name : String) : Bool
       return false if @enum_info.try(&.has_key?(qualified_name))
       return false if @lazy_enum_searched.includes?(qualified_name)
       @lazy_enum_searched << qualified_name
 
-      # Extract bare enum name (last component after ::)
-      bare_name = qualified_name.includes?("::") ? qualified_name.split("::").last : qualified_name
-      # Extract module prefix for matching (e.g., "Crystal" from "Crystal::NumberKind")
-      module_prefix = qualified_name.includes?("::") ? qualified_name.rpartition("::")[0] : ""
+      # Extract bare enum name (last component after ::) and module prefix
+      bare_name = last_namespace_component(qualified_name)
+      module_prefix = lazy_enum_namespace_prefix(qualified_name)
 
-      # Search directories of already-loaded files for sibling .cr files
+      loaded_paths = Set(String).new
       searched_dirs = Set(String).new
       @paths_by_arena.each_value do |path|
-        dir = File.dirname(path)
-        next if searched_dirs.includes?(dir)
-        searched_dirs << dir
+        loaded_paths << path
+        searched_dirs << File.dirname(path)
+      end
+      searched_dirs.each do |dir|
+        index_lazy_enum_candidates_for_dir(dir, loaded_paths)
+      end
 
-        Dir.glob(File.join(dir, "*.cr")).each do |cr_file|
-          # Skip already-loaded files
-          next if @paths_by_arena.values.includes?(cr_file)
+      candidate_files = @lazy_enum_candidate_files[bare_name]?
+      return false unless candidate_files
 
-          # Quick check: does the file likely contain the enum?
-          begin
-            source = File.read(cr_file)
-          rescue
-            next
-          end
-          next unless source.includes?("enum #{bare_name}")
+      candidate_files.each do |cr_file|
+        # Skip files already present in the current require graph.
+        next if loaded_paths.includes?(cr_file)
 
-          # Parse the file
-          begin
-            lexer = CrystalV2::Compiler::Frontend::Lexer.new(source)
-            parser = CrystalV2::Compiler::Frontend::Parser.new(lexer)
-            program = parser.parse_program
-          rescue
-            next
-          end
+        # Parse the file
+        begin
+          source = File.read(cr_file)
+          lexer = CrystalV2::Compiler::Frontend::Lexer.new(source)
+          parser = CrystalV2::Compiler::Frontend::Parser.new(lexer)
+          program = parser.parse_program
+        rescue
+          next
+        end
 
-          # Walk AST to find and register the enum
-          if find_and_register_enum_from_ast(program.arena, program.roots, qualified_name, bare_name, module_prefix)
-            return true
-          end
+        # Walk AST to find and register the enum
+        if find_and_register_enum_from_ast(program.arena, program.roots, qualified_name, bare_name, module_prefix)
+          return true
         end
       end
 
       false
+    end
+
+    private def lazy_enum_namespace_prefix(name : String) : String
+      if idx = name.rindex("::")
+        name[0, idx]
+      else
+        ""
+      end
+    end
+
+    private def index_lazy_enum_candidates_for_dir(dir : String, loaded_paths : Set(String)) : Nil
+      return if @lazy_enum_indexed_dirs.includes?(dir)
+      @lazy_enum_indexed_dirs << dir
+
+      Dir.glob(File.join(dir, "*.cr")).each do |cr_file|
+        next if loaded_paths.includes?(cr_file)
+
+        source = begin
+          File.read(cr_file)
+        rescue
+          nil
+        end
+        next unless source
+
+        source.scan(/(?:^|\n)\s*enum\s+([A-Za-z_][A-Za-z0-9_]*)/) do |match|
+          enum_name = match[1]?
+          next unless enum_name
+
+          files = @lazy_enum_candidate_files[enum_name]?
+          if files
+            files << cr_file unless files.includes?(cr_file)
+          else
+            @lazy_enum_candidate_files[enum_name] = [cr_file]
+          end
+        end
+      end
     end
 
     # Walk a parsed AST to find a specific enum and register it.
@@ -3628,6 +3681,7 @@ module Crystal::HIR
         end
       end
       @type_aliases[alias_name] = target_name
+      @module_include_alias_cache.clear
       @type_cache.delete(alias_name)
       invalidate_type_cache_for_namespace(alias_name)
     end
@@ -9305,6 +9359,12 @@ module Crystal::HIR
       end
     end
 
+    @[AlwaysInline]
+    private def bump_module_defs_cache_version : Nil
+      @module_defs_cache_version += 1
+      @module_include_alias_cache.clear
+    end
+
     private def register_module_with_name(node : CrystalV2::Compiler::Frontend::ModuleNode, module_name : String)
       module_name = resolve_class_name_for_definition(module_name)
       if env_get("DEBUG_TYPE_PATH") && module_name.includes?('/')
@@ -9319,7 +9379,7 @@ module Crystal::HIR
 
       if class_like_namespace?(module_name)
         if @module_defs.delete(module_name)
-          @module_defs_cache_version += 1
+          bump_module_defs_cache_version
           invalidate_type_cache_for_namespace(module_name)
         end
         if body = node.body
@@ -9355,7 +9415,7 @@ module Crystal::HIR
       # Keep module AST around for mixin expansion (`include Foo` in classes/structs).
       existing_defs = @module_defs.has_key?(module_name)
       (@module_defs[module_name] ||= [] of {CrystalV2::Compiler::Frontend::ModuleNode, CrystalV2::Compiler::Frontend::ArenaLike}) << {node, @arena}
-      @module_defs_cache_version += 1
+      bump_module_defs_cache_version
       invalidate_type_cache_for_namespace(module_name) if existing_defs
 
       # Always register nested types (classes, enums, modules) from module bodies.
@@ -12770,7 +12830,7 @@ module Crystal::HIR
       had_module_defs = @module_defs.has_key?(class_name)
       if had_module_defs
         @module_defs.delete(class_name)
-        @module_defs_cache_version += 1
+        bump_module_defs_cache_version
       end
       if existing_info || had_module_defs
         invalidate_type_cache_for_namespace(class_name)
