@@ -492,6 +492,66 @@ module Crystal::MIR
       @string_offsets = {} of String => UInt32
     end
 
+    @[AlwaysInline]
+    private def sanitize_llvm_local_name(name : String) : String
+      return "arg" if name.empty?
+
+      ptr = name.to_unsafe
+      n = name.bytesize
+      needs_sanitize = false
+      i = 0
+      while i < n
+        b = ptr[i]
+        valid = if i == 0
+                  (b >= 'a'.ord && b <= 'z'.ord) ||
+                    (b >= 'A'.ord && b <= 'Z'.ord) ||
+                    b == '_'.ord || b == '.'.ord
+                else
+                  (b >= 'a'.ord && b <= 'z'.ord) ||
+                    (b >= 'A'.ord && b <= 'Z'.ord) ||
+                    (b >= '0'.ord && b <= '9'.ord) ||
+                    b == '_'.ord || b == '.'.ord
+                end
+        unless valid
+          needs_sanitize = true
+          break
+        end
+        i += 1
+      end
+
+      return name unless needs_sanitize
+
+      String.build(n) do |io|
+        i = 0
+        while i < n
+          b = ptr[i]
+          valid = if i == 0
+                    (b >= 'a'.ord && b <= 'z'.ord) ||
+                      (b >= 'A'.ord && b <= 'Z'.ord) ||
+                      b == '_'.ord || b == '.'.ord
+                  else
+                    (b >= 'a'.ord && b <= 'z'.ord) ||
+                      (b >= 'A'.ord && b <= 'Z'.ord) ||
+                      (b >= '0'.ord && b <= '9'.ord) ||
+                      b == '_'.ord || b == '.'.ord
+                  end
+          io << (valid ? b.unsafe_chr : '_')
+          i += 1
+        end
+      end
+    end
+
+    @[AlwaysInline]
+    private def current_func_param_type_by_llvm_name(name : String) : TypeRef?
+      @current_func_params.each do |param|
+        llvm_name = @value_names[param.index]? || sanitize_llvm_local_name(param.name)
+        if llvm_name == name
+          return param.type == TypeRef::VOID ? TypeRef::POINTER : param.type
+        end
+      end
+      nil
+    end
+
     def generate : String
       STDERR.puts "  [LLVM] emit_header..." if @progress
       emit_header
@@ -4470,7 +4530,7 @@ module Crystal::MIR
         llvm_type = @type_mapper.llvm_type(p.type)
         llvm_type = "ptr" if llvm_type == "void"
 
-        base_name = p.name
+        base_name = sanitize_llvm_local_name(p.name)
         base_name = "arg" if base_name.empty?
         count = used_param_names[base_name]?
         if count
@@ -5602,7 +5662,7 @@ module Crystal::MIR
       @cond_counter = 0  # Reset for each function
 
       func.params.each do |param|
-        @value_names[param.index] = param.name
+        @value_names[param.index] = sanitize_llvm_local_name(param.name)
         # Use POINTER for void params (void is not valid for values)
         param_type = param.type == TypeRef::VOID ? TypeRef::POINTER : param.type
         @value_types[param.index] = param_type
@@ -6583,24 +6643,14 @@ module Crystal::MIR
       # and look up its type from current function params
       if !left.starts_with?("%r") && left.starts_with?('%')
         param_name = left[1..]  # Remove %
-        @current_func_params.each do |param|
-          if param.name == param_name
-            param_type = param.type == TypeRef::VOID ? TypeRef::POINTER : param.type
-            operand_type_str = @type_mapper.llvm_type(param_type)
-            # STDERR.puts "[BINOP-PARAM-LEFT] left=#{left}, param_name=#{param_name}, found_type=#{operand_type_str}"
-            break
-          end
+        if param_type = current_func_param_type_by_llvm_name(param_name)
+          operand_type_str = @type_mapper.llvm_type(param_type)
         end
       end
       if !right.starts_with?("%r") && right.starts_with?('%')
         param_name = right[1..]  # Remove %
-        @current_func_params.each do |param|
-          if param.name == param_name
-            param_type = param.type == TypeRef::VOID ? TypeRef::POINTER : param.type
-            right_type_str = @type_mapper.llvm_type(param_type)
-            # STDERR.puts "[BINOP-PARAM-RIGHT] right=#{right}, param_name=#{param_name}, found_type=#{right_type_str}"
-            break
-          end
+        if param_type = current_func_param_type_by_llvm_name(param_name)
+          right_type_str = @type_mapper.llvm_type(param_type)
         end
       end
 
@@ -7168,12 +7218,8 @@ module Crystal::MIR
       # Also check parameter types for operand (similar to binary op handling)
       if !operand.starts_with?("%r") && operand.starts_with?('%')
         param_name = operand[1..]  # Remove %
-        @current_func_params.each do |param|
-          if param.name == param_name
-            param_type = param.type == TypeRef::VOID ? TypeRef::POINTER : param.type
-            operand_llvm_type = @type_mapper.llvm_type(param_type)
-            break
-          end
+        if param_type = current_func_param_type_by_llvm_name(param_name)
+          operand_llvm_type = @type_mapper.llvm_type(param_type)
         end
       end
 
@@ -11636,12 +11682,8 @@ module Crystal::MIR
 
       # Check if value corresponds to a parameter by checking value_names
       if name = @value_names[id]?
-        # Look up parameter by name
-        @current_func_params.each do |param|
-          if param.name == name
-            param_type = param.type == TypeRef::VOID ? TypeRef::POINTER : param.type
-            return @type_mapper.llvm_type(param_type)
-          end
+        if param_type = current_func_param_type_by_llvm_name(name)
+          return @type_mapper.llvm_type(param_type)
         end
       end
 

@@ -239,6 +239,16 @@ about syntax or types and should match what the original compiler would report.
       - release smoke with `/tmp/crystal_v2_astfilter2_rel`: `basic_sanity/hash_compaction/hash_stress`, `examples/bootstrap_array.cr`, `examples/bench_fib42.cr` compile+run => all `EXIT:0`.
     - note:
       - with `CRYSTAL_V2_AST_FILTER=1` and longer run, pipeline now reaches LLVM `opt` and surfaces a separate IR naming bug (`%flag?` in generated callback args for GMP hook) that was previously masked by timeout.
+  - Update (2026-02-14): fixed LLVM local/arg naming sanitization for invalid identifiers (e.g. `%flag?`) and advanced pipeline to the next blocker.
+    - changes in `src/compiler/mir/llvm_backend.cr`:
+      - added `sanitize_llvm_local_name` for emitted local/param names;
+      - aligned parameter-type fallback lookup to emitted LLVM names via `current_func_param_type_by_llvm_name`;
+      - applied sanitization consistently in function signature emission and `reset_value_names`.
+    - verification:
+      - `timeout 180 env CRYSTAL_V2_AST_FILTER=1 /tmp/crystal_v2_paramsan_dbg spec spec/hir/return_type_inference_spec.cr` => no `%flag?` naming errors; pipeline now fails later with `use of undefined value '%r2.u2p.4'` in a `phi` predecessor path;
+      - `./regression_tests/run_all.sh /tmp/crystal_v2_paramsan_dbg` => `35 passed, 0 failed`.
+    - next:
+      - debug undefined `%r2.u2p.4` producer/consumer chain in LLVM phi emission (`emit_phi*` + predecessor conversion path).
   - Update (2026-02-03): added guarded recursion suppression in `infer_type_from_expr` (per‑cache version) and param‑type lookup using current def’s signature (fall back to owner/method lookup when no local). Skip local inference for self‑referential assignments. Guard logs now include file/span under `DEBUG_INFER_GUARD=1`. `spec/hir/return_type_inference_spec.cr` passes (13 examples, ~10s). Guard hotspots shifted to `Crystal::Hasher#result` and Enumerable helpers (`zip?`, `in_groups_of`, `chunks`). Mini compile still >60s on `/tmp/mini_try_each.cr`; next: inspect hasher result recursion and enumerate block‑path inference.
   - Update (2026-02-03): `timeout 60 ./bin/crystal_v2 spec spec/hir/return_type_inference_spec.cr` still times out. Needs re‑profile with latest block‑return inference changes.
   - Update (2026-02-03): sampled `spec/hir/return_type_inference_spec.cr` (see `/tmp/rt_infer_sample.txt`). Hot path is still in `lower_function_if_needed_impl → lower_method → lower_expr → lower_call → lookup_function_def_for_call`. Histogram (`/tmp/rt_infer_histo.log`) dominated by Identifier/Call/Binary/MemberAccess. Next: reduce `lookup_function_def_for_call` churn (cache/memoize by callsite), and cut repeated callsite overload resolution.
