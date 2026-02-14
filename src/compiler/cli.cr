@@ -656,7 +656,7 @@ module CrystalV2
         if ENV.has_key?("CRYSTAL_V2_AST_FILTER")
           ast_filter_start = Time.instant
           ast_result = hir_converter.compute_ast_reachable_functions(main_exprs)
-          hir_converter.set_ast_reachable_filter(ast_result[:defs], ast_result[:method_names], ast_result[:owner_types])
+          hir_converter.set_ast_reachable_filter(ast_result[:defs], ast_result[:method_names], ast_result[:owner_types], ast_result[:method_bases])
           if ENV.has_key?("CRYSTAL_V2_PHASE_STATS")
             STDERR.puts "[PHASE_STATS] AST filter: #{ast_result[:defs].size}/#{hir_converter.function_defs_count} defs reachable, #{ast_result[:method_names].size} method names in #{(Time.instant - ast_filter_start).total_milliseconds.round(1)}ms"
           end

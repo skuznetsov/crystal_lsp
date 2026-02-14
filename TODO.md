@@ -150,6 +150,23 @@ about syntax or types and should match what the original compiler would report.
       - `lower_missing`: `594.9ms -> 426.4ms` (~`-28.3%`);
       - final lowered function count: `17376 -> 16469`.
     - net: phase balance improved and tracked-signature explosion reduced; target spec still exceeds 90s timeout, so next focus remains `emit_tracked_sigs` candidate generation and `lookup_function_def_for_call` miss branch cost.
+  - Update (2026-02-14): tightened safety-net AST filter from independent sets to pairwise `owner+separator+method` keys.
+    - change:
+      - `compute_ast_reachable_functions` now also returns `method_bases` built from reachable defs (exact owner + generic-owner-base pairs);
+      - `set_ast_reachable_filter` stores this set;
+      - safety-net helper now rejects candidates that do not match reachable pair keys (while keeping runtime/auto-generated exemptions).
+    - validation:
+      - `crystal build src/crystal_v2.cr -o /tmp/crystal_v2_emit_pair_filter_dbg --error-trace` => `EXIT 0`;
+      - `./regression_tests/run_all.sh /tmp/crystal_v2_emit_pair_filter_dbg` => `35 passed, 0 failed`;
+      - `/tmp/crystal_v2_emit_pair_filter_dbg examples/bootstrap_array.cr -o /tmp/bootstrap_array_emit_pair_filter_dbg && ./scripts/run_safe.sh /tmp/bootstrap_array_emit_pair_filter_dbg 10 768` => `EXIT 0`.
+    - measured impact (`CRYSTAL_V2_AST_FILTER=1 CRYSTAL_V2_PHASE_STATS=1 timeout 90 /tmp/crystal_v2_emit_pair_filter_dbg spec spec/hir/return_type_inference_spec.cr`):
+      - `process_pending`: `15667.2ms -> 14666.4ms` (~`-6.4%`);
+      - `emit_tracked_sigs`: `23940.5ms -> 22488.5ms` (~`-6.1%`);
+      - `lower_missing`: `426.4ms -> 413.6ms` (~`-3.0%`);
+      - final lowered function count: `16469 -> 16480` (flat/noise).
+    - debug signal (`DEBUG_EMIT_SIGS`, 45s window):
+      - iteration 0 candidates: `419 -> 399`;
+      - skipped by AST filter: `1106 -> 1135`.
   - Update (2026-02-14): rejected two micro-cache experiments in `ast_to_hir` hot path (no robust win):
     - `ensure_monomorphized_type` epoch cache: near-noise delta across 2x A/B runs (`process_pending` ~`0.38%` faster, `emit_tracked_sigs` ~`0.14%` faster); not enough to justify extra state/invalidations.
     - `strip_generic_receiver_from_base_name` cache variants:

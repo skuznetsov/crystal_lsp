@@ -21538,7 +21538,7 @@ module Crystal::HIR
     ])
 
     # Compute set of function def names and method names reachable from main expressions via BFS
-    def compute_ast_reachable_functions(main_exprs : Array(Tuple(CrystalV2::Compiler::Frontend::ExprId, CrystalV2::Compiler::Frontend::ArenaLike))) : NamedTuple(defs: Set(String), method_names: Set(String), owner_types: Set(String))
+    def compute_ast_reachable_functions(main_exprs : Array(Tuple(CrystalV2::Compiler::Frontend::ExprId, CrystalV2::Compiler::Frontend::ArenaLike))) : NamedTuple(defs: Set(String), method_names: Set(String), owner_types: Set(String), method_bases: Set(String))
       t0 = Time.instant
       log_filter = ENV.has_key?("CRYSTAL_V2_AST_FILTER_LOG")
 
@@ -21657,7 +21657,21 @@ module Crystal::HIR
         owner_types << owner_base unless owner_base.empty?
       end
 
-      {defs: reachable, method_names: visited_methods, owner_types: owner_types}
+      method_bases = Set(String).new(initial_capacity: reachable.size * 2)
+      reachable.each do |full_name|
+        parts = parse_method_name_compact(full_name)
+        method = parts.method
+        sep = parts.separator
+        next unless method && sep
+        owner = parts.owner
+        method_bases << "#{owner}#{sep}#{method}"
+        owner_base = strip_generic_args(owner)
+        if owner_base != owner
+          method_bases << "#{owner_base}#{sep}#{method}"
+        end
+      end
+
+      {defs: reachable, method_names: visited_methods, owner_types: owner_types, method_bases: method_bases}
     end
 
     # Check if an owner type should be included based on constructed types
@@ -21710,13 +21724,15 @@ module Crystal::HIR
     @ast_reachable_functions : Set(String)? = nil
     @ast_reachable_method_names : Set(String)? = nil
     @ast_reachable_owner_types : Set(String)? = nil
+    @ast_reachable_method_bases : Set(String)? = nil
     @ast_filter_active : Bool = false
 
     # Set the AST reachability filter (called from cli.cr before flush_pending_functions)
-    def set_ast_reachable_filter(defs : Set(String), method_names : Set(String), owner_types : Set(String)) : Nil
+    def set_ast_reachable_filter(defs : Set(String), method_names : Set(String), owner_types : Set(String), method_bases : Set(String)) : Nil
       @ast_reachable_functions = defs
       @ast_reachable_method_names = method_names
       @ast_reachable_owner_types = owner_types
+      @ast_reachable_method_bases = method_bases
     end
 
     # Check if a function name is auto-generated (constructors, setters, runtime helpers)
@@ -27323,6 +27339,7 @@ module Crystal::HIR
       debug_emit = env_has?("DEBUG_EMIT_SIGS")
       ast_method_names = @ast_reachable_method_names
       ast_owner_types = @ast_reachable_owner_types
+      ast_method_bases = @ast_reachable_method_bases
 
       while iteration < max_iterations
         # Collect all unique function names from pending arg types
@@ -27339,7 +27356,7 @@ module Crystal::HIR
           next if function_state(name).completed?
           next if function_state(name).in_progress?
           next if attempted.includes?(name)
-          unless ast_filter_allows_safety_net_name?(name, ast_method_names, ast_owner_types)
+          unless ast_filter_allows_safety_net_name?(name, ast_method_names, ast_owner_types, ast_method_bases)
             skipped_ast += 1 if debug_emit
             next
           end
@@ -27397,7 +27414,7 @@ module Crystal::HIR
             next if function_state(name).completed?
             next if function_state(name).in_progress?
             next if attempted.includes?(name)
-            unless ast_filter_allows_safety_net_name?(name, ast_method_names, ast_owner_types)
+            unless ast_filter_allows_safety_net_name?(name, ast_method_names, ast_owner_types, ast_method_bases)
               skipped_ast += 1 if debug_emit
               next
             end
@@ -27466,6 +27483,7 @@ module Crystal::HIR
       iteration = 0
       ast_method_names = @ast_reachable_method_names
       ast_owner_types = @ast_reachable_owner_types
+      ast_method_bases = @ast_reachable_method_bases
       STDERR.puts "[MISSING_LOWER] start" if env_get("DEBUG_MISSING_LOWER")
 
       while iteration < max_iterations
@@ -27517,7 +27535,7 @@ module Crystal::HIR
               end
               next if name.empty?
               next if @module.has_function?(name)
-              next unless ast_filter_allows_safety_net_name?(name, ast_method_names, ast_owner_types)
+              next unless ast_filter_allows_safety_net_name?(name, ast_method_names, ast_owner_types, ast_method_bases)
               if function_state(name).completed?
                 # Some flows mark completed without emitting a function body.
                 # Clear the completed state to allow a re-lower pass.
@@ -27553,10 +27571,23 @@ module Crystal::HIR
     end
 
     @[AlwaysInline]
-    private def ast_filter_allows_safety_net_name?(name : String, method_names : Set(String)?, owner_types : Set(String)?) : Bool
+    private def ast_filter_allows_safety_net_name?(name : String, method_names : Set(String)?, owner_types : Set(String)?, method_bases : Set(String)?) : Bool
       auto_generated = is_auto_generated_function?(name) ||
                        name.starts_with?("__crystal") ||
                        name.starts_with?("main")
+      if !auto_generated && method_bases && has_method_separator?(name)
+        parts = parse_method_name_compact(name)
+        if method = parts.method
+          sep = parts.separator
+          owner = parts.owner
+          method_key = "#{owner}#{sep}#{method}"
+          unless method_bases.includes?(method_key)
+            owner_base = strip_generic_args(owner)
+            base_key = "#{owner_base}#{sep}#{method}"
+            return false unless method_bases.includes?(base_key)
+          end
+        end
+      end
       if method_names
         if method = method_short_from_name(name)
           return false unless method_names.includes?(method)
