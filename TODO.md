@@ -18,6 +18,22 @@
 - Float64: arithmetic, ** on literals
 
 ## Recently completed
+- **Nested macro record arg reparse across arenas** (2026-02-14) — fixed
+  nested `macro -> record` lowering corruption/segfault caused by selecting the
+  wrong source slice when reparsing macro args from another arena.
+  Changes in `ast_to_hir`:
+  - `reparse_expr_for_macro` now tries multiple source candidates
+    (`@sources_by_arena`, `@extra_sources_by_arena`, arena `extra_sources`)
+    and picks the best parse by anchor + node-shape compatibility.
+  - added `parse_macro_expr_text_for_arena`, `macro_arg_anchor_for_expr`,
+    `macro_arg_nodes_compatible?`.
+  - `MacroLiteralNode` lowering now routes through `lower_macro_body`; parsed
+    macro body expressions use `lower_expanded_macro_expr` (not raw `lower_expr`)
+    so nested declarations are not dropped.
+  Validation:
+  - `CRYSTAL_V2_PIPELINE_CACHE=0 /tmp/crystal_v2_dbg_macrofix /tmp/nested_macro_record_check.cr -o /tmp/nested_macro_record_check_after --emit hir`
+  - `scripts/run_safe.sh /tmp/nested_macro_record_check_after 10 256` => prints `11`, `true`, `EXIT 0`
+  - `regression_tests/run_all.sh /tmp/crystal_v2_dbg_macrofix` => `37 passed, 0 failed`
 - **String#to_u8/to_u16/to_u32 intercepts** (2026-02-14) — fixed wrong unsigned
   string conversions that still routed through `Int#remainder/tdiv` pointer-style
   lowering and produced address-like values.
@@ -517,7 +533,19 @@ about syntax or types and should match what the original compiler would report.
   - Update (2026-02-14): no longer reproduces on current bootstrap workload. With `CRYSTAL_V2_MISSING_TRACE=1 CRYSTAL_V2_DEBUG_HOOKS=1`:
     - `CRYSTAL_V2_PIPELINE_CACHE=0 ./bin/crystal_v2 examples/bootstrap_array.cr -o /tmp/bootstrap_array_missing_check` => `EXIT 0`;
     - `/private/tmp/bootstrap_array_missing_check.stderr` contains progress only; no `missing.symbol` / `reason=unlowered` entries.
-- [ ] Check macro expansion depth for nested macros (record/def generators). Consider multi-pass macro expansion (bounded loop) so record-generated getters are lowered into real DefNodes (avoid missing `_String__ToUnsignedInfo_*`).
+- [x] Fix nested macro record lowering across arenas (record-generated getters were dropped/misparsed in nested macro flow).
+  - Update (2026-02-14): root cause was not macro-depth itself but incorrect
+    macro-arg source selection during cross-arena reparse (`record NestedToken`
+    could be reparsed as corrupted text like `record efine_token ...`).
+    `reparse_expr_for_macro` now evaluates multiple source candidates and picks
+    the best parse via anchor + node compatibility scoring.
+  - Update (2026-02-14): expanded macro-body lowering now routes parsed macro
+    expressions through `lower_expanded_macro_expr`, and `MacroLiteralNode`
+    goes through `lower_macro_body`, so nested type declarations are preserved.
+  - Update (2026-02-14): repro `/tmp/nested_macro_record_check.cr` now compiles
+    and runs (`11`, `true`), and full regression suite is green (`37/37`).
+- [ ] Evaluate bounded multi-pass macro expansion as a follow-up hardening
+  measure for deep nested macro chains (after bootstrap blockers are closed).
   - Update (2026-02-05): expanded macros unconditionally during PASS 1.75 (module/class registration) so macro‑generated defs like `class_getter` are registered before method lookup. Re-test bootstrap missing list to confirm `Unicode.category_*` no longer becomes VOID locals.
   - Update (2026-02-05): class accessor entries now participate in class‑method lookup. `Unicode.category_Lu` is emitted as a call and a real
     `func @Unicode.category_Lu` exists in `/tmp/bootstrap_array.hir` (no longer a VOID local).

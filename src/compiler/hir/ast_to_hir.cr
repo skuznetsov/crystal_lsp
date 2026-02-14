@@ -4243,24 +4243,71 @@ module Crystal::HIR
       target_arena : CrystalV2::Compiler::Frontend::ArenaLike,
     ) : ExprId
       return expr_id if source_arena == target_arena
-      source = @sources_by_arena[source_arena]?
-      return ExprId.new(-1) unless source
+      return ExprId.new(-1) if expr_id.invalid? || expr_id.index < 0 || expr_id.index >= source_arena.size
 
-      text = slice_source_for_expr_in_arena(expr_id, source_arena, source)
-      return ExprId.new(-1) unless text
+      source_node = source_arena[expr_id]
+      anchor = macro_arg_anchor_for_expr(expr_id, source_arena)
+      candidates = [] of String
+
+      if source = @sources_by_arena[source_arena]?
+        if text = slice_source_for_expr_in_arena(expr_id, source_arena, source)
+          candidates << text unless text.empty?
+        end
+      end
+
+      extras = @extra_sources_by_arena[source_arena]? || source_arena.extra_sources
+      extra_limit = 16
+      extras.reverse_each do |extra_source|
+        break if extra_limit <= 0
+        if text = slice_source_for_expr_in_arena(expr_id, source_arena, extra_source)
+          candidates << text unless text.empty?
+        end
+        extra_limit -= 1
+      end
+      candidates.uniq!
+      return ExprId.new(-1) if candidates.empty?
+
+      best_id = ExprId.new(-1)
+      best_score = Int32::MIN
+
+      candidates.each do |text|
+        parsed_id = parse_macro_expr_text_for_arena(text, target_arena)
+        next if parsed_id.invalid?
+
+        parsed_node = target_arena[parsed_id]
+        score = 0
+        score += 2 if anchor && text.includes?(anchor)
+        score += 1 if macro_arg_nodes_compatible?(source_node, parsed_node)
+
+        if score > best_score
+          best_score = score
+          best_id = parsed_id
+          # Strong match: anchor preserved and node shape compatible.
+          return parsed_id if score >= 3
+        end
+      end
+
+      best_id
+    end
+
+    private def parse_macro_expr_text_for_arena(
+      text : String,
+      target_arena : CrystalV2::Compiler::Frontend::ArenaLike,
+    ) : ExprId
+      trimmed = text.strip
+      return ExprId.new(-1) if trimmed.empty?
+
       store_extra_source(target_arena, text)
-
       lexer = CrystalV2::Compiler::Frontend::Lexer.new(text)
       parser = CrystalV2::Compiler::Frontend::Parser.new(lexer, target_arena, recovery_mode: true)
       program = parser.parse_program
-      root = program.roots.first?
-      if root
+      if root = program.roots.first?
         node = target_arena[root]
         return root unless node.is_a?(CrystalV2::Compiler::Frontend::NilNode)
       end
 
-      # Fallback for typed macro args using keyword identifiers (e.g., `when : Int64` in `record`).
-      # Reparse through a wrapper call to reuse the typed macro arg parsing path.
+      # Fallback for typed macro args using keyword identifiers
+      # (e.g., `value : Int32` passed to `record`).
       if text.includes?(':')
         wrapper = "record __macro_tmp__, #{text}"
         store_extra_source(target_arena, wrapper)
@@ -4280,6 +4327,54 @@ module Crystal::HIR
       end
 
       ExprId.new(-1)
+    end
+
+    private def macro_arg_anchor_for_expr(
+      expr_id : ExprId,
+      arena : CrystalV2::Compiler::Frontend::ArenaLike,
+    ) : String?
+      return nil if expr_id.invalid? || expr_id.index < 0 || expr_id.index >= arena.size
+      node = arena[expr_id]
+
+      case node
+      when CrystalV2::Compiler::Frontend::IdentifierNode
+        String.new(node.name)
+      when CrystalV2::Compiler::Frontend::ConstantNode
+        String.new(node.name)
+      when CrystalV2::Compiler::Frontend::PathNode
+        with_arena(arena) do
+          resolve_path_like_name(expr_id) || collect_path_string(node)
+        end
+      when CrystalV2::Compiler::Frontend::TypeDeclarationNode
+        String.new(node.name)
+      when CrystalV2::Compiler::Frontend::AssignNode
+        macro_arg_anchor_for_expr(node.target, arena)
+      when CrystalV2::Compiler::Frontend::InstanceVarNode
+        String.new(node.name)
+      else
+        nil
+      end
+    end
+
+    private def macro_arg_nodes_compatible?(source_node : AstNode, parsed_node : AstNode) : Bool
+      return true if source_node.class == parsed_node.class
+
+      case source_node
+      when CrystalV2::Compiler::Frontend::IdentifierNode,
+           CrystalV2::Compiler::Frontend::ConstantNode,
+           CrystalV2::Compiler::Frontend::PathNode
+        parsed_node.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode) ||
+          parsed_node.is_a?(CrystalV2::Compiler::Frontend::ConstantNode) ||
+          parsed_node.is_a?(CrystalV2::Compiler::Frontend::PathNode)
+      when CrystalV2::Compiler::Frontend::TypeDeclarationNode
+        parsed_node.is_a?(CrystalV2::Compiler::Frontend::TypeDeclarationNode) ||
+          parsed_node.is_a?(CrystalV2::Compiler::Frontend::AssignNode)
+      when CrystalV2::Compiler::Frontend::AssignNode
+        parsed_node.is_a?(CrystalV2::Compiler::Frontend::AssignNode) ||
+          parsed_node.is_a?(CrystalV2::Compiler::Frontend::TypeDeclarationNode)
+      else
+        true
+      end
     end
 
     private def reparse_named_arg_for_macro(
@@ -4475,6 +4570,11 @@ module Crystal::HIR
           ctx.emit(nil_lit)
           nil_lit.id
         end
+      when CrystalV2::Compiler::Frontend::MacroLiteralNode
+        # Expanded macros can produce a literal code blob that parses into
+        # declarations (struct/class/module/enum). Route through macro-body
+        # lowering so nested definitions are not dropped.
+        lower_macro_body(ctx, expr_id)
       else
         lower_expr(ctx, expr_id)
       end
@@ -29904,7 +30004,7 @@ module Crystal::HIR
       parsed_value : ValueId? = nil
       with_arena(program.arena) do
         body.each do |expr_id|
-          parsed_value = lower_expr(ctx, expr_id)
+          parsed_value = lower_expanded_macro_expr(ctx, expr_id)
         end
       end
       parsed_value || begin
