@@ -18,6 +18,15 @@
 - Float64: arithmetic, ** on literals
 
 ## Recently completed
+- **String#to_u8/to_u16/to_u32 intercepts** (2026-02-14) — fixed wrong unsigned
+  string conversions that still routed through `Int#remainder/tdiv` pointer-style
+  lowering and produced address-like values.
+  Extended string unsigned conversion intercepts to `to_u8`, `to_u16`, `to_u32`
+  (existing `to_u64` path reused) via `__crystal_v2_string_to_u64` + typed cast.
+  Validation:
+  - `/tmp/crystal_v2_dbg_to_unsignedfix /tmp/string_unsigned_matrix.cr` + `run_safe` => `123 / 123 / 123 / 123`
+  - `./regression_tests/run_all.sh /tmp/crystal_v2_dbg_to_unsignedfix` => `36 passed, 0 failed`
+  - `/tmp/crystal_v2_dbg_to_unsignedfix examples/bootstrap_array.cr ...` + `run_safe` => `EXIT 0`
 - **String#to_u64 runtime intercept** (2026-02-14) — fixed wrong `String#to_u64`
   lowering that returned `ptrtoint(self)` instead of parsed value.
   Added `__crystal_v2_string_to_u64` (strtoull-based) and HIR intercepts in

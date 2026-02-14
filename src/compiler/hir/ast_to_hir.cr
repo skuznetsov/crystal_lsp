@@ -17614,6 +17614,32 @@ module Crystal::HIR
       end
     end
 
+    private def string_unsigned_conversion_target(method_name : String) : TypeRef?
+      case method_name
+      when "to_u8", "to_u8!"   then TypeRef::UINT8
+      when "to_u16", "to_u16!" then TypeRef::UINT16
+      when "to_u32", "to_u32!" then TypeRef::UINT32
+      when "to_u64", "to_u64!" then TypeRef::UINT64
+      else                          nil
+      end
+    end
+
+    private def lower_string_to_unsigned_conversion(
+      ctx : LoweringContext,
+      receiver_id : ValueId,
+      target : TypeRef
+    ) : ValueId
+      parsed = ExternCall.new(ctx.next_id, TypeRef::UINT64, "__crystal_v2_string_to_u64", [receiver_id])
+      ctx.emit(parsed)
+      ctx.register_type(parsed.id, TypeRef::UINT64)
+      return parsed.id if target == TypeRef::UINT64
+
+      cast = Cast.new(ctx.next_id, target, parsed.id, target, safe: false)
+      ctx.emit(cast)
+      ctx.register_type(cast.id, target)
+      cast.id
+    end
+
     private def lower_primitive_pointer_get(
       ctx : LoweringContext,
       receiver_id : ValueId?,
@@ -39078,9 +39104,9 @@ module Crystal::HIR
           return lower_member_access(ctx, callee_node)
         end
 
-        # String#to_i / to_i64 / to_u64 intercept (EARLY): must be before method resolution
+        # String#to_i / to_i64 / to_u* intercept (EARLY): must be before method resolution
         # to prevent stdlib conversion methods with default args from being compiled.
-        if (method_name == "to_i" || method_name == "to_i32" || method_name == "to_i64" || method_name == "to_u64") &&
+        if (method_name == "to_i" || method_name == "to_i32" || method_name == "to_i64" || string_unsigned_conversion_target(method_name)) &&
            call_args.empty? && block_expr.nil? && block_pass_expr.nil?
           recv_id = lower_expr(ctx, obj_expr)
           recv_type = ctx.type_of(recv_id)
@@ -39090,11 +39116,8 @@ module Crystal::HIR
               ctx.emit(ext_call)
               ctx.register_type(ext_call.id, TypeRef::INT64)
               return ext_call.id
-            elsif method_name == "to_u64"
-              ext_call = ExternCall.new(ctx.next_id, TypeRef::UINT64, "__crystal_v2_string_to_u64", [recv_id])
-              ctx.emit(ext_call)
-              ctx.register_type(ext_call.id, TypeRef::UINT64)
-              return ext_call.id
+            elsif unsigned_target = string_unsigned_conversion_target(method_name)
+              return lower_string_to_unsigned_conversion(ctx, recv_id, unsigned_target)
             else
               ext_call = ExternCall.new(ctx.next_id, TypeRef::INT32, "__crystal_v2_string_to_i", [recv_id])
               ctx.emit(ext_call)
@@ -40641,14 +40664,11 @@ module Crystal::HIR
         end
       end
 
-      # String#to_u64 intercept
-      if method_name == "to_u64" && receiver_id
+      # String#to_u* intercept
+      if receiver_id && (unsigned_target = string_unsigned_conversion_target(method_name))
         recv_type = ctx.type_of(receiver_id)
         if recv_type == TypeRef::STRING || recv_type == TypeRef::POINTER
-          ext_call = ExternCall.new(ctx.next_id, TypeRef::UINT64, "__crystal_v2_string_to_u64", [receiver_id])
-          ctx.emit(ext_call)
-          ctx.register_type(ext_call.id, TypeRef::UINT64)
-          return ext_call.id
+          return lower_string_to_unsigned_conversion(ctx, receiver_id, unsigned_target)
         end
       end
 
@@ -50615,7 +50635,7 @@ module Crystal::HIR
         end
       end
 
-      # String#to_i / to_i64 / to_u64 intercept: convert string to integer via runtime helper
+      # String#to_i / to_i64 / to_u* intercept: convert string to integer via runtime helper
       # Must be here (not in lower_call) because "str".to_i creates MemberAccessNode
       if receiver_type == TypeRef::STRING
         if member_name == "to_i" || member_name == "to_i32"
@@ -50628,11 +50648,8 @@ module Crystal::HIR
           ctx.emit(ext)
           ctx.register_type(ext.id, TypeRef::INT64)
           return ext.id
-        elsif member_name == "to_u64"
-          ext = ExternCall.new(ctx.next_id, TypeRef::UINT64, "__crystal_v2_string_to_u64", [object_id])
-          ctx.emit(ext)
-          ctx.register_type(ext.id, TypeRef::UINT64)
-          return ext.id
+        elsif unsigned_target = string_unsigned_conversion_target(member_name)
+          return lower_string_to_unsigned_conversion(ctx, object_id, unsigned_target)
         end
       end
 
