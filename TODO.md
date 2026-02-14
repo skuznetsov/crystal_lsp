@@ -270,6 +270,22 @@ about syntax or types and should match what the original compiler would report.
         - `AstToHir#resolve_type_name_in_context`: `195 -> 172`;
         - `String#hash`: `366 -> 319`;
         - `Crystal::Hasher#bytes`: `387 -> 334`.
+  - Update (2026-02-14): reduced ENV-debug lookup overhead in HIR hot paths (`env_get`/`env_has?`) with prefix gating.
+    - `src/compiler/hir/ast_to_hir.cr`:
+      - added precomputed env-category flags:
+        - `@any_debug_like_env_set` for `DEBUG_*`/`DBG_*`/`HIR_DEBUG`/`INLINE_YIELD_*`
+        - `@any_crystal_v2_env_set` for `CRYSTAL_V2_*`
+      - updated `env_get` to return `nil` immediately for missing whole categories, skipping `@env_cache` hash lookups.
+    - verification:
+      - `./regression_tests/run_all.sh /tmp/crystal_v2_envgate_dbg` => `35 passed, 0 failed`;
+      - `timeout 60 env CRYSTAL_V2_AST_FILTER=1 /tmp/crystal_v2_envgate_dbg spec spec/hir/return_type_inference_spec.cr` => timeout only (`EXIT:124`), no `opt failed`/`error:` in log.
+    - sample deltas (same 10s window on `CRYSTAL_V2_AST_FILTER=1 ... return_type_inference_spec.cr`):
+      - `AstToHir#env_get`: `149 -> 11`;
+      - `AstToHir#type_ref_for_name`: `445 -> 408`;
+      - `AstToHir#register_concrete_class`: `449 -> 442`;
+      - `AstToHir#lower_expr`: `522 -> 511`;
+      - `String#index`: `488 -> 474`.
+    - full regression wall-time (same machine/session): `8:23.45` (`/tmp/crystal_v2_typecachefast_dbg`) -> `7:41.07` (`/tmp/crystal_v2_envgate_dbg`).
   - Update (2026-02-03): added guarded recursion suppression in `infer_type_from_expr` (per‑cache version) and param‑type lookup using current def’s signature (fall back to owner/method lookup when no local). Skip local inference for self‑referential assignments. Guard logs now include file/span under `DEBUG_INFER_GUARD=1`. `spec/hir/return_type_inference_spec.cr` passes (13 examples, ~10s). Guard hotspots shifted to `Crystal::Hasher#result` and Enumerable helpers (`zip?`, `in_groups_of`, `chunks`). Mini compile still >60s on `/tmp/mini_try_each.cr`; next: inspect hasher result recursion and enumerate block‑path inference.
   - Update (2026-02-03): `timeout 60 ./bin/crystal_v2 spec spec/hir/return_type_inference_spec.cr` still times out. Needs re‑profile with latest block‑return inference changes.
   - Update (2026-02-03): sampled `spec/hir/return_type_inference_spec.cr` (see `/tmp/rt_infer_sample.txt`). Hot path is still in `lower_function_if_needed_impl → lower_method → lower_expr → lower_call → lookup_function_def_for_call`. Histogram (`/tmp/rt_infer_histo.log`) dominated by Identifier/Call/Binary/MemberAccess. Next: reduce `lookup_function_def_for_call` churn (cache/memoize by callsite), and cut repeated callsite overload resolution.

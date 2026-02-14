@@ -1112,8 +1112,17 @@ module Crystal::HIR
 
     # Cached ENV lookups — avoid repeated C library getenv() calls.
     @env_cache : Hash(String, String?) = {} of String => String?
-    # Fast-path: if no DEBUG_*/CRYSTAL_V2_* env vars are set, all env_has? calls return false immediately
-    @any_debug_env_set : Bool = ENV.keys.any? { |k| k.starts_with?("DEBUG_") || k.starts_with?("CRYSTAL_V2_") }
+    # Prefix-gated ENV presence checks to skip hash/cache lookups when whole
+    # categories are absent (common for perf runs that set only CRYSTAL_V2_*).
+    @any_debug_like_env_set : Bool = ENV.keys.any? do |k|
+      k.starts_with?("DEBUG_") || k.starts_with?("DBG_") || k == "HIR_DEBUG" || k.starts_with?("INLINE_YIELD_")
+    end
+    @any_crystal_v2_env_set : Bool = ENV.keys.any? { |k| k.starts_with?("CRYSTAL_V2_") }
+    # Fast-path: if no debug-like/crystal-v2 vars are set, env_has? is always false.
+    @any_debug_env_set : Bool = ENV.keys.any? do |k|
+      k.starts_with?("DEBUG_") || k.starts_with?("DBG_") || k == "HIR_DEBUG" ||
+        k.starts_with?("INLINE_YIELD_") || k.starts_with?("CRYSTAL_V2_")
+    end
     # Cache block function def lookup by callsite shape.
     @block_lookup_cache : Hash(BlockLookupKey, Tuple(String, CrystalV2::Compiler::Frontend::DefNode)?) = {} of BlockLookupKey => Tuple(String, CrystalV2::Compiler::Frontend::DefNode)?
     @block_lookup_cache_size : Int32 = 0
@@ -2265,6 +2274,11 @@ module Crystal::HIR
     # ENV values never change during compilation, so caching is safe.
     @[AlwaysInline]
     private def env_get(key : String) : String?
+      if key.starts_with?("CRYSTAL_V2_")
+        return nil unless @any_crystal_v2_env_set
+      elsif key.starts_with?("DEBUG_") || key.starts_with?("DBG_") || key == "HIR_DEBUG" || key.starts_with?("INLINE_YIELD_")
+        return nil unless @any_debug_like_env_set
+      end
       @env_cache.fetch(key) do
         val = ENV[key]?
         @env_cache[key] = val
