@@ -291,7 +291,7 @@ module Crystal::HIR
   # Stores enough information to register a single method from a module on demand.
   record DeferredModuleContext,
     module_full_name : String,
-    type_param_snapshot : Hash(String, String),   # full @type_param_map at include time
+    type_param_snapshot : Hash(String, String), # full @type_param_map at include time
     mod_arena : CrystalV2::Compiler::Frontend::ArenaLike,
     namespace_override : String?
 
@@ -928,6 +928,7 @@ module Crystal::HIR
         Set(String).new
       end
     end
+
     # Functions whose return value is a type literal (e.g., EventLoop.backend_class).
     @function_return_type_literals : Set(String)
 
@@ -1157,8 +1158,9 @@ module Crystal::HIR
     @rta_deferred_functions : Array(String) = [] of String
     @rta_deferred_set : Set(String) = Set(String).new
     @rta_module_base_names : Set(String) = Set(String).new
-    @rta_scan_start_idx : Int32 = 0 # Track which functions we've already scanned
-    @lazy_rta_active : Bool = false  # Set to true only during main process_pending pass
+    @rta_scan_start_idx : Int32 = 0      # Track which functions we've already scanned
+    @rta_type_scan_start_idx : Int32 = 0 # Track which type descriptors we've already scanned
+    @lazy_rta_active : Bool = false      # Set to true only during main process_pending pass
 
     # Initialize live types for lazy RTA
     private def initialize_lazy_rta
@@ -1180,14 +1182,9 @@ module Crystal::HIR
         @rta_module_base_names << strip_generics_simple(mod_name)
       end
 
-      # Union type variants — if a union exists, its variants can appear at runtime
+      # Union type variants — if a union exists, its variants can appear at runtime.
       @module.types.each do |desc|
-        if desc.name.includes?(" | ")
-          desc.name.split(" | ").each do |variant|
-            base = strip_generics_simple(variant.strip)
-            @live_types << base unless base.empty?
-          end
-        end
+        mark_union_variants_live(desc.name)
       end
 
       # Monomorphized types — generic instantiations that have been created
@@ -1206,6 +1203,7 @@ module Crystal::HIR
         scan_hir_function_for_live_types(func)
       end
       @rta_scan_start_idx = @module.function_count
+      @rta_type_scan_start_idx = @module.types.size
     end
 
     # Extract owner type from function name and mark as live
@@ -1326,6 +1324,68 @@ module Crystal::HIR
         @rta_scan_start_idx += 1
       end
       new_types
+    end
+
+    # Scan only newly-added type descriptors for union variants.
+    private def scan_new_type_descriptors_for_live_types : Bool
+      new_types = false
+      current_count = @module.types.size
+      while @rta_type_scan_start_idx < current_count
+        desc = @module.types[@rta_type_scan_start_idx]
+        new_types = true if mark_union_variants_live(desc.name)
+        @rta_type_scan_start_idx += 1
+      end
+      new_types
+    end
+
+    # Add union variants to live types without using split allocations.
+    # Returns true if at least one new live type was added.
+    private def mark_union_variants_live(type_name : String) : Bool
+      return false unless type_name.includes?(" | ")
+      added = false
+      each_union_variant(type_name) do |variant|
+        base = strip_generics_simple(variant)
+        next if base.empty?
+        unless @live_types.includes?(base)
+          @live_types << base
+          added = true
+        end
+      end
+      added
+    end
+
+    # Iterate over union variants in "T | U | V" without split.
+    private def each_union_variant(type_name : String, & : String ->) : Nil
+      n = type_name.bytesize
+      start_idx = 0
+      i = 0
+      while i <= n
+        at_end = i == n
+        sep = !at_end && i + 2 < n && type_name.byte_at(i) == 32_u8 && type_name.byte_at(i + 1) == 124_u8 && type_name.byte_at(i + 2) == 32_u8
+        if at_end || sep
+          s = start_idx
+          e = i
+          while s < e && whitespace_byte?(type_name.byte_at(s))
+            s += 1
+          end
+          while e > s && whitespace_byte?(type_name.byte_at(e - 1))
+            e -= 1
+          end
+          if e > s
+            yield type_name[s, e - s]
+          end
+          if sep
+            i += 3
+            start_idx = i
+            next
+          end
+        end
+        i += 1
+      end
+    end
+
+    private def whitespace_byte?(b : UInt8) : Bool
+      b == 32_u8 || b == 9_u8 || b == 10_u8 || b == 13_u8
     end
 
     # Move deferred functions whose owner type is now live back to the pending queue
@@ -11304,99 +11364,97 @@ module Crystal::HIR
       old_class = @current_class
       @current_class = class_name
       begin
+        if member.is_class?
+          case member
+          when CrystalV2::Compiler::Frontend::GetterNode
+            member.specs.each { |spec| register_class_accessor_entry(class_name, spec, :getter) }
+          when CrystalV2::Compiler::Frontend::SetterNode
+            member.specs.each { |spec| register_class_accessor_entry(class_name, spec, :setter) }
+          when CrystalV2::Compiler::Frontend::PropertyNode
+            member.specs.each do |spec|
+              register_class_accessor_entry(class_name, spec, :getter)
+              register_class_accessor_entry(class_name, spec, :setter)
+            end
+          end
+          return
+        end
 
-      if member.is_class?
         case member
         when CrystalV2::Compiler::Frontend::GetterNode
-          member.specs.each { |spec| register_class_accessor_entry(class_name, spec, :getter) }
+          member.specs.each do |spec|
+            storage_name = accessor_storage_name(spec)
+            getter_name = accessor_method_name(spec)
+            ivar_name = "@#{storage_name}"
+            ivar_type = if ta = spec.type_annotation
+                          type_ref_for_name(String.new(ta))
+                        elsif spec.predicate
+                          TypeRef::BOOL
+                        elsif default_value = spec.default_value
+                          infer_type_from_expr(default_value, class_name) || TypeRef::VOID
+                        else
+                          TypeRef::VOID
+                        end
+            unless ivars.any? { |iv| iv.name == ivar_name }
+              ivars << IVarInfo.new(ivar_name, ivar_type, offset_ref.value,
+                default_expr_id: spec.default_value,
+                default_arena: spec.default_value ? @arena : nil)
+              offset_ref.value += type_size(ivar_type)
+            end
+            getter_base = "#{class_name}##{getter_name}"
+            full_name = mangle_function_name(getter_base, [] of TypeRef)
+            register_function_type(full_name, ivar_type)
+          end
         when CrystalV2::Compiler::Frontend::SetterNode
-          member.specs.each { |spec| register_class_accessor_entry(class_name, spec, :setter) }
+          member.specs.each do |spec|
+            storage_name = accessor_storage_name(spec)
+            ivar_name = "@#{storage_name}"
+            ivar_type = if ta = spec.type_annotation
+                          type_ref_for_name(String.new(ta))
+                        elsif spec.predicate
+                          TypeRef::BOOL
+                        elsif default_value = spec.default_value
+                          infer_type_from_expr(default_value, class_name) || TypeRef::VOID
+                        else
+                          TypeRef::VOID
+                        end
+            unless ivars.any? { |iv| iv.name == ivar_name }
+              ivars << IVarInfo.new(ivar_name, ivar_type, offset_ref.value,
+                default_expr_id: spec.default_value,
+                default_arena: spec.default_value ? @arena : nil)
+              offset_ref.value += type_size(ivar_type)
+            end
+            setter_name = "#{class_name}##{storage_name}="
+            full_name = mangle_function_name(setter_name, [ivar_type])
+            register_function_type(full_name, ivar_type)
+          end
         when CrystalV2::Compiler::Frontend::PropertyNode
           member.specs.each do |spec|
-            register_class_accessor_entry(class_name, spec, :getter)
-            register_class_accessor_entry(class_name, spec, :setter)
+            storage_name = accessor_storage_name(spec)
+            getter_name = accessor_method_name(spec)
+            ivar_name = "@#{storage_name}"
+            ivar_type = if ta = spec.type_annotation
+                          type_ref_for_name(String.new(ta))
+                        elsif spec.predicate
+                          TypeRef::BOOL
+                        elsif default_value = spec.default_value
+                          infer_type_from_expr(default_value, class_name) || TypeRef::VOID
+                        else
+                          TypeRef::VOID
+                        end
+            unless ivars.any? { |iv| iv.name == ivar_name }
+              ivars << IVarInfo.new(ivar_name, ivar_type, offset_ref.value,
+                default_expr_id: spec.default_value,
+                default_arena: spec.default_value ? @arena : nil)
+              offset_ref.value += type_size(ivar_type)
+            end
+            getter_base = "#{class_name}##{getter_name}"
+            getter_full = mangle_function_name(getter_base, [] of TypeRef)
+            register_function_type(getter_full, ivar_type)
+            setter_name = "#{class_name}##{storage_name}="
+            setter_full = mangle_function_name(setter_name, [ivar_type])
+            register_function_type(setter_full, ivar_type)
           end
         end
-        return
-      end
-
-      case member
-      when CrystalV2::Compiler::Frontend::GetterNode
-        member.specs.each do |spec|
-          storage_name = accessor_storage_name(spec)
-          getter_name = accessor_method_name(spec)
-          ivar_name = "@#{storage_name}"
-          ivar_type = if ta = spec.type_annotation
-                        type_ref_for_name(String.new(ta))
-                      elsif spec.predicate
-                        TypeRef::BOOL
-                      elsif default_value = spec.default_value
-                        infer_type_from_expr(default_value, class_name) || TypeRef::VOID
-                      else
-                        TypeRef::VOID
-                      end
-          unless ivars.any? { |iv| iv.name == ivar_name }
-            ivars << IVarInfo.new(ivar_name, ivar_type, offset_ref.value,
-              default_expr_id: spec.default_value,
-              default_arena: spec.default_value ? @arena : nil)
-            offset_ref.value += type_size(ivar_type)
-          end
-          getter_base = "#{class_name}##{getter_name}"
-          full_name = mangle_function_name(getter_base, [] of TypeRef)
-          register_function_type(full_name, ivar_type)
-        end
-      when CrystalV2::Compiler::Frontend::SetterNode
-        member.specs.each do |spec|
-          storage_name = accessor_storage_name(spec)
-          ivar_name = "@#{storage_name}"
-          ivar_type = if ta = spec.type_annotation
-                        type_ref_for_name(String.new(ta))
-                      elsif spec.predicate
-                        TypeRef::BOOL
-                      elsif default_value = spec.default_value
-                        infer_type_from_expr(default_value, class_name) || TypeRef::VOID
-                      else
-                        TypeRef::VOID
-                      end
-          unless ivars.any? { |iv| iv.name == ivar_name }
-            ivars << IVarInfo.new(ivar_name, ivar_type, offset_ref.value,
-              default_expr_id: spec.default_value,
-              default_arena: spec.default_value ? @arena : nil)
-            offset_ref.value += type_size(ivar_type)
-          end
-          setter_name = "#{class_name}##{storage_name}="
-          full_name = mangle_function_name(setter_name, [ivar_type])
-          register_function_type(full_name, ivar_type)
-        end
-      when CrystalV2::Compiler::Frontend::PropertyNode
-        member.specs.each do |spec|
-          storage_name = accessor_storage_name(spec)
-          getter_name = accessor_method_name(spec)
-          ivar_name = "@#{storage_name}"
-          ivar_type = if ta = spec.type_annotation
-                        type_ref_for_name(String.new(ta))
-                      elsif spec.predicate
-                        TypeRef::BOOL
-                      elsif default_value = spec.default_value
-                        infer_type_from_expr(default_value, class_name) || TypeRef::VOID
-                      else
-                        TypeRef::VOID
-                      end
-          unless ivars.any? { |iv| iv.name == ivar_name }
-            ivars << IVarInfo.new(ivar_name, ivar_type, offset_ref.value,
-              default_expr_id: spec.default_value,
-              default_arena: spec.default_value ? @arena : nil)
-            offset_ref.value += type_size(ivar_type)
-          end
-          getter_base = "#{class_name}##{getter_name}"
-          getter_full = mangle_function_name(getter_base, [] of TypeRef)
-          register_function_type(getter_full, ivar_type)
-          setter_name = "#{class_name}##{storage_name}="
-          setter_full = mangle_function_name(setter_name, [ivar_type])
-          register_function_type(setter_full, ivar_type)
-        end
-      end
-
       ensure
         @current_class = old_class
       end
@@ -13933,7 +13991,6 @@ module Crystal::HIR
           end
         end
       end
-
     end
 
     private def concrete_type_args?(type_args : Array(String)) : Bool
@@ -16082,7 +16139,7 @@ module Crystal::HIR
       # Collect parameter types first for name mangling
       param_infos = [] of Tuple(String, TypeRef, Bool) # (name, type, is_instance_var)
       param_default_literals = [] of String?
-      param_type_names = [] of String?                 # Track type annotation names for enum detection
+      param_type_names = [] of String? # Track type annotation names for enum detection
       param_literal_flags = [] of Bool
       param_types = [] of TypeRef
       has_block = false
@@ -17152,24 +17209,24 @@ module Crystal::HIR
     # Returns nil if the method is not a binary operator
     private def binary_op_for_method(method_name : String) : BinaryOp?
       case method_name
-      when "+"  then BinaryOp::Add
-      when "-"  then BinaryOp::Sub
-      when "*"  then BinaryOp::Mul
-      when "/"  then BinaryOp::Div
-      when "%"  then BinaryOp::Mod
-      when "&"  then BinaryOp::BitAnd
-      when "|"  then BinaryOp::BitOr
-      when "^"  then BinaryOp::BitXor
-      when "<<" then BinaryOp::Shl
-      when ">>" then BinaryOp::Shr
+      when "+"         then BinaryOp::Add
+      when "-"         then BinaryOp::Sub
+      when "*"         then BinaryOp::Mul
+      when "/"         then BinaryOp::Div
+      when "%"         then BinaryOp::Mod
+      when "&"         then BinaryOp::BitAnd
+      when "|"         then BinaryOp::BitOr
+      when "^"         then BinaryOp::BitXor
+      when "<<"        then BinaryOp::Shl
+      when ">>"        then BinaryOp::Shr
       when "==", "===" then BinaryOp::Eq
-      when "!=" then BinaryOp::Ne
-      when "<"  then BinaryOp::Lt
-      when "<=" then BinaryOp::Le
-      when ">"  then BinaryOp::Gt
-      when ">=" then BinaryOp::Ge
-      when "&&" then BinaryOp::And
-      when "||" then BinaryOp::Or
+      when "!="        then BinaryOp::Ne
+      when "<"         then BinaryOp::Lt
+      when "<="        then BinaryOp::Le
+      when ">"         then BinaryOp::Gt
+      when ">="        then BinaryOp::Ge
+      when "&&"        then BinaryOp::And
+      when "||"        then BinaryOp::Or
         # Wrapping operators - map to same ops (LLVM integer ops already wrap)
       when "&+" then BinaryOp::Add
       when "&-" then BinaryOp::Sub
@@ -17292,15 +17349,15 @@ module Crystal::HIR
       when "to_i8", "to_i8!"           then TypeRef::INT8
       when "to_i16", "to_i16!"         then TypeRef::INT16
       when "to_i64", "to_i64!"         then TypeRef::INT64
-      when "to_i128"                    then TypeRef::INT128
+      when "to_i128"                   then TypeRef::INT128
       when "to_u", "to_u32", "to_u32!" then TypeRef::UINT32
       when "to_u8", "to_u8!"           then TypeRef::UINT8
       when "to_u16", "to_u16!"         then TypeRef::UINT16
       when "to_u64", "to_u64!"         then TypeRef::UINT64
-      when "to_u128"                    then TypeRef::UINT128
+      when "to_u128"                   then TypeRef::UINT128
       when "to_f", "to_f64", "to_f64!" then TypeRef::FLOAT64
       when "to_f32", "to_f32!"         then TypeRef::FLOAT32
-      else                                   nil
+      else                                  nil
       end
     end
 
@@ -18935,7 +18992,7 @@ module Crystal::HIR
 
         score = 0
         score += 2 if param_count == arg_count
-        score += 3 if required == arg_count  # Prefer exact required match over using defaults
+        score += 3 if required == arg_count # Prefer exact required match over using defaults
         score -= 1 if has_splat
         score -= 1 if has_double_splat
         score += 1 if name.includes?('$')
@@ -21005,66 +21062,51 @@ module Crystal::HIR
           if named = node.named_args
             named.each { |na| worklist << na.value }
           end
-
         when CrystalV2::Compiler::Frontend::MemberAccessNode
           info.method_names.add(String.new(node.member))
           worklist << node.object
-
         when CrystalV2::Compiler::Frontend::BinaryNode
           info.method_names.add(String.new(node.operator))
           worklist << node.left
           worklist << node.right
-
         when CrystalV2::Compiler::Frontend::UnaryNode
           worklist << node.operand
-
         when CrystalV2::Compiler::Frontend::TernaryNode
           worklist << node.condition
           worklist << node.true_branch
           worklist << node.false_branch
-
         when CrystalV2::Compiler::Frontend::AssignNode
           worklist << node.target
           worklist << node.value
-
         when CrystalV2::Compiler::Frontend::MultipleAssignNode
           node.targets.each { |t| worklist << t }
           worklist << node.value
-
         when CrystalV2::Compiler::Frontend::GroupingNode
           worklist << node.expression
-
         when CrystalV2::Compiler::Frontend::MacroExpressionNode
           worklist << node.expression
-
         when CrystalV2::Compiler::Frontend::ConstantNode
           worklist << node.value
-
         when CrystalV2::Compiler::Frontend::ReturnNode
           if v = node.value
             worklist << v
           end
-
         when CrystalV2::Compiler::Frontend::BreakNode
           if v = node.value
             worklist << v
           end
-
         when CrystalV2::Compiler::Frontend::YieldNode
           if args = node.args
             args.each { |arg| worklist << arg }
           end
-
         when CrystalV2::Compiler::Frontend::SuperNode
           if args = node.args
             args.each { |arg| worklist << arg }
           end
-
         when CrystalV2::Compiler::Frontend::IndexNode
           worklist << node.object
           info.method_names.add("[]")
           node.indexes.each { |idx| worklist << idx }
-
         when CrystalV2::Compiler::Frontend::IfNode
           worklist << node.condition
           node.then_body.each { |e| worklist << e }
@@ -21077,31 +21119,24 @@ module Crystal::HIR
           if else_body = node.else_body
             else_body.each { |e| worklist << e }
           end
-
         when CrystalV2::Compiler::Frontend::UnlessNode
           worklist << node.condition
           node.then_branch.each { |e| worklist << e }
           if else_branch = node.else_branch
             else_branch.each { |e| worklist << e }
           end
-
         when CrystalV2::Compiler::Frontend::WhileNode
           worklist << node.condition
           node.body.each { |e| worklist << e }
-
         when CrystalV2::Compiler::Frontend::UntilNode
           worklist << node.condition
           node.body.each { |e| worklist << e }
-
         when CrystalV2::Compiler::Frontend::LoopNode
           node.body.each { |e| worklist << e }
-
         when CrystalV2::Compiler::Frontend::BlockNode
           node.body.each { |e| worklist << e }
-
         when CrystalV2::Compiler::Frontend::ProcLiteralNode
           node.body.each { |e| worklist << e }
-
         when CrystalV2::Compiler::Frontend::CaseNode
           if v = node.value
             worklist << v
@@ -21110,31 +21145,25 @@ module Crystal::HIR
           if else_branch = node.else_branch
             else_branch.each { |e| worklist << e }
           end
-
         when CrystalV2::Compiler::Frontend::ArrayLiteralNode
           node.elements.each { |el| worklist << el }
           info.type_constructors.add("Array")
-
         when CrystalV2::Compiler::Frontend::HashLiteralNode
           node.entries.each do |entry|
             worklist << entry.key
             worklist << entry.value
           end
           info.type_constructors.add("Hash")
-
         when CrystalV2::Compiler::Frontend::TupleLiteralNode
           node.elements.each { |el| worklist << el }
           info.type_constructors.add("Tuple")
-
         when CrystalV2::Compiler::Frontend::NamedTupleLiteralNode
           node.entries.each { |entry| worklist << entry.value }
           info.type_constructors.add("NamedTuple")
-
         when CrystalV2::Compiler::Frontend::RangeNode
           worklist << node.begin_expr
           worklist << node.end_expr
           info.type_constructors.add("Range")
-
         when CrystalV2::Compiler::Frontend::StringInterpolationNode
           node.pieces.each do |piece|
             if piece.kind == CrystalV2::Compiler::Frontend::StringPiece::Kind::Expression
@@ -21144,7 +21173,6 @@ module Crystal::HIR
             end
           end
           info.method_names.add("to_s")
-
         when CrystalV2::Compiler::Frontend::BeginNode
           node.body.each { |e| worklist << e }
           if clauses = node.rescue_clauses
@@ -21156,28 +21184,22 @@ module Crystal::HIR
           if ensure_body = node.ensure_body
             ensure_body.each { |e| worklist << e }
           end
-
         when CrystalV2::Compiler::Frontend::IsANode
           worklist << node.expression
-
         when CrystalV2::Compiler::Frontend::AsNode
           worklist << node.expression
-
         when CrystalV2::Compiler::Frontend::SafeNavigationNode
           info.method_names.add(String.new(node.member))
           worklist << node.object
-
         when CrystalV2::Compiler::Frontend::MacroIfNode
           worklist << node.condition
           worklist << node.then_body
           if eb = node.else_body
             worklist << eb
           end
-
         when CrystalV2::Compiler::Frontend::MacroForNode
           worklist << node.iterable
           worklist << node.body
-
         else
           # Leaf nodes — nothing to enqueue
         end
@@ -21414,11 +21436,11 @@ module Crystal::HIR
 
     # Check if a function name is auto-generated (constructors, setters, runtime helpers)
     private def is_auto_generated_function?(name : String) : Bool
-      return true if name.includes?(".new")         # Allocators
-      return true if name.ends_with?("=")           # Setters
-      return true if name.starts_with?("~")         # Destructors
-      return true if name.includes?("#initialize")  # Constructors
-      return true if name.includes?("#finalize")    # Finalizers
+      return true if name.includes?(".new")        # Allocators
+      return true if name.ends_with?("=")          # Setters
+      return true if name.starts_with?("~")        # Destructors
+      return true if name.includes?("#initialize") # Constructors
+      return true if name.includes?("#finalize")   # Finalizers
       false
     end
 
@@ -25588,7 +25610,7 @@ module Crystal::HIR
       seen : Set(String),
       depth : Int32,
     )
-      return if depth > 5  # Limit recursion depth
+      return if depth > 5 # Limit recursion depth
       exprs.each do |expr_id|
         node = arena[expr_id]
         case node
@@ -27369,17 +27391,7 @@ module Crystal::HIR
             end
           end
           # Also check newly registered union type descriptors
-          @module.types.each do |desc|
-            if desc.name.includes?(" | ")
-              desc.name.split(" | ").each do |variant|
-                vbase = strip_generics_simple(variant.strip)
-                unless vbase.empty? || @live_types.includes?(vbase)
-                  @live_types << vbase
-                  new_types_found = true
-                end
-              end
-            end
-          end
+          new_types_found = true if scan_new_type_descriptors_for_live_types
           if new_types_found
             undeferred = undefer_rta_functions
             rta_undeferred_total += undeferred
@@ -28609,9 +28621,9 @@ module Crystal::HIR
         return number_primitives.includes?(left_type)
       when "Number"
         return number_primitives.includes?(left_type) ||
-               left_type == "Number::Primitive" ||
-               left_type == "BigInt" || left_type == "BigFloat" ||
-               left_type == "BigDecimal" || left_type == "BigRational"
+          left_type == "Number::Primitive" ||
+          left_type == "BigInt" || left_type == "BigFloat" ||
+          left_type == "BigDecimal" || left_type == "BigRational"
       when "Int"
         return {"Int8", "Int16", "Int32", "Int64", "Int128",
                 "UInt8", "UInt16", "UInt32", "UInt64", "UInt128"}.includes?(left_type)
@@ -28625,17 +28637,17 @@ module Crystal::HIR
         return false
       when "Value"
         return number_primitives.includes?(left_type) ||
-               left_type == "Bool" || left_type == "Char" || left_type == "Symbol" ||
-               left_type == "Nil" || left_type == "Pointer" || left_type == "StaticArray"
+          left_type == "Bool" || left_type == "Char" || left_type == "Symbol" ||
+          left_type == "Nil" || left_type == "Pointer" || left_type == "StaticArray"
       when "Struct"
         return number_primitives.includes?(left_type) ||
-               left_type == "Bool" || left_type == "Char" || left_type == "Symbol"
+          left_type == "Bool" || left_type == "Char" || left_type == "Symbol"
       when "Reference", "Object"
         return left_type == "String" || left_type == "Array" || left_type == "Hash" ||
-               @class_info[left_type]?.try { |info|
-                 p = info.parent_name
-                 p && p != "Struct" && p != "Value" && p != "Enum"
-               } || false
+          @class_info[left_type]?.try { |info|
+            p = info.parent_name
+            p && p != "Struct" && p != "Value" && p != "Enum"
+          } || false
       end
 
       false
@@ -31587,12 +31599,12 @@ module Crystal::HIR
         left_desc2 = @module.get_type_descriptor(left_type)
         if left_desc2 && left_desc2.kind == TypeKind::Array && left_desc2.name.starts_with?("Array(")
           # Determine element size from array element type
-          elem_name = left_desc2.name[6...-1]  # Extract "Int32" from "Array(Int32)"
+          elem_name = left_desc2.name[6...-1] # Extract "Int32" from "Array(Int32)"
           elem_size = case elem_name
-                      when "Bool", "Int8", "UInt8" then 1
-                      when "Int16", "UInt16"       then 2
+                      when "Bool", "Int8", "UInt8"              then 1
+                      when "Int16", "UInt16"                    then 2
                       when "Int32", "UInt32", "Float32", "Char" then 4
-                      else 8  # Int64, UInt64, Float64, String, ptr, class instances
+                      else                                           8 # Int64, UInt64, Float64, String, ptr, class instances
                       end
           # Emit element size literal
           sz_lit = Literal.new(ctx.next_id, TypeRef::INT32, elem_size.to_i64)
@@ -31709,29 +31721,29 @@ module Crystal::HIR
                      left_type == TypeRef::STRING || left_type == TypeRef::NIL ||
                      left_type == TypeRef::VOID
       if !is_primitive && (op_str == "+" || op_str == "-" || op_str == "*" || op_str == "/" || op_str == "%" ||
-                            op_str == "===" || op_str == "==" || op_str == "!=" ||
-                            op_str == "<" || op_str == "<=" || op_str == ">" || op_str == ">=")
+         op_str == "===" || op_str == "==" || op_str == "!=" ||
+         op_str == "<" || op_str == "<=" || op_str == ">" || op_str == ">=")
         return emit_binary_call(ctx, left_id, op_str, right_id)
       end
 
       op = case op_str
-           when "+"  then BinaryOp::Add
-           when "-"  then BinaryOp::Sub
-           when "*"  then BinaryOp::Mul
-           when "/"  then BinaryOp::Div
-           when "//" then BinaryOp::Div # Floor division - use Div (truncation) for now
-           when "%"  then BinaryOp::Mod
-           when "&"  then BinaryOp::BitAnd
-           when "|"  then BinaryOp::BitOr
-           when "^"  then BinaryOp::BitXor
-           when "<<" then BinaryOp::Shl
-           when ">>" then BinaryOp::Shr
+           when "+"         then BinaryOp::Add
+           when "-"         then BinaryOp::Sub
+           when "*"         then BinaryOp::Mul
+           when "/"         then BinaryOp::Div
+           when "//"        then BinaryOp::Div # Floor division - use Div (truncation) for now
+           when "%"         then BinaryOp::Mod
+           when "&"         then BinaryOp::BitAnd
+           when "|"         then BinaryOp::BitOr
+           when "^"         then BinaryOp::BitXor
+           when "<<"        then BinaryOp::Shl
+           when ">>"        then BinaryOp::Shr
            when "==", "===" then BinaryOp::Eq
-           when "!=" then BinaryOp::Ne
-           when "<"  then BinaryOp::Lt
-           when "<=" then BinaryOp::Le
-           when ">"  then BinaryOp::Gt
-           when ">=" then BinaryOp::Ge
+           when "!="        then BinaryOp::Ne
+           when "<"         then BinaryOp::Lt
+           when "<="        then BinaryOp::Le
+           when ">"         then BinaryOp::Gt
+           when ">="        then BinaryOp::Ge
              # Wrapping operators - map to same ops (LLVM integer ops already wrap)
            when "&+" then BinaryOp::Add
            when "&-" then BinaryOp::Sub
@@ -32264,14 +32276,14 @@ module Crystal::HIR
       is_numeric = is_signed || is_unsigned || is_float
       return nil unless is_numeric
       case check_name
-      when "Int::Signed"   then is_signed
-      when "Int::Unsigned"  then is_unsigned
-      when "Int::Primitive", "Int" then is_signed || is_unsigned
-      when "Float::Primitive", "Float" then is_float
+      when "Int::Signed"                 then is_signed
+      when "Int::Unsigned"               then is_unsigned
+      when "Int::Primitive", "Int"       then is_signed || is_unsigned
+      when "Float::Primitive", "Float"   then is_float
       when "Number::Primitive", "Number" then true
-      when "Value", "Struct" then true
-      when "Reference", "Object" then false
-      else nil
+      when "Value", "Struct"             then true
+      when "Reference", "Object"         then false
+      else                                    nil
       end
     end
 
@@ -33670,7 +33682,7 @@ module Crystal::HIR
 
       ctx.push_scope(ScopeKind::Loop)
       @loop_exit_stack << exit_block
-      @loop_cond_stack << body_block  # for infinite loop, `next` jumps back to body start
+      @loop_cond_stack << body_block # for infinite loop, `next` jumps back to body start
       @loop_phi_stack << phi_nodes
       @loop_break_info_stack << [] of {BlockId, Hash(String, ValueId)}
       pushed_inline = false
@@ -35057,9 +35069,9 @@ module Crystal::HIR
       body_exit_block : BlockId? = nil
       rescue_exit_block : BlockId? = nil
       rescue_done_block : BlockId? = nil
-      body_value_block : BlockId? = nil    # actual block before jump to exit (body path)
-      rescue_value_block : BlockId? = nil  # actual block before jump to exit (rescue path)
-      rescue_result : ValueId = ValueId.new(0)  # rescue block's return value
+      body_value_block : BlockId? = nil        # actual block before jump to exit (body path)
+      rescue_value_block : BlockId? = nil      # actual block before jump to exit (rescue path)
+      rescue_result : ValueId = ValueId.new(0) # rescue block's return value
 
       # If we have rescue clauses, set up exception handling
       if has_rescue
@@ -35129,12 +35141,12 @@ module Crystal::HIR
 
         rescue_result = ctx.next_id
         after_rescue_target = ensure_block || exit_block
-        rescue_done_block = ctx.create_block  # also updates outer variable
+        rescue_done_block = ctx.create_block # also updates outer variable
 
         # Build chain: for each typed clause → IsA check → branch to body or next check
         # Untyped clause → catch-all (no check)
         next_check_block : BlockId? = nil
-        rescue_clause_exits = [] of {BlockId, ValueId}  # {exit_block, value} for PHI
+        rescue_clause_exits = [] of {BlockId, ValueId} # {exit_block, value} for PHI
         rescue_clauses.each_with_index do |clause, idx|
           exc_type_name = ""
           if et = clause.exception_type
@@ -36165,7 +36177,7 @@ module Crystal::HIR
       return false if @module.has_function?(name)
       return false if function_state(name).completed?
       # Prevent deep chaining: A needs ret type of B, B needs C, C needs D...
-      max_force_depth = 32
+      max_force_depth = 4
       if @force_lower_return_type_depth >= max_force_depth
         STDERR.puts "[FORCE_LOWER_DEPTH_LIMIT] depth=#{@force_lower_return_type_depth} name=#{name}" if env_has?("DEBUG_FORCE_LOWER_DEPTH")
         return false
@@ -40495,7 +40507,7 @@ module Crystal::HIR
       if method_name == "index" && receiver_id && args.size >= 1 && block_expr.nil?
         if array_intrinsic_receiver?(ctx, receiver_id) ||
            (callee_node.is_a?(CrystalV2::Compiler::Frontend::MemberAccessNode) &&
-            check_original_receiver_is_array?(ctx, callee_node))
+           check_original_receiver_is_array?(ctx, callee_node))
           return lower_array_index_dynamic(ctx, receiver_id, args[0])
         end
       end
@@ -41667,9 +41679,9 @@ module Crystal::HIR
                                  true
                                else
                                  (return_type == TypeRef::BOOL ||
-                                  return_type == TypeRef::VOID ||
-                                  return_type == TypeRef::NIL) &&
-                                 NILABLE_QUERY_METHODS.includes?(method_name)
+                                   return_type == TypeRef::VOID ||
+                                   return_type == TypeRef::NIL) &&
+                                   NILABLE_QUERY_METHODS.includes?(method_name)
                                end
         if should_infer_nilable
           if inferred = infer_unannotated_query_return_type(method_name, recv_type_for_infer)
@@ -42258,12 +42270,12 @@ module Crystal::HIR
       # Crystal stdlib chains copy_from → copy_to → copy_from_impl which loses
       # the element type (resolves to Pointer(Void)), so we intercept at the top level.
       if receiver_id && (method_name == "copy_from" || method_name == "copy_to" ||
-                         method_name == "move_from" || method_name == "move_to") && args.size >= 2
+         method_name == "move_from" || method_name == "move_to") && args.size >= 2
         receiver_type = ctx.type_of(receiver_id)
         recv_type_desc = @module.get_type_descriptor(receiver_type)
         is_pointer_type = receiver_type == TypeRef::POINTER ||
                           (recv_type_desc && (recv_type_desc.kind == TypeKind::Pointer ||
-                           recv_type_desc.name.starts_with?("Pointer")))
+                                              recv_type_desc.name.starts_with?("Pointer")))
         if is_pointer_type
           # Determine element size from pointer type
           recv_name = recv_type_desc.try(&.name) || "Pointer(Void)"
@@ -42284,7 +42296,7 @@ module Crystal::HIR
           ctx.register_type(elem_size_lit.id, TypeRef::INT32)
 
           copy_call = ExternCall.new(ctx.next_id, TypeRef::POINTER, helper,
-                                     [dest_id, src_id, count_id, elem_size_lit.id] of ValueId)
+            [dest_id, src_id, count_id, elem_size_lit.id] of ValueId)
           ctx.emit(copy_call)
           ctx.register_type(copy_call.id, receiver_type)
           return copy_call.id
@@ -43093,7 +43105,7 @@ module Crystal::HIR
             field_ptr = PointerAdd.new(ctx.next_id, TypeRef::POINTER, self_id, offset_lit.id, TypeRef::INT8)
             ctx.emit(field_ptr)
             ctx.register_type(field_ptr.id, TypeRef::POINTER)
-            return field_ptr.id  # Already a pointer — no AddressOf needed
+            return field_ptr.id # Already a pointer — no AddressOf needed
           end
         end
       end
@@ -45241,7 +45253,7 @@ module Crystal::HIR
       # Push loop stacks so `next` in block body jumps to incr_block (advances index),
       # and `break` jumps to exit_block. Without this, `next` emits `unreachable`.
       @loop_exit_stack << exit_block
-      @loop_cond_stack << incr_block  # next → increment → cond (NOT directly to cond)
+      @loop_cond_stack << incr_block # next → increment → cond (NOT directly to cond)
       @loop_phi_stack << phi_nodes
       @loop_break_info_stack << [] of {BlockId, Hash(String, ValueId)}
       begin
@@ -45342,7 +45354,7 @@ module Crystal::HIR
         end
       elsif orig_obj.is_a?(CrystalV2::Compiler::Frontend::ArrayLiteralNode)
         # For inline array literals, infer element type from elements
-        elem_type_name = "Int32"  # default
+        elem_type_name = "Int32" # default
         if first_elem_id = orig_obj.elements.first?
           first_elem = @arena[first_elem_id]
           if first_elem.is_a?(CrystalV2::Compiler::Frontend::StringNode)
@@ -48690,8 +48702,8 @@ module Crystal::HIR
         ctx.emit(index_get)
         ctx.register_type(index_get.id, element_type)
         index_get.id
-      # Check if this is a tuple type — intercept to avoid calling Tuple#[]
-      # which relies on T.size macro (resolves to 0) causing infinite recursion.
+        # Check if this is a tuple type — intercept to avoid calling Tuple#[]
+        # which relies on T.size macro (resolves to 0) causing infinite recursion.
       elsif type_desc && (type_desc.kind == TypeKind::Tuple || type_desc.name.starts_with?("Tuple(")) && index_ids.size == 1
         td = type_desc.not_nil!
         # Determine element type from literal index or use first element type
@@ -49282,7 +49294,7 @@ module Crystal::HIR
 
       # Array#first / Array#last / Array#min / Array#max / Array#sum intrinsic (MemberAccessNode path)
       if (member_name == "first" || member_name == "last" || member_name == "min" ||
-          member_name == "max" || member_name == "sum") && array_intrinsic_receiver?(ctx, object_id)
+         member_name == "max" || member_name == "sum") && array_intrinsic_receiver?(ctx, object_id)
         case member_name
         when "first" then return lower_array_first_intrinsic(ctx, object_id)
         when "last"  then return lower_array_last_intrinsic(ctx, object_id)
@@ -51979,8 +51991,8 @@ module Crystal::HIR
 
       # Detect captures: scan proc body for identifiers that reference parent locals
       referenced_names = collect_proc_body_identifiers(node.body)
-      parent_locals = ctx.save_locals  # {name => ValueId}
-      captures = [] of {String, ValueId, TypeRef}  # {name, parent_value_id, type}
+      parent_locals = ctx.save_locals             # {name => ValueId}
+      captures = [] of {String, ValueId, TypeRef} # {name, parent_value_id, type}
       referenced_names.each do |name|
         next if proc_param_names.includes?(name)
         next if name == "self"
@@ -52278,7 +52290,7 @@ module Crystal::HIR
       # The LLVM backend emits: select i1 %is_a, ptr %obj, ptr null
       # Result is nilable: non-null = matches target type, null = nil
       select_call = Call.new(ctx.next_id, target_type,
-                             nil, "__crystal_v2_select_ptr", [is_a_result, value_id])
+        nil, "__crystal_v2_select_ptr", [is_a_result, value_id])
       ctx.emit(select_call)
       ctx.register_type(select_call.id, target_type)
       # Mark this value as potentially null so lower_truthy_check emits null check
