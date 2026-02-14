@@ -513,7 +513,10 @@ about syntax or types and should match what the original compiler would report.
   - Update (2026-02-05): class accessor entries now participate in class‑method lookup. `Unicode.category_Lu` is emitted as a call and a real
     `func @Unicode.category_Lu` exists in `/tmp/bootstrap_array.hir` (no longer a VOID local).
 - [ ] Add enum literal fast-path in HIR lowering for `.to_i` / `.value` on enum members (e.g., `DayOfWeek::Wednesday.to_i`), emitting const instead of missing call.
-- [ ] Ensure block wrapper emission for `each`/block calls: emit concrete block functions and propagate block arg type from callee signature to avoid missing `_block_each_block`.
+- [x] Ensure block wrapper emission for `each`/block calls: emit concrete block functions and propagate block arg type from callee signature to avoid missing `_block_each_block`.
+  - Update (2026-02-14): no longer reproduces on current bootstrap workload.
+    - `CRYSTAL_V2_PIPELINE_CACHE=0 CRYSTAL_V2_MISSING_TRACE=1 CRYSTAL_V2_DEBUG_HOOKS=1 ./bin/crystal_v2 examples/bootstrap_array.cr -o /tmp/bootstrap_array_blockcheck` => `EXIT 0`, and log `/tmp/bootstrap_array_blockcheck.err` has no `missing.symbol`/`reason=unlowered`/`_block_each_block`.
+    - `CRYSTAL_V2_PIPELINE_CACHE=0 ./bin/crystal_v2 --emit hir examples/bootstrap_array.cr -o /tmp/bootstrap_array_blockcheck_hir` => `EXIT 0`; emitted HIR includes block-call and block-def shapes (e.g. `Enumerable#each$block` callsites and concrete `..._block` defs).
 - [x] Bootstrap linker undefined list (from `/tmp/undefined_symbols_latest.txt`) still non-empty after latest lowering tweaks. Prioritize these exact missing symbols (e.g., `_Unicode$Dput$$Pointer_Int32_Int32_Int32_Int32`, `_String$_$OR$_Nil$Hbsearch_index$$block`, `_try$block`, `_Array$LRange$LInt32$C$_Int32$R$R$Hbegin/end`, `Crystal::EventLoop::Kqueue/ Polling` methods). Focus on linker list, not just `missing.symbol` trace (trace includes transient unlowered).
   - Update (2026-02-02): latest `bootstrap_array` link (debug, `--no-llvm-opt --no-llvm-metadata`) fails with missing symbols:
     `_Array$LRange$LInt32$C$_Int32$R$R$Hbegin`, `_Array$LRange$LInt32$C$_Int32$R$R$Hend`, `Crystal::System::FileDescriptor#@read_timeout`,
