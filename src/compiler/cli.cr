@@ -230,7 +230,9 @@ module CrystalV2
         property progress : Bool = false
         property check_only : Bool = false
         property dump_symbols : Bool = false
-        property ast_cache : Bool = ENV["CRYSTAL_V2_AST_CACHE"]? == "1"
+        # Enabled by default: stdlib/prelude parsing dominates cold starts, and cache
+        # is invalidated by source mtime + compiler mtime in LSP::AstCache.
+        property ast_cache : Bool = ENV["CRYSTAL_V2_AST_CACHE"]? != "0"
         property llvm_opt : Bool = true
         property llvm_cache : Bool = ENV["CRYSTAL_V2_LLVM_CACHE"]? != "0"
         property pipeline_cache : Bool = ENV["CRYSTAL_V2_PIPELINE_CACHE"]? != "0"
