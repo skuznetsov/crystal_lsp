@@ -1227,7 +1227,7 @@ module CrystalV2
               skip_macro_whitespace
               kw_token = current_token
               kw_text = token_text(kw_token)
-              debug("fast_forward_percent_block: kw=#{kw_text} depth=#{depth} first=#{first_header}")
+              debug { "fast_forward_percent_block: kw=#{kw_text} depth=#{depth} first=#{first_header}" }
               advance
               skip_macro_whitespace
               skip_until_macro_close
@@ -1241,7 +1241,7 @@ module CrystalV2
                   depth = 1
                 else
                   # Self-contained statements like {% raise %}, {% skip %} - just return
-                  debug("fast_forward_percent_block: self-contained '#{kw_text}', returning early")
+                  debug { "fast_forward_percent_block: self-contained '#{kw_text}', returning early" }
                   skip_whitespace_and_optional_newlines
                   return
                 end
@@ -1819,9 +1819,9 @@ module CrystalV2
           # Allow immediate separators after header (e.g., `struct X; end`)
           skip_statement_end
 
-          debug("parse_macro_definition: name=#{String.new(macro_name_slice)} entering body, token=#{current_token.kind}")
+          debug { "parse_macro_definition: name=#{String.new(macro_name_slice)} entering body, token=#{current_token.kind}" }
           pieces, trim_left, trim_right = parse_macro_body
-          debug("parse_macro_definition: exited body token=#{current_token.kind}")
+          debug { "parse_macro_definition: exited body token=#{current_token.kind}" }
           # Allow trailing separators before 'end'
           skip_statement_end
 
@@ -3709,7 +3709,7 @@ module CrystalV2
         end
 
         private def parse_rescue_sections : Tuple(Array(RescueClause)?, Array(ExprId)?, Array(ExprId)?)
-          debug("parse_rescue_sections: entering with token=#{current_token.kind}") if @debug_enabled
+          debug { "parse_rescue_sections: entering with token=#{current_token.kind}" }
           rescue_clauses = nil
           while current_token.kind == Token::Kind::Rescue
             rescue_clauses ||= [] of RescueClause
@@ -7710,7 +7710,7 @@ module CrystalV2
         # Example: def_equals value, kind
         # Returns CallNode or PREFIX_ERROR if can't parse as call
         private def try_parse_call_args_without_parens(callee_token : Token) : ExprId
-          debug("try_parse_call_args_without_parens: callee=#{String.new(callee_token.slice)}, current_token=#{current_token.kind}")
+          debug { "try_parse_call_args_without_parens: callee=#{String.new(callee_token.slice)}, current_token=#{current_token.kind}" }
           # Inside brace literals (named tuples) a trailing colon usually starts a key/value entry,
           # not a named argument label. Bail out early in that shape.
           if @brace_depth > 0 && current_token.kind == Token::Kind::Colon
@@ -9605,7 +9605,7 @@ module CrystalV2
             saved_index = @index
             tok = current_token
             if tok.kind == Token::Kind::Identifier
-              debug("brace: first token is Identifier #{String.new(tok.slice)}")
+              debug { "brace: first token is Identifier #{String.new(tok.slice)}" }
               ident_token = tok
               # Check for no-space named tuple form: `foo:a` where next is adjacent Symbol
               if named_arg_no_space?
@@ -9633,7 +9633,7 @@ module CrystalV2
               end
               # Peek next non-trivia for ':'
               nt = peek_next_non_trivia
-              debug("brace: next after identifier is #{nt.kind}")
+              debug { "brace: next after identifier is #{nt.kind}" }
               if nt.kind == Token::Kind::Colon || nt.kind == Token::Kind::MacroExprStart
                 # Consume identifier and any inline macro expression before colon
                 advance
@@ -9657,7 +9657,7 @@ module CrystalV2
                 skip_whitespace_and_optional_newlines
               end
             else
-              debug("brace: first token is #{tok.kind}")
+              debug { "brace: first token is #{tok.kind}" }
               @no_type_declaration += 1
               first_elem = parse_expression(0)
               @no_type_declaration -= 1
@@ -9670,7 +9670,7 @@ module CrystalV2
             end
 
             # Check what follows
-            debug("brace: after first elem, current=#{current_token.kind}")
+            debug { "brace: after first elem, current=#{current_token.kind}" }
             case current_token.kind
             when Token::Kind::Eq
               # Pattern like {x = expr, y} → treat as tuple with assignment expressions.
@@ -9686,7 +9686,7 @@ module CrystalV2
               # ":" → named tuple (expression context: allow identifier and certain keyword labels like 'nil')
               first_node = @arena[first_elem]
               kind = Frontend.node_kind(first_node)
-              debug("brace: colon after first elem; first kind=#{kind}")
+              debug { "brace: colon after first elem; first kind=#{kind}" }
               if kind == Frontend::NodeKind::Identifier || kind == Frontend::NodeKind::Nil || kind == Frontend::NodeKind::Bool || kind == Frontend::NodeKind::String
                 return parse_named_tuple_literal_continued(lbrace, first_elem)
               else
@@ -9897,7 +9897,7 @@ module CrystalV2
                 fast_forward_percent_block
                 macro_block_consumed = true
                 skip_whitespace_and_optional_newlines
-                debug("named_tuple: skipped macro control block")
+                debug { "named_tuple: skipped macro control block" }
                 next
               elsif current_token.kind == Token::Kind::MacroExprStart
                 fast_forward_macro_expression
@@ -9907,7 +9907,7 @@ module CrystalV2
               end
               break
             end
-            debug("named_tuple: loop current=#{current_token.kind} @#{current_token.span}")
+            debug { "named_tuple: loop current=#{current_token.kind} @#{current_token.span}" }
             # Be extra permissive: also tolerate standalone newlines
             if current_token.kind == Token::Kind::Newline
               skip_statement_end
@@ -9932,7 +9932,7 @@ module CrystalV2
               if macro_control_start?
                 fast_forward_percent_block
                 macro_block_consumed = true
-                debug("named_tuple: skipped macro control block after comma")
+                debug { "named_tuple: skipped macro control block after comma" }
                 next
               elsif current_token.kind == Token::Kind::MacroExprStart
                 fast_forward_macro_expression
@@ -10920,14 +10920,14 @@ module CrystalV2
                     # This mirrors Crystal's allowance of named args inside [] calls,
                     # e.g. obj[key, options: value]
 
-                      current_token.kind == Token::Kind::Identifier &&
-                      begin
-                        nxt = peek_next_non_trivia
-                        nxt.kind == Token::Kind::Colon
-                      rescue
-                        false
-                      end
-                    )
+current_token.kind == Token::Kind::Identifier &&
+                    begin
+                      nxt = peek_next_non_trivia
+                      nxt.kind == Token::Kind::Colon
+                    rescue
+                      false
+                    end
+                      )
                 # Named argument inside index: obj[pattern, name: value]
                 name_token = current_token
                 name_slice = name_token.slice
@@ -12265,7 +12265,7 @@ module CrystalV2
         end
 
         private def emit_unexpected(token : Token)
-          debug("emit_unexpected: #{token.kind} at #{token.span.start_line + 1}:#{token.span.start_column + 1}")
+          debug { "emit_unexpected: #{token.kind} at #{token.span.start_line + 1}:#{token.span.start_column + 1}" }
           if ENV["PARSER_UNEXPECTED_TRACE"]?
             STDERR.puts "[TRACE] unexpected #{token.kind} at #{token.span.start_line + 1}:#{token.span.start_column + 1} context=#{@expect_context}"
             STDERR.puts caller[0, 5].join("\n")
@@ -12338,11 +12338,6 @@ module CrystalV2
         private def debug(& : -> String)
           return unless @debug_enabled
           STDERR.puts "[PARSER_DEBUG] #{yield}"
-        end
-
-        private def debug(message : String)
-          return unless @debug_enabled
-          STDERR.puts "[PARSER_DEBUG] #{message}"
         end
 
         # Phase 103: Optimization - compare slice with string without allocation
