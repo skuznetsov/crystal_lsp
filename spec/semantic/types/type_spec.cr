@@ -188,7 +188,7 @@ describe "Type System" do
       nilable_int = ctx.nilable(ctx.int32_type)
 
       nilable_int.should be_a(UnionType)
-      nilable_int.to_s.should eq("Int32 | Nil")
+      nilable_int.to_s.should eq("Nil | Int32")
     end
   end
 end

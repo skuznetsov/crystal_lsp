@@ -623,7 +623,15 @@ about syntax or types and should match what the original compiler would report.
     - `CRYSTAL_V2_PIPELINE_CACHE=0 /tmp/crystal_v2_dbg_stackcheck examples/hello.cr -o /tmp/hello_stackcheck` => `EXIT 0`
     - `scripts/run_safe.sh /tmp/hello_stackcheck 5 128` => `EXIT 0`
   - Result: no stack overflow reproduction on hello path.
- - [ ] Match original Crystal union canonicalization order (Nil/Null first) to avoid name/mangle mismatches when unions are spelled in different order.
+- [x] Match original Crystal union canonicalization order (Nil/Null first) to avoid name/mangle mismatches when unions are spelled in different order.
+  - Update (2026-02-14): semantic union normalization now keeps `Nil` first (then lexical order) in `src/compiler/semantic/types/union_type.cr` to align with Crystal-style canonicalization used elsewhere in HIR/mangling paths.
+  - Updated affected semantic expectations:
+    - `spec/semantic/types/type_spec.cr` (`nilable` string form now `Nil | Int32`)
+    - `spec/semantic/type_inference_exception_spec.cr` (`begin/rescue` nilable unions)
+  - Validation:
+    - `crystal spec spec/semantic/types/type_spec.cr spec/semantic/type_inference_exception_spec.cr` => `25 examples, 0 failures`
+    - `./regression_tests/run_all.sh ./bin/crystal_v2` => `35 passed, 0 failed`
+    - `CRYSTAL_V2_PIPELINE_CACHE=0 ./bin/crystal_v2 examples/bootstrap_array.cr -o /tmp/bootstrap_array_unionnil` + `scripts/run_safe.sh /tmp/bootstrap_array_unionnil 10 768` => `EXIT 0`
 
 ### Test Coverage
 - **3400+ tests**, 0 failures in `spec/hir/ast_to_hir_spec.cr` (2 pending)

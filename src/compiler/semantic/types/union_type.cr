@@ -49,8 +49,13 @@ module CrystalV2
             end
           end
 
-          # Step 3: Sort for canonical order
-          unique.sort_by! { |t| t.to_s }
+          # Step 3: Sort for canonical order.
+          # Keep Nil first to match Crystal union canonicalization (`Nil | T`).
+          unique.sort_by! do |t|
+            name = t.to_s
+            nil_flag = (name == "Nil" || name.ends_with?("::Nil")) ? 0 : 1
+            {nil_flag, name}
+          end
 
           unique
         end

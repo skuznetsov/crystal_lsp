@@ -162,8 +162,8 @@ describe TypeInferenceEngine do
       root_id = program.roots.first
       begin_type = engine.context.get_type(root_id)
 
-      # Begin + rescue with raise = Int32 | Nil
-      begin_type.to_s.should eq("Int32 | Nil")
+      # Begin + rescue with raise = Nil | Int32
+      begin_type.to_s.should eq("Nil | Int32")
     end
 
     it "handles empty rescue clause" do
@@ -179,8 +179,8 @@ describe TypeInferenceEngine do
       root_id = program.roots.first
       assign_type = engine.context.get_type(root_id)
 
-      # Empty rescue returns Nil, so Int32 | Nil
-      assign_type.to_s.should eq("Int32 | Nil")
+      # Empty rescue returns Nil, so Nil | Int32
+      assign_type.to_s.should eq("Nil | Int32")
     end
 
     it "handles nested begin/rescue blocks" do
