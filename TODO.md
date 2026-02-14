@@ -93,6 +93,15 @@ about syntax or types and should match what the original compiler would report.
 - [x] Replace method-name string `split` usage with zero-copy helpers (`parse_method_name`, `strip_type_suffix`) in HIR lowering hot paths (ast_to_hir).
 - [x] Audit remaining `split("$")`/`split("#")` in other files (if any) to ensure method-name parsing uses helpers.
 - [ ] Investigate `spec/hir/return_type_inference_spec.cr` timeout: resolved early arena scans; samples show hot path in HIR lowering (`lower_call → lower_path → lower_type_literal_from_name → generate_allocator → lower_method`), with heavy `type_ref_for_name/monomorphize_generic_class` (see `/tmp/rt_infer10.sample`, `/tmp/rt_infer11.sample`, `/tmp/rt_infer12.sample`, `/tmp/rt_infer13.sample`). Histogram (`DEBUG_LOWER_HISTO=1`) still dominated by Identifier/Assign/Call/MemberAccess/If. Added: local type inference cache (scope + nil cache), zero‑copy name compares, generic split cache, method resolution key build w/out map+join, split‑free `register_type_cache_key`, callsite method resolution cache (per current method), and normalized generic spacing in `type_ref_for_name`. Spec still >30s. Next: reduce `type_ref_for_name` allocations further (union/generic normalization), add a fast path for type literal lowering, and re‑profile.
+  - Update (2026-02-14): release-only recursion spike/stack overflow in inline-yield fallback path.
+    - root cause: `inline_yield_fallback_call` called `get_function_return_type` while lowering, which could re-enter `force_lower_function_for_return_type` and recurse through nested yield lowering chains.
+    - fix: added scoped suppression flag (`@suppress_force_lower_return_type_depth`) used only inside `inline_yield_fallback_call`; `force_lower_function_for_return_type` now early-returns while this flag is active.
+    - validation:
+      - `crystal build src/crystal_v2.cr -o /tmp/crystal_v2_dbg_guard2 --error-trace` + `basic_sanity` run => `EXIT 0`;
+      - spot regression runs with `/tmp/crystal_v2_dbg_guard2`: `test_yield`, `test_hash_simple`, `test_blocks` => compile+run OK;
+      - `crystal build --release src/crystal_v2.cr -o /tmp/crystal_v2_rel_guard2 --error-trace`;
+      - release `bootstrap_array` no longer hits stack overflow (`/tmp/bootstrap_array_rel_guard2.stderr`), now fails later on existing LLVM issue: `undefined value '@Crystal$CCSystem$CCFile$Dopen_flag$$String'`.
+      - A/B heavy compile timing (`spec/hir/return_type_inference_spec.cr`): old `./bin/crystal_v2_release` = `24.42s`, new `/tmp/crystal_v2_rel_guard2` = `20.51s` (both still fail later on known issues).
   - Update (2026-02-14): reduced split/join churn in type/context resolution hot path (`ast_to_hir`):
     - `resolve_path_string_in_context` no longer uses `split("::")` + `join("::")`; switched to index/byte-slice reconstruction (`head` + `tail`) with the same fallback behavior.
     - `resolve_class_name_in_context` namespace descent no longer allocates `parts = namespace.split("::")` and repeated joins per iteration; replaced with a decremental `candidate_ns` loop using `rindex("::")`.

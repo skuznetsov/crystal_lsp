@@ -1471,6 +1471,9 @@ module Crystal::HIR
     # Tracks nesting depth of force_lower_function_for_return_type to prevent
     # unbounded recursion when inferring return types triggers more return type inferences.
     @force_lower_return_type_depth : Int32 = 0
+    # Temporarily disables force-lowering return types in fragile call paths
+    # (for example, inline-yield fallback), where eager forcing can recurse.
+    @suppress_force_lower_return_type_depth : Int32 = 0
     # When true, skip expensive infer_concrete_return_type_from_body during
     # monomorphization triggered by ensure_monomorphized_type (lowering path).
     # Return types will be inferred lazily when the method is actually called.
@@ -36608,6 +36611,7 @@ module Crystal::HIR
     # Used when we need the return type of a callee that was deferred.
     # Returns true if the function was lowered, false if it couldn't be.
     private def force_lower_function_for_return_type(name : String) : Bool
+      return false if @suppress_force_lower_return_type_depth > 0
       # During inline-yield/proc lowering, force-lowering return types can recurse
       # through nested call chains and blow the stack in release builds.
       return false if @inline_yield_block_body_depth > 0
@@ -48166,20 +48170,25 @@ module Crystal::HIR
       block : CrystalV2::Compiler::Frontend::BlockNode,
       block_param_types : Array(TypeRef)? = nil,
     ) : ValueId
-      # Register call-site argument types so that when the function is deferred
-      # to the work queue, lower_method has type info for untyped parameters.
-      # Without this, functions like read_section?(name, &) whose params lack
-      # type annotations are silently skipped during deferred lowering.
-      callsite_arg_types = call_args.map { |arg| ctx.type_of(arg) }
-      remember_callsite_arg_types(inline_key, callsite_arg_types, nil, nil, true)
-      lower_function_if_needed(inline_key)
-      return_type = get_function_return_type(inline_key)
-      block_id = lower_block_to_block_id(ctx, block, block_param_types)
-      call = Call.new(ctx.next_id, return_type, receiver_id, inline_key, call_args, block_id)
-      ctx.emit(call)
-      ctx.register_type(call.id, return_type)
-      ctx.pop_scope
-      call.id
+      @suppress_force_lower_return_type_depth += 1
+      begin
+        # Register call-site argument types so that when the function is deferred
+        # to the work queue, lower_method has type info for untyped parameters.
+        # Without this, functions like read_section?(name, &) whose params lack
+        # type annotations are silently skipped during deferred lowering.
+        callsite_arg_types = call_args.map { |arg| ctx.type_of(arg) }
+        remember_callsite_arg_types(inline_key, callsite_arg_types, nil, nil, true)
+        lower_function_if_needed(inline_key)
+        return_type = get_function_return_type(inline_key)
+        block_id = lower_block_to_block_id(ctx, block, block_param_types)
+        call = Call.new(ctx.next_id, return_type, receiver_id, inline_key, call_args, block_id)
+        ctx.emit(call)
+        ctx.register_type(call.id, return_type)
+        call.id
+      ensure
+        @suppress_force_lower_return_type_depth -= 1
+        ctx.pop_scope
+      end
     end
 
     private def inline_caller_local_id(name : String) : ValueId?
