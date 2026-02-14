@@ -1144,6 +1144,206 @@ module Crystal::HIR
     @mono_sources_reported : Bool = false
     # Monomorphization caller context counts (debug only): "base@caller" → count
     @mono_caller_counts : Hash(String, Int32) = {} of String => Int32
+    # Lookup branch profiling (PHASE_STATS): branch_name → count
+    @lookup_branch_counts : Hash(String, Int32) = Hash(String, Int32).new(0)
+    @lookup_branch_time_ns : Hash(String, Int64) = Hash(String, Int64).new(0i64)
+    @lookup_total_count : Int32 = 0
+    @lookup_total_time_ns : Int64 = 0i64
+
+    # Lazy RTA: types known to be instantiated during lowering
+    @live_types : Set(String) = Set(String).new
+    @live_types_initialized : Bool = false
+    # Functions deferred because owner type not yet instantiated
+    @rta_deferred_functions : Array(String) = [] of String
+    @rta_deferred_set : Set(String) = Set(String).new
+    @rta_module_base_names : Set(String) = Set(String).new
+    @rta_scan_start_idx : Int32 = 0 # Track which functions we've already scanned
+    @lazy_rta_active : Bool = false  # Set to true only during main process_pending pass
+
+    # Initialize live types for lazy RTA
+    private def initialize_lazy_rta
+      return if @live_types_initialized
+      @live_types_initialized = true
+
+      # Primitives are always live
+      {"Int8", "Int16", "Int32", "Int64", "UInt8", "UInt16", "UInt32", "UInt64",
+       "Float32", "Float64", "Bool", "Char", "String", "Nil", "Pointer", "Symbol",
+       "Slice", "StaticArray", "Tuple", "NamedTuple",
+       # Core runtime types always needed
+       "Object", "Reference", "Value", "Struct", "Number", "Int", "Float",
+       "IO", "Fiber", "Thread", "Mutex", "Exception", "ArgumentError",
+       "IndexError", "KeyError", "NilAssertionError", "OverflowError",
+       "Crystal", "GC", "Enum"}.each { |t| @live_types << t }
+
+      # Collect module base names — module instance methods are always eligible
+      @module_defs.each_key do |mod_name|
+        @rta_module_base_names << strip_generics_simple(mod_name)
+      end
+
+      # Union type variants — if a union exists, its variants can appear at runtime
+      @module.types.each do |desc|
+        if desc.name.includes?(" | ")
+          desc.name.split(" | ").each do |variant|
+            base = strip_generics_simple(variant.strip)
+            @live_types << base unless base.empty?
+          end
+        end
+      end
+
+      # Monomorphized types — generic instantiations that have been created
+      @monomorphized.each do |name|
+        @live_types << strip_generics_simple(name)
+      end
+
+      # Initial pending queue — these functions were deferred from lower_main
+      # (prelude initialization, always needed). Mark their owner types as live.
+      @pending_function_queue.each do |name|
+        mark_owner_type_live(name)
+      end
+
+      # Scan already-emitted functions (from lower_main) for instantiated types
+      @module.functions.each do |func|
+        scan_hir_function_for_live_types(func)
+      end
+      @rta_scan_start_idx = @module.function_count
+    end
+
+    # Extract owner type from function name and mark as live
+    private def mark_owner_type_live(name : String) : Nil
+      if hash_idx = name.rindex('#')
+        base = strip_generics_simple(name[0, hash_idx])
+        @live_types << base unless base.empty?
+      elsif dot_idx = name.rindex('.')
+        base = strip_generics_simple(name[0, dot_idx])
+        @live_types << base unless base.empty?
+      end
+    end
+
+    # Strip generics: "Array(Int32)" → "Array"
+    private def strip_generics_simple(name : String) : String
+      if paren = name.index('(')
+        name[0, paren]
+      else
+        name
+      end
+    end
+
+    # Extract owner base type from function name for RTA filtering.
+    # Returns nil for functions that should NEVER be deferred (class methods, top-level, constructors).
+    # Returns owner base for instance methods that CAN be deferred.
+    private def extract_owner_base_for_rta(name : String) : String?
+      # Top-level / runtime helpers → never defer
+      return nil if name.starts_with?("__crystal") || name.starts_with?("main")
+      # Instance methods have '#'
+      hash_idx = name.rindex('#')
+      return nil unless hash_idx # class method (.) or top-level → never defer
+      owner = name[0, hash_idx]
+      base = strip_generics_simple(owner)
+      # Constructors → never defer
+      method_part = name[(hash_idx + 1)..]
+      return nil if method_part.starts_with?("initialize")
+      # Module methods → never defer (they're dispatched via includers)
+      return nil if @rta_module_base_names.includes?(base)
+      base
+    end
+
+    # Scan a single HIR function for type instantiations, return true if new types found
+    private def scan_hir_function_for_live_types(func : Crystal::HIR::Function) : Bool
+      new_types = false
+      func.blocks.each do |block|
+        block.instructions.each do |inst|
+          case inst
+          when Crystal::HIR::Allocate
+            if desc = @module.get_type_descriptor(inst.type)
+              base = strip_generics_simple(desc.name)
+              unless @live_types.includes?(base)
+                @live_types << base
+                new_types = true
+              end
+            end
+          when Crystal::HIR::ArrayLiteral
+            if desc = @module.get_type_descriptor(inst.type)
+              base = strip_generics_simple(desc.name)
+              unless @live_types.includes?(base)
+                @live_types << base
+                new_types = true
+              end
+            end
+            if desc = @module.get_type_descriptor(inst.element_type)
+              base = strip_generics_simple(desc.name)
+              unless @live_types.includes?(base)
+                @live_types << base
+                new_types = true
+              end
+            end
+          when Crystal::HIR::StringInterpolation
+            unless @live_types.includes?("String")
+              @live_types << "String"
+              new_types = true
+            end
+          when Crystal::HIR::Call
+            mname = inst.method_name
+            # Track .new calls (type instantiation)
+            if dot_idx = mname.rindex('.')
+              after_dot = mname[(dot_idx + 1)..]
+              if after_dot.starts_with?("new") && (after_dot.size == 3 || after_dot[3] == '$')
+                owner_name = strip_generics_simple(mname[0, dot_idx])
+                unless owner_name.empty? || @live_types.includes?(owner_name)
+                  @live_types << owner_name
+                  new_types = true
+                end
+              end
+            end
+            # Track non-virtual calls — direct calls prove the target type is used
+            unless inst.virtual
+              if hash_idx = mname.rindex('#')
+                owner = strip_generics_simple(mname[0, hash_idx])
+                unless owner.empty? || @live_types.includes?(owner)
+                  @live_types << owner
+                  new_types = true
+                end
+              elsif dot_idx2 = mname.rindex('.')
+                owner = strip_generics_simple(mname[0, dot_idx2])
+                unless owner.empty? || @live_types.includes?(owner)
+                  @live_types << owner
+                  new_types = true
+                end
+              end
+            end
+          end
+        end
+      end
+      new_types
+    end
+
+    # Scan only newly-emitted functions since last scan
+    private def scan_new_functions_for_live_types : Bool
+      new_types = false
+      current_count = @module.function_count
+      while @rta_scan_start_idx < current_count
+        func = @module.functions[@rta_scan_start_idx]
+        new_types = true if scan_hir_function_for_live_types(func)
+        @rta_scan_start_idx += 1
+      end
+      new_types
+    end
+
+    # Move deferred functions whose owner type is now live back to the pending queue
+    private def undefer_rta_functions : Int32
+      count = 0
+      @rta_deferred_functions.reject! do |name|
+        owner_base = extract_owner_base_for_rta(name)
+        if owner_base.nil? || @live_types.includes?(owner_base)
+          @rta_deferred_set.delete(name)
+          @pending_function_queue << name
+          count += 1
+          true
+        else
+          false
+        end
+      end
+      count
+    end
 
     # Tracks nesting depth of lowering operations.
     # When > 0, new lower requests are queued instead of executed immediately.
@@ -21052,8 +21252,8 @@ module Crystal::HIR
       "Proc",
     ])
 
-    # Compute set of function def names reachable from main expressions via BFS
-    def compute_ast_reachable_functions(main_exprs : Array(Tuple(CrystalV2::Compiler::Frontend::ExprId, CrystalV2::Compiler::Frontend::ArenaLike))) : Set(String)
+    # Compute set of function def names and method names reachable from main expressions via BFS
+    def compute_ast_reachable_functions(main_exprs : Array(Tuple(CrystalV2::Compiler::Frontend::ExprId, CrystalV2::Compiler::Frontend::ArenaLike))) : NamedTuple(defs: Set(String), method_names: Set(String))
       t0 = Time.instant
       log_filter = ENV.has_key?("CRYSTAL_V2_AST_FILTER_LOG")
 
@@ -21145,7 +21345,7 @@ module Crystal::HIR
       elapsed = (Time.instant - t0).total_milliseconds
       STDERR.puts "[AST_FILTER] BFS: #{reachable.size} reachable / #{@function_defs.size} total defs, #{constructed_types.size} types, #{visited_methods.size} methods scanned in #{elapsed.round(1)}ms" if ENV.has_key?("CRYSTAL_V2_PHASE_STATS") || log_filter
 
-      reachable
+      {defs: reachable, method_names: visited_methods}
     end
 
     # Check if an owner type should be included based on constructed types
@@ -21196,11 +21396,13 @@ module Crystal::HIR
 
     # Instance variables for AST filter
     @ast_reachable_functions : Set(String)? = nil
+    @ast_reachable_method_names : Set(String)? = nil
     @ast_filter_active : Bool = false
 
     # Set the AST reachability filter (called from cli.cr before flush_pending_functions)
-    def set_ast_reachable_filter(reachable : Set(String)) : Nil
-      @ast_reachable_functions = reachable
+    def set_ast_reachable_filter(defs : Set(String), method_names : Set(String)) : Nil
+      @ast_reachable_functions = defs
+      @ast_reachable_method_names = method_names
     end
 
     # Check if a function name is auto-generated (constructors, setters, runtime helpers)
@@ -26622,8 +26824,30 @@ module Crystal::HIR
     def flush_pending_functions
       phase_stats = env_has?("CRYSTAL_V2_PHASE_STATS")
 
+      # Before activating the filter, seed method names from the initial pending queue.
+      # These functions were deferred during lower_main (prelude initialization) and are
+      # always needed (GC.init, Crystal.init_runtime, Crystal.exit, Exception#message, etc.)
+      if method_names = @ast_reachable_method_names
+        @pending_function_queue.each do |name|
+          if m = method_short_from_name(name)
+            method_names << m
+          end
+        end
+        # Also add method names from already-emitted functions (from lower_main)
+        @module.functions.each do |func|
+          if m = method_short_from_name(func.name)
+            method_names << m
+          end
+        end
+      end
+
       # Enable AST filter during process_pending phase (if set)
       @ast_filter_active = @ast_reachable_functions != nil
+      # Enable lazy RTA during the main process_pending pass only
+      if env_has?("CRYSTAL_V2_LAZY_RTA")
+        initialize_lazy_rta
+        @lazy_rta_active = true
+      end
 
       if phase_stats
         before = @module.function_count
@@ -26632,8 +26856,9 @@ module Crystal::HIR
 
       process_pending_lower_functions
 
-      # Disable AST filter for safety nets (emit_tracked_sigs, lower_missing)
+      # Disable AST filter and lazy RTA for safety nets (emit_tracked_sigs, lower_missing)
       @ast_filter_active = false
+      @lazy_rta_active = false
 
       if phase_stats
         after1 = @module.function_count
@@ -26678,6 +26903,18 @@ module Crystal::HIR
         top20 = prefix_counts.to_a.sort_by { |_, c| -c }.first(20)
         STDERR.puts "[PHASE_STATS] Top type prefixes (#{after3} total functions):"
         top20.each { |name, count| STDERR.puts "  #{name}: #{count}" }
+
+        # Lookup branch profiling
+        if @lookup_total_count > 0
+          total_ms = @lookup_total_time_ns / 1_000_000.0
+          STDERR.puts "[PHASE_STATS] Lookup: #{@lookup_total_count} calls, #{total_ms.round(1)}ms total"
+          top_branches = @lookup_branch_counts.to_a.sort_by { |_, c| -c }.first(15)
+          top_branches.each do |branch, count|
+            branch_ms = @lookup_branch_time_ns[branch] / 1_000_000.0
+            pct = (count * 100.0 / @lookup_total_count).round(1)
+            STDERR.puts "  #{branch}: #{count} (#{pct}%) #{branch_ms.round(1)}ms"
+          end
+        end
       end
 
       if env_get("DEBUG_MONO_SOURCES") && !@mono_sources_reported && !@mono_source_counts.empty?
@@ -26968,6 +27205,15 @@ module Crystal::HIR
       mono_sources_top = env_get("DEBUG_MONO_SOURCES_TOP").try(&.to_i?) || 15
       mono_sources_samples = env_has?("DEBUG_MONO_SOURCES_SAMPLES")
 
+      lazy_rta = @lazy_rta_active
+      lazy_rta_log = env_has?("CRYSTAL_V2_LAZY_RTA_LOG")
+      rta_deferred_total = 0
+      rta_undeferred_total = 0
+
+      if lazy_rta
+        STDERR.puts "[LAZY_RTA] active: #{@live_types.size} live types, #{@rta_module_base_names.size} module names"
+      end
+
       attempt_counts = Hash(String, Int32).new(0)
       while pending_functions.size > 0 && iteration < max_iterations
         # Take a snapshot of currently pending functions — skip stuck ones (max 3 attempts)
@@ -26976,6 +27222,28 @@ module Crystal::HIR
         if budget > 0 && pending.size > budget
           pending = pending.first(budget)
         end
+
+        # Lazy RTA: partition pending into live (process now) and deferred (skip)
+        if lazy_rta
+          deferred_this_iter = 0
+          pending.reject! do |name|
+            owner_base = extract_owner_base_for_rta(name)
+            if owner_base.nil? || @live_types.includes?(owner_base)
+              false # Keep in pending — owner is live
+            else
+              # Defer — owner type not yet instantiated
+              unless @rta_deferred_set.includes?(name)
+                @rta_deferred_functions << name
+                @rta_deferred_set << name
+              end
+              STDERR.puts "[LAZY_RTA] defer: #{name} (owner=#{owner_base})" if lazy_rta_log
+              deferred_this_iter += 1
+              rta_deferred_total += 1
+              true # Remove from pending
+            end
+          end
+        end
+
         if debug_pending
           STDERR.puts "[PENDING] iteration=#{iteration} pending=#{pending.size}"
           if pending_sources_mode && (pending_sources_each || iteration == 0) && !@pending_source_counts.empty?
@@ -27023,7 +27291,12 @@ module Crystal::HIR
         # Clear pending state (transition to NotStarted so they can be lowered)
         pending.each { |name| @function_lowering_states.delete(name) }
         # Remove from queue so we don't reprocess endlessly
-        if pending.size == @pending_function_queue.size
+        # Also remove deferred functions from the queue (they're tracked separately)
+        if lazy_rta
+          remove_set = pending.to_set
+          @rta_deferred_set.each { |name| remove_set << name }
+          @pending_function_queue.reject! { |name| remove_set.includes?(name) }
+        elsif pending.size == @pending_function_queue.size
           @pending_function_queue.clear
         else
           pending_set = pending.to_set
@@ -27049,12 +27322,69 @@ module Crystal::HIR
         end
 
         @lowering_depth = saved_depth
+
+        # Lazy RTA: scan newly emitted functions + monomorphized types for live type discovery
+        if lazy_rta
+          new_types_found = scan_new_functions_for_live_types
+          # Also check newly monomorphized types
+          if @monomorphized.size > mono_before
+            @monomorphized.each do |mname|
+              mbase = strip_generics_simple(mname)
+              unless @live_types.includes?(mbase)
+                @live_types << mbase
+                new_types_found = true
+              end
+            end
+          end
+          # Also check newly registered union type descriptors
+          @module.types.each do |desc|
+            if desc.name.includes?(" | ")
+              desc.name.split(" | ").each do |variant|
+                vbase = strip_generics_simple(variant.strip)
+                unless vbase.empty? || @live_types.includes?(vbase)
+                  @live_types << vbase
+                  new_types_found = true
+                end
+              end
+            end
+          end
+          if new_types_found
+            undeferred = undefer_rta_functions
+            rta_undeferred_total += undeferred
+            STDERR.puts "[LAZY_RTA] iter=#{iteration} new live types (total=#{@live_types.size}), undeferred=#{undeferred} remaining_deferred=#{@rta_deferred_functions.size}" if lazy_rta_log || env_has?("CRYSTAL_V2_PHASE_STATS")
+          end
+        end
+
         iteration += 1
         defs_after = @function_defs.size
         mono_after = @monomorphized.size
         new_pending = pending_functions.size
-        STDERR.puts "[PROGRESS] iter=#{iteration} lowered=#{lowered_this_iter}/#{pending.size} pending=#{new_pending} funcs=#{@module.function_count} defs=#{defs_before}->#{defs_after}(+#{defs_after - defs_before}) mono=#{mono_before}->#{mono_after}(+#{mono_after - mono_before})"
+        deferred_info = lazy_rta ? " deferred=#{@rta_deferred_functions.size}" : ""
+        STDERR.puts "[PROGRESS] iter=#{iteration} lowered=#{lowered_this_iter}/#{pending.size} pending=#{new_pending} funcs=#{@module.function_count} defs=#{defs_before}->#{defs_after}(+#{defs_after - defs_before}) mono=#{mono_before}->#{mono_after}(+#{mono_after - mono_before})#{deferred_info}"
         break if pending.empty?
+      end
+
+      # Mark main pass done so subsequent calls (from emit_tracked_sigs, lower_missing)
+      # don't defer. Deferred functions that are actually needed will be discovered
+      # naturally by those subsequent passes. Truly dead functions stay deferred = never lowered.
+      if lazy_rta
+        @lazy_rta_active = false
+        deferred_count = @rta_deferred_functions.size
+        if env_has?("CRYSTAL_V2_PHASE_STATS") && deferred_count > 0
+          deferred_owners = Hash(String, Int32).new(0)
+          @rta_deferred_functions.each do |name|
+            owner = extract_owner_base_for_rta(name) || "(no-owner)"
+            deferred_owners[owner] += 1
+          end
+          STDERR.puts "[LAZY_RTA] skipped #{deferred_count} functions (no safety net), top owners:"
+          deferred_owners.to_a.sort_by { |_, c| -c }.first(20).each do |owner, count|
+            STDERR.puts "  #{owner}: #{count}"
+          end
+        end
+        STDERR.puts "[LAZY_RTA] summary: deferred=#{rta_deferred_total} undeferred=#{rta_undeferred_total} final_live_types=#{@live_types.size} skipped=#{deferred_count}"
+        # Clear deferred tracking
+        @rta_deferred_functions.clear
+        @rta_deferred_set.clear
       end
 
       pending_remaining = pending_functions
@@ -35762,20 +36092,21 @@ module Crystal::HIR
         return
       end
 
-      # AST REACHABILITY FILTER: Skip functions not in the pre-computed reachable set.
-      # Only active during process_pending_lower_functions phase.
+      # AST REACHABILITY FILTER: Skip functions whose method name was never seen
+      # in any reachable code path. Only active during process_pending phase.
       # Note: We do NOT mark as Completed — safety nets (emit_tracked_sigs,
       # lower_missing_call_targets) can still lower these if needed.
       if @ast_filter_active
-        if ast_set = @ast_reachable_functions
-          base = strip_type_suffix(name)
-          owner = method_owner_from_name(name)
-          unless ast_set.includes?(name) || ast_set.includes?(base) ||
-                 is_auto_generated_function?(name) ||
-                 name.starts_with?("__crystal") || name.starts_with?("main") ||
-                 ALWAYS_REACHABLE_TYPES.includes?(owner)
-            STDERR.puts "[AST_FILTER] filtered: #{name}" if env_has?("CRYSTAL_V2_AST_FILTER_LOG")
-            return
+        if method_names = @ast_reachable_method_names
+          # Extract just the method name: "Array(Int32)#push$Int32" → "push"
+          method = method_short_from_name(name)
+          if method && !method_names.includes?(method)
+            # Method name was never seen in any reachable code path — skip
+            unless is_auto_generated_function?(name) ||
+                   name.starts_with?("__crystal") || name.starts_with?("main")
+              STDERR.puts "[AST_FILTER] filtered: #{name} (method=#{method})" if env_has?("CRYSTAL_V2_AST_FILTER_LOG")
+              return
+            end
           end
         end
       end
@@ -35803,6 +36134,7 @@ module Crystal::HIR
       end
 
       target_name = name
+      lookup_start_ns = Time.monotonic.total_nanoseconds.to_i64 if env_has?("CRYSTAL_V2_PHASE_STATS")
       # Parse name once at the start - reuse for all lookups
       name_parts = parse_method_name(name)
       base_name = name_parts.base
@@ -36629,6 +36961,16 @@ module Crystal::HIR
             lookup_branch = "qualified_current"
           end
         end
+      end
+
+      # Track lookup branch stats
+      if env_has?("CRYSTAL_V2_PHASE_STATS")
+        branch_key = lookup_branch || (func_def ? "unknown" : "miss")
+        @lookup_branch_counts[branch_key] += 1
+        @lookup_total_count += 1
+        elapsed_ns = Time.monotonic.total_nanoseconds.to_i64 - (lookup_start_ns || 0i64)
+        @lookup_branch_time_ns[branch_key] += elapsed_ns
+        @lookup_total_time_ns += elapsed_ns
       end
 
       if func_def

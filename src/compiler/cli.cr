@@ -649,20 +649,20 @@ module CrystalV2
         STDERR.puts "[PHASE_STATS] After lower_main: #{after_lower_main} functions" if ENV.has_key?("CRYSTAL_V2_PHASE_STATS")
 
         # Pass 2.5: AST reachability pre-filter (experimental, opt-in)
-        # Enable with CRYSTAL_V2_AST_FILTER=1. Currently too aggressive — filters
-        # transitively needed functions causing segfaults. Safe for analysis only.
+        # AST reachability pre-filter: skip functions whose method name was never
+        # seen transitively from main. Enable with CRYSTAL_V2_AST_FILTER=1.
         if ENV.has_key?("CRYSTAL_V2_AST_FILTER")
           ast_filter_start = Time.instant
-          ast_reachable = hir_converter.compute_ast_reachable_functions(main_exprs)
-          hir_converter.set_ast_reachable_filter(ast_reachable)
+          ast_result = hir_converter.compute_ast_reachable_functions(main_exprs)
+          hir_converter.set_ast_reachable_filter(ast_result[:defs], ast_result[:method_names])
           if ENV.has_key?("CRYSTAL_V2_PHASE_STATS")
-            STDERR.puts "[PHASE_STATS] AST filter: #{ast_reachable.size}/#{hir_converter.function_defs_count} defs reachable in #{(Time.instant - ast_filter_start).total_milliseconds.round(1)}ms"
+            STDERR.puts "[PHASE_STATS] AST filter: #{ast_result[:defs].size}/#{hir_converter.function_defs_count} defs reachable, #{ast_result[:method_names].size} method names in #{(Time.instant - ast_filter_start).total_milliseconds.round(1)}ms"
           end
         elsif ENV.has_key?("CRYSTAL_V2_PHASE_STATS")
           # Just compute for analysis, don't activate filter
           ast_filter_start = Time.instant
-          ast_reachable = hir_converter.compute_ast_reachable_functions(main_exprs)
-          STDERR.puts "[PHASE_STATS] AST analysis: #{ast_reachable.size}/#{hir_converter.function_defs_count} defs reachable (analysis-only, #{(Time.instant - ast_filter_start).total_milliseconds.round(1)}ms)"
+          ast_result = hir_converter.compute_ast_reachable_functions(main_exprs)
+          STDERR.puts "[PHASE_STATS] AST analysis: #{ast_result[:defs].size}/#{hir_converter.function_defs_count} defs reachable, #{ast_result[:method_names].size} method names (analysis-only, #{(Time.instant - ast_filter_start).total_milliseconds.round(1)}ms)"
         end
 
         # Ensure top-level `fun main` is lowered as a real entrypoint (C ABI).
