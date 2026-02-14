@@ -21504,6 +21504,8 @@ module Crystal::HIR
       reachable = Set(String).new(initial_capacity: 4096)
       visited_methods = Set(String).new(initial_capacity: 2048)
       method_queue = Deque(String).new
+      owner_included_cache = Set(String).new(initial_capacity: 1024)
+      owner_excluded_cache = Set(String).new(initial_capacity: 1024)
 
       # Seed BFS with method names from main body
       main_info.method_names.each { |m| method_queue << m }
@@ -21536,7 +21538,21 @@ module Crystal::HIR
                        end
 
           # Accept if owner is always-reachable or constructed
-          unless should_include_owner?(owner, owner_base, constructed_types)
+          include_owner = if owner_included_cache.includes?(owner)
+                            true
+                          elsif owner_excluded_cache.includes?(owner)
+                            false
+                          else
+                            included = should_include_owner?(owner, owner_base, constructed_types)
+                            if included
+                              owner_included_cache << owner
+                            else
+                              owner_excluded_cache << owner
+                            end
+                            included
+                          end
+
+          unless include_owner
             STDERR.puts "[AST_FILTER] skip #{full_name} (owner #{owner} not constructed)" if log_filter
             next
           end
@@ -21551,6 +21567,8 @@ module Crystal::HIR
             call_info.type_constructors.each do |t|
               unless constructed_types.includes?(t)
                 constructed_types << t
+                # constructed_types growth can turn previous negatives into positives
+                owner_excluded_cache.clear
                 # New type constructed → re-check previously skipped methods
                 # by re-adding all visited method names to queue
                 # (only newly-matching owners will pass the filter)
