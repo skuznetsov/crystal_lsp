@@ -795,14 +795,39 @@ module Crystal::HIR
 
     @[AlwaysInline]
     private def strip_generic_receiver_from_base_name(base_name : String) : String
-      if base_name.includes?('#') || base_name.includes?('.')
-        parts = parse_method_name_compact(base_name)
-        if parts.separator && parts.method
-          owner_base = strip_generic_args(parts.owner)
-          return parts.separator == '#' ? "#{owner_base}##{parts.method.not_nil!}" : "#{owner_base}.#{parts.method.not_nil!}"
+      bytesize = base_name.bytesize
+      ptr = base_name.to_unsafe
+      sep_idx : Int32? = nil
+      paren_idx : Int32? = nil
+
+      i = 0
+      while i < bytesize
+        byte = ptr[i]
+        if byte == '('.ord
+          paren_idx ||= i
+        elsif byte == '#'.ord || byte == '.'.ord
+          sep_idx = i
+          break
+        end
+        i += 1
+      end
+
+      if sep_idx
+        return base_name unless paren_idx && paren_idx < sep_idx
+
+        generic_start = paren_idx.not_nil!
+        total = bytesize - (sep_idx - generic_start)
+        return String.build(total) do |io|
+          io.write Slice.new(ptr, generic_start)
+          io.write Slice.new(ptr + sep_idx, bytesize - sep_idx)
         end
       end
-      strip_generic_args(base_name)
+
+      if generic_start = paren_idx
+        base_name.byte_slice(0, generic_start)
+      else
+        base_name
+      end
     end
 
     @[AlwaysInline]
@@ -26929,9 +26954,12 @@ module Crystal::HIR
         block.terminator = Return.new(nil)
       end
 
-      # WORK QUEUE: Process all pending functions that were deferred during lowering.
-      # This breaks the recursive cycle by processing functions iteratively.
-      process_pending_lower_functions
+      # Pending lowering is flushed later from CLI/driver via flush_pending_functions,
+      # after optional AST filter + lazy RTA are configured.
+      # Running process_pending here eagerly bypasses those filters and explodes work.
+      if env_get("CRYSTAL_V2_EAGER_PENDING_FROM_MAIN")
+        process_pending_lower_functions
+      end
 
       @current_class = old_main_class
       @current_namespace_override = old_main_namespace
@@ -26993,8 +27021,11 @@ module Crystal::HIR
 
       ctx.terminate(Return.new(nil))
 
-      # WORK QUEUE: Process all pending functions that were deferred during lowering.
-      process_pending_lower_functions
+      # Pending lowering is flushed later from CLI/driver via flush_pending_functions,
+      # after optional AST filter + lazy RTA are configured.
+      if env_get("CRYSTAL_V2_EAGER_PENDING_FROM_MAIN")
+        process_pending_lower_functions
+      end
 
       func
     end
@@ -27132,6 +27163,7 @@ module Crystal::HIR
       sig_budget = env_get("CRYSTAL_V2_SIG_BUDGET").try(&.to_i?) || 0
       iteration = 0
       debug_emit = env_has?("DEBUG_EMIT_SIGS")
+      ast_method_names = @ast_reachable_method_names
 
       while iteration < max_iterations
         # Collect all unique function names from pending arg types
@@ -27140,6 +27172,7 @@ module Crystal::HIR
         skipped_void = 0
         skipped_bare = 0
         skipped_seen = 0
+        skipped_ast = 0
         considered = 0
         @pending_arg_types.each do |name, args|
           considered += 1
@@ -27147,6 +27180,14 @@ module Crystal::HIR
           next if function_state(name).completed?
           next if function_state(name).in_progress?
           next if attempted.includes?(name)
+          if ast_method_names
+            if short = method_short_from_name(name)
+              unless ast_method_names.includes?(short)
+                skipped_ast += 1 if debug_emit
+                next
+              end
+            end
+          end
           if !args.types.empty? && args.types.all? { |t| t == TypeRef::VOID }
             skipped_void += 1 if debug_emit
             next
@@ -27201,6 +27242,14 @@ module Crystal::HIR
             next if function_state(name).completed?
             next if function_state(name).in_progress?
             next if attempted.includes?(name)
+            if ast_method_names
+              if short = method_short_from_name(name)
+                unless ast_method_names.includes?(short)
+                  skipped_ast += 1 if debug_emit
+                  next
+                end
+              end
+            end
             has_bare_generic = args.types.any? do |t|
               if desc = @module.get_type_descriptor(t)
                 is_bare = !desc.name.includes?('(') && KNOWN_GENERIC_TYPES.includes?(desc.name)
@@ -27234,7 +27283,7 @@ module Crystal::HIR
 
         if debug_emit
           budget_note = sig_budget > 0 ? " budget=#{sig_budget}" : ""
-          STDERR.puts "[EMIT_SIGS] iteration=#{iteration} sigs=#{sigs_to_lower.size}#{budget_note} considered=#{considered} skipped_void=#{skipped_void} skipped_bare=#{skipped_bare} skipped_seen=#{skipped_seen}"
+          STDERR.puts "[EMIT_SIGS] iteration=#{iteration} sigs=#{sigs_to_lower.size}#{budget_note} considered=#{considered} skipped_void=#{skipped_void} skipped_bare=#{skipped_bare} skipped_seen=#{skipped_seen} skipped_ast=#{skipped_ast}"
           if iteration == 0 && sigs_to_lower.size > 0
             sigs_to_lower.first(10).each do |name|
               STDERR.puts "[EMIT_SIGS] sample: #{name}"
@@ -27264,6 +27313,7 @@ module Crystal::HIR
       max_iterations = 20
       budget = env_get("CRYSTAL_V2_MISSING_BUDGET").try(&.to_i?) || 0
       iteration = 0
+      ast_method_names = @ast_reachable_method_names
       STDERR.puts "[MISSING_LOWER] start" if env_get("DEBUG_MISSING_LOWER")
 
       while iteration < max_iterations
@@ -27315,6 +27365,11 @@ module Crystal::HIR
               end
               next if name.empty?
               next if @module.has_function?(name)
+              if ast_method_names
+                if short = method_short_from_name(name)
+                  next unless ast_method_names.includes?(short)
+                end
+              end
               if function_state(name).completed?
                 # Some flows mark completed without emitting a function body.
                 # Clear the completed state to allow a re-lower pass.
@@ -27387,6 +27442,14 @@ module Crystal::HIR
       progress_log = phase_stats || env_has?("CRYSTAL_V2_LOWER_PROGRESS")
 
       lazy_rta = @lazy_rta_active
+      # Main lowering path (`lower_main`) calls process_pending_lower_functions directly,
+      # bypassing flush_pending_functions where lazy RTA is normally initialized.
+      # Honor CRYSTAL_V2_LAZY_RTA here as well so the optimization works in both paths.
+      if !lazy_rta && env_has?("CRYSTAL_V2_LAZY_RTA")
+        initialize_lazy_rta
+        @lazy_rta_active = true
+        lazy_rta = true
+      end
       lazy_rta_log = env_has?("CRYSTAL_V2_LAZY_RTA_LOG")
       rta_deferred_total = 0
       rta_undeferred_total = 0
