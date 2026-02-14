@@ -2119,6 +2119,8 @@ The return_type=16 (NIL) for `to_s` methods is incorrect - should be String type
   - Cache method inheritance resolution (class+method) with invalidation on function/module/class changes (2026-01-xx).
   - Track class_info mutation version to invalidate method inheritance cache on in-place updates (2026-01-xx).
   - Index HIR functions by base name (avoid scanning module.functions for fuzzy matches) (2026-01-xx).
+  - Added top-level union-separator fast check (`has_top_level_union_separator?`) and switched `union_type_name?` / `normalize_union_type_name` to it, avoiding `split_union_type_name` allocations on non-union names in hot lookup paths (2026-02-14).
+  - Validation (2026-02-14): `crystal build src/crystal_v2.cr -o /tmp/crystal_v2_unionfast_dbg --error-trace` + `regression_tests/run_all.sh /tmp/crystal_v2_unionfast_dbg` => **35/35 passed**; sampled `spec/hir/return_type_inference_spec.cr` run improved key counters (`type_ref_for_name` 408→364, `resolve_type_name_in_context` 203→165, `lower_call` 474→380) vs previous baseline logs.
 - **Profile check** (2026-01-xx):
   - `tmp/profile_parser.cr` with `DEBUG_LOWER_METHOD_TIME=1` shows ~2.1–2.3s self-time per Parser parse_* method (parse_program/parse_macro_*), resolve/infer time ≈ 0. Cost is raw lowering, not lookup/inference.
 - `DEBUG_LOWER_PROGRESS=Parser#parse_program DEBUG_LOWER_SLOW_MS=50` shows slowest node is the `parse_macro_definition` call (dominant cost inside parse_program).

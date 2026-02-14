@@ -18087,10 +18087,38 @@ module Crystal::HIR
       parts
     end
 
+    @[AlwaysInline]
+    private def has_top_level_union_separator?(type_name : String) : Bool
+      return false unless type_name.includes?('|') || type_name.includes?("___")
+
+      depth = 0
+      i = 0
+      size = type_name.bytesize
+      ptr = type_name.to_unsafe
+      while i < size
+        byte = ptr[i]
+        case byte
+        when '('.ord, '{'.ord, '['.ord
+          depth += 1
+        when ')'.ord, '}'.ord, ']'.ord
+          depth -= 1 if depth > 0
+        when '|'.ord
+          return true if depth == 0
+        when '_'.ord
+          if depth == 0 && i + 2 < size &&
+             ptr[i + 1] == '_'.ord && ptr[i + 2] == '_'.ord
+            return true
+          end
+        end
+        i += 1
+      end
+      false
+    end
+
     # Normalize union type names to "A | B" spacing (handles legacy "A___B" too).
     @[AlwaysInline]
     private def normalize_union_type_name(type_name : String) : String
-      return type_name unless type_name.includes?('|') || type_name.includes?("___")
+      return type_name unless has_top_level_union_separator?(type_name)
       parts = split_union_type_name(type_name)
       return type_name if parts.empty?
       dedup = [] of String
@@ -18108,8 +18136,7 @@ module Crystal::HIR
 
     @[AlwaysInline]
     private def union_type_name?(type_name : String) : Bool
-      return false unless type_name.includes?('|') || type_name.includes?("___")
-      split_union_type_name(type_name).size > 1
+      has_top_level_union_separator?(type_name)
     end
 
     # Prefer an inferred union when it is a non-empty, concrete union that
