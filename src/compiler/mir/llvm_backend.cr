@@ -4279,9 +4279,20 @@ module Crystal::MIR
         # Find the find_entry function name
         find_entry_name = "#{hash_prefix}$Hfind_entry$$#{key_type_suffix}"
 
-        # Union type name for Nil | Entry (returned by find_entry)
+        # Union type name for Nil | Entry (returned by find_entry).
+        # Do not synthesize this from hash_prefix: for specialized callsites
+        # the key type may stay generic in hash_prefix ("Key") while find_entry
+        # return type is concrete (e.g. HTTP::Headers::Key). Reuse the actual
+        # declared return type from module metadata when available.
+        find_entry_ret_union = begin
+          if find_entry_func = @module.functions.find { |f| mangle_function_name(f.name) == find_entry_name }
+            @type_mapper.llvm_type(find_entry_func.return_type)
+          end
+        rescue
+          nil
+        end
         entry_type_name = hash_prefix.sub("Hash$L", "Hash$CCEntry$L")
-        nil_or_entry_union = "%Nil$_$OR$_#{entry_type_name}.union"
+        nil_or_entry_union = find_entry_ret_union || "%Nil$_$OR$_#{entry_type_name}.union"
 
         # Nil | V union type name — this is what []? returns
         value_type_name = case value_type_str
@@ -4638,6 +4649,9 @@ module Crystal::MIR
       prepass_collect_phi_predecessor_union_wraps(func)
       # Prepass: identify which union values need reinterpretation to a different union type for phi nodes
       prepass_collect_phi_union_to_union_converts(func)
+      # Prepass: identify which union incoming values need ptr payload extraction
+      # in predecessor blocks for ptr-emitted phi nodes.
+      prepass_collect_phi_union_to_ptr_extracts(func)
 
       func.blocks.each do |block|
         emit_block(block, func)
@@ -4864,6 +4878,70 @@ module Crystal::MIR
 
             convert_name = "r#{val_id}.u2u.#{pred_block_id}"
             @phi_union_to_union_converts[{pred_block_id, val_id}] = {convert_name, val_llvm_type, phi_llvm_type}
+          end
+        end
+      end
+    end
+
+    # Prepass: identify union-typed incoming values that will feed ptr-emitted phi nodes.
+    # These extracts must be known before block emission; otherwise predecessor blocks may
+    # already be emitted and `%rN.u2p.B` will become undefined in phi incomings.
+    private def prepass_collect_phi_union_to_ptr_extracts(func : Function)
+      @phi_union_to_ptr_extracts.clear
+
+      func.blocks.each do |block|
+        block.instructions.each do |inst|
+          next unless inst.is_a?(Phi)
+          phi = inst
+
+          phi_mir_type = @type_mapper.llvm_type(phi.type)
+          prepass_phi_type = @value_types[phi.id]?
+
+          emit_ptr_phi = false
+          if prepass_phi_type == TypeRef::POINTER && phi_mir_type.includes?(".union")
+            emit_ptr_phi = true
+          elsif phi_mir_type == "ptr"
+            emit_ptr_phi = true
+          elsif phi_mir_type.includes?(".union")
+            union_descriptor = @module.get_union_descriptor(phi.type)
+            emit_ptr_phi = phi.incoming.any? do |(pred_block_id, val_id)|
+              next false if @phi_predecessor_union_wraps.has_key?({pred_block_id, val_id})
+
+              val_type = @value_types[val_id]?
+              const_val = @constant_values[val_id]?
+              val_llvm_type = val_type ? @type_mapper.llvm_type(val_type) : nil
+
+              if val_type && union_descriptor
+                next false if union_descriptor.variants.any? { |variant| variant.type_ref == val_type }
+              end
+
+              if val_llvm_type != "ptr"
+                if def_inst = find_def_inst(val_id)
+                  if def_inst.is_a?(UnionUnwrap) && @type_mapper.llvm_type(def_inst.type) == "ptr"
+                    next true
+                  end
+                end
+              end
+
+              (val_llvm_type == "ptr") ||
+                (val_type.nil? && const_val.nil?) ||
+                (const_val == "null")
+            end
+          end
+
+          next unless emit_ptr_phi
+
+          phi.incoming.each do |(pred_block_id, val_id)|
+            next if @phi_union_to_ptr_extracts.has_key?({pred_block_id, val_id})
+
+            val_type = @value_types[val_id]?
+            next unless val_type
+
+            val_llvm_type = @type_mapper.llvm_type(val_type)
+            next unless val_llvm_type.includes?(".union")
+
+            extract_name = "r#{val_id}.u2p.#{pred_block_id}"
+            @phi_union_to_ptr_extracts[{pred_block_id, val_id}] = {extract_name, val_llvm_type}
           end
         end
       end
@@ -5841,6 +5919,10 @@ module Crystal::MIR
 
         extract_name, union_type = info
         val_ref_str = value_ref(val_id)
+        if val_ref_str == "null"
+          emit "%#{extract_name} = inttoptr i64 0 to ptr"
+          next
+        end
 
         # Extract ptr from union: alloca → store → GEP to payload → load ptr
         emit "%#{extract_name}.alloca = alloca #{union_type}, align 8"
