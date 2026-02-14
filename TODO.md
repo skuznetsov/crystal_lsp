@@ -134,6 +134,15 @@ about syntax or types and should match what the original compiler would report.
       - `Parser#parse_expression`: `631 -> 494`;
       - `Parser#parse_statement`: `527 -> 411`;
       - `Parser#parse_prefix`: `419 -> 327`.
+  - Update (2026-02-14): reduced include/mixin type-param remapping overhead in HIR lowering:
+    - added per-call cache for `include_type_param_map` in `register_module_instance_methods_for`, keyed by module type-param signature, so reopenings of the same generic module reuse the already computed mapping;
+    - sample deltas (same 10s self-host window):
+      - `include_type_param_map` mentions: `23 -> 13`;
+      - `substitute_type_params_in_type_name` mentions: `133 -> 102`;
+      - comparison files: `/tmp/self_host_after_49725db.sample.txt` vs `/tmp/self_host_after_include_cache.sample.txt`;
+    - validation:
+      - `./regression_tests/run_all.sh /tmp/crystal_v2_hotspot_include` => `35 passed, 0 failed`;
+      - `timeout 120 /tmp/crystal_v2_hotspot_include src/crystal_v2.cr -o /tmp/crystal_v2_self_profile_check` => timeout only, no `error:`/exceptions in `/tmp/crystal_v2_self_profile_check.log`.
   - Update (2026-02-03): added guarded recursion suppression in `infer_type_from_expr` (per‑cache version) and param‑type lookup using current def’s signature (fall back to owner/method lookup when no local). Skip local inference for self‑referential assignments. Guard logs now include file/span under `DEBUG_INFER_GUARD=1`. `spec/hir/return_type_inference_spec.cr` passes (13 examples, ~10s). Guard hotspots shifted to `Crystal::Hasher#result` and Enumerable helpers (`zip?`, `in_groups_of`, `chunks`). Mini compile still >60s on `/tmp/mini_try_each.cr`; next: inspect hasher result recursion and enumerate block‑path inference.
   - Update (2026-02-03): `timeout 60 ./bin/crystal_v2 spec spec/hir/return_type_inference_spec.cr` still times out. Needs re‑profile with latest block‑return inference changes.
   - Update (2026-02-03): sampled `spec/hir/return_type_inference_spec.cr` (see `/tmp/rt_infer_sample.txt`). Hot path is still in `lower_function_if_needed_impl → lower_method → lower_expr → lower_call → lookup_function_def_for_call`. Histogram (`/tmp/rt_infer_histo.log`) dominated by Identifier/Call/Binary/MemberAccess. Next: reduce `lookup_function_def_for_call` churn (cache/memoize by callsite), and cut repeated callsite overload resolution.

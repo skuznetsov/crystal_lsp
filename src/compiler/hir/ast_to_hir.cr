@@ -5823,6 +5823,22 @@ module Crystal::HIR
       extra
     end
 
+    private def module_type_params_signature(module_node : CrystalV2::Compiler::Frontend::ModuleNode) : String
+      type_params = module_node.type_params
+      return "" unless type_params
+      return "" if type_params.empty?
+      return String.new(type_params[0]) if type_params.size == 1
+
+      String.build do |io|
+        first = true
+        type_params.each do |tp|
+          io << ',' unless first
+          io << String.new(tp)
+          first = false
+        end
+      end
+    end
+
     private def defer_untyped_params_for_module?(
       module_node : CrystalV2::Compiler::Frontend::ModuleNode,
       extra_map : Hash(String, String),
@@ -6339,9 +6355,17 @@ module Crystal::HIR
       return offset unless defs
       # INC_DEBUG disabled
       include_arena = @arena
+      include_param_map_cache = {} of String => Hash(String, String)
       defs.each do |mod_node, mod_arena|
         with_arena(mod_arena) do
-          extra_map = include_type_param_map(mod_node, include_node.target, include_arena, class_name)
+          param_sig = module_type_params_signature(mod_node)
+          extra_map = if cached = include_param_map_cache[param_sig]?
+                        cached
+                      else
+                        computed = include_type_param_map(mod_node, include_node.target, include_arena, class_name)
+                        include_param_map_cache[param_sig] = computed
+                        computed
+                      end
           with_type_param_map(extra_map) do
             if macro_lookup = lookup_macro_entry("included", module_full_name)
               macro_entry, macro_key = macro_lookup
