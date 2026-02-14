@@ -28991,11 +28991,52 @@ module Crystal::HIR
       end
     end
 
+    private def macro_type_name_has_unresolved_splat?(type_name : String) : Bool
+      return false if type_name.empty?
+      return true if type_name.starts_with?('*')
+      return true if type_name.includes?("(*")
+      if type_name.ends_with?('*')
+        base = type_name[0, type_name.size - 1].strip
+        return true if base.empty?
+        # Internal splat-expanded forms may become "A, B, C*" (not a valid pointer type).
+        # Treat those as unresolved macro-only names instead of forcing Pointer(A, B, C).
+        return true if base.includes?(',') && !base.includes?('(')
+      end
+      false
+    end
+
     private def macro_value_for_type_name(type_name : String) : CrystalV2::Compiler::Semantic::MacroValue
       resolved = resolve_type_alias_chain(resolve_type_name_in_context(type_name))
       type_vars = nil
       if info = split_generic_base_and_args(resolved)
         type_vars = split_generic_type_args(info[:args]).map(&.strip)
+        if template = @generic_templates[info[:base]]?
+          if type_vars.size != template.type_params.size
+            if env_get("DEBUG_MACRO_TYPE_MISMATCH")
+              STDERR.puts "[MACRO_TYPE_MISMATCH] name=#{type_name} resolved=#{resolved} expected=#{template.type_params.size} got=#{type_vars.size}"
+            end
+            return CrystalV2::Compiler::Semantic::MacroTypeValue.new(
+              resolved,
+              nil,
+              false,
+              false,
+              false,
+              nil,
+              type_vars
+            )
+          end
+        end
+      end
+      if macro_type_name_has_unresolved_splat?(resolved)
+        return CrystalV2::Compiler::Semantic::MacroTypeValue.new(
+          resolved,
+          nil,
+          false,
+          false,
+          false,
+          nil,
+          type_vars
+        )
       end
       type_ref = type_ref_for_name(resolved)
       desc = type_ref == TypeRef::VOID ? nil : @module.get_type_descriptor(type_ref)
