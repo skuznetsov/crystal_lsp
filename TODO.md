@@ -617,7 +617,12 @@ about syntax or types and should match what the original compiler would report.
   - Update (2026-02-04): scanned `llvm_backend.cr` union payload load/store sites — all use `align 4`. Remaining: confirm any non-union payload loads/stores in other backends.
   - Update (2026-02-14): second-pass audit found several missed payload accesses without explicit alignment (`Hash#[]?` union builder, phi payload extract, cross-block slot wrap/unwrap, string index union pack, array value union wrap, string interpolation union payload loads, and runtime `rindex` overrides). Added explicit `align 4` to these load/store sites. Verified by debug build + `examples/bootstrap_array.cr` + `scripts/run_safe.sh` + full `regression_tests/run_all.sh` (`35 passed, 0 failed`). Remaining: validate on real ARM/AArch64 target (cross-target CI/hardware run).
   - [ ] Windows support: track parity with original Crystal target coverage; add Windows backend tasks once bootstrap is stable.
- - [ ] Stack overflow in `substitute_type_params_in_type_name` during compile (hello) traced to recursive substitution; added recursion guard + depth limit (commit `be80713`). Rebuild debug binary and verify; if still recurses, inspect `generic_owner_info`/type-param map for cyclic expansion.
+- [x] Stack overflow in `substitute_type_params_in_type_name` during compile (hello) traced to recursive substitution; added recursion guard + depth limit (commit `be80713`). Rebuild debug binary and verify; if still recurses, inspect `generic_owner_info`/type-param map for cyclic expansion.
+  - Update (2026-02-14): re-verified on current tree with freshly rebuilt debug compiler:
+    - `crystal build src/crystal_v2.cr -o /tmp/crystal_v2_dbg_stackcheck --error-trace` => `EXIT 0`
+    - `CRYSTAL_V2_PIPELINE_CACHE=0 /tmp/crystal_v2_dbg_stackcheck examples/hello.cr -o /tmp/hello_stackcheck` => `EXIT 0`
+    - `scripts/run_safe.sh /tmp/hello_stackcheck 5 128` => `EXIT 0`
+  - Result: no stack overflow reproduction on hello path.
  - [ ] Match original Crystal union canonicalization order (Nil/Null first) to avoid name/mangle mismatches when unions are spelled in different order.
 
 ### Test Coverage
