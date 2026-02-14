@@ -340,6 +340,46 @@ describe Crystal::MIR::LLVMIRGenerator do
       body.should contain("call i32 (ptr, i64, ptr, ...) @snprintf(")
     end
 
+    it "uses fptoui for float64 to uint32 cast" do
+      mod = Crystal::MIR::Module.new("test")
+      func = mod.create_function("float_to_uint_cast", Crystal::MIR::TypeRef::UINT32)
+      func.add_param("x", Crystal::MIR::TypeRef::FLOAT64)
+      builder = Crystal::MIR::Builder.new(func)
+
+      casted = builder.cast(Crystal::MIR::CastKind::Bitcast, 0_u32, Crystal::MIR::TypeRef::UINT32)
+      builder.ret(casted)
+
+      gen = Crystal::MIR::LLVMIRGenerator.new(mod)
+      gen.emit_type_metadata = false
+      output = gen.generate
+
+      func_ir = output[/define i32 @float_to_uint_cast\(double %x\)\s*\{.*?\n\}/m]
+      func_ir.should_not be_nil
+      body = func_ir.not_nil!
+      body.should contain("fptoui double %x to i32")
+      body.should_not contain("fptosi double %x to i32")
+    end
+
+    it "uses uitofp for uint32 to float64 cast" do
+      mod = Crystal::MIR::Module.new("test")
+      func = mod.create_function("uint_to_float_cast", Crystal::MIR::TypeRef::FLOAT64)
+      func.add_param("x", Crystal::MIR::TypeRef::UINT32)
+      builder = Crystal::MIR::Builder.new(func)
+
+      casted = builder.cast(Crystal::MIR::CastKind::Bitcast, 0_u32, Crystal::MIR::TypeRef::FLOAT64)
+      builder.ret(casted)
+
+      gen = Crystal::MIR::LLVMIRGenerator.new(mod)
+      gen.emit_type_metadata = false
+      output = gen.generate
+
+      func_ir = output[/define double @uint_to_float_cast\(i32 %x\)\s*\{.*?\n\}/m]
+      func_ir.should_not be_nil
+      body = func_ir.not_nil!
+      body.should contain("uitofp i32 %x to double")
+      body.should_not contain("sitofp i32 %x to double")
+    end
+
     it "emits ptr phi when a union phi has ptr incoming" do
       mod = Crystal::MIR::Module.new("phi_union_ptr")
 
