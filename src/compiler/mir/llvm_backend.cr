@@ -813,7 +813,7 @@ module Crystal::MIR
       already_declared << "strstr" << "write" << "strchr" << "strtod" << "snprintf"
       already_declared << "strcmp" << "memcmp" << "qsort"
       already_declared << "open" << "lseek" << "read" << "close"
-      already_declared << "strtol"
+      already_declared << "strtol" << "strtoull"
       already_declared << "setjmp" << "longjmp"
       # Crystal v2 runtime functions
       already_declared << "__crystal_v2_raise" << "__crystal_v2_int_to_string"
@@ -1880,6 +1880,7 @@ module Crystal::MIR
       emit_raw "declare i32 @memcmp(ptr, ptr, i32)\n"
       emit_raw "declare void @qsort(ptr, i64, i64, ptr)\n"
       emit_raw "declare i64 @strtol(ptr, ptr, i32)\n"
+      emit_raw "declare i64 @strtoull(ptr, ptr, i32)\n"
       emit_raw "declare double @llvm.copysign.f64(double, double)\n"
       emit_raw "declare double @llvm.fabs.f64(double)\n"
       emit_raw "declare void @llvm.memmove.p0.p0.i64(ptr, ptr, i64, i1)\n"
@@ -2369,6 +2370,13 @@ module Crystal::MIR
       emit_raw "define i64 @__crystal_v2_string_to_i64(ptr %self) {\n"
       emit_raw "  %data = getelementptr i8, ptr %self, i32 12\n"
       emit_raw "  %val = call i64 @strtol(ptr %data, ptr null, i32 10)\n"
+      emit_raw "  ret i64 %val\n"
+      emit_raw "}\n\n"
+
+      # String#to_u64 — convert Crystal String to UInt64 via strtoull
+      emit_raw "define i64 @__crystal_v2_string_to_u64(ptr %self) {\n"
+      emit_raw "  %data = getelementptr i8, ptr %self, i32 12\n"
+      emit_raw "  %val = call i64 @strtoull(ptr %data, ptr null, i32 10)\n"
       emit_raw "  ret i64 %val\n"
       emit_raw "}\n\n"
 

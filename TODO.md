@@ -18,6 +18,14 @@
 - Float64: arithmetic, ** on literals
 
 ## Recently completed
+- **String#to_u64 runtime intercept** (2026-02-14) — fixed wrong `String#to_u64`
+  lowering that returned `ptrtoint(self)` instead of parsed value.
+  Added `__crystal_v2_string_to_u64` (strtoull-based) and HIR intercepts in
+  call/member-access paths; added regression `regression_tests/test_string_to_u64.cr`.
+  Validation:
+  - `/tmp/crystal_v2_dbg_to_u64fix /tmp/to_unsigned_check.cr` + `run_safe` => prints `123` and `123`
+  - `./regression_tests/run_all.sh /tmp/crystal_v2_dbg_to_u64fix` => `36 passed, 0 failed`
+  - `/tmp/crystal_v2_dbg_to_u64fix examples/bootstrap_array.cr ...` + `run_safe` => `EXIT 0`
 - **VOID filter in merge_if_branch_locals** (6d8df07) — fixed infinite loop on buffered I/O
   (Slice|Void union bug caused 450MB+ memory, machine reboot)
 - **Cross-block value detection** (ae7234e) — added missing MIR types to operand scan
