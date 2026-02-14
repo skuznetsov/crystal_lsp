@@ -1,10 +1,11 @@
 # Crystal v2 — Active Work (codegen branch)
 
 ## Known Bugs (codegen)
-- **Array select+map heap corruption**: `select` on 4+ matching elements corrupts heap,
-  subsequent `map`/`Array.new` segfaults. Likely in array resize/capacity logic.
-- **Float#** variable path**: `x ** 2` where x is a Float64 variable segfaults (literal path works)
-- **String#upcase**: "Capacity too big (ArgumentError)" — capacity calculation bug
+- No currently confirmed repro in the previous top-3 bug list; now guarded by
+  targeted regressions:
+  - `regression_tests/test_select_map_stress.cr`
+  - `regression_tests/test_float_pow_var.cr`
+  - `regression_tests/test_string_upcase_large.cr`
 
 ## Working Features
 - Basic output: puts String/Int32/Float64, string interpolation
@@ -18,6 +19,13 @@
 - Float64: arithmetic, ** on literals
 
 ## Recently completed
+- **Regression lock for former top codegen repros** (2026-02-14) — re-validated
+  and locked three historical bugs (`select+map` corruption, `Float#**` variable
+  path, `String#upcase` capacity) with explicit stress tests.
+  Validation:
+  - debug compiler: `/tmp/crystal_v2_dbg_macrofix` + `run_safe` on dedicated repros => all `EXIT 0`
+  - release codegen: `/tmp/crystal_v2_dbg_macrofix --release` + `run_safe` on same repros => all `EXIT 0`
+  - full suite with new tests: `regression_tests/run_all.sh /tmp/crystal_v2_dbg_macrofix` => `40 passed, 0 failed`
 - **Nested macro record arg reparse across arenas** (2026-02-14) — fixed
   nested `macro -> record` lowering corruption/segfault caused by selecting the
   wrong source slice when reparsing macro args from another arena.
