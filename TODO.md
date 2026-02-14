@@ -549,7 +549,12 @@ about syntax or types and should match what the original compiler would report.
   - Update (2026-02-05): expanded macros unconditionally during PASS 1.75 (module/class registration) so macro‑generated defs like `class_getter` are registered before method lookup. Re-test bootstrap missing list to confirm `Unicode.category_*` no longer becomes VOID locals.
   - Update (2026-02-05): class accessor entries now participate in class‑method lookup. `Unicode.category_Lu` is emitted as a call and a real
     `func @Unicode.category_Lu` exists in `/tmp/bootstrap_array.hir` (no longer a VOID local).
-- [ ] Add enum literal fast-path in HIR lowering for `.to_i` / `.value` on enum members (e.g., `DayOfWeek::Wednesday.to_i`), emitting const instead of missing call.
+- [x] Add enum literal fast-path in HIR lowering for `.to_i` / `.value` on enum members (e.g., `DayOfWeek::Wednesday.to_i`), emitting const instead of missing call.
+  - Update (2026-02-14): verified on current tree; `spec/hir/ast_to_hir_spec.cr`
+    example `lowers enum literal to_i/value without a method call` passes and
+    confirms HIR emits literals/casts without `to_i`/`value` call targets.
+    Validation:
+    - `crystal spec spec/hir/ast_to_hir_spec.cr --example "lowers enum literal to_i/value without a method call"` => `1 examples, 0 failures`
 - [x] Ensure block wrapper emission for `each`/block calls: emit concrete block functions and propagate block arg type from callee signature to avoid missing `_block_each_block`.
   - Update (2026-02-14): no longer reproduces on current bootstrap workload.
     - `CRYSTAL_V2_PIPELINE_CACHE=0 CRYSTAL_V2_MISSING_TRACE=1 CRYSTAL_V2_DEBUG_HOOKS=1 ./bin/crystal_v2 examples/bootstrap_array.cr -o /tmp/bootstrap_array_blockcheck` => `EXIT 0`, and log `/tmp/bootstrap_array_blockcheck.err` has no `missing.symbol`/`reason=unlowered`/`_block_each_block`.
