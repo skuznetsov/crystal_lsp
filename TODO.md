@@ -93,6 +93,16 @@ about syntax or types and should match what the original compiler would report.
 - [x] Replace method-name string `split` usage with zero-copy helpers (`parse_method_name`, `strip_type_suffix`) in HIR lowering hot paths (ast_to_hir).
 - [x] Audit remaining `split("$")`/`split("#")` in other files (if any) to ensure method-name parsing uses helpers.
 - [ ] Investigate `spec/hir/return_type_inference_spec.cr` timeout: resolved early arena scans; samples show hot path in HIR lowering (`lower_call → lower_path → lower_type_literal_from_name → generate_allocator → lower_method`), with heavy `type_ref_for_name/monomorphize_generic_class` (see `/tmp/rt_infer10.sample`, `/tmp/rt_infer11.sample`, `/tmp/rt_infer12.sample`, `/tmp/rt_infer13.sample`). Histogram (`DEBUG_LOWER_HISTO=1`) still dominated by Identifier/Assign/Call/MemberAccess/If. Added: local type inference cache (scope + nil cache), zero‑copy name compares, generic split cache, method resolution key build w/out map+join, split‑free `register_type_cache_key`, callsite method resolution cache (per current method), and normalized generic spacing in `type_ref_for_name`. Spec still >30s. Next: reduce `type_ref_for_name` allocations further (union/generic normalization), add a fast path for type literal lowering, and re‑profile.
+  - Update (2026-02-14): reduced split/join churn in type/context resolution hot path (`ast_to_hir`):
+    - `resolve_path_string_in_context` no longer uses `split("::")` + `join("::")`; switched to index/byte-slice reconstruction (`head` + `tail`) with the same fallback behavior.
+    - `resolve_class_name_in_context` namespace descent no longer allocates `parts = namespace.split("::")` and repeated joins per iteration; replaced with a decremental `candidate_ns` loop using `rindex("::")`.
+    - validation:
+      - `crystal build src/crystal_v2.cr -o /tmp/crystal_v2_ctx_split_dbg --error-trace` => `EXIT 0`;
+      - `./regression_tests/run_all.sh /tmp/crystal_v2_ctx_split_dbg` => `35 passed, 0 failed`;
+      - `/tmp/crystal_v2_ctx_split_dbg examples/bootstrap_array.cr -o /tmp/bootstrap_array_ctx_split_dbg && ./scripts/run_safe.sh /tmp/bootstrap_array_ctx_split_dbg 10 768` => `EXIT 0`.
+    - sample signal (`sample` 10s self-host window):
+      - `String#split`: baseline `/tmp/v2_self_10s.sample` = `18`, after change `/tmp/v2_self_10s_ctx_split.sample` = `9`, `/tmp/v2_self_10s_ctx_split2.sample` = `5`;
+      - `AstToHir#resolve_path_string_in_context`: `57 -> 42/44`.
   - Update (2026-02-14): rejected two micro-cache experiments in `ast_to_hir` hot path (no robust win):
     - `ensure_monomorphized_type` epoch cache: near-noise delta across 2x A/B runs (`process_pending` ~`0.38%` faster, `emit_tracked_sigs` ~`0.14%` faster); not enough to justify extra state/invalidations.
     - `strip_generic_receiver_from_base_name` cache variants:

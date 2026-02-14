@@ -544,6 +544,11 @@ module Crystal::HIR
         is_class: sep_char == '.'
       )
       @method_name_parts_cache[name_id] = parts
+      @method_name_parts_cache_size += 1
+      if @method_name_parts_cache_size > @method_name_parts_cache_limit
+        @method_name_parts_cache.clear
+        @method_name_parts_cache_size = 0
+      end
       @method_name_parts_last_id = name_id
       @method_name_parts_last = parts
       parts
@@ -663,6 +668,11 @@ module Crystal::HIR
 
       parts = MethodNamePartsCompact.new(owner, method, sep_char, base)
       @method_name_compact_cache[name_id] = parts
+      @method_name_compact_cache_size += 1
+      if @method_name_compact_cache_size > @method_name_compact_cache_limit
+        @method_name_compact_cache.clear
+        @method_name_compact_cache_size = 0
+      end
       @method_name_compact_last_id = name_id
       @method_name_compact_last = parts
       parts
@@ -1082,6 +1092,8 @@ module Crystal::HIR
     @function_def_overloads_stripped_by_base : Hash(String, String) = {} of String => String
     # Cache parsed method name parts to avoid repeated scans in hot paths.
     @method_name_parts_cache : Hash(UInt64, MethodNameParts) = {} of UInt64 => MethodNameParts
+    @method_name_parts_cache_size : Int32 = 0
+    @method_name_parts_cache_limit : Int32 = 65536
     @method_name_parts_last_id : UInt64 = 0
     @method_name_parts_last : MethodNameParts? = nil
     @type_param_map_hash_owner : UInt64 = 0
@@ -1094,6 +1106,8 @@ module Crystal::HIR
     @resolved_type_name_last_entry_epoch : Int32 = 0
     # Lightweight owner/method cache used in def lookup (avoids parse_method_name).
     @method_name_compact_cache : Hash(UInt64, MethodNamePartsCompact) = {} of UInt64 => MethodNamePartsCompact
+    @method_name_compact_cache_size : Int32 = 0
+    @method_name_compact_cache_limit : Int32 = 65536
     @method_name_compact_last_id : UInt64 = 0
     @method_name_compact_last : MethodNamePartsCompact? = nil
     # Recursion guard for substitute_type_params_in_type_name.
@@ -2216,6 +2230,14 @@ module Crystal::HIR
       @type_cache = {} of String => TypeRef
       @type_cache_keys_by_component = {} of String => Set(String)
       @type_cache_keys_by_generic_prefix = {} of String => Set(String)
+      @method_name_parts_cache = Hash(UInt64, MethodNameParts).new(initial_capacity: 32768)
+      @method_name_parts_cache_size = 0
+      @method_name_parts_last_id = 0_u64
+      @method_name_parts_last = nil
+      @method_name_compact_cache = Hash(UInt64, MethodNamePartsCompact).new(initial_capacity: 32768)
+      @method_name_compact_cache_size = 0
+      @method_name_compact_last_id = 0_u64
+      @method_name_compact_last = nil
       @array_type_for_element_cache = {} of TypeRef => TypeRef
       @array_type_for_element_nil_cache = Set(TypeRef).new
       @type_name_normalize_cache = Hash(String, String).new(initial_capacity: 4096)
@@ -22937,13 +22959,17 @@ module Crystal::HIR
       end
       return resolve_type_name_in_context(path) unless path.includes?("::")
 
-      parts = path.split("::")
-      return path if parts.empty?
+      sep = path.index("::")
+      return path unless sep
 
-      resolved_head = resolve_class_name_in_context(parts.first)
-      return path if resolved_head == parts.first
+      head = path[0, sep]
+      tail_start = sep + 2
+      tail = tail_start < path.bytesize ? path.byte_slice(tail_start, path.bytesize - tail_start) : ""
 
-      resolved = ([resolved_head] + parts[1..]).join("::")
+      resolved_head = resolve_class_name_in_context(head)
+      return path if resolved_head == head
+
+      resolved = "#{resolved_head}::#{tail}"
       return resolved if type_name_exists?(resolved)
       return path if type_name_exists?(path)
       resolved
@@ -23082,14 +23108,11 @@ module Crystal::HIR
                          else
                            namespace
                          end
-        # Extract namespace: "Foo::Bar::Baz" -> "Foo::Bar"
-        parts = namespace.split("::")
-
         # Try full namespace first (e.g., Foo::Bar::Baz::Name), then increasingly shorter
-        # This handles cases where we're inside module Foo::Bar and reference Name
-        # which should resolve to Foo::Bar::Name before trying Foo::Name
-        while parts.size > 0
-          qualified_name = (parts + [name]).join("::")
+        # without split/join allocations in this hot lookup path.
+        candidate_ns = namespace
+        loop do
+          qualified_name = "#{candidate_ns}::#{name}"
           if env_get("DEBUG_WUINT128") && name == "UInt128"
             STDERR.puts "[DEBUG_WUINT128] trying qualified_name=#{qualified_name} namespace=#{namespace} type_name_exists=#{type_name_exists?(qualified_name)}"
           end
@@ -23097,7 +23120,9 @@ module Crystal::HIR
             if qualified_name == "#{namespace_base}::#{name}"
               if nested = @nested_type_names[namespace_base]? || @nested_type_names[namespace]?
                 unless nested.includes?(name)
-                  parts.pop
+                  idx = candidate_ns.rindex("::")
+                  break unless idx
+                  candidate_ns = candidate_ns[0, idx]
                   next
                 end
               end
@@ -23108,7 +23133,9 @@ module Crystal::HIR
             # resolving to unrelated top-level classes (e.g., File vs Crystal::System::File).
             if @module_defs.has_key?(qualified_name) && @top_level_class_kinds.has_key?(name)
               unless @module_defs.has_key?(namespace)
-                parts.pop
+                idx = candidate_ns.rindex("::")
+                break unless idx
+                candidate_ns = candidate_ns[0, idx]
                 next
               end
             end
@@ -23122,7 +23149,9 @@ module Crystal::HIR
                   override = @current_namespace_override
                   unless (current && (current == ns || current.starts_with?("#{ns}::"))) ||
                          (override && (override == ns || override.starts_with?("#{ns}::")))
-                    parts.pop
+                    idx = candidate_ns.rindex("::")
+                    break unless idx
+                    candidate_ns = candidate_ns[0, idx]
                     next
                   end
                 end
@@ -23132,7 +23161,9 @@ module Crystal::HIR
             found = true
             break
           end
-          parts.pop
+          idx = candidate_ns.rindex("::")
+          break unless idx
+          candidate_ns = candidate_ns[0, idx]
         end
         break if found
       end
@@ -53727,7 +53758,6 @@ module Crystal::HIR
       return TypeRef::VOID if normalized_name == "_"
 
       lookup_name = normalized_name
-      resolved_in_context = false
       if lookup_name == "Bytes"
         lookup_name = "Slice(UInt8)"
       end
@@ -53749,7 +53779,6 @@ module Crystal::HIR
       if !absolute_name && !lookup_name.includes?('|')
         old_lookup = lookup_name
         lookup_name = resolve_type_name_in_context(lookup_name)
-        resolved_in_context = true
         if env_get("DEBUG_WUINT128") && old_lookup == "UInt128"
           STDERR.puts "[DEBUG_WUINT128] type_ref_for_name: UInt128 resolved to #{lookup_name}, current=#{@current_class || "(nil)"}"
         end
