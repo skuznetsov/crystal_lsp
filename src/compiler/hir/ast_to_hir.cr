@@ -309,6 +309,8 @@ module Crystal::HIR
       end
     end
 
+    private alias BlockLoweringKey = {FunctionId, UInt64, UInt64}
+
     private struct DefParamStats
       getter param_count : Int32
       getter required : Int32
@@ -1997,6 +1999,10 @@ module Crystal::HIR
     # Map block node object ids to the function being lowered when the block was registered.
     # Used to detect whether a `return` inside a yield block should exit the current function.
     @block_owner_function_ids : Hash(UInt64, FunctionId) = {} of UInt64 => FunctionId
+    # Cache lowered block body ids by lexical block + function + inferred block param signature.
+    # Prevents re-lowering the same block literal recursively in inline-yield fallback paths.
+    @block_lowering_cache : Hash(BlockLoweringKey, BlockId) = {} of BlockLoweringKey => BlockId
+    @block_lowering_in_progress : Hash(BlockLoweringKey, BlockId) = {} of BlockLoweringKey => BlockId
     @last_block_arena_id : UInt64 = 0_u64
     @last_block_arena : CrystalV2::Compiler::Frontend::ArenaLike?
 
@@ -2195,6 +2201,8 @@ module Crystal::HIR
       @block_owner = {} of UInt64 => {class_name: String?, method_name: String?, is_class: Bool}
       @block_owner_self_ids = {} of UInt64 => ValueId
       @block_owner_function_ids = {} of UInt64 => FunctionId
+      @block_lowering_cache = {} of BlockLoweringKey => BlockId
+      @block_lowering_in_progress = {} of BlockLoweringKey => BlockId
       @sources_by_arena = sources_by_arena || {} of CrystalV2::Compiler::Frontend::ArenaLike => String
       @line_counts_by_arena = {} of CrystalV2::Compiler::Frontend::ArenaLike => Int32
       @paths_by_arena = paths_by_arena || {} of CrystalV2::Compiler::Frontend::ArenaLike => String
@@ -36334,6 +36342,11 @@ module Crystal::HIR
     # Used when we need the return type of a callee that was deferred.
     # Returns true if the function was lowered, false if it couldn't be.
     private def force_lower_function_for_return_type(name : String) : Bool
+      # During inline-yield/proc lowering, force-lowering return types can recurse
+      # through nested call chains and blow the stack in release builds.
+      return false if @inline_yield_block_body_depth > 0
+      return false if @inline_yield_proc_depth > 0
+      return false unless @inline_yield_name_stack.empty?
       # Don't force if it would cause infinite recursion
       return false if function_state(name).in_progress?
       return false if @module.has_function?(name)
@@ -47930,6 +47943,15 @@ module Crystal::HIR
         return inline_yield_fallback_call(ctx, inline_key, receiver_id, call_args, block, block_param_types)
       end
       base_inline_name = strip_type_suffix(inline_key)
+      # Nested inline-yield inside an inlined block body is the main source of
+      # runaway recursion in release builds (inline_yield -> inline_block_body -> lower_call -> ...).
+      # Fall back to a normal call as soon as we're inside any inlined block body.
+      if @inline_yield_block_body_depth > 0
+        if env_has?("DEBUG_YIELD_INLINE")
+          STDERR.puts "[INLINE_YIELD] skipping nested block-body inline: #{inline_key} depth=#{@inline_yield_block_body_depth}"
+        end
+        return inline_yield_fallback_call(ctx, inline_key, receiver_id, call_args, block, block_param_types)
+      end
       namespace_override = function_namespace_override_for(inline_key, base_inline_name)
       debug_inline_self = false
       if filter = env_get("DEBUG_INLINE_SELF")
@@ -51761,11 +51783,37 @@ module Crystal::HIR
       closure.id
     end
 
+    private def block_param_types_fingerprint(param_types : Array(TypeRef)?) : UInt64
+      return 0_u64 unless param_types
+      hash = 1469598103934665603_u64
+      param_types.each do |type_ref|
+        hash ^= type_ref.id.to_u64
+        hash = hash &* 1099511628211_u64
+      end
+      hash
+    end
+
+    private def block_lowering_key_for(
+      function_id : FunctionId,
+      node : CrystalV2::Compiler::Frontend::BlockNode,
+      param_types : Array(TypeRef)?,
+    ) : BlockLoweringKey
+      {function_id, node.object_id, block_param_types_fingerprint(param_types)}
+    end
+
     private def lower_block_to_block_id(
       ctx : LoweringContext,
       node : CrystalV2::Compiler::Frontend::BlockNode,
       param_types : Array(TypeRef)? = nil,
     ) : BlockId
+      cache_key = block_lowering_key_for(ctx.function.id, node, param_types)
+      if cached = @block_lowering_cache[cache_key]?
+        return cached
+      end
+      if in_progress = @block_lowering_in_progress[cache_key]?
+        return in_progress
+      end
+
       saved_block = ctx.current_block
       @block_node_arenas[node.object_id] = @arena
       @block_owner[node.object_id] = {
@@ -51804,6 +51852,7 @@ module Crystal::HIR
       ctx.push_scope(ScopeKind::Closure)
       closure_scope = ctx.current_scope
       body_block = ctx.create_block
+      @block_lowering_in_progress[cache_key] = body_block
       ctx.current_block = body_block
 
       # Add block parameters (params can be nil)
@@ -51867,7 +51916,10 @@ module Crystal::HIR
       ctx.restore_locals(saved_locals)
       @current_typeof_locals = old_typeof_locals
       @current_typeof_local_names = old_typeof_local_names
+      @block_lowering_cache[cache_key] = body_block
       body_block
+    ensure
+      @block_lowering_in_progress.delete(cache_key)
     end
 
     private def lower_block_pass_proc(

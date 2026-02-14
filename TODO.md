@@ -203,6 +203,16 @@ about syntax or types and should match what the original compiler would report.
     - tried (and reverted): extra base-name repeat guard + fallback-depth suppression in inline-yield; did not resolve crash;
     - with aggressive inline limits (`INLINE_YIELD_MAX_DEPTH=1..2`) crash morphs into invalid IR (`use of undefined value '%r35'`), so this is likely a deeper fallback/inlining correctness bug rather than only depth.
     - next step: instrument inline-yield recursion with per-key histogram (callee + depth + fallback path) on `basic_sanity`, then patch at the first repeating cycle boundary.
+  - Update (2026-02-14): fixed release-only inline-yield recursion crash in lowering.
+    - root cause: nested inline-yield expansion from inside already-inlined block bodies (`inline_yield_function -> inline_block_body -> lower_call -> inline_yield_function`) caused runaway recursion/stack growth in release builds;
+    - fixes in `src/compiler/hir/ast_to_hir.cr`:
+      - added block-body recursion guard: when `@inline_yield_block_body_depth > 0`, skip yield inlining and emit normal fallback call with block;
+      - disabled `force_lower_function_for_return_type` while inside inline-yield/proc contexts to prevent recursive return-type force-lowering chains;
+      - added block lowering cache + in-progress map keyed by `{function_id, block.object_id, param_fingerprint}` so fallback block lowering does not recursively re-lower the same block literal;
+    - verification:
+      - `crystal build --release src/crystal_v2.cr -o /tmp/crystal_v2_blockdepth_release`;
+      - `/tmp/crystal_v2_blockdepth_release regression_tests/basic_sanity.cr` => `EXIT:0`;
+      - `./regression_tests/run_all.sh /tmp/crystal_v2_blockdepth_release` => `35 passed, 0 failed`.
   - Update (2026-02-03): added guarded recursion suppression in `infer_type_from_expr` (per‑cache version) and param‑type lookup using current def’s signature (fall back to owner/method lookup when no local). Skip local inference for self‑referential assignments. Guard logs now include file/span under `DEBUG_INFER_GUARD=1`. `spec/hir/return_type_inference_spec.cr` passes (13 examples, ~10s). Guard hotspots shifted to `Crystal::Hasher#result` and Enumerable helpers (`zip?`, `in_groups_of`, `chunks`). Mini compile still >60s on `/tmp/mini_try_each.cr`; next: inspect hasher result recursion and enumerate block‑path inference.
   - Update (2026-02-03): `timeout 60 ./bin/crystal_v2 spec spec/hir/return_type_inference_spec.cr` still times out. Needs re‑profile with latest block‑return inference changes.
   - Update (2026-02-03): sampled `spec/hir/return_type_inference_spec.cr` (see `/tmp/rt_infer_sample.txt`). Hot path is still in `lower_function_if_needed_impl → lower_method → lower_expr → lower_call → lookup_function_def_for_call`. Histogram (`/tmp/rt_infer_histo.log`) dominated by Identifier/Call/Binary/MemberAccess. Next: reduce `lookup_function_def_for_call` churn (cache/memoize by callsite), and cut repeated callsite overload resolution.
