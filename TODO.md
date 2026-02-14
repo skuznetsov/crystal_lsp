@@ -135,6 +135,21 @@ about syntax or types and should match what the original compiler would report.
       - `Lookup`: `38279 calls / 1879.9ms` -> `29142 calls / 1772.6ms`;
       - final lowered function count reduced: `25459 -> 17376`.
     - net: target spec still times out at 90s, but process_pending graph moved in the intended direction; next step is to trim `emit_tracked_sigs` explosion under the tighter pending filter.
+  - Update (2026-02-14): extended owner-aware AST filter to safety-net phases (`emit_all_tracked_signatures`, `lower_missing_call_targets`).
+    - change:
+      - introduced shared helper `ast_filter_allows_safety_net_name?` (method + owner checks with auto-generated/runtime exemptions);
+      - `emit_all_tracked_signatures` now filters candidates by both reachable method names and reachable owner types;
+      - `lower_missing_call_targets` now applies the same combined filter before late lowering.
+    - validation:
+      - `crystal build src/crystal_v2.cr -o /tmp/crystal_v2_emit_owner_filter_dbg --error-trace` => `EXIT 0`;
+      - `./regression_tests/run_all.sh /tmp/crystal_v2_emit_owner_filter_dbg` => `35 passed, 0 failed`;
+      - `/tmp/crystal_v2_emit_owner_filter_dbg examples/bootstrap_array.cr -o /tmp/bootstrap_array_emit_owner_filter_dbg && ./scripts/run_safe.sh /tmp/bootstrap_array_emit_owner_filter_dbg 10 768` => `EXIT 0`.
+    - measured impact (`CRYSTAL_V2_AST_FILTER=1 CRYSTAL_V2_PHASE_STATS=1 timeout 90 /tmp/crystal_v2_emit_owner_filter_dbg spec spec/hir/return_type_inference_spec.cr`):
+      - `process_pending`: `16027.1ms -> 15667.2ms` (~`-2.2%`);
+      - `emit_tracked_sigs`: `26993.3ms -> 23940.5ms` (~`-11.3%`);
+      - `lower_missing`: `594.9ms -> 426.4ms` (~`-28.3%`);
+      - final lowered function count: `17376 -> 16469`.
+    - net: phase balance improved and tracked-signature explosion reduced; target spec still exceeds 90s timeout, so next focus remains `emit_tracked_sigs` candidate generation and `lookup_function_def_for_call` miss branch cost.
   - Update (2026-02-14): rejected two micro-cache experiments in `ast_to_hir` hot path (no robust win):
     - `ensure_monomorphized_type` epoch cache: near-noise delta across 2x A/B runs (`process_pending` ~`0.38%` faster, `emit_tracked_sigs` ~`0.14%` faster); not enough to justify extra state/invalidations.
     - `strip_generic_receiver_from_base_name` cache variants:

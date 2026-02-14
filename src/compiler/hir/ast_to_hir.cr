@@ -27322,6 +27322,7 @@ module Crystal::HIR
       iteration = 0
       debug_emit = env_has?("DEBUG_EMIT_SIGS")
       ast_method_names = @ast_reachable_method_names
+      ast_owner_types = @ast_reachable_owner_types
 
       while iteration < max_iterations
         # Collect all unique function names from pending arg types
@@ -27338,13 +27339,9 @@ module Crystal::HIR
           next if function_state(name).completed?
           next if function_state(name).in_progress?
           next if attempted.includes?(name)
-          if ast_method_names
-            if short = method_short_from_name(name)
-              unless ast_method_names.includes?(short)
-                skipped_ast += 1 if debug_emit
-                next
-              end
-            end
+          unless ast_filter_allows_safety_net_name?(name, ast_method_names, ast_owner_types)
+            skipped_ast += 1 if debug_emit
+            next
           end
           if !args.types.empty? && args.types.all? { |t| t == TypeRef::VOID }
             skipped_void += 1 if debug_emit
@@ -27400,13 +27397,9 @@ module Crystal::HIR
             next if function_state(name).completed?
             next if function_state(name).in_progress?
             next if attempted.includes?(name)
-            if ast_method_names
-              if short = method_short_from_name(name)
-                unless ast_method_names.includes?(short)
-                  skipped_ast += 1 if debug_emit
-                  next
-                end
-              end
+            unless ast_filter_allows_safety_net_name?(name, ast_method_names, ast_owner_types)
+              skipped_ast += 1 if debug_emit
+              next
             end
             has_bare_generic = args.types.any? do |t|
               if desc = @module.get_type_descriptor(t)
@@ -27472,6 +27465,7 @@ module Crystal::HIR
       budget = env_get("CRYSTAL_V2_MISSING_BUDGET").try(&.to_i?) || 0
       iteration = 0
       ast_method_names = @ast_reachable_method_names
+      ast_owner_types = @ast_reachable_owner_types
       STDERR.puts "[MISSING_LOWER] start" if env_get("DEBUG_MISSING_LOWER")
 
       while iteration < max_iterations
@@ -27523,11 +27517,7 @@ module Crystal::HIR
               end
               next if name.empty?
               next if @module.has_function?(name)
-              if ast_method_names
-                if short = method_short_from_name(name)
-                  next unless ast_method_names.includes?(short)
-                end
-              end
+              next unless ast_filter_allows_safety_net_name?(name, ast_method_names, ast_owner_types)
               if function_state(name).completed?
                 # Some flows mark completed without emitting a function body.
                 # Clear the completed state to allow a re-lower pass.
@@ -27560,6 +27550,24 @@ module Crystal::HIR
         iteration += 1
         break if @module.functions.size == before
       end
+    end
+
+    @[AlwaysInline]
+    private def ast_filter_allows_safety_net_name?(name : String, method_names : Set(String)?, owner_types : Set(String)?) : Bool
+      auto_generated = is_auto_generated_function?(name) ||
+                       name.starts_with?("__crystal") ||
+                       name.starts_with?("main")
+      if method_names
+        if method = method_short_from_name(name)
+          return false unless method_names.includes?(method)
+        end
+      end
+      if !auto_generated && owner_types && has_method_separator?(name)
+        owner = method_owner_from_name(name)
+        owner_base = strip_generic_args(owner)
+        return false if !owner_types.includes?(owner) && !owner_types.includes?(owner_base)
+      end
+      true
     end
 
     private def force_lower_module_method_by_name(name : String) : Nil
