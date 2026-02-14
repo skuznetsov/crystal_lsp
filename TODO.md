@@ -92,7 +92,9 @@ about syntax or types and should match what the original compiler would report.
 ### In Progress
 - [x] Replace method-name string `split` usage with zero-copy helpers (`parse_method_name`, `strip_type_suffix`) in HIR lowering hot paths (ast_to_hir).
 - [x] Audit remaining `split("$")`/`split("#")` in other files (if any) to ensure method-name parsing uses helpers.
-- [ ] Investigate `spec/hir/return_type_inference_spec.cr` timeout: resolved early arena scans; samples show hot path in HIR lowering (`lower_call → lower_path → lower_type_literal_from_name → generate_allocator → lower_method`), with heavy `type_ref_for_name/monomorphize_generic_class` (see `/tmp/rt_infer10.sample`, `/tmp/rt_infer11.sample`, `/tmp/rt_infer12.sample`, `/tmp/rt_infer13.sample`). Histogram (`DEBUG_LOWER_HISTO=1`) still dominated by Identifier/Assign/Call/MemberAccess/If. Added: local type inference cache (scope + nil cache), zero‑copy name compares, generic split cache, method resolution key build w/out map+join, split‑free `register_type_cache_key`, callsite method resolution cache (per current method), and normalized generic spacing in `type_ref_for_name`. Spec still >30s. Next: reduce `type_ref_for_name` allocations further (union/generic normalization), add a fast path for type literal lowering, and re‑profile.
+- [x] Investigate `spec/hir/return_type_inference_spec.cr` timeout: resolved early arena scans; samples show hot path in HIR lowering (`lower_call → lower_path → lower_type_literal_from_name → generate_allocator → lower_method`), with heavy `type_ref_for_name/monomorphize_generic_class` (see `/tmp/rt_infer10.sample`, `/tmp/rt_infer11.sample`, `/tmp/rt_infer12.sample`, `/tmp/rt_infer13.sample`). Histogram (`DEBUG_LOWER_HISTO=1`) still dominated by Identifier/Assign/Call/MemberAccess/If. Added: local type inference cache (scope + nil cache), zero‑copy name compares, generic split cache, method resolution key build w/out map+join, split‑free `register_type_cache_key`, callsite method resolution cache (per current method), and normalized generic spacing in `type_ref_for_name`. Spec still >30s. Next: reduce `type_ref_for_name` allocations further (union/generic normalization), add a fast path for type literal lowering, and re‑profile.
+  - Update (2026-02-14): no longer reproduces timeout in the current tree.
+    - `crystal spec spec/hir/return_type_inference_spec.cr` => `13 examples, 0 failures` in `30.71ms` (`/tmp/rt_spec_cachefp.out`).
   - Update (2026-02-14): release-only recursion spike/stack overflow in inline-yield fallback path.
     - root cause: `inline_yield_fallback_call` called `get_function_return_type` while lowering, which could re-enter `force_lower_function_for_return_type` and recurse through nested yield lowering chains.
     - fix: added scoped suppression flag (`@suppress_force_lower_return_type_depth`) used only inside `inline_yield_fallback_call`; `force_lower_function_for_return_type` now early-returns while this flag is active.
@@ -125,6 +127,16 @@ about syntax or types and should match what the original compiler would report.
         - run2 => `Pipeline cache HIT (...)`
         - `touch /tmp/crystal_v2_dbg_cachefp`, run3 => `Pipeline cache MISS → saved` (expected invalidation);
       - bootstrap sanity: `CRYSTAL_V2_PIPELINE_CACHE=0 /tmp/crystal_v2_dbg_cachefp examples/bootstrap_array.cr -o /tmp/bootstrap_array_dbg_cachefp && scripts/run_safe.sh /tmp/bootstrap_array_dbg_cachefp 10 768` => `EXIT 0`.
+  - Update (2026-02-14): fixed `raise "msg"` exception semantics in backend runtime helper (`__crystal_v2_raise_msg`).
+    - root cause: helper always aborted (and later, after partial fix, longjmp'd with a raw String pointer), so `rescue ex` paths either aborted or segfaulted in `Exception#message` vdispatch.
+    - change (`src/compiler/mir/llvm_backend.cr`):
+      - `__crystal_v2_raise_msg` now constructs a minimal exception object payload (RuntimeError/Exception type id + message union), stores it to `@__crystal_exc_ptr`, and uses handler-aware longjmp flow (abort only when no handler exists).
+    - validation:
+      - targeted regressions:
+        - `regression_tests/test_rescue.cr` => `caught: test error ... after rescue`, `EXIT 0`;
+        - `regression_tests/test_rescue_nested.cr` => `caught inner: inner`, `EXIT 0`;
+      - full regression suite: `./regression_tests/run_all.sh /tmp/crystal_v2_dbg_rescuefix2` => `35 passed, 0 failed`;
+      - bootstrap smoke: `CRYSTAL_V2_PIPELINE_CACHE=0 /tmp/crystal_v2_dbg_rescuefix2 examples/bootstrap_array.cr -o /tmp/bootstrap_array_dbg_rescuefix2 && scripts/run_safe.sh /tmp/bootstrap_array_dbg_rescuefix2 10 768` => `EXIT 0`.
   - Update (2026-02-14): reduced split/join churn in type/context resolution hot path (`ast_to_hir`):
     - `resolve_path_string_in_context` no longer uses `split("::")` + `join("::")`; switched to index/byte-slice reconstruction (`head` + `tail`) with the same fallback behavior.
     - `resolve_class_name_in_context` namespace descent no longer allocates `parts = namespace.split("::")` and repeated joins per iteration; replaced with a decremental `candidate_ns` loop using `rindex("::")`.

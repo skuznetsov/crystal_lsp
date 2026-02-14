@@ -3683,9 +3683,38 @@ module Crystal::MIR
       emit_raw "  unreachable\n"
       emit_raw "}\n\n"
 
+      runtime_error_type = @module.type_registry.get_by_name("RuntimeError")
+      exception_type = @module.type_registry.get_by_name("Exception")
+      runtime_error_size = runtime_error_type.try(&.size.to_i64) || exception_type.try(&.size.to_i64) || 64_i64
+      runtime_error_type_id = runtime_error_type.try(&.id.to_i32) || exception_type.try(&.id.to_i32) || 1_i32
+      runtime_error_alloc_size = runtime_error_size + 8_i64 # + refcount header
+
       emit_raw "define void @__crystal_v2_raise_msg(ptr %msg) {\n"
-      emit_raw "  ; Bootstrap-safe fallback: print message and abort without relying\n"
-      emit_raw "  ; on mangled Crystal constructors in backend runtime helpers.\n"
+      emit_raw "  ; Build a minimal RuntimeError object: {type_id, message, ...}\n"
+      emit_raw "  ; so rescue variables can safely call Exception#message.\n"
+      emit_raw "  %raw = call ptr @__crystal_v2_malloc64(i64 #{runtime_error_alloc_size})\n"
+      emit_raw "  store i64 1, ptr %raw, align 8\n"
+      emit_raw "  %exc = getelementptr i8, ptr %raw, i64 8\n"
+      emit_raw "  call void @llvm.memset.p0.i64(ptr %exc, i8 0, i64 #{runtime_error_size}, i1 false)\n"
+      emit_raw "  store i32 #{runtime_error_type_id}, ptr %exc\n"
+      emit_raw "  %msg_union.ptr = alloca %Nil$_$OR$_String.union, align 8\n"
+      emit_raw "  %msg_union.type_id_ptr = getelementptr %Nil$_$OR$_String.union, ptr %msg_union.ptr, i32 0, i32 0\n"
+      emit_raw "  store i32 1, ptr %msg_union.type_id_ptr\n"
+      emit_raw "  %msg_union.payload_ptr = getelementptr %Nil$_$OR$_String.union, ptr %msg_union.ptr, i32 0, i32 1\n"
+      emit_raw "  store ptr %msg, ptr %msg_union.payload_ptr, align 8\n"
+      emit_raw "  %msg_union = load %Nil$_$OR$_String.union, ptr %msg_union.ptr\n"
+      emit_raw "  %msg_field = getelementptr i8, ptr %exc, i64 8\n"
+      emit_raw "  store %Nil$_$OR$_String.union %msg_union, ptr %msg_field\n"
+      emit_raw "  store ptr %exc, ptr @__crystal_exc_ptr\n"
+      emit_raw "  %depth = load i32, ptr @__crystal_exc_depth\n"
+      emit_raw "  %has_handler = icmp sgt i32 %depth, 0\n"
+      emit_raw "  br i1 %has_handler, label %do_longjmp, label %no_handler\n"
+      emit_raw "do_longjmp:\n"
+      emit_raw "  %jmpbuf = call ptr @__crystal_exc_current_jmpbuf()\n"
+      emit_raw "  call void @longjmp(ptr %jmpbuf, i32 1)\n"
+      emit_raw "  unreachable\n"
+      emit_raw "no_handler:\n"
+      emit_raw "  ; No rescue frame: print and abort.\n"
       emit_raw "  %cmsg = getelementptr i8, ptr %msg, i32 12\n"
       emit_raw "  call i32 @puts(ptr %cmsg)\n"
       emit_raw "  call void @abort()\n"
