@@ -53399,15 +53399,18 @@ module Crystal::HIR
     end
 
     private def type_ref_for_name(name : String) : TypeRef
+      return TypeRef::VOID if name == "_"
+
       raw_name = name
       has_union = false
       has_comma = false
       has_paren = false
       has_brace = false
       simple_name = true
+      bytes = name.to_unsafe
       i = 0
       while i < name.bytesize
-        byte = name.to_unsafe[i]
+        byte = bytes[i]
         case byte
         when '|'.ord
           has_union = true
@@ -53427,9 +53430,9 @@ module Crystal::HIR
         i += 1
       end
       if simple_name && !has_union && !has_comma && !has_paren && !has_brace
+        self_prefixed = name.starts_with?("self")
         if @type_param_map.empty? && (@current_typeof_local_names.nil? || @current_typeof_local_names.not_nil!.empty?) &&
-           !name.includes?("self") && !name.includes?("typeof(")
-          return TypeRef::VOID if name == "_"
+           !self_prefixed
           lookup_name = name
           absolute_name = lookup_name.starts_with?("::")
           lookup_name = lookup_name[2..] if absolute_name

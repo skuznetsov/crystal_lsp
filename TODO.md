@@ -181,6 +181,22 @@ about syntax or types and should match what the original compiler would report.
     - validation:
       - `./regression_tests/run_all.sh /tmp/crystal_v2_hotspot_defarena` => `35 passed, 0 failed`;
       - `timeout 120 /tmp/crystal_v2_hotspot_defarena src/crystal_v2.cr -o /tmp/crystal_v2_self_defarena_check` => timeout only, no `error:`/exceptions in `/tmp/crystal_v2_self_defarena_check.log`.
+  - Update (2026-02-14): micro-optimized `type_ref_for_name` hot path:
+    - early return for wildcard `_` before full scanner;
+    - reuse `to_unsafe` pointer in the scanner loop (avoid repeated `name.to_unsafe` dispatch);
+    - replace `includes?("self")`/`includes?("typeof(")` gate in simple-name fast path with cheap `starts_with?("self")` check (the `typeof(` branch is unreachable in this no-paren path).
+    - sample deltas (same 10s self-host window):
+      - `type_ref_for_name` mentions: `1659 -> 1341`;
+      - `lookup_function_def_for_call`: `159 -> 152`;
+      - `rebuild_function_def_overloads`: `263 -> 221`;
+      - comparison files: `/tmp/self_host_after_revert.sample.txt` vs `/tmp/self_host_after_typefast_dbg.sample.txt`.
+    - validation:
+      - `timeout 180 crystal spec spec/hir/return_type_inference_spec.cr` => `13 examples, 0 failures`;
+      - `./regression_tests/run_all.sh /tmp/crystal_v2_hotspot_typefast_dbg` => `35 passed, 0 failed`;
+      - `timeout 180 /tmp/crystal_v2_hotspot_typefast_dbg examples/bootstrap_array.cr -o /tmp/bootstrap_array_after_typefast_dbg && ./scripts/run_safe.sh /tmp/bootstrap_array_after_typefast_dbg 10 768` => `EXIT 0`.
+  - Update (2026-02-14): rejected unsafe experiment in overload index:
+    - removing dedup (`list.includes?`) for `@function_type_keys_by_base` produced runaway recursion / stack overflows in release runs;
+    - action: fully reverted; keep uniqueness invariant explicit in this index path.
   - Update (2026-02-03): added guarded recursion suppression in `infer_type_from_expr` (per‑cache version) and param‑type lookup using current def’s signature (fall back to owner/method lookup when no local). Skip local inference for self‑referential assignments. Guard logs now include file/span under `DEBUG_INFER_GUARD=1`. `spec/hir/return_type_inference_spec.cr` passes (13 examples, ~10s). Guard hotspots shifted to `Crystal::Hasher#result` and Enumerable helpers (`zip?`, `in_groups_of`, `chunks`). Mini compile still >60s on `/tmp/mini_try_each.cr`; next: inspect hasher result recursion and enumerate block‑path inference.
   - Update (2026-02-03): `timeout 60 ./bin/crystal_v2 spec spec/hir/return_type_inference_spec.cr` still times out. Needs re‑profile with latest block‑return inference changes.
   - Update (2026-02-03): sampled `spec/hir/return_type_inference_spec.cr` (see `/tmp/rt_infer_sample.txt`). Hot path is still in `lower_function_if_needed_impl → lower_method → lower_expr → lower_call → lookup_function_def_for_call`. Histogram (`/tmp/rt_infer_histo.log`) dominated by Identifier/Call/Binary/MemberAccess. Next: reduce `lookup_function_def_for_call` churn (cache/memoize by callsite), and cut repeated callsite overload resolution.
