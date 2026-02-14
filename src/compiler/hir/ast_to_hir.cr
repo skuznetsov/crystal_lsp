@@ -27258,13 +27258,15 @@ module Crystal::HIR
       mono_sources_each = env_has?("DEBUG_MONO_SOURCES_EACH")
       mono_sources_top = env_get("DEBUG_MONO_SOURCES_TOP").try(&.to_i?) || 15
       mono_sources_samples = env_has?("DEBUG_MONO_SOURCES_SAMPLES")
+      phase_stats = env_has?("CRYSTAL_V2_PHASE_STATS")
+      progress_log = phase_stats || env_has?("CRYSTAL_V2_LOWER_PROGRESS")
 
       lazy_rta = @lazy_rta_active
       lazy_rta_log = env_has?("CRYSTAL_V2_LAZY_RTA_LOG")
       rta_deferred_total = 0
       rta_undeferred_total = 0
 
-      if lazy_rta
+      if lazy_rta && progress_log
         STDERR.puts "[LAZY_RTA] active: #{@live_types.size} live types, #{@rta_module_base_names.size} module names"
       end
 
@@ -27404,7 +27406,9 @@ module Crystal::HIR
         mono_after = @monomorphized.size
         new_pending = pending_functions.size
         deferred_info = lazy_rta ? " deferred=#{@rta_deferred_functions.size}" : ""
-        STDERR.puts "[PROGRESS] iter=#{iteration} lowered=#{lowered_this_iter}/#{pending.size} pending=#{new_pending} funcs=#{@module.function_count} defs=#{defs_before}->#{defs_after}(+#{defs_after - defs_before}) mono=#{mono_before}->#{mono_after}(+#{mono_after - mono_before})#{deferred_info}"
+        if progress_log
+          STDERR.puts "[PROGRESS] iter=#{iteration} lowered=#{lowered_this_iter}/#{pending.size} pending=#{new_pending} funcs=#{@module.function_count} defs=#{defs_before}->#{defs_after}(+#{defs_after - defs_before}) mono=#{mono_before}->#{mono_after}(+#{mono_after - mono_before})#{deferred_info}"
+        end
         break if pending.empty?
       end
 
@@ -27414,7 +27418,7 @@ module Crystal::HIR
       if lazy_rta
         @lazy_rta_active = false
         deferred_count = @rta_deferred_functions.size
-        if env_has?("CRYSTAL_V2_PHASE_STATS") && deferred_count > 0
+        if phase_stats && deferred_count > 0
           deferred_owners = Hash(String, Int32).new(0)
           @rta_deferred_functions.each do |name|
             owner = extract_owner_base_for_rta(name) || "(no-owner)"
@@ -27425,14 +27429,18 @@ module Crystal::HIR
             STDERR.puts "  #{owner}: #{count}"
           end
         end
-        STDERR.puts "[LAZY_RTA] summary: deferred=#{rta_deferred_total} undeferred=#{rta_undeferred_total} final_live_types=#{@live_types.size} skipped=#{deferred_count}"
+        if progress_log
+          STDERR.puts "[LAZY_RTA] summary: deferred=#{rta_deferred_total} undeferred=#{rta_undeferred_total} final_live_types=#{@live_types.size} skipped=#{deferred_count}"
+        end
         # Clear deferred tracking
         @rta_deferred_functions.clear
         @rta_deferred_set.clear
       end
 
       pending_remaining = pending_functions
-      STDERR.puts "[LOWER] Finished lowering: #{iteration} iterations, #{@module.function_count} functions, #{@monomorphized.size} types, #{@function_defs.size} defs"
+      if progress_log
+        STDERR.puts "[LOWER] Finished lowering: #{iteration} iterations, #{@module.function_count} functions, #{@monomorphized.size} types, #{@function_defs.size} defs"
+      end
       if iteration >= max_iterations && pending_remaining.size > 0
         STDERR.puts "[WARNING] process_pending_lower_functions hit iteration limit, #{pending_remaining.size} functions remaining"
       end

@@ -97,6 +97,14 @@ about syntax or types and should match what the original compiler would report.
     - replaced union variant parsing via `split(" | ")` with zero-copy scanner (`each_union_variant` / `mark_union_variants_live`);
     - added incremental type-descriptor scan (`@rta_type_scan_start_idx`) instead of rescanning all `@module.types` on every pending-lower iteration.
     - DoD checks: `regression_tests/run_all.sh ./bin/crystal_v2` => `35 passed, 0 failed`; `./bin/crystal_v2 examples/bootstrap_array.cr -o /tmp/bootstrap_array_after_rta_union && ./scripts/run_safe.sh /tmp/bootstrap_array_after_rta_union 10 512` => `EXIT 0`.
+  - Update (2026-02-14): parser/codegen startup perf pass:
+    - enabled AST cache by default in CLI (`ast_cache=true` unless `CRYSTAL_V2_AST_CACHE=0` or `--no-ast-cache`);
+    - gated noisy lowering progress logs behind `CRYSTAL_V2_LOWER_PROGRESS` / `CRYSTAL_V2_PHASE_STATS` (no unconditional `[PROGRESS]/[LOWER]` on normal runs);
+    - timing checks (release binary):
+      - parse-only (`CRYSTAL_V2_STOP_AFTER_PARSE=1`, `examples/hello.cr`): no-cache baseline ~`0.34s`; cached warm run ~`0.12s`;
+      - default warm full compile (`examples/hello.cr`) improved from ~`0.41s` to ~`0.20s` after enabling AST cache by default;
+      - full regression on release: `35 passed, 0 failed`;
+      - bootstrap smoke: `examples/bootstrap_array.cr` + `scripts/run_safe.sh` => `EXIT 0`.
   - Update (2026-02-03): added guarded recursion suppression in `infer_type_from_expr` (per‑cache version) and param‑type lookup using current def’s signature (fall back to owner/method lookup when no local). Skip local inference for self‑referential assignments. Guard logs now include file/span under `DEBUG_INFER_GUARD=1`. `spec/hir/return_type_inference_spec.cr` passes (13 examples, ~10s). Guard hotspots shifted to `Crystal::Hasher#result` and Enumerable helpers (`zip?`, `in_groups_of`, `chunks`). Mini compile still >60s on `/tmp/mini_try_each.cr`; next: inspect hasher result recursion and enumerate block‑path inference.
   - Update (2026-02-03): `timeout 60 ./bin/crystal_v2 spec spec/hir/return_type_inference_spec.cr` still times out. Needs re‑profile with latest block‑return inference changes.
   - Update (2026-02-03): sampled `spec/hir/return_type_inference_spec.cr` (see `/tmp/rt_infer_sample.txt`). Hot path is still in `lower_function_if_needed_impl → lower_method → lower_expr → lower_call → lookup_function_def_for_call`. Histogram (`/tmp/rt_infer_histo.log`) dominated by Identifier/Call/Binary/MemberAccess. Next: reduce `lookup_function_def_for_call` churn (cache/memoize by callsite), and cut repeated callsite overload resolution.
