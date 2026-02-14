@@ -1452,7 +1452,7 @@ module Crystal::HIR
       arena : CrystalV2::Compiler::Frontend::ArenaLike,
     )
       @function_defs[full_name] = def_node
-      @function_def_arenas[full_name] = arena
+      set_function_def_arena(full_name, arena)
       base_name = strip_type_suffix(full_name)
       @function_lookup_base_epoch[base_name] = (@function_lookup_base_epoch[base_name]? || 0) + 1
       @function_lookup_last_result_valid = false
@@ -5494,19 +5494,35 @@ module Crystal::HIR
 
     @function_def_arenas_last_refresh_size : Int32 = 0
 
+    private def add_unique_def_arena(arena : CrystalV2::Compiler::Frontend::ArenaLike) : Nil
+      oid = arena.object_id
+      return if @unique_def_arenas.has_key?(oid)
+
+      @unique_def_arenas[oid] = arena
+      @unique_def_arenas_list << arena
+      if path = source_path_for(arena)
+        (@unique_def_arenas_by_path[path] ||= [] of CrystalV2::Compiler::Frontend::ArenaLike) << arena
+      end
+      @unique_def_arenas_list_size = @unique_def_arenas_list.size
+    end
+
+    private def set_function_def_arena(name : String, arena : CrystalV2::Compiler::Frontend::ArenaLike) : Nil
+      @function_def_arenas[name] = arena
+      add_unique_def_arena(arena)
+      @function_def_arenas_last_refresh_size = @function_def_arenas.size
+    end
+
+    private def set_function_def_arena_if_missing(name : String, arena : CrystalV2::Compiler::Frontend::ArenaLike) : Nil
+      return if @function_def_arenas.has_key?(name)
+      set_function_def_arena(name, arena)
+    end
+
     private def refresh_unique_def_arenas! : Nil
       return if @function_def_arenas.size == @function_def_arenas_last_refresh_size
       @function_def_arenas.each_value do |arena|
-        oid = arena.object_id
-        next if @unique_def_arenas.has_key?(oid)
-        @unique_def_arenas[oid] = arena
-        @unique_def_arenas_list << arena
-        if path = source_path_for(arena)
-          (@unique_def_arenas_by_path[path] ||= [] of CrystalV2::Compiler::Frontend::ArenaLike) << arena
-        end
+        add_unique_def_arena(arena)
       end
       @function_def_arenas_last_refresh_size = @function_def_arenas.size
-      @unique_def_arenas_list_size = @unique_def_arenas_list.size
     end
 
     private def each_def_arena_candidate(
@@ -5714,8 +5730,8 @@ module Crystal::HIR
           store_function_namespace_override(full_name, base_name, ns)
         end
         # Store the arena so the method body can be found
-        @function_def_arenas[full_name] ||= ctx.mod_arena
-        @function_def_arenas[base_name] ||= ctx.mod_arena
+        set_function_def_arena_if_missing(full_name, ctx.mod_arena)
+        set_function_def_arena_if_missing(base_name, ctx.mod_arena)
         break
       end
     end
@@ -6618,14 +6634,14 @@ module Crystal::HIR
                     end
                     register_function_type(full_name, return_type)
                     @function_defs[full_name] = member
-                    @function_def_arenas[full_name] = @arena
+                    set_function_def_arena(full_name, @arena)
                     if env_get("DEBUG_ARENA_WRITE") && (class_name.includes?("Slice") && method_name == "hash")
                       arena_path = source_path_for(@arena) || "(unknown)"
                       STDERR.puts "[ARENA_WRITE_MOD_INST] full=#{full_name} arena=#{arena_path}:#{@arena.size} module=#{module_full_name}"
                     end
                     if should_register_base_name?(full_name, base_name, member, has_block)
                       @function_defs[base_name] = member
-                      @function_def_arenas[base_name] = @arena
+                      set_function_def_arena(base_name, @arena)
                     end
 
                     if body = member.body
@@ -6641,10 +6657,10 @@ module Crystal::HIR
                         debug_hook("yield.register", full_name)
                         if !has_block && !@function_defs.has_key?(base_name)
                           @function_defs[base_name] = member
-                          @function_def_arenas[base_name] = @arena
+                          set_function_def_arena(base_name, @arena)
                         end
                         @function_defs[full_name] = member
-                        @function_def_arenas[full_name] = @arena
+                        set_function_def_arena(full_name, @arena)
                       end
                     end
                   when CrystalV2::Compiler::Frontend::GetterNode
@@ -6817,7 +6833,7 @@ module Crystal::HIR
                     end
                     register_function_type(full_name, return_type)
                     @function_defs[full_name] = member
-                    @function_def_arenas[full_name] = @arena
+                    set_function_def_arena(full_name, @arena)
                   end
                 end
               end
@@ -6971,7 +6987,7 @@ module Crystal::HIR
                           register_function_type(full_name, return_type)
                           register_pending_method_effects(full_name, param_types.size)
                           @function_defs[full_name] = member
-                          @function_def_arenas[full_name] = @arena
+                          set_function_def_arena(full_name, @arena)
                         end
                       end
                       next
@@ -9758,10 +9774,10 @@ module Crystal::HIR
                 full_name = function_full_name_for_def(base_name, param_types, member.params, has_block)
                 register_function_type(full_name, return_type)
                 @function_defs[full_name] = member
-                @function_def_arenas[full_name] = @arena
+                set_function_def_arena(full_name, @arena)
                 if should_register_base_name?(full_name, base_name, member, has_block)
                   @function_defs[base_name] = member
-                  @function_def_arenas[base_name] = @arena
+                  set_function_def_arena(base_name, @arena)
                 end
 
                 # Track yield-functions for inline expansion (module methods).
@@ -9770,10 +9786,10 @@ module Crystal::HIR
                   debug_hook("yield.register", full_name)
                   if !has_block && !@function_defs.has_key?(base_name)
                     @function_defs[base_name] = member
-                    @function_def_arenas[base_name] = @arena
+                    set_function_def_arena(base_name, @arena)
                   end
                   @function_defs[full_name] = member
-                  @function_def_arenas[full_name] = @arena
+                  set_function_def_arena(full_name, @arena)
                 end
               else
                 register_type_method_from_def(member, module_name)
@@ -10538,14 +10554,14 @@ module Crystal::HIR
         end
         register_function_type(full_name, return_type)
         @function_defs[full_name] = member
-        @function_def_arenas[full_name] = @arena
+        set_function_def_arena(full_name, @arena)
         if env_get("DEBUG_ARENA_WRITE") && (module_name.includes?("Slice") || full_name.includes?("Slice")) && method_name == "hash"
           arena_path = source_path_for(@arena) || "(unknown)"
           STDERR.puts "[ARENA_WRITE_MOD_METHOD] full=#{full_name} base=#{base_name} module=#{module_name} arena=#{arena_path}:#{@arena.size}"
         end
         if should_register_base_name?(full_name, base_name, member, has_block)
           @function_defs[base_name] = member
-          @function_def_arenas[base_name] = @arena
+          set_function_def_arena(base_name, @arena)
         elsif !has_block
           prefer_non_yield_base_name(base_name, member, @arena)
           prefer_lower_arity_base_name(base_name, member, @arena)
@@ -10557,10 +10573,10 @@ module Crystal::HIR
           debug_hook("yield.register", full_name)
           if !has_block && !@function_defs.has_key?(base_name)
             @function_defs[base_name] = member
-            @function_def_arenas[base_name] = @arena
+            set_function_def_arena(base_name, @arena)
           end
           @function_defs[full_name] = member
-          @function_def_arenas[full_name] = @arena
+          set_function_def_arena(full_name, @arena)
         end
       ensure
         @current_class = old_class
@@ -10914,9 +10930,9 @@ module Crystal::HIR
         end
         @function_defs[previous_full] = existing_def
         if prev_arena = @function_def_arenas[full_name]?
-          @function_def_arenas[previous_full] = prev_arena
+          set_function_def_arena(previous_full, prev_arena)
         else
-          @function_def_arenas[previous_full] = @arena
+          set_function_def_arena(previous_full, @arena)
         end
         if prev_enum = @function_enum_return_names[full_name]? || @function_enum_return_names[base_name]?
           @function_enum_return_names[previous_full] = prev_enum
@@ -10925,7 +10941,7 @@ module Crystal::HIR
       end
       register_function_type(full_name, return_type)
       @function_defs[full_name] = member
-      @function_def_arenas[full_name] = @arena
+      set_function_def_arena(full_name, @arena)
       if env_get("DEBUG_ARENA_WRITE_TYPE") && (type_name.includes?("Slice") || full_name.includes?("Slice")) && method_name == "hash"
         arena_path = source_path_for(@arena) || "(unknown)"
         STDERR.puts "[ARENA_WRITE_TYPE] full=#{full_name} base=#{base_name} type=#{type_name} arena=#{arena_path}:#{@arena.size}"
@@ -10942,14 +10958,14 @@ module Crystal::HIR
       if alias_full_name
         register_function_type(alias_full_name, return_type) unless @function_types.has_key?(alias_full_name)
         @function_defs[alias_full_name] = member
-        @function_def_arenas[alias_full_name] = @arena
+        set_function_def_arena(alias_full_name, @arena)
         unless @type_param_map.empty?
           store_function_type_param_map(alias_full_name, strip_type_suffix(alias_full_name), @type_param_map)
         end
       end
       if should_register_base_name?(full_name, base_name, member, has_block)
         @function_defs[base_name] = member
-        @function_def_arenas[base_name] = @arena
+        set_function_def_arena(base_name, @arena)
       elsif !has_block
         prefer_non_yield_base_name(base_name, member, @arena)
         prefer_lower_arity_base_name(base_name, member, @arena)
@@ -10963,10 +10979,10 @@ module Crystal::HIR
           # This avoids routing no-block calls to block-only defs.
           if !has_block && !@function_defs.has_key?(base_name)
             @function_defs[base_name] = member
-            @function_def_arenas[base_name] = @arena
+            set_function_def_arena(base_name, @arena)
           end
           @function_defs[full_name] = member
-          @function_def_arenas[full_name] = @arena
+          set_function_def_arena(full_name, @arena)
         end
       end
     end
@@ -11824,10 +11840,10 @@ module Crystal::HIR
               full_method_name = function_full_name_for_def(base_name, param_types, member.params, has_block)
               register_function_type(full_method_name, return_type)
               @function_defs[full_method_name] = member
-              @function_def_arenas[full_method_name] = @arena
+              set_function_def_arena(full_method_name, @arena)
               if should_register_base_name?(full_method_name, base_name, member, has_block)
                 @function_defs[base_name] = member
-                @function_def_arenas[base_name] = @arena
+                set_function_def_arena(base_name, @arena)
               end
 
               # Track yield-functions for inline expansion (nested module methods).
@@ -11836,10 +11852,10 @@ module Crystal::HIR
                 debug_hook("yield.register", full_method_name)
                 unless @function_defs.has_key?(base_name)
                   @function_defs[base_name] = member
-                  @function_def_arenas[base_name] = @arena
+                  set_function_def_arena(base_name, @arena)
                 end
                 @function_defs[full_method_name] = member
-                @function_def_arenas[full_method_name] = @arena
+                set_function_def_arena(full_method_name, @arena)
               end
             when CrystalV2::Compiler::Frontend::ClassNode
               class_name = String.new(member.name)
@@ -13308,7 +13324,7 @@ module Crystal::HIR
                 resolved_path = source_path_for(member_arena) || "(unknown)"
                 STDERR.puts "[ARENA_RESOLVE] full=#{full_name} current=#{current_path}:#{@arena.size} resolved=#{resolved_path}:#{member_arena.size} member.span=#{member.span.start_offset}..#{member.span.end_offset}"
               end
-              @function_def_arenas[full_name] = member_arena
+              set_function_def_arena(full_name, member_arena)
               # Store type param map for lazy lowering of generic class methods.
               # When a monomorphized class registers its methods, the @type_param_map
               # contains substitutions (e.g., T => UInt8) needed for macro evaluation.
@@ -13321,7 +13337,7 @@ module Crystal::HIR
               if alias_full_name
                 register_function_type(alias_full_name, return_type) unless @function_types.has_key?(alias_full_name)
                 @function_defs[alias_full_name] = member
-                @function_def_arenas[alias_full_name] = member_arena
+                set_function_def_arena(alias_full_name, member_arena)
                 unless @type_param_map.empty?
                   alias_base_name = strip_type_suffix(alias_full_name)
                   store_function_type_param_map(alias_full_name, alias_base_name, @type_param_map)
@@ -13329,7 +13345,7 @@ module Crystal::HIR
               end
               if should_register_base_name?(full_name, base_name, member, has_block)
                 @function_defs[base_name] = member
-                @function_def_arenas[base_name] = member_arena
+                set_function_def_arena(base_name, member_arena)
               elsif !has_block
                 prefer_non_yield_base_name(base_name, member, member_arena)
                 prefer_lower_arity_base_name(base_name, member, member_arena)
@@ -13344,19 +13360,19 @@ module Crystal::HIR
                 debug_hook("yield.register", full_name)
                 if !has_block && !@function_defs.has_key?(base_name)
                   @function_defs[base_name] = member
-                  @function_def_arenas[base_name] = member_arena
+                  set_function_def_arena(base_name, member_arena)
                 end
                 @function_defs[full_name] = member
-                @function_def_arenas[full_name] = member_arena
+                set_function_def_arena(full_name, member_arena)
                 if alias_full_name
                   @yield_functions.add(alias_full_name)
                   debug_hook("yield.register", alias_full_name)
                   if alias_base && !has_block && !@function_defs.has_key?(alias_base)
                     @function_defs[alias_base] = member
-                    @function_def_arenas[alias_base] = member_arena
+                    set_function_def_arena(alias_base, member_arena)
                   end
                   @function_defs[alias_full_name] = member
-                  @function_def_arenas[alias_full_name] = member_arena
+                  set_function_def_arena(alias_full_name, member_arena)
                 end
               end
               yield_elapsed = yield_start ? (Time.instant - yield_start).total_milliseconds : nil
@@ -13660,7 +13676,7 @@ module Crystal::HIR
               end
               next if has_typed
               @function_defs[base_name] = member
-              @function_def_arenas[base_name] = @arena
+              set_function_def_arena(base_name, @arena)
             end
           end
           if mono_debug && include_start
@@ -14407,7 +14423,7 @@ module Crystal::HIR
 
             register_function_type(full_name, return_type)
             @function_defs[full_name] = member
-            @function_def_arenas[full_name] = @arena
+            set_function_def_arena(full_name, @arena)
 
             # CRITICAL: Store type param map so lowering can resolve type param calls
             # e.g., ImplInfo.get_cache() -> ImplInfo_Float32.get_cache()
@@ -17880,7 +17896,7 @@ module Crystal::HIR
       return unless def_contains_yield?(existing, existing_arena)
       return if def_contains_yield?(member, member_arena)
       @function_defs[base_name] = member
-      @function_def_arenas[base_name] = member_arena
+      set_function_def_arena(base_name, member_arena)
     end
 
     private def prefer_lower_arity_base_name(
@@ -17893,7 +17909,7 @@ module Crystal::HIR
       member_params = count_non_block_params(member)
       return unless member_params < existing_params
       @function_defs[base_name] = member
-      @function_def_arenas[base_name] = member_arena
+      set_function_def_arena(base_name, member_arena)
     end
 
     private def count_non_block_params(def_node : CrystalV2::Compiler::Frontend::DefNode) : Int32
@@ -20255,12 +20271,12 @@ module Crystal::HIR
 
       # Store AST for potential inline expansion (use mangled name)
       @function_defs[full_name] = node
-      @function_def_arenas[full_name] = @arena
+      set_function_def_arena(full_name, @arena)
       if should_register_base_name?(full_name, base_name, node, has_block)
         register_function_type(base_name, return_type)
         unless @function_defs.has_key?(base_name)
           @function_defs[base_name] = node
-          @function_def_arenas[base_name] = @arena
+          set_function_def_arena(base_name, @arena)
         end
       end
 
@@ -26583,11 +26599,11 @@ module Crystal::HIR
         # Keep AST around for signatureHelp/named args and for yield inlining.
         unless @function_defs.has_key?(base_name)
           @function_defs[base_name] = node
-          @function_def_arenas[base_name] = @arena
+          set_function_def_arena(base_name, @arena)
         end
       end
       @function_defs[full_name] = node
-      @function_def_arenas[full_name] = @arena
+      set_function_def_arena(full_name, @arena)
 
       func = @module.create_function(full_name, return_type)
       ctx = LoweringContext.new(func, @module, @arena)
@@ -30101,10 +30117,10 @@ module Crystal::HIR
       register_function_type(method_name, return_type) unless @function_types[method_name]?
 
       @function_defs[full_name] = node
-      @function_def_arenas[full_name] = @arena
+      set_function_def_arena(full_name, @arena)
       unless @function_defs.has_key?(method_name)
         @function_defs[method_name] = node
-        @function_def_arenas[method_name] = @arena
+        set_function_def_arena(method_name, @arena)
       end
 
       # Method definitions don't produce a value
@@ -36983,8 +36999,8 @@ module Crystal::HIR
             # Store the parent method's arena so lower_method uses the correct arena
             # for AST node lookups. Without this, methods found via parent fallback
             # use the wrong arena, causing macro node resolution failures.
-            @function_def_arenas[name] ||= arena
-            @function_def_arenas[base_name] ||= arena
+            set_function_def_arena_if_missing(name, arena)
+            set_function_def_arena_if_missing(base_name, arena)
             # Extract matched parent from resolved name for namespace override
             resolved_parts = parse_method_name(resolved_name)
             matched_parent = resolved_parts.owner
