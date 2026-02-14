@@ -197,6 +197,12 @@ about syntax or types and should match what the original compiler would report.
   - Update (2026-02-14): rejected unsafe experiment in overload index:
     - removing dedup (`list.includes?`) for `@function_type_keys_by_base` produced runaway recursion / stack overflows in release runs;
     - action: fully reverted; keep uniqueness invariant explicit in this index path.
+  - Update (2026-02-14): release-only stack overflow remains reproducible in lowering:
+    - repro: `crystal build --release src/crystal_v2.cr -o /tmp/crystal_v2_inlineguard2_release` then `/tmp/crystal_v2_inlineguard2_release regression_tests/basic_sanity.cr` => `EXIT:11` (stack overflow);
+    - top recursive stack: `lower_call -> inline_yield_function -> lower_body` (see `/tmp/inlineguard2_release_basic.err`);
+    - tried (and reverted): extra base-name repeat guard + fallback-depth suppression in inline-yield; did not resolve crash;
+    - with aggressive inline limits (`INLINE_YIELD_MAX_DEPTH=1..2`) crash morphs into invalid IR (`use of undefined value '%r35'`), so this is likely a deeper fallback/inlining correctness bug rather than only depth.
+    - next step: instrument inline-yield recursion with per-key histogram (callee + depth + fallback path) on `basic_sanity`, then patch at the first repeating cycle boundary.
   - Update (2026-02-03): added guarded recursion suppression in `infer_type_from_expr` (per‑cache version) and param‑type lookup using current def’s signature (fall back to owner/method lookup when no local). Skip local inference for self‑referential assignments. Guard logs now include file/span under `DEBUG_INFER_GUARD=1`. `spec/hir/return_type_inference_spec.cr` passes (13 examples, ~10s). Guard hotspots shifted to `Crystal::Hasher#result` and Enumerable helpers (`zip?`, `in_groups_of`, `chunks`). Mini compile still >60s on `/tmp/mini_try_each.cr`; next: inspect hasher result recursion and enumerate block‑path inference.
   - Update (2026-02-03): `timeout 60 ./bin/crystal_v2 spec spec/hir/return_type_inference_spec.cr` still times out. Needs re‑profile with latest block‑return inference changes.
   - Update (2026-02-03): sampled `spec/hir/return_type_inference_spec.cr` (see `/tmp/rt_infer_sample.txt`). Hot path is still in `lower_function_if_needed_impl → lower_method → lower_expr → lower_call → lookup_function_def_for_call`. Histogram (`/tmp/rt_infer_histo.log`) dominated by Identifier/Call/Binary/MemberAccess. Next: reduce `lookup_function_def_for_call` churn (cache/memoize by callsite), and cut repeated callsite overload resolution.
