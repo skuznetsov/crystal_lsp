@@ -1275,6 +1275,10 @@ module Crystal::HIR
     @string_intern : Hash(String, StringId)
     @functions_by_name : Hash(String, Function)
     @functions_by_base_name : Hash(String, Array(Function))
+    @extern_functions_by_any_name : Hash(String, ExternFunction)
+    @extern_functions_by_lib_and_name : Hash(Tuple(String, String), ExternFunction)
+    @extern_globals_by_any_name : Hash(String, ExternGlobal)
+    @extern_globals_by_lib_and_name : Hash(Tuple(String, String), ExternGlobal)
 
     def initialize(@name : String = "main")
       @functions = [] of Function
@@ -1287,8 +1291,12 @@ module Crystal::HIR
       @link_libraries = [] of String
       @extern_functions = [] of ExternFunction
       @extern_function_names = Set(String).new
+      @extern_functions_by_any_name = {} of String => ExternFunction
+      @extern_functions_by_lib_and_name = {} of Tuple(String, String) => ExternFunction
       @extern_globals = [] of ExternGlobal
       @extern_global_names = Set(String).new
+      @extern_globals_by_any_name = {} of String => ExternGlobal
+      @extern_globals_by_lib_and_name = {} of Tuple(String, String) => ExternGlobal
       @method_effects = {} of String => MethodEffectSummary
       @class_parents = {} of String => String?
       @module_includers = {} of String => Array(String)
@@ -1416,6 +1424,11 @@ module Crystal::HIR
       return if @extern_function_names.includes?(func.real_name)
       @extern_function_names.add(func.real_name)
       @extern_functions << func
+      @extern_functions_by_any_name[func.name] ||= func
+      @extern_functions_by_any_name[func.real_name] ||= func
+      if lib_name = func.lib_name
+        @extern_functions_by_lib_and_name[{lib_name, func.name}] ||= func
+      end
       lib_name = func.lib_name
       register_lib_name(lib_name) if lib_name
     end
@@ -1425,26 +1438,31 @@ module Crystal::HIR
       return if @extern_global_names.includes?(glob.real_name)
       @extern_global_names.add(glob.real_name)
       @extern_globals << glob
+      @extern_globals_by_any_name[glob.name] ||= glob
+      @extern_globals_by_any_name[glob.real_name] ||= glob
+      if lib_name = glob.lib_name
+        @extern_globals_by_lib_and_name[{lib_name, glob.name}] ||= glob
+      end
       lib_name = glob.lib_name
       register_lib_name(lib_name) if lib_name
     end
 
     def get_extern_function(name : String) : ExternFunction?
-      @extern_functions.find { |f| f.name == name || f.real_name == name }
+      @extern_functions_by_any_name[name]?
     end
 
     # Look up extern function by lib name and function name (e.g., "LibC", "puts")
     def get_extern_function(lib_name : String, fun_name : String) : ExternFunction?
-      @extern_functions.find { |f| f.lib_name == lib_name && f.name == fun_name }
+      @extern_functions_by_lib_and_name[{lib_name, fun_name}]?
     end
 
     # Look up extern global by lib name and global name (e.g., "LibGC", "stackbottom")
     def get_extern_global(lib_name : String, var_name : String) : ExternGlobal?
-      @extern_globals.find { |g| g.lib_name == lib_name && g.name == var_name }
+      @extern_globals_by_lib_and_name[{lib_name, var_name}]?
     end
 
     def get_extern_global(name : String) : ExternGlobal?
-      @extern_globals.find { |g| g.name == name || g.real_name == name }
+      @extern_globals_by_any_name[name]?
     end
 
     # Check if a name is a known lib (has any extern functions registered under it)
