@@ -448,6 +448,56 @@ describe Crystal::MIR::LLVMIRGenerator do
       phi_line.not_nil!.should_not contain("zeroinitializer")
     end
 
+    it "emits align 4 for union payload store/load" do
+      mod = Crystal::MIR::Module.new("union_align")
+
+      union_type = mod.type_registry.create_type(Crystal::MIR::TypeKind::Union, "PtrOrNilAlign", 16, 8)
+      union_ref = Crystal::MIR::TypeRef.new(union_type.id)
+      mod.register_union(
+        union_ref,
+        Crystal::MIR::UnionDescriptor.new(
+          "PtrOrNilAlign",
+          [
+            Crystal::MIR::UnionVariantDescriptor.new(
+              type_id: 0,
+              type_ref: Crystal::MIR::TypeRef::POINTER,
+              full_name: "Pointer",
+              size: 8,
+              alignment: 8,
+              field_offsets: nil
+            ),
+            Crystal::MIR::UnionVariantDescriptor.new(
+              type_id: 1,
+              type_ref: Crystal::MIR::TypeRef::NIL,
+              full_name: "Nil",
+              size: 0,
+              alignment: 1,
+              field_offsets: nil
+            ),
+          ],
+          16,
+          8
+        )
+      )
+
+      func = mod.create_function("union_align_payload", Crystal::MIR::TypeRef::POINTER)
+      builder = Crystal::MIR::Builder.new(func)
+      ptr_val = builder.alloc(Crystal::MIR::MemoryStrategy::Stack, Crystal::MIR::TypeRef::INT32, 4_u64, 4_u32)
+      wrapped = builder.union_wrap(ptr_val, 0, union_ref)
+      unwrapped = builder.emit(Crystal::MIR::UnionUnwrap.new(func.next_value_id, Crystal::MIR::TypeRef::POINTER, wrapped, 0))
+      builder.ret(unwrapped)
+
+      gen = Crystal::MIR::LLVMIRGenerator.new(mod)
+      gen.emit_type_metadata = false
+      output = gen.generate
+
+      func_ir = output[/define ptr @union_align_payload\(\)\s*\{.*?\n\}/m]
+      func_ir.should_not be_nil
+      body = func_ir.not_nil!
+      body.should match(/store ptr .*payload_ptr, align 4/)
+      body.should match(/load ptr, ptr %.*payload_ptr, align 4/)
+    end
+
     it "generates RC increment and decrement" do
       mod = Crystal::MIR::Module.new("test")
       func = mod.create_function("rc_test", Crystal::MIR::TypeRef::VOID)
