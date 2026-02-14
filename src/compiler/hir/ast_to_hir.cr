@@ -21538,7 +21538,7 @@ module Crystal::HIR
     ])
 
     # Compute set of function def names and method names reachable from main expressions via BFS
-    def compute_ast_reachable_functions(main_exprs : Array(Tuple(CrystalV2::Compiler::Frontend::ExprId, CrystalV2::Compiler::Frontend::ArenaLike))) : NamedTuple(defs: Set(String), method_names: Set(String))
+    def compute_ast_reachable_functions(main_exprs : Array(Tuple(CrystalV2::Compiler::Frontend::ExprId, CrystalV2::Compiler::Frontend::ArenaLike))) : NamedTuple(defs: Set(String), method_names: Set(String), owner_types: Set(String))
       t0 = Time.instant
       log_filter = ENV.has_key?("CRYSTAL_V2_AST_FILTER_LOG")
 
@@ -21648,7 +21648,16 @@ module Crystal::HIR
       elapsed = (Time.instant - t0).total_milliseconds
       STDERR.puts "[AST_FILTER] BFS: #{reachable.size} reachable / #{@function_defs.size} total defs, #{constructed_types.size} types, #{visited_methods.size} methods scanned in #{elapsed.round(1)}ms" if ENV.has_key?("CRYSTAL_V2_PHASE_STATS") || log_filter
 
-      {defs: reachable, method_names: visited_methods}
+      owner_types = Set(String).new(initial_capacity: constructed_types.size + reachable.size)
+      constructed_types.each { |t| owner_types << t }
+      reachable.each do |full_name|
+        owner = method_owner_from_name(full_name)
+        owner_types << owner unless owner.empty?
+        owner_base = strip_generic_args(owner)
+        owner_types << owner_base unless owner_base.empty?
+      end
+
+      {defs: reachable, method_names: visited_methods, owner_types: owner_types}
     end
 
     # Check if an owner type should be included based on constructed types
@@ -21700,12 +21709,14 @@ module Crystal::HIR
     # Instance variables for AST filter
     @ast_reachable_functions : Set(String)? = nil
     @ast_reachable_method_names : Set(String)? = nil
+    @ast_reachable_owner_types : Set(String)? = nil
     @ast_filter_active : Bool = false
 
     # Set the AST reachability filter (called from cli.cr before flush_pending_functions)
-    def set_ast_reachable_filter(defs : Set(String), method_names : Set(String)) : Nil
+    def set_ast_reachable_filter(defs : Set(String), method_names : Set(String), owner_types : Set(String)) : Nil
       @ast_reachable_functions = defs
       @ast_reachable_method_names = method_names
+      @ast_reachable_owner_types = owner_types
     end
 
     # Check if a function name is auto-generated (constructors, setters, runtime helpers)
@@ -27181,6 +27192,20 @@ module Crystal::HIR
           if m = method_short_from_name(func.name)
             method_names << m
           end
+        end
+      end
+      if owner_types = @ast_reachable_owner_types
+        @pending_function_queue.each do |name|
+          owner = method_owner_from_name(name)
+          owner_types << owner unless owner.empty?
+          owner_base = strip_generic_args(owner)
+          owner_types << owner_base unless owner_base.empty?
+        end
+        @module.functions.each do |func|
+          owner = method_owner_from_name(func.name)
+          owner_types << owner unless owner.empty?
+          owner_base = strip_generic_args(owner)
+          owner_types << owner_base unless owner_base.empty?
         end
       end
 
@@ -36643,14 +36668,26 @@ module Crystal::HIR
       # Note: We do NOT mark as Completed — safety nets (emit_tracked_sigs,
       # lower_missing_call_targets) can still lower these if needed.
       if @ast_filter_active
+        auto_generated = is_auto_generated_function?(name) ||
+                         name.starts_with?("__crystal") ||
+                         name.starts_with?("main")
         if method_names = @ast_reachable_method_names
           # Extract just the method name: "Array(Int32)#push$Int32" → "push"
           method = method_short_from_name(name)
           if method && !method_names.includes?(method)
             # Method name was never seen in any reachable code path — skip
-            unless is_auto_generated_function?(name) ||
-                   name.starts_with?("__crystal") || name.starts_with?("main")
+            unless auto_generated
               STDERR.puts "[AST_FILTER] filtered: #{name} (method=#{method})" if env_has?("CRYSTAL_V2_AST_FILTER_LOG")
+              return
+            end
+          end
+        end
+        if !auto_generated && has_method_separator?(name)
+          if owner_types = @ast_reachable_owner_types
+            owner = method_owner_from_name(name)
+            owner_base = strip_generic_args(owner)
+            if !owner_types.includes?(owner) && !owner_types.includes?(owner_base)
+              STDERR.puts "[AST_FILTER] filtered owner: #{name} (owner=#{owner})" if env_has?("CRYSTAL_V2_AST_FILTER_LOG")
               return
             end
           end

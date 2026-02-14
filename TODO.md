@@ -117,6 +117,24 @@ about syntax or types and should match what the original compiler would report.
       - `sample` 10s (`/tmp/rt_spec_10s_ctx_split.sample` -> `/tmp/rt_spec_10s_norebuild.sample`):
         - `AstToHir#rebuild_function_def_overloads`: `242 -> 199`;
         - `AstToHir#type_ref_for_name`: `1318 -> 1223`.
+  - Update (2026-02-14): tightened AST filter with owner-type reachability in `process_pending`.
+    - `compute_ast_reachable_functions` now returns `owner_types` (constructed/always-reachable + owners of reachable defs), not only `defs` and `method_names`.
+    - `set_ast_reachable_filter` and CLI wiring updated to pass `owner_types`.
+    - During `flush_pending_functions`, owner types are seeded from pending queue + already-emitted functions (same as method-name seeding behavior).
+    - `lower_function_if_needed_impl` AST filter now applies two guards during `process_pending`:
+      - existing method-name filter;
+      - new owner filter (`owner`/`owner_base` must be in reachable owner set for method-like names), excluding auto-generated/runtime entrypoints.
+    - validation:
+      - `crystal build src/crystal_v2.cr -o /tmp/crystal_v2_ast_owner_filter_dbg --error-trace` => `EXIT 0`;
+      - `./regression_tests/run_all.sh /tmp/crystal_v2_ast_owner_filter_dbg` => `35 passed, 0 failed`;
+      - `/tmp/crystal_v2_ast_owner_filter_dbg examples/bootstrap_array.cr -o /tmp/bootstrap_array_ast_owner_filter_dbg && ./scripts/run_safe.sh /tmp/bootstrap_array_ast_owner_filter_dbg 10 768` => `EXIT 0`.
+    - measured impact (`CRYSTAL_V2_AST_FILTER=1 CRYSTAL_V2_PHASE_STATS=1`, 90s timeout workload):
+      - `process_pending`: `26888.8ms -> 16027.1ms` (faster);
+      - `emit_tracked_sigs`: `14161.6ms -> 26993.3ms` (slower);
+      - `lower_missing`: `5893.2ms -> 594.9ms` (much faster);
+      - `Lookup`: `38279 calls / 1879.9ms` -> `29142 calls / 1772.6ms`;
+      - final lowered function count reduced: `25459 -> 17376`.
+    - net: target spec still times out at 90s, but process_pending graph moved in the intended direction; next step is to trim `emit_tracked_sigs` explosion under the tighter pending filter.
   - Update (2026-02-14): rejected two micro-cache experiments in `ast_to_hir` hot path (no robust win):
     - `ensure_monomorphized_type` epoch cache: near-noise delta across 2x A/B runs (`process_pending` ~`0.38%` faster, `emit_tracked_sigs` ~`0.14%` faster); not enough to justify extra state/invalidations.
     - `strip_generic_receiver_from_base_name` cache variants:
