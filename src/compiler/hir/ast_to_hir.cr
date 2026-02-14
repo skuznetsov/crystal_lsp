@@ -36305,7 +36305,7 @@ module Crystal::HIR
       end
 
       target_name = name
-      lookup_start_ns = Time.monotonic.total_nanoseconds.to_i64 if env_has?("CRYSTAL_V2_PHASE_STATS")
+      lookup_start_instant = Time.instant if env_has?("CRYSTAL_V2_PHASE_STATS")
       # Parse name once at the start - reuse for all lookups
       name_parts = parse_method_name(name)
       base_name = name_parts.base
@@ -37139,7 +37139,11 @@ module Crystal::HIR
         branch_key = lookup_branch || (func_def ? "unknown" : "miss")
         @lookup_branch_counts[branch_key] += 1
         @lookup_total_count += 1
-        elapsed_ns = Time.monotonic.total_nanoseconds.to_i64 - (lookup_start_ns || 0i64)
+        elapsed_ns = if start_instant = lookup_start_instant
+                       (Time.instant - start_instant).total_nanoseconds.to_i64
+                     else
+                       0i64
+                     end
         @lookup_branch_time_ns[branch_key] += elapsed_ns
         @lookup_total_time_ns += elapsed_ns
       end
