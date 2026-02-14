@@ -7941,10 +7941,12 @@ module Crystal::MIR
         end
       end
 
-      # Guard: ptr to float/double - can't bitcast directly, must load from ptr
-      # This happens when value is a pointer to float/double and we need the value itself
+      # Guard: ptr to float/double - convert pointer VALUE (address) numerically.
+      # Never dereference unknown pointers here.
       if src_type == "ptr" && (dst_type == "float" || dst_type == "double")
-        emit "#{name} = load #{dst_type}, ptr #{value}"
+        base_name = name.lstrip('%')
+        emit "%#{base_name}.ptr_int = ptrtoint ptr #{value} to i64"
+        emit "#{name} = uitofp i64 %#{base_name}.ptr_int to #{dst_type}"
         @value_types[inst.id] = inst.type
         return
       end
@@ -9537,7 +9539,8 @@ module Crystal::MIR
           expected_bits = expected_type[1..].to_i?
           if actual_bits && expected_bits
             if actual_bits < expected_bits
-              emit "#{cast_name} = sext #{actual_type} #{value} to #{expected_type}"
+              ext_op = (actual_type_ref && unsigned_type_ref?(actual_type_ref)) ? "zext" : "sext"
+              emit "#{cast_name} = #{ext_op} #{actual_type} #{value} to #{expected_type}"
             elsif actual_bits > expected_bits
               emit "#{cast_name} = trunc #{actual_type} #{value} to #{expected_type}"
             else
@@ -11799,6 +11802,7 @@ module Crystal::MIR
         end
         # Non-phi use: load from slot to handle dominance issues
         val_type = @value_types[id]?
+        slot_type_ref = @cross_block_slot_type_refs[id]?
         llvm_type = @cross_block_slot_types[id]? ||
           (val_type ? @type_mapper.llvm_type(val_type) : "i64")
         llvm_type = "i64" if llvm_type == "void"
@@ -11817,7 +11821,8 @@ module Crystal::MIR
               if dst_bits < src_bits
                 emit "#{cast_name} = trunc #{llvm_type} #{temp_name} to #{expected_type}"
               elsif dst_bits > src_bits
-                emit "#{cast_name} = sext #{llvm_type} #{temp_name} to #{expected_type}"
+                ext_op = (slot_type_ref && unsigned_type_ref?(slot_type_ref)) ? "zext" : "sext"
+                emit "#{cast_name} = #{ext_op} #{llvm_type} #{temp_name} to #{expected_type}"
               else
                 emit "#{cast_name} = add #{expected_type} #{temp_name}, 0"
               end
