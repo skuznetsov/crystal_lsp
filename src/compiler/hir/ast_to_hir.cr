@@ -53558,6 +53558,21 @@ module Crystal::HIR
         end
         i += 1
       end
+      has_nullable = name.ends_with?('?')
+      has_pointer_suffix = name.ends_with?('*')
+      has_complex_shape = has_union || has_comma || has_paren || has_brace || has_nullable || has_pointer_suffix
+      if has_complex_shape
+        raw_cache_key = type_cache_key(raw_name)
+        if cached = @type_cache[raw_cache_key]?
+          if has_union || raw_name.includes?("___")
+            if desc = @module.get_type_descriptor(cached)
+              return cached if desc.kind == TypeKind::Union
+            end
+          else
+            return cached
+          end
+        end
+      end
       if simple_name && !has_union && !has_comma && !has_paren && !has_brace
         self_prefixed = name.starts_with?("self")
         if @type_param_map.empty? && (@current_typeof_local_names.nil? || @current_typeof_local_names.not_nil!.empty?) &&
