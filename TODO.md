@@ -607,6 +607,7 @@ about syntax or types and should match what the original compiler would report.
   - Update (2026-02-04): switched ptr→float arg conversion to `ptrtoint + uitofp` (replaced ptr→int + bitcast). Remaining: re-audit return/cast paths for ptr→float and unsigned float→int.
   - Update (2026-02-04): float→ptr slot stores now preserve bit patterns via bitcast + inttoptr (no fptosi).
   - Update (2026-02-04): ptr→float returns/casts now use `ptrtoint + uitofp` (no pointer loads or bitcast).
+  - Update (2026-02-14): fixed two remaining unsigned conversion hotspots in `emit_extern_call`: (1) varargs fixed-arg int→float cast now picks `uitofp` for unsigned sources; (2) inline `to_u64!/to_u32!` paths now use `zext` (not `sext`) and propagate `TypeRef::UINT64/UINT32`. Verified by debug build + `examples/bootstrap_array.cr` + `scripts/run_safe.sh` + full `regression_tests/run_all.sh` (`35 passed, 0 failed`). Remaining: run ARM/AArch64 target validation once CI cross-target job is available.
 - [ ] Re-audit union payload alignment for ARM/AArch64 (align 4 where required) to catch any remaining misaligned loads/stores.
   - Update (2026-02-04): scanned `llvm_backend.cr` union payload load/store sites — all use `align 4`. Remaining: confirm any non-union payload loads/stores in other backends.
   - [ ] Windows support: track parity with original Crystal target coverage; add Windows backend tasks once bootstrap is stable.

@@ -9493,7 +9493,7 @@ module Crystal::MIR
         end
       end
 
-      cast_fixed_arg = ->(actual_type : String, value : String, expected_type : String) : String {
+      cast_fixed_arg = ->(actual_type : String, actual_type_ref : TypeRef?, value : String, expected_type : String) : String {
         return value if actual_type == expected_type
 
         c = @cond_counter
@@ -9512,7 +9512,8 @@ module Crystal::MIR
 
         # Int <-> float conversions (avoid invalid LLVM bitcasts)
         if (expected_type == "double" || expected_type == "float") && actual_type.starts_with?('i')
-          emit "#{cast_name} = sitofp #{actual_type} #{value} to #{expected_type}"
+          op = (actual_type_ref && unsigned_type_ref?(actual_type_ref)) ? "uitofp" : "sitofp"
+          emit "#{cast_name} = #{op} #{actual_type} #{value} to #{expected_type}"
           return cast_name
         end
 
@@ -9557,15 +9558,15 @@ module Crystal::MIR
         arg_type = @type_mapper.llvm_type(arg_type_ref)
 
         if arg_type == "void"
-          {"ptr", "null"}
+          {"ptr", "null", nil.as(TypeRef?)}
         else
           val = value_ref(arg_id)
           if arg_type.includes?(".union") && (val == "0" || val == "null")
-            {arg_type, "zeroinitializer"}
+            {arg_type, "zeroinitializer", arg_type_ref.as(TypeRef?)}
           elsif arg_type == "ptr" && val == "0"
-            {"ptr", "null"}
+            {"ptr", "null", arg_type_ref.as(TypeRef?)}
           else
-            {arg_type, val}
+            {arg_type, val, arg_type_ref.as(TypeRef?)}
           end
         end
       end
@@ -9757,6 +9758,9 @@ module Crystal::MIR
         arg_type = @value_types[arg_id]? || TypeRef::POINTER
         arg_llvm_type = @type_mapper.llvm_type(arg_type)
         arg_val = value_ref(arg_id)
+        target_unsigned = mangled_extern_name.includes?("to_u64_")
+        ext_op = target_unsigned ? "zext" : "sext"
+        target_type_ref = target_unsigned ? TypeRef::UINT64 : TypeRef::INT64
 
         c = @cond_counter
         @cond_counter += 1
@@ -9769,29 +9773,32 @@ module Crystal::MIR
           emit "store #{arg_llvm_type} #{normalize_union_value(arg_val, arg_llvm_type)}, ptr %to_i64_alloca.#{c}"
           emit "%to_i64_payload_ptr.#{c} = getelementptr #{arg_llvm_type}, ptr %to_i64_alloca.#{c}, i32 0, i32 1"
           emit "%to_i64_val.#{c} = load i32, ptr %to_i64_payload_ptr.#{c}, align 4"  # Load as i32 (covers Int8/16/32)
-          emit "#{name} = sext i32 %to_i64_val.#{c} to i64"
-          @value_types[inst.id] = TypeRef::INT64
+          emit "#{name} = #{ext_op} i32 %to_i64_val.#{c} to i64"
+          @value_types[inst.id] = target_type_ref
         elsif arg_llvm_type == "i64"
           emit "#{name} = add i64 #{arg_val}, 0"
-          @value_types[inst.id] = TypeRef::INT64
+          @value_types[inst.id] = target_type_ref
         elsif arg_llvm_type.starts_with?('i')
-          # Primitive int type - just sign extend
-          emit "#{name} = sext #{arg_llvm_type} #{arg_val} to i64"
-          @value_types[inst.id] = TypeRef::INT64
+          # Primitive int type - sign or zero extend depending on target conversion.
+          emit "#{name} = #{ext_op} #{arg_llvm_type} #{arg_val} to i64"
+          @value_types[inst.id] = target_type_ref
         else
           # Fallback - treat as i32 and extend
-          emit "#{name} = sext i32 #{arg_val} to i64"
-          @value_types[inst.id] = TypeRef::INT64
+          emit "#{name} = #{ext_op} i32 #{arg_val} to i64"
+          @value_types[inst.id] = target_type_ref
         end
         @value_names[inst.id] = "r#{inst.id}"
         return
       end
 
-      if (mangled_extern_name.includes?("to_u32_") || mangled_extern_name.includes?("to_i32_") || mangled_extern_name.includes?("to_i_")) && inst.args.size == 1
+      if (mangled_extern_name.includes?("to_u32_") || mangled_extern_name.includes?("to_u_") || mangled_extern_name.includes?("to_i32_") || mangled_extern_name.includes?("to_i_")) && inst.args.size == 1
         arg_id = inst.args[0]
         arg_type = @value_types[arg_id]? || TypeRef::POINTER
         arg_llvm_type = @type_mapper.llvm_type(arg_type)
         arg_val = value_ref(arg_id)
+        target_unsigned = mangled_extern_name.includes?("to_u32_") || mangled_extern_name.includes?("to_u_")
+        ext_op = target_unsigned ? "zext" : "sext"
+        target_type_ref = target_unsigned ? TypeRef::UINT32 : TypeRef::INT32
 
         c = @cond_counter
         @cond_counter += 1
@@ -9802,22 +9809,22 @@ module Crystal::MIR
           emit "store #{arg_llvm_type} #{normalize_union_value(arg_val, arg_llvm_type)}, ptr %to_i32_alloca.#{c}"
           emit "%to_i32_payload_ptr.#{c} = getelementptr #{arg_llvm_type}, ptr %to_i32_alloca.#{c}, i32 0, i32 1"
           emit "#{name} = load i32, ptr %to_i32_payload_ptr.#{c}, align 4"
-          @value_types[inst.id] = TypeRef::INT32
+          @value_types[inst.id] = target_type_ref
         elsif arg_llvm_type == "i64"
           emit "#{name} = trunc i64 #{arg_val} to i32"
-          @value_types[inst.id] = TypeRef::INT32
+          @value_types[inst.id] = target_type_ref
         elsif arg_llvm_type == "i32"
           emit "#{name} = add i32 #{arg_val}, 0"
-          @value_types[inst.id] = TypeRef::INT32
+          @value_types[inst.id] = target_type_ref
         elsif arg_llvm_type.starts_with?('i')
-          emit "#{name} = sext #{arg_llvm_type} #{arg_val} to i32"
-          @value_types[inst.id] = TypeRef::INT32
+          emit "#{name} = #{ext_op} #{arg_llvm_type} #{arg_val} to i32"
+          @value_types[inst.id] = target_type_ref
         elsif arg_llvm_type == "ptr"
           emit "#{name} = ptrtoint ptr #{arg_val} to i32"
-          @value_types[inst.id] = TypeRef::INT32
+          @value_types[inst.id] = target_type_ref
         else
           emit "#{name} = add i32 0, 0"  # Fallback to 0
-          @value_types[inst.id] = TypeRef::INT32
+          @value_types[inst.id] = target_type_ref
         end
         @value_names[inst.id] = "r#{inst.id}"
         return
@@ -10048,13 +10055,13 @@ module Crystal::MIR
       if fixed_sig
         fixed_sig.each_with_index do |expected_type, idx|
           break if idx >= arg_entries.size
-          actual_type, actual_val = arg_entries[idx]
-          coerced_val = cast_fixed_arg.call(actual_type, actual_val, expected_type)
-          arg_entries[idx] = {expected_type, coerced_val}
+          actual_type, actual_val, actual_type_ref = arg_entries[idx]
+          coerced_val = cast_fixed_arg.call(actual_type, actual_type_ref, actual_val, expected_type)
+          arg_entries[idx] = {expected_type, coerced_val, actual_type_ref}
         end
       end
 
-      args = arg_entries.map { |(t, v)| "#{t} #{v}" }.join(", ")
+      args = arg_entries.map { |(t, v, _)| "#{t} #{v}" }.join(", ")
 
       if return_type == "void"
         emit "call void @#{mangled_extern_name}(#{args})"
