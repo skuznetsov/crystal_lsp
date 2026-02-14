@@ -6367,6 +6367,7 @@ module Crystal::HIR
       return offset unless defs
       # INC_DEBUG disabled
       include_arena = @arena
+      included_macro_lookup = lookup_macro_entry("included", module_full_name)
       include_param_map_cache = {} of String => Hash(String, String)
       defs.each do |mod_node, mod_arena|
         with_arena(mod_arena) do
@@ -6379,7 +6380,7 @@ module Crystal::HIR
                         computed
                       end
           with_type_param_map(extra_map) do
-            if macro_lookup = lookup_macro_entry("included", module_full_name)
+            if macro_lookup = included_macro_lookup
               macro_entry, macro_key = macro_lookup
               macro_def, macro_arena = macro_entry
               expanded_id = expand_macro_expr(macro_def, macro_arena, [] of ExprId, nil, nil, macro_key)
