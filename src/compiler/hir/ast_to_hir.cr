@@ -1140,6 +1140,8 @@ module Crystal::HIR
     # Cache block function def lookup by callsite shape.
     @block_lookup_cache : Hash(BlockLookupKey, Tuple(String, CrystalV2::Compiler::Frontend::DefNode)?) = {} of BlockLookupKey => Tuple(String, CrystalV2::Compiler::Frontend::DefNode)?
     @block_lookup_cache_size : Int32 = 0
+    # Cache method-short fallback for block lookups (shared across owners).
+    @block_fallback_lookup_cache : Hash(BlockLookupKey, Tuple(String, CrystalV2::Compiler::Frontend::DefNode)?) = {} of BlockLookupKey => Tuple(String, CrystalV2::Compiler::Frontend::DefNode)?
     # Cache function def lookup by callsite shape.
     @function_lookup_cache : Hash(FunctionLookupKey, FunctionLookupEntry) = Hash(FunctionLookupKey, FunctionLookupEntry).new(initial_capacity: 16384)
     @function_lookup_cache_size : Int32 = 0
@@ -44476,6 +44478,7 @@ module Crystal::HIR
       if @block_lookup_cache_size != @function_defs.size
         @block_lookup_cache.clear
         @block_lookup_cache_size = @function_defs.size
+        @block_fallback_lookup_cache.clear
       end
       args_hash = 0_u64
       if arg_types
@@ -44557,6 +44560,12 @@ module Crystal::HIR
       # Example: Int32#try should inline Object#try when receiver_base allows it.
       method_short = method_short_from_name(func_name)
       if method_short
+        fallback_key = BlockLookupKey.new(method_short, arg_count, args_hash, receiver_base, !arg_types.nil?)
+        if @block_fallback_lookup_cache.has_key?(fallback_key)
+          result = @block_fallback_lookup_cache[fallback_key]
+          @block_lookup_cache[cache_key] = result
+          return result
+        end
         instance_suffix = "##{method_short}"
         class_suffix = ".#{method_short}"
         @function_defs.each do |name, def_node|
@@ -44600,10 +44609,14 @@ module Crystal::HIR
 
       if best && best_name
         result = {best_name, best}
+        @block_fallback_lookup_cache[BlockLookupKey.new(method_short.not_nil!, arg_count, args_hash, receiver_base, !arg_types.nil?)] = result if method_short
         @block_lookup_cache[cache_key] = result
         return result
       end
 
+      if method_short
+        @block_fallback_lookup_cache[BlockLookupKey.new(method_short, arg_count, args_hash, receiver_base, !arg_types.nil?)] = nil
+      end
       @block_lookup_cache[cache_key] = nil
       nil
     end

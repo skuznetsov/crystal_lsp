@@ -167,6 +167,20 @@ about syntax or types and should match what the original compiler would report.
     - debug signal (`DEBUG_EMIT_SIGS`, 45s window):
       - iteration 0 candidates: `419 -> 399`;
       - skipped by AST filter: `1106 -> 1135`.
+  - Update (2026-02-14): added shared block-fallback lookup cache by method short name.
+    - root cause (from `sample` in emit phase): `lookup_block_function_def_for_call` fallback repeatedly scanned full `@function_defs` for the same short method across many owners, with heavy `strip_type_suffix_uncached` string allocation churn.
+    - change:
+      - new `@block_fallback_lookup_cache` keyed by `(method_short, arg_count, args_hash, receiver_base, has_args)`;
+      - `lookup_block_function_def_for_call` now reuses fallback results (including nil) across owner variants in the same call-shape;
+      - cache is invalidated together with `@block_lookup_cache` when `@function_defs.size` changes.
+    - validation:
+      - `crystal build src/crystal_v2.cr -o /tmp/crystal_v2_block_fallback_cache_dbg --error-trace` => `EXIT 0`;
+      - `./regression_tests/run_all.sh /tmp/crystal_v2_block_fallback_cache_dbg` => `35 passed, 0 failed`;
+      - `/tmp/crystal_v2_block_fallback_cache_dbg examples/bootstrap_array.cr -o /tmp/bootstrap_array_block_fallback_cache_dbg && ./scripts/run_safe.sh /tmp/bootstrap_array_block_fallback_cache_dbg 10 768` => `EXIT 0`.
+    - measured impact (`CRYSTAL_V2_AST_FILTER=1 CRYSTAL_V2_PHASE_STATS=1 timeout 90 /tmp/crystal_v2_block_fallback_cache_dbg spec spec/hir/return_type_inference_spec.cr`):
+      - control run: `process_pending=9318.7ms`, `emit_tracked_sigs=16124.6ms`, `lower_missing=419.3ms`;
+      - prior baseline (before this change): `process_pending=14666.4ms`, `emit_tracked_sigs=22488.5ms`, `lower_missing=413.6ms`;
+      - deltas: `process_pending -36.5%`, `emit_tracked_sigs -28.3%`, combined three-phase time `~37568ms -> ~25863ms` (`-31.2%`).
   - Update (2026-02-14): rejected two micro-cache experiments in `ast_to_hir` hot path (no robust win):
     - `ensure_monomorphized_type` epoch cache: near-noise delta across 2x A/B runs (`process_pending` ~`0.38%` faster, `emit_tracked_sigs` ~`0.14%` faster); not enough to justify extra state/invalidations.
     - `strip_generic_receiver_from_base_name` cache variants:
