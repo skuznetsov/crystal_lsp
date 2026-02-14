@@ -15911,6 +15911,21 @@ module Crystal::HIR
       arg_types : Array(TypeRef),
       meta_owner : String,
     ) : String?
+      if arg_types.empty? && (method_name == "to_s" || method_name == "inspect" || method_name == "name")
+        full_name = mangle_function_name("#{owner_name}.#{method_name}", arg_types)
+        return full_name if @module.has_function?(full_name)
+
+        func = @module.create_function(full_name, TypeRef::STRING)
+        ctx = LoweringContext.new(func, @module, @arena)
+        lit = Literal.new(ctx.next_id, TypeRef::STRING, owner_name)
+        ctx.emit(lit)
+        ctx.register_type(lit.id, TypeRef::STRING)
+        ctx.terminate(Return.new(lit.id))
+        register_function_type(full_name, TypeRef::STRING)
+        register_function_type("#{owner_name}.#{method_name}", TypeRef::STRING)
+        return full_name
+      end
+
       meta_method = resolve_meta_method_overload(meta_owner, method_name, arg_types)
       return nil unless meta_method
       full_name = mangle_function_name("#{owner_name}.#{method_name}", arg_types)
@@ -18477,6 +18492,7 @@ module Crystal::HIR
       stats = env_get("DEBUG_LOWER_METHOD_STATS") ? @lower_method_stats_stack.last? : nil
       stats_start = stats ? Time.instant : nil
       receiver_type = ctx.type_of(receiver_id)
+      receiver_is_type_literal = ctx.type_literal?(receiver_id)
       type_desc = @module.get_type_descriptor(receiver_type)
       cache_key : String? = nil
       if @method_resolution_cache
@@ -18485,7 +18501,7 @@ module Crystal::HIR
           @method_resolution_cache.clear
           @method_resolution_cache_scope = scope
         end
-        cache_key = method_resolution_cache_key(receiver_type, method_name, arg_types, ctx.type_literal?(receiver_id), has_block_call)
+        cache_key = method_resolution_cache_key(receiver_type, method_name, arg_types, receiver_is_type_literal, has_block_call)
         if cached = @method_resolution_cache[cache_key]?
           return cached
         end
@@ -18572,13 +18588,23 @@ module Crystal::HIR
         STDERR.puts "[RESOLVE_INTERNAL] class=#{class_name} base=#{base_method_name} recv_type=#{receiver_type.id}"
       end
       if arg_types.empty? && (method_name == "inspect" || method_name == "to_s")
+        if receiver_is_type_literal
+          meta_owner = module_type_ref?(receiver_type) ? "Module" : "Class"
+          meta_base = "#{meta_owner}##{method_name}"
+          if has_function_base?(meta_base)
+            if resolved = resolve_untyped_overload(meta_base, 0, has_block_call, call_has_named_args)
+              debug_hook("method.resolve", "base=#{base_method_name} resolved=#{resolved} reason=zero_arg_type_literal_meta")
+              return cache_method_resolution(cache_key, resolved)
+            end
+          end
+        end
         if has_function_base?(base_method_name)
           if resolved = resolve_untyped_overload(base_method_name, 0, has_block_call, call_has_named_args)
             debug_hook("method.resolve", "base=#{base_method_name} resolved=#{resolved} reason=zero_arg_prefer_base")
             return cache_method_resolution(cache_key, resolved)
           end
         end
-        if class_name != "Object"
+        if !receiver_is_type_literal && class_name != "Object"
           object_base = "Object##{method_name}"
           if resolved = resolve_untyped_overload(object_base, 0, has_block_call, call_has_named_args)
             debug_hook("method.resolve", "base=#{base_method_name} resolved=#{resolved} reason=zero_arg_object")
@@ -18764,11 +18790,13 @@ module Crystal::HIR
           debug_hook("method.resolve", "base=#{base_method_name} resolved=#{resolved} reason=ancestor_overload_arity")
           return cache_method_resolution(cache_key, resolved)
         end
-        object_base = "Object##{method_name}"
-        if resolved = resolve_untyped_overload(object_base, effective_arg_count, has_block_call, call_has_named_args)
-          resolved = prefer_callsite_over_arity(resolved, object_base, arg_types, has_block_call)
-          debug_hook("method.resolve", "base=#{base_method_name} resolved=#{resolved} reason=object_overload_arity")
-          return cache_method_resolution(cache_key, resolved)
+        unless receiver_is_type_literal
+          object_base = "Object##{method_name}"
+          if resolved = resolve_untyped_overload(object_base, effective_arg_count, has_block_call, call_has_named_args)
+            resolved = prefer_callsite_over_arity(resolved, object_base, arg_types, has_block_call)
+            debug_hook("method.resolve", "base=#{base_method_name} resolved=#{resolved} reason=object_overload_arity")
+            return cache_method_resolution(cache_key, resolved)
+          end
         end
         if lookup_function_def_for_call(base_method_name, effective_arg_count, has_block_call, arg_types, false, call_has_named_args)
           debug_hook("method.resolve", "base=#{base_method_name} resolved=#{base_method_name} reason=base_overload")
@@ -18778,7 +18806,7 @@ module Crystal::HIR
         return cache_method_resolution(cache_key, base_method_name)
       end
 
-      if !class_name.empty? && class_name != "Object"
+      if !receiver_is_type_literal && !class_name.empty? && class_name != "Object"
         object_base = "Object##{method_name}"
         if resolved = resolve_untyped_overload(object_base, arg_types.size, has_block_call, call_has_named_args)
           resolved = prefer_callsite_over_arity(resolved, object_base, arg_types, has_block_call)
@@ -39970,6 +39998,43 @@ module Crystal::HIR
           if env_get("DEBUG_SELF_TO_S") && method_name == "to_s"
             recv_name = receiver_id ? get_type_name_from_ref(ctx.type_of(receiver_id)) : "nil"
             STDERR.puts "[SELF_TO_S_LIT] explicit=#{explicit_self_receiver} force=#{force_instance_receiver} lit=#{receiver_is_type_literal} recv_type=#{recv_name}"
+          end
+          # Type literals are compile-time entities in our IR (runtime pointer is nil).
+          # Calling Object#to_s/inspect/name on a type literal would vdispatch on nil and crash.
+          # Preserve explicit class-method overrides; otherwise emit the type name directly.
+          if receiver_is_type_literal &&
+             call_args.empty? &&
+             block_expr.nil? &&
+             block_pass_expr.nil? &&
+             (method_name == "to_s" || method_name == "inspect" || method_name == "name")
+            literal_owner = class_name_str
+            if literal_owner.nil? || literal_owner.empty?
+              if desc = @module.get_type_descriptor(receiver_type)
+                literal_owner = desc.name unless desc.name.empty?
+              end
+            end
+            if (literal_owner.nil? || literal_owner.empty?) && (owner_info = @class_info_by_type_id[receiver_type.id]?)
+              literal_owner = owner_info.name
+            end
+            if literal_owner.nil? || literal_owner.empty?
+              inferred_name = get_type_name_from_ref(receiver_type)
+              literal_owner = inferred_name unless inferred_name.empty?
+            end
+            literal_owner = resolve_type_alias_chain(literal_owner.not_nil!) unless literal_owner.nil? || literal_owner.empty?
+
+            has_class_override = false
+            if literal_owner && !literal_owner.empty?
+              has_class_override = !resolve_class_method_with_inheritance(literal_owner, method_name).nil?
+            end
+
+            unless has_class_override
+              if literal_owner && !literal_owner.empty?
+                lit = Literal.new(ctx.next_id, TypeRef::STRING, literal_owner)
+                ctx.emit(lit)
+                ctx.register_type(lit.id, TypeRef::STRING)
+                return lit.id
+              end
+            end
           end
           # Fallback: when .new is called on a method that returns a type (e.g. backend_class.new),
           # resolve the method body to find the actual class and generate the allocator.
