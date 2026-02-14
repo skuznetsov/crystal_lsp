@@ -3960,7 +3960,7 @@ module Crystal::MIR
         emit_raw "  %f_tid = getelementptr {i32, [8 x i8]}, ptr %f_u, i32 0, i32 0\n"
         emit_raw "  store i32 1, ptr %f_tid\n"
         emit_raw "  %f_pay = getelementptr {i32, [8 x i8]}, ptr %f_u, i32 0, i32 1\n"
-        emit_raw "  store i32 %i, ptr %f_pay\n"
+        emit_raw "  store i32 %i, ptr %f_pay, align 4\n"
         emit_raw "  %f_val = load #{union_type}, ptr %f_u\n"
         emit_raw "  ret #{union_type} %f_val\n"
         emit_raw "ret_nil:\n"
@@ -4013,7 +4013,7 @@ module Crystal::MIR
         emit_raw "  %f_tid = getelementptr {i32, [8 x i8]}, ptr %f_u, i32 0, i32 0\n"
         emit_raw "  store i32 1, ptr %f_tid\n"
         emit_raw "  %f_pay = getelementptr {i32, [8 x i8]}, ptr %f_u, i32 0, i32 1\n"
-        emit_raw "  store i32 %i, ptr %f_pay\n"
+        emit_raw "  store i32 %i, ptr %f_pay, align 4\n"
         emit_raw "  %f_val = load #{union_type}, ptr %f_u\n"
         emit_raw "  ret #{union_type} %f_val\n"
         emit_raw "ret_nil:\n"
@@ -4060,7 +4060,7 @@ module Crystal::MIR
         emit_raw "  %f_tag = getelementptr {i32, [8 x i8]}, ptr %f_u, i32 0, i32 0\n"
         emit_raw "  store i32 1, ptr %f_tag\n"
         emit_raw "  %f_pay = getelementptr {i32, [8 x i8]}, ptr %f_u, i32 0, i32 1\n"
-        emit_raw "  store i32 %i, ptr %f_pay\n"
+        emit_raw "  store i32 %i, ptr %f_pay, align 4\n"
         emit_raw "  %f_val = load #{union_type}, ptr %f_u\n"
         emit_raw "  ret #{union_type} %f_val\n"
         emit_raw "ret_nil:\n"
@@ -4440,7 +4440,7 @@ module Crystal::MIR
         emit_raw "  %rtid = getelementptr #{value_union_name}, ptr %result_ptr, i32 0, i32 0\n"
         emit_raw "  store i32 1, ptr %rtid\n"
         emit_raw "  %rpay = getelementptr #{value_union_name}, ptr %result_ptr, i32 0, i32 1\n"
-        emit_raw "  store #{value_llvm_type} %val, ptr %rpay\n"
+        emit_raw "  store #{value_llvm_type} %val, ptr %rpay, align 4\n"
         emit_raw "  %result_found = load #{value_union_name}, ptr %result_ptr\n"
         emit_raw "  ret #{value_union_name} %result_found\n"
         emit_raw "notfound_bb:\n"
@@ -6078,7 +6078,7 @@ module Crystal::MIR
         slot_name = @cross_block_slots[val_id]?
         next unless slot_name
         emit "%#{extract_name}.pay_ptr = getelementptr i8, ptr %#{slot_name}, i32 4"
-        emit "%#{extract_name} = load #{target_type}, ptr %#{extract_name}.pay_ptr"
+        emit "%#{extract_name} = load #{target_type}, ptr %#{extract_name}.pay_ptr, align 4"
       end
     end
 
@@ -6252,7 +6252,7 @@ module Crystal::MIR
           emit "%#{base}.slot_wrap_tid = getelementptr #{slot_llvm_type}, ptr %#{base}.slot_wrap_ptr, i32 0, i32 0"
           emit "store i32 0, ptr %#{base}.slot_wrap_tid"
           emit "%#{base}.slot_wrap_pay = getelementptr #{slot_llvm_type}, ptr %#{base}.slot_wrap_ptr, i32 0, i32 1"
-          emit "store #{llvm_type} #{name}, ptr %#{base}.slot_wrap_pay"
+          emit "store #{llvm_type} #{name}, ptr %#{base}.slot_wrap_pay, align 4"
           emit "%#{base}.slot_wrap_val = load #{slot_llvm_type}, ptr %#{base}.slot_wrap_ptr"
           store_val = "%#{base}.slot_wrap_val"
           store_type = slot_llvm_type
@@ -6260,7 +6260,7 @@ module Crystal::MIR
           emit "%#{base}.slot_unwrap_ptr = alloca #{llvm_type}, align 8"
           emit "store #{llvm_type} #{name}, ptr %#{base}.slot_unwrap_ptr"
           emit "%#{base}.slot_unwrap_pay = getelementptr #{llvm_type}, ptr %#{base}.slot_unwrap_ptr, i32 0, i32 1"
-          emit "%#{base}.slot_unwrap_val = load #{slot_llvm_type}, ptr %#{base}.slot_unwrap_pay"
+          emit "%#{base}.slot_unwrap_val = load #{slot_llvm_type}, ptr %#{base}.slot_unwrap_pay, align 4"
           store_val = "%#{base}.slot_unwrap_val"
           store_type = slot_llvm_type
         elsif llvm_type.starts_with?('i') && slot_llvm_type.starts_with?('i') && !llvm_type.includes?('.') && !slot_llvm_type.includes?('.')
@@ -8781,7 +8781,7 @@ module Crystal::MIR
           emit "#{tid_val} = select i1 #{cmp_name}, i32 0, i32 1"
           emit "store i32 #{tid_val}, ptr #{tid_ptr}"
           # Store payload (the index value) — only meaningful when non-nil
-          emit "store i32 #{idx_name}, ptr #{payload_ptr}"
+          emit "store i32 #{idx_name}, ptr #{payload_ptr}, align 4"
           # Load as the expected return type
           ret_type = @type_mapper.llvm_type(inst.type)
           if ret_type == "ptr"
@@ -10999,7 +10999,7 @@ module Crystal::MIR
         emit "%#{base_name}.val_tid_ptr = getelementptr #{element_type}, ptr %#{base_name}.val_union_ptr, i32 0, i32 0"
         emit "store i32 0, ptr %#{base_name}.val_tid_ptr"
         emit "%#{base_name}.val_pay_ptr = getelementptr #{element_type}, ptr %#{base_name}.val_union_ptr, i32 0, i32 1"
-        emit "store ptr #{value}, ptr %#{base_name}.val_pay_ptr"
+        emit "store ptr #{value}, ptr %#{base_name}.val_pay_ptr, align 4"
         emit "%#{base_name}.val_union = load #{element_type}, ptr %#{base_name}.val_union_ptr"
         value = "%#{base_name}.val_union"
       elsif actual_value_type.starts_with?('i') && element_type.starts_with?('i') && actual_value_type != element_type
@@ -11144,17 +11144,17 @@ module Crystal::MIR
             # Use branchless select to avoid splitting basic blocks (breaks phi predecessors).
             emit "%#{base_name}.is_nil#{idx} = icmp eq i32 %#{base_name}.tid#{idx}, 0"
             if payload_is_int32
-              emit "%#{base_name}.i32_val#{idx} = load i32, ptr %#{base_name}.payload_ptr#{idx}"
+              emit "%#{base_name}.i32_val#{idx} = load i32, ptr %#{base_name}.payload_ptr#{idx}, align 4"
               emit "%#{base_name}.i32_str#{idx} = call ptr @__crystal_v2_int_to_string(i32 %#{base_name}.i32_val#{idx})"
               emit "%#{base_name}.conv#{idx} = select i1 %#{base_name}.is_nil#{idx}, ptr @.str.empty, ptr %#{base_name}.i32_str#{idx}"
               string_parts << "%#{base_name}.conv#{idx}"
             elsif payload_is_int64
-              emit "%#{base_name}.i64_val#{idx} = load i64, ptr %#{base_name}.payload_ptr#{idx}"
+              emit "%#{base_name}.i64_val#{idx} = load i64, ptr %#{base_name}.payload_ptr#{idx}, align 4"
               emit "%#{base_name}.i64_str#{idx} = call ptr @__crystal_v2_int64_to_string(i64 %#{base_name}.i64_val#{idx})"
               emit "%#{base_name}.conv#{idx} = select i1 %#{base_name}.is_nil#{idx}, ptr @.str.empty, ptr %#{base_name}.i64_str#{idx}"
               string_parts << "%#{base_name}.conv#{idx}"
             elsif payload_is_bool
-              emit "%#{base_name}.bool_val#{idx} = load i8, ptr %#{base_name}.payload_ptr#{idx}"
+              emit "%#{base_name}.bool_val#{idx} = load i8, ptr %#{base_name}.payload_ptr#{idx}, align 4"
               emit "%#{base_name}.bool_i1#{idx} = trunc i8 %#{base_name}.bool_val#{idx} to i1"
               emit "%#{base_name}.bool_str#{idx} = call ptr @__crystal_v2_bool_to_string(i1 %#{base_name}.bool_i1#{idx})"
               emit "%#{base_name}.conv#{idx} = select i1 %#{base_name}.is_nil#{idx}, ptr @.str.empty, ptr %#{base_name}.bool_str#{idx}"
