@@ -93,6 +93,12 @@ about syntax or types and should match what the original compiler would report.
 - [x] Replace method-name string `split` usage with zero-copy helpers (`parse_method_name`, `strip_type_suffix`) in HIR lowering hot paths (ast_to_hir).
 - [x] Audit remaining `split("$")`/`split("#")` in other files (if any) to ensure method-name parsing uses helpers.
 - [ ] Investigate `spec/hir/return_type_inference_spec.cr` timeout: resolved early arena scans; samples show hot path in HIR lowering (`lower_call → lower_path → lower_type_literal_from_name → generate_allocator → lower_method`), with heavy `type_ref_for_name/monomorphize_generic_class` (see `/tmp/rt_infer10.sample`, `/tmp/rt_infer11.sample`, `/tmp/rt_infer12.sample`, `/tmp/rt_infer13.sample`). Histogram (`DEBUG_LOWER_HISTO=1`) still dominated by Identifier/Assign/Call/MemberAccess/If. Added: local type inference cache (scope + nil cache), zero‑copy name compares, generic split cache, method resolution key build w/out map+join, split‑free `register_type_cache_key`, callsite method resolution cache (per current method), and normalized generic spacing in `type_ref_for_name`. Spec still >30s. Next: reduce `type_ref_for_name` allocations further (union/generic normalization), add a fast path for type literal lowering, and re‑profile.
+  - Update (2026-02-14): rejected two micro-cache experiments in `ast_to_hir` hot path (no robust win):
+    - `ensure_monomorphized_type` epoch cache: near-noise delta across 2x A/B runs (`process_pending` ~`0.38%` faster, `emit_tracked_sigs` ~`0.14%` faster); not enough to justify extra state/invalidations.
+    - `strip_generic_receiver_from_base_name` cache variants:
+      - content-hash cache regressed hard (`process_pending` +`~2.9%`, `emit_tracked_sigs` +`~10.7%` in A/B run);
+      - direct-mapped object-id cache was mixed (`process_pending` ~`0.9%` faster, `emit_tracked_sigs` ~`1.7%` slower; net ~neutral).
+    - Decision: keep baseline implementation; focus next on higher-leverage hot spots (`type_ref_for_name` normalization/allocation pressure and allocator generation path).
   - Update (2026-02-14): optimized lazy RTA type discovery in HIR lowering:
     - replaced union variant parsing via `split(" | ")` with zero-copy scanner (`each_union_variant` / `mark_union_variants_live`);
     - added incremental type-descriptor scan (`@rta_type_scan_start_idx`) instead of rescanning all `@module.types` on every pending-lower iteration.
