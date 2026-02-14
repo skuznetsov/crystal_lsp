@@ -19,6 +19,19 @@
 - Float64: arithmetic, ** on literals
 
 ## Recently completed
+- **HIR generic-owner cache (type-param substitution hot path)** (2026-02-14) —
+  added generation-scoped cache for `generic_owner_info(owner)` keyed by owner
+  and current `@subst_cache_gen`, and avoided mutating cached maps by duping
+  the map when materializing `extra_type_params` in function lowering.
+  Validation:
+  - build: `crystal build src/crystal_v2.cr -o /tmp/crystal_v2_dbg_perf_tpmap --error-trace` => `EXIT 0`
+  - regressions: `regression_tests/run_all.sh /tmp/crystal_v2_dbg_perf_tpmap` => `40 passed, 0 failed`
+  - sample delta (`spec/hir/return_type_inference_spec.cr`, 10s):
+    - `generic_owner_info<`: `177 -> 88`
+    - `substitute_type_params_in_type_name<`: `327 -> 263`
+    - `include_type_param_map<`: `39 -> 29`
+    - `split_generic_type_args<`: `49 -> 32`
+    - files: `/tmp/rt_infer_perf2.sample` vs `/tmp/rt_infer_perf3.sample`
 - **Regression lock for former top codegen repros** (2026-02-14) — re-validated
   and locked three historical bugs (`select+map` corruption, `Float#**` variable
   path, `String#upcase` capacity) with explicit stress tests.

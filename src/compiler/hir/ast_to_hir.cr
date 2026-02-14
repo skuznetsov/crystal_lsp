@@ -299,6 +299,7 @@ module Crystal::HIR
   class AstToHir
     alias AstNode = CrystalV2::Compiler::Frontend::Node
     alias ExprId = CrystalV2::Compiler::Frontend::ExprId
+    alias GenericOwnerInfo = NamedTuple(base: String, owner: String, args: Array(String), map: Hash(String, String))
 
     private struct CallSignature
       getter base_name : String
@@ -1118,6 +1119,9 @@ module Crystal::HIR
     @subst_cache_class : String? = nil
     @subst_cache_gen : UInt64 = 0
     @subst_cache_last_gen : UInt64 = 0
+    # Cache generic owner parsing/substitution for the current substitution generation.
+    @generic_owner_info_cache : Hash(String, GenericOwnerInfo?) = {} of String => GenericOwnerInfo?
+    @generic_owner_info_cache_gen : UInt64 = 0_u64
     # Cache for split_generic_type_args (pure function of input string).
     @split_generic_args_cache : Hash(String, Array(String)) = {} of String => Array(String)
     # Recursion guard for unresolved_generic_type_arg? to avoid cyclic alias/union loops.
@@ -36395,9 +36399,20 @@ module Crystal::HIR
       nil
     end
 
-    private def generic_owner_info(owner : String) : NamedTuple(base: String, owner: String, args: Array(String), map: Hash(String, String))?
+    private def generic_owner_info(owner : String) : GenericOwnerInfo?
+      if @generic_owner_info_cache_gen != @subst_cache_gen
+        @generic_owner_info_cache.clear
+        @generic_owner_info_cache_gen = @subst_cache_gen
+      end
+      if @generic_owner_info_cache.has_key?(owner)
+        return @generic_owner_info_cache[owner]
+      end
+
       info = split_generic_base_and_args(owner)
-      return nil unless info
+      unless info
+        @generic_owner_info_cache[owner] = nil
+        return nil
+      end
 
       base = info[:base]
       raw_args = split_generic_type_args(info[:args]).map do |arg|
@@ -36418,8 +36433,10 @@ module Crystal::HIR
           end
         end
       end
-      return nil unless param_names
-      return nil unless raw_args.size == param_names.size
+      unless param_names && raw_args.size == param_names.size
+        @generic_owner_info_cache[owner] = nil
+        return nil
+      end
 
       substituted_args = raw_args.map { |arg| @type_param_map[arg]? || arg }
       map = {} of String => String
@@ -36428,7 +36445,9 @@ module Crystal::HIR
       end
 
       resolved_owner = "#{base}(#{substituted_args.join(", ")})"
-      {base: base, owner: resolved_owner, args: substituted_args, map: map}
+      result = {base: base, owner: resolved_owner, args: substituted_args, map: map}
+      @generic_owner_info_cache[owner] = result
+      result
     end
 
     private def find_module_def_recursive(
@@ -38075,7 +38094,7 @@ module Crystal::HIR
         method = target_parts.method
         if info = generic_owner_info(owner)
           resolved_owner = info[:owner]
-          extra_type_params = info[:map]
+          extra_type_params = info[:map].dup
           if resolved_owner != owner
             resolved_base = "#{resolved_owner}#{sep}#{method}"
             if suffix = target_parts.suffix
