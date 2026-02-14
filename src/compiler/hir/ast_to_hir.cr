@@ -1880,6 +1880,8 @@ module Crystal::HIR
     @type_cache : Hash(String, TypeRef)
     @type_cache_keys_by_component : Hash(String, Set(String))
     @type_cache_keys_by_generic_prefix : Hash(String, Set(String))
+    @array_type_for_element_cache : Hash(TypeRef, TypeRef)
+    @array_type_for_element_nil_cache : Set(TypeRef)
     @type_name_normalize_cache : Hash(String, String)
     # Cache for normalize_declared_type_name keyed on (type_name, context, subst_cache_gen).
     @normalize_decl_cache : Hash({String, String?, UInt64}, String)
@@ -2175,6 +2177,8 @@ module Crystal::HIR
       @type_cache = {} of String => TypeRef
       @type_cache_keys_by_component = {} of String => Set(String)
       @type_cache_keys_by_generic_prefix = {} of String => Set(String)
+      @array_type_for_element_cache = {} of TypeRef => TypeRef
+      @array_type_for_element_nil_cache = Set(TypeRef).new
       @type_name_normalize_cache = Hash(String, String).new(initial_capacity: 4096)
       @normalize_decl_cache = Hash({String, String?, UInt64}, String).new(initial_capacity: 4096)
       @union_in_progress = Set(String).new
@@ -46219,9 +46223,7 @@ module Crystal::HIR
       arr_lit = ArrayLiteral.new(ctx.next_id, result_element_type, transformed_values)
       ctx.emit(arr_lit)
       # Register proper Array type so array_intrinsic_receiver? recognizes it for each/map/select
-      elem_type_name = get_type_name_from_ref(result_element_type)
-      if elem_type_name != "Unknown" && elem_type_name != "Void"
-        array_type = type_ref_for_name("Array(#{elem_type_name})")
+      if array_type = array_type_for_element_type(result_element_type)
         ctx.register_type(arr_lit.id, array_type)
       else
         ctx.register_type(arr_lit.id, TypeRef::POINTER)
@@ -46313,9 +46315,7 @@ module Crystal::HIR
       # Update array type registration based on block return type (like intrinsic version)
       if result_value
         result_element_type = ctx.type_of(result_value)
-        elem_type_name = get_type_name_from_ref(result_element_type)
-        if elem_type_name != "Unknown" && elem_type_name != "Void"
-          array_type = type_ref_for_name("Array(#{elem_type_name})")
+        if array_type = array_type_for_element_type(result_element_type)
           ctx.register_type(new_array.id, array_type)
         end
       end
@@ -46367,9 +46367,7 @@ module Crystal::HIR
       arr_lit = ArrayLiteral.new(ctx.next_id, source_element_type, selected_values)
       ctx.emit(arr_lit)
       # Register proper Array type so array_intrinsic_receiver? recognizes it for each/map/select
-      elem_type_name = get_type_name_from_ref(source_element_type)
-      if elem_type_name != "Unknown" && elem_type_name != "Void"
-        array_type = type_ref_for_name("Array(#{elem_type_name})")
+      if array_type = array_type_for_element_type(source_element_type)
         ctx.register_type(arr_lit.id, array_type)
       else
         ctx.register_type(arr_lit.id, TypeRef::POINTER)
@@ -52321,6 +52319,24 @@ module Crystal::HIR
       nil
     end
 
+    private def array_type_for_element_type(element_type : TypeRef) : TypeRef?
+      return nil if element_type == TypeRef::VOID
+      return nil if @array_type_for_element_nil_cache.includes?(element_type)
+      if cached = @array_type_for_element_cache[element_type]?
+        return cached
+      end
+
+      element_type_name = get_type_name_from_ref(element_type)
+      if element_type_name == "Unknown" || element_type_name == "Void"
+        @array_type_for_element_nil_cache.add(element_type)
+        return nil
+      end
+
+      array_type = type_ref_for_name("Array(#{element_type_name})")
+      @array_type_for_element_cache[element_type] = array_type
+      array_type
+    end
+
     private def lower_array_literal(ctx : LoweringContext, node : CrystalV2::Compiler::Frontend::ArrayLiteralNode) : ValueId
       element_ids = node.elements.map { |e| lower_expr(ctx, e) }
 
@@ -52358,9 +52374,7 @@ module Crystal::HIR
       arr = ArrayLiteral.new(ctx.next_id, element_type, element_ids)
       arr.lifetime = LifetimeTag::StackLocal # Default to stack until escape analysis
       ctx.emit(arr)
-      element_type_name ||= get_type_name_from_ref(element_type)
-      if element_type_name != "Unknown" && element_type_name != "Void"
-        array_type = type_ref_for_name("Array(#{element_type_name})")
+      if array_type = array_type_for_element_type(element_type)
         ctx.register_type(arr.id, array_type)
       else
         # Fallback when element type is unresolved.

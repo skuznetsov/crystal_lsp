@@ -213,6 +213,17 @@ about syntax or types and should match what the original compiler would report.
       - `crystal build --release src/crystal_v2.cr -o /tmp/crystal_v2_blockdepth_release`;
       - `/tmp/crystal_v2_blockdepth_release regression_tests/basic_sanity.cr` => `EXIT:0`;
       - `./regression_tests/run_all.sh /tmp/crystal_v2_blockdepth_release` => `35 passed, 0 failed`.
+  - Update (2026-02-14): reduced repeated `Array(T)` type materialization in HIR array lowering.
+    - added `@array_type_for_element_cache` and nil-cache (`@array_type_for_element_nil_cache`) plus helper `array_type_for_element_type`;
+    - switched hot array paths (`lower_array_literal`, `lower_array_map_intrinsic`, `lower_array_map_dynamic`, `lower_array_select_intrinsic_with_ast`) from repeated `type_ref_for_name("Array(...)")` calls to cached lookup;
+    - intent: reduce repeated `get_type_name_from_ref + type_ref_for_name` churn on array intrinsic/literal-heavy code paths;
+    - verification:
+      - `crystal build src/crystal_v2.cr -o /tmp/crystal_v2_arraycache_dbg --error-trace` => `EXIT:0`;
+      - `crystal build src/crystal_v2.cr -o /tmp/crystal_v2_arraycache_rel --release` => `EXIT:0`;
+      - `./regression_tests/run_all.sh /tmp/crystal_v2_arraycache_dbg` => `35 passed, 0 failed`;
+      - release smoke: `basic_sanity/hash_compaction/hash_stress` compile+run => `EXIT:0`;
+      - `examples/bench_fib42.cr` compile+run with release binary + `scripts/run_safe.sh` => `EXIT:0`;
+      - `timeout 120 /tmp/crystal_v2_arraycache_{dbg,rel} spec spec/hir/return_type_inference_spec.cr` => still `EXIT:124` (no regression, no fix yet).
   - Update (2026-02-03): added guarded recursion suppression in `infer_type_from_expr` (per‑cache version) and param‑type lookup using current def’s signature (fall back to owner/method lookup when no local). Skip local inference for self‑referential assignments. Guard logs now include file/span under `DEBUG_INFER_GUARD=1`. `spec/hir/return_type_inference_spec.cr` passes (13 examples, ~10s). Guard hotspots shifted to `Crystal::Hasher#result` and Enumerable helpers (`zip?`, `in_groups_of`, `chunks`). Mini compile still >60s on `/tmp/mini_try_each.cr`; next: inspect hasher result recursion and enumerate block‑path inference.
   - Update (2026-02-03): `timeout 60 ./bin/crystal_v2 spec spec/hir/return_type_inference_spec.cr` still times out. Needs re‑profile with latest block‑return inference changes.
   - Update (2026-02-03): sampled `spec/hir/return_type_inference_spec.cr` (see `/tmp/rt_infer_sample.txt`). Hot path is still in `lower_function_if_needed_impl → lower_method → lower_expr → lower_call → lookup_function_def_for_call`. Histogram (`/tmp/rt_infer_histo.log`) dominated by Identifier/Call/Binary/MemberAccess. Next: reduce `lookup_function_def_for_call` churn (cache/memoize by callsite), and cut repeated callsite overload resolution.
