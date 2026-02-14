@@ -1386,6 +1386,31 @@ module Crystal::MIR
       false
     end
 
+    @[AlwaysInline]
+    private def qualified_method_name?(name : String) : Bool
+      name.includes?('#') || name.includes?('.') || name.includes?("::")
+    end
+
+    # Conservative fuzzy match for unresolved Crystal extern calls:
+    # only allow unqualified method names that have an explicit "$..." suffix.
+    # This avoids legacy suffix collisions while still covering cases such as
+    # "index$UInt8" -> "String#index$UInt8".
+    @[AlwaysInline]
+    private def extern_fuzzy_match_eligible?(extern_name : String, is_operator : Bool, is_c_lib_function : Bool) : Bool
+      return false if is_operator || is_c_lib_function
+      return false if qualified_method_name?(extern_name)
+      suffix = suffix_after_dollar(extern_name)
+      !suffix.nil? && !suffix.empty?
+    end
+
+    @[AlwaysInline]
+    private def extern_fuzzy_matches_candidate?(extern_name : String, extern_method_core : String, extern_suffix : String, candidate_name : String) : Bool
+      return false unless qualified_method_name?(candidate_name)
+      return false unless method_core_from_name(candidate_name) == extern_method_core
+      candidate_suffix = suffix_after_dollar(candidate_name)
+      candidate_suffix == extern_suffix
+    end
+
 
     private def emit_string_constants
       emit_raw "\n; String constants\n"
@@ -5113,17 +5138,16 @@ module Crystal::MIR
               is_operator = operator_method?(extern_name)
             end
             is_c_lib_function = !crystalish_extern_name?(extern_name)
-            # Search for exact match OR suffix match (for non-arithmetic, non-C-lib operators)
+            extern_method_core = method_core_from_name(extern_name)
+            extern_suffix = suffix_after_dollar(extern_name)
+            fuzzy_match_allowed = extern_suffix && extern_fuzzy_match_eligible?(extern_name, is_operator, is_c_lib_function)
+
+            # Search for exact match OR constrained fuzzy match.
             matching_func = @module.functions.find do |f|
               mangled = @type_mapper.mangle_name(f.name)
-              if is_operator || is_c_lib_function
-                # Only exact match for arithmetic operators and C lib functions
-                mangled == mangled_extern_name
-              else
-                # Exact match OR suffix match (e.g., index$UInt8 matches String#index$UInt8)
-                mangled == mangled_extern_name ||
-                mangled.ends_with?(mangled_extern_name)
-              end
+              next true if mangled == mangled_extern_name || f.name == extern_name
+              next false unless fuzzy_match_allowed
+              extern_fuzzy_matches_candidate?(extern_name, extern_method_core, extern_suffix.not_nil!, f.name)
             end
             if matching_func
               # Use the actual function return type
@@ -9843,15 +9867,27 @@ module Crystal::MIR
       end
 
       # If the mangled name doesn't match any defined function, try to find a match with namespace prefix
-      # Search in MIR module's functions - but only exact matches or proper namespace matches
-      # Note: Suffix matching is disabled as it causes false positives (e.g., matching initialize to unrelated methods)
+      # Search in MIR module's functions using strict matching:
+      # - exact name/mangled name
+      # - constrained fuzzy match for unresolved unqualified Crystal method names with explicit suffix
+      extern_name = inst.extern_name
+      receiver_and_method = extract_receiver_and_method(extern_name)
+      is_operator = if receiver_and_method
+                      _receiver_name, method_core = receiver_and_method
+                      operator_method?(method_core)
+                    else
+                      operator_method?(extern_name)
+                    end
+      is_c_lib_function = !crystalish_extern_name?(extern_name)
+      extern_method_core = method_core_from_name(extern_name)
+      extern_suffix = suffix_after_dollar(extern_name)
+      fuzzy_match_allowed = extern_suffix && extern_fuzzy_match_eligible?(extern_name, is_operator, is_c_lib_function)
+
       matching_func = @module.functions.find do |f|
         mangled = @type_mapper.mangle_name(f.name)
-        # Only match if:
-        # 1. Exact match, or
-        # 2. Function name is namespace-prefixed version: "Namespace__method" == "method"
-        mangled == mangled_extern_name ||
-        (mangled_extern_name.includes?('#') || mangled_extern_name.includes?('.')) && mangled == mangled_extern_name
+        next true if mangled == mangled_extern_name || f.name == extern_name
+        next false unless fuzzy_match_allowed
+        extern_fuzzy_matches_candidate?(extern_name, extern_method_core, extern_suffix.not_nil!, f.name)
       end
       if matching_func
         mangled_extern_name = @type_mapper.mangle_name(matching_func.name)
@@ -9859,7 +9895,6 @@ module Crystal::MIR
 
       # Type suffix heuristics - apply BEFORE void check since MIR might have wrong ptr type
       # Methods with type suffix in HIR (e.g., "unsafe_shr$UInt64").
-      extern_name = inst.extern_name
       if suffix = suffix_after_dollar(extern_name)
         if !suffix.includes?('_')
           case suffix
