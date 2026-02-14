@@ -2001,6 +2001,9 @@ module Crystal::HIR
 
     # Track currently inlined yield-functions to avoid infinite inline recursion on stdlib code.
     @inline_yield_name_stack : Array(String) = [] of String
+    # Independent depth guard for inline_yield_function.
+    # Unlike @inline_yield_name_stack, this cannot be bypassed by temporary stack swaps.
+    @inline_yield_function_depth : Int32 = 0
     # Track when we are lowering an inlined block body to keep non-local returns intact.
     @inline_yield_block_body_depth : Int32 = 0
     # Track when we are lowering proc literal bodies (returns should not escape).
@@ -36642,6 +36645,7 @@ module Crystal::HIR
       return false if @suppress_force_lower_return_type_depth > 0
       # During inline-yield/proc lowering, force-lowering return types can recurse
       # through nested call chains and blow the stack in release builds.
+      return false if @inline_yield_function_depth > 0
       return false if @inline_yield_block_body_depth > 0
       return false if @inline_yield_proc_depth > 0
       return false unless @inline_yield_name_stack.empty?
@@ -48393,6 +48397,7 @@ module Crystal::HIR
       @inline_caller_locals_stack << caller_locals
       preserved_locals = {} of String => ValueId
       ctx.restore_locals(preserved_locals)
+      @inline_yield_function_depth += 1
 
       begin
         pushed_name = false
@@ -48660,6 +48665,7 @@ module Crystal::HIR
         end
         @arena = caller_arena
         @inline_arenas = old_inline_arenas
+        @inline_yield_function_depth -= 1
         ctx.pop_scope
       end
     end

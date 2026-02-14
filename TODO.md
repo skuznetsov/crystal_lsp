@@ -104,6 +104,17 @@ about syntax or types and should match what the original compiler would report.
       - `crystal build --release src/crystal_v2.cr -o /tmp/crystal_v2_rel_guard2 --error-trace`;
       - release `bootstrap_array` no longer hits stack overflow (`/tmp/bootstrap_array_rel_guard2.stderr`), now fails later on existing LLVM issue: `undefined value '@Crystal$CCSystem$CCFile$Dopen_flag$$String'`.
       - A/B heavy compile timing (`spec/hir/return_type_inference_spec.cr`): old `./bin/crystal_v2_release` = `24.42s`, new `/tmp/crystal_v2_rel_guard2` = `20.51s` (both still fail later on known issues).
+  - Update (2026-02-14): fixed remaining release stack-overflow recurrence in inline-yield lowering.
+    - root cause: `force_lower_function_for_return_type` guard relied on `@inline_yield_name_stack`, but some lowering branches temporarily swap/clear that stack (e.g., macro/body lowering), allowing force-lower re-entry while still inside `inline_yield_function`.
+    - fix (`src/compiler/hir/ast_to_hir.cr`):
+      - added independent `@inline_yield_function_depth` counter (increment/decrement around full `inline_yield_function` body);
+      - `force_lower_function_for_return_type` now early-returns when `@inline_yield_function_depth > 0`.
+    - validation:
+      - `crystal build --release src/crystal_v2.cr -o /tmp/crystal_v2_rel_inline_guard --error-trace` => `EXIT 0`;
+      - `CRYSTAL_V2_PIPELINE_CACHE=0 /tmp/crystal_v2_rel_inline_guard examples/bootstrap_array.cr -o /tmp/bootstrap_array_rel_inline_guard` => `EXIT 0` (no stack overflow);
+      - `scripts/run_safe.sh /tmp/bootstrap_array_rel_inline_guard 10 768` => `EXIT 0`;
+      - `timeout 120 crystal spec spec/hir/return_type_inference_spec.cr` => `13 examples, 0 failures`;
+      - `./regression_tests/run_all.sh /tmp/crystal_v2_dbg_inline_guard` => `35 passed, 0 failed`.
   - Update (2026-02-14): fixed release-time LLVM undefined-symbol chain in backend runtime helpers (legacy hardcoded mangled calls).
     - changes (`src/compiler/mir/llvm_backend.cr`):
       - replaced hardcoded `Crystal::System::File.open_flag` runtime call with local helper `__crystal_v2_mode_to_open_flags`;
