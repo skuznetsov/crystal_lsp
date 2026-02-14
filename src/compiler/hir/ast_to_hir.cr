@@ -5635,7 +5635,19 @@ module Crystal::HIR
     end
 
     private def with_type_param_map(extra : Hash(String, String), &)
+      return yield if extra.empty?
+
       old_map = @type_param_map
+      changed = false
+      extra.each do |key, value|
+        old_value = old_map[key]?
+        if old_value != value
+          changed = true
+          break
+        end
+      end
+      return yield unless changed
+
       @type_param_map = old_map.merge(extra)
       @subst_cache_gen &+= 1
       begin
