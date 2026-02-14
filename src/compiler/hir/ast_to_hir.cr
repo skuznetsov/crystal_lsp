@@ -19094,7 +19094,6 @@ module Crystal::HIR
     end
 
     private def function_param_stats(name : String, def_node : CrystalV2::Compiler::Frontend::DefNode) : DefParamStats
-      rebuild_function_def_overloads if @function_defs_cache_size != @function_defs.size
       if stats = @function_param_stats[name]?
         return stats
       end

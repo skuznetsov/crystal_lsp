@@ -103,6 +103,20 @@ about syntax or types and should match what the original compiler would report.
     - sample signal (`sample` 10s self-host window):
       - `String#split`: baseline `/tmp/v2_self_10s.sample` = `18`, after change `/tmp/v2_self_10s_ctx_split.sample` = `9`, `/tmp/v2_self_10s_ctx_split2.sample` = `5`;
       - `AstToHir#resolve_path_string_in_context`: `57 -> 42/44`.
+  - Update (2026-02-14): removed redundant global overload-index rebuild from `function_param_stats` hot path.
+    - change: `function_param_stats(name, def_node)` now computes/caches stats from `def_node` directly and no longer calls `rebuild_function_def_overloads` when `@function_defs` grows.
+    - why: `function_param_stats` is called frequently during candidate scoring (`lookup_function_def_for_call`), while overload-index rebuild is global and expensive; stats extraction itself does not depend on full overload index freshness.
+    - validation:
+      - `crystal build src/crystal_v2.cr -o /tmp/crystal_v2_norebuild_stats_dbg --error-trace` => `EXIT 0`;
+      - `./regression_tests/run_all.sh /tmp/crystal_v2_norebuild_stats_dbg` => `35 passed, 0 failed`;
+      - `/tmp/crystal_v2_norebuild_stats_dbg examples/bootstrap_array.cr -o /tmp/bootstrap_array_norebuild_stats_dbg && ./scripts/run_safe.sh /tmp/bootstrap_array_norebuild_stats_dbg 10 768` => `EXIT 0`.
+    - measured impact (same 90s timeout workload, `spec/hir/return_type_inference_spec.cr`):
+      - `process_pending`: `28544.2ms -> 26888.8ms` (~`-5.8%`);
+      - `emit_tracked_sigs`: `15220.0ms -> 14161.6ms` (~`-7.0%`);
+      - `lower_missing`: `6159.4ms -> 5893.2ms` (~`-4.3%`);
+      - `sample` 10s (`/tmp/rt_spec_10s_ctx_split.sample` -> `/tmp/rt_spec_10s_norebuild.sample`):
+        - `AstToHir#rebuild_function_def_overloads`: `242 -> 199`;
+        - `AstToHir#type_ref_for_name`: `1318 -> 1223`.
   - Update (2026-02-14): rejected two micro-cache experiments in `ast_to_hir` hot path (no robust win):
     - `ensure_monomorphized_type` epoch cache: near-noise delta across 2x A/B runs (`process_pending` ~`0.38%` faster, `emit_tracked_sigs` ~`0.14%` faster); not enough to justify extra state/invalidations.
     - `strip_generic_receiver_from_base_name` cache variants:
