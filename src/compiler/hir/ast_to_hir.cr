@@ -1978,6 +1978,13 @@ module Crystal::HIR
     # Stores: {owner_name, const_name, value_expr_id, arena}
     @deferred_constant_inits : Array(Tuple(String, String, CrystalV2::Compiler::Frontend::ExprId, CrystalV2::Compiler::Frontend::ArenaLike))
 
+    # Lazy classvar init: maps "Owner::cvar_name" → {expr_id, arena, owner_class}
+    @classvar_lazy_init_info = {} of String => Tuple(CrystalV2::Compiler::Frontend::ExprId, CrystalV2::Compiler::Frontend::ArenaLike, String)
+    # Set of init function names already created (avoid duplicates)
+    @classvar_init_functions_created = Set(String).new
+    # Whether lazy classvar init is active (disabled by CRYSTAL_V2_EAGER_CLASSVAR_INIT=1)
+    @lazy_classvar_init_active : Bool = !ENV.has_key?("CRYSTAL_V2_EAGER_CLASSVAR_INIT")
+
     def initialize(
       @arena,
       module_name : String = "main",
@@ -22301,6 +22308,7 @@ module Crystal::HIR
     private def emit_constant_get(ctx : LoweringContext, full_name : String) : ValueId
       owner, const_name = constant_storage_info(full_name)
       const_type = @constant_types[full_name]? || TypeRef::VOID
+
       get = ClassVarGet.new(ctx.next_id, const_type, owner, const_name)
       ctx.emit(get)
       ctx.register_type(get.id, const_type)
@@ -26606,84 +26614,108 @@ module Crystal::HIR
       @current_class = nil
       @current_namespace_override = nil
 
-      # Process deferred classvar initializations FIRST, before any other code.
-      # This ensures classvars like @@skip are initialized before being used.
-      if env_has?("DEBUG_DEFERRED_CLASSVAR")
-        STDERR.puts "[DEFERRED_CLASSVAR] Processing #{@deferred_classvar_inits.size} deferred inits"
-      end
       old_arena = @arena
-      @deferred_classvar_inits.each do |(init_expr_id, init_arena, owner_class)|
-        @arena = init_arena
-        old_class = @current_class
-        @current_class = owner_class
-        begin
-          node = @arena[init_expr_id]
-          case node
-          when CrystalV2::Compiler::Frontend::ClassVarDeclNode
-            # Generate: @@varname = initial_value
-            if val_id = node.value
-              # Skip `uninitialized` classvars — they're zero-initialized by default
-              # and may be explicitly initialized later (e.g. in Thread.init/Fiber.init).
-              # Generating a deferred init for these would overwrite the proper value.
-              val_node = @arena[val_id]
-              next if val_node.is_a?(CrystalV2::Compiler::Frontend::UninitializedNode)
-
-              raw_name = String.new(node.name)
-              cvar_name = raw_name.lstrip('@')
-              value_id = lower_expr(ctx, val_id)
-              value_type = ctx.type_of(value_id)
-              # Emit ClassVarSet to store the initialized value
-              class_var_set = ClassVarSet.new(ctx.next_id, value_type, owner_class, cvar_name, value_id)
-              ctx.emit(class_var_set)
-            end
-          when CrystalV2::Compiler::Frontend::AssignNode
-            # Skip `uninitialized` classvars — they're zero-initialized by default
-            # and may be explicitly initialized later (e.g. in Thread.init/Fiber.init).
-            rhs_node = @arena[node.value]
-            next if rhs_node.is_a?(CrystalV2::Compiler::Frontend::UninitializedNode)
-
-            # Regular assignment - just lower it
-            if env_has?("DEBUG_DEFERRED_CLASSVAR")
-              target = @arena[node.target]
-              target_name = target.is_a?(CrystalV2::Compiler::Frontend::ClassVarNode) ? String.new(target.name) : "?"
-              STDERR.puts "[DEFERRED_CLASSVAR] Lowering AssignNode: class=#{owner_class} target=#{target_name}"
-            end
-            lower_expr(ctx, init_expr_id)
-          when CrystalV2::Compiler::Frontend::ConstantNode
-            # Constant definition (e.g. HEADER_SIZE = offsetof(String, @c))
-            lower_expr(ctx, init_expr_id)
+      if @lazy_classvar_init_active
+        # LAZY MODE: Record classvar inits for on-demand initialization.
+        # Init functions will be created when classvars are first accessed (ClassVarGet).
+        # NOTE: Constants are kept EAGER because they may depend on argc/argv (e.g., ARGV)
+        # which are only available as __crystal_main parameters.
+        @deferred_classvar_inits.each do |(init_expr_id, init_arena, owner_class)|
+          cvar_name = extract_deferred_classvar_name(init_arena, init_expr_id)
+          next unless cvar_name
+          key = "#{owner_class}::#{cvar_name}"
+          @classvar_lazy_init_info[key] = {init_expr_id, init_arena, owner_class}
+          if env_has?("DEBUG_DEFERRED_CLASSVAR")
+            STDERR.puts "[DEFERRED_CLASSVAR] LAZY: Recorded #{key}"
           end
-        ensure
-          @current_class = old_class
         end
-      end
-      @arena = old_arena
-      @deferred_classvar_inits.clear
+        @deferred_classvar_inits.clear
 
-      # Process deferred constant initializations (string literals, etc.)
-      if env_has?("DEBUG_DEFERRED_CONST")
-        STDERR.puts "[DEFERRED_CONST] Processing #{@deferred_constant_inits.size} deferred constant inits"
+        # Constants stay EAGER — process them now (same as eager mode)
         @deferred_constant_inits.each do |(owner, const_name, value_id, init_arena)|
-          STDERR.puts "[DEFERRED_CONST]   #{owner}::#{const_name}"
+          @arena = init_arena
+          old_class = @current_class
+          @current_class = owner == "$" ? nil : owner
+          begin
+            value = lower_expr(ctx, value_id)
+            value_type = ctx.type_of(value)
+            full_name = constant_full_name(owner == "$" ? nil : owner, const_name)
+            storage_owner, storage_name = constant_storage_info(full_name)
+            set = ClassVarSet.new(ctx.next_id, value_type, storage_owner, storage_name, value)
+            ctx.emit(set)
+          ensure
+            @current_class = old_class
+          end
         end
-      end
-      @deferred_constant_inits.each do |(owner, const_name, value_id, init_arena)|
-        @arena = init_arena
-        old_class = @current_class
-        @current_class = owner == "$" ? nil : owner
-        begin
-          value = lower_expr(ctx, value_id)
-          value_type = ctx.type_of(value)
-          full_name = constant_full_name(owner == "$" ? nil : owner, const_name)
-          storage_owner, storage_name = constant_storage_info(full_name)
-          set = ClassVarSet.new(ctx.next_id, value_type, storage_owner, storage_name, value)
-          ctx.emit(set)
-        ensure
-          @current_class = old_class
+        @arena = old_arena
+        @deferred_constant_inits.clear
+      else
+        # EAGER MODE: Process all deferred classvar/constant inits at startup (original behavior).
+        if env_has?("DEBUG_DEFERRED_CLASSVAR")
+          STDERR.puts "[DEFERRED_CLASSVAR] EAGER: Processing #{@deferred_classvar_inits.size} deferred inits"
         end
+        @deferred_classvar_inits.each do |(init_expr_id, init_arena, owner_class)|
+          @arena = init_arena
+          old_class = @current_class
+          @current_class = owner_class
+          begin
+            node = @arena[init_expr_id]
+            case node
+            when CrystalV2::Compiler::Frontend::ClassVarDeclNode
+              if val_id = node.value
+                val_node = @arena[val_id]
+                next if val_node.is_a?(CrystalV2::Compiler::Frontend::UninitializedNode)
+                raw_name = String.new(node.name)
+                cvar_name = raw_name.lstrip('@')
+                value_id = lower_expr(ctx, val_id)
+                value_type = ctx.type_of(value_id)
+                class_var_set = ClassVarSet.new(ctx.next_id, value_type, owner_class, cvar_name, value_id)
+                ctx.emit(class_var_set)
+              end
+            when CrystalV2::Compiler::Frontend::AssignNode
+              rhs_node = @arena[node.value]
+              next if rhs_node.is_a?(CrystalV2::Compiler::Frontend::UninitializedNode)
+              if env_has?("DEBUG_DEFERRED_CLASSVAR")
+                target = @arena[node.target]
+                target_name = target.is_a?(CrystalV2::Compiler::Frontend::ClassVarNode) ? String.new(target.name) : "?"
+                STDERR.puts "[DEFERRED_CLASSVAR] Lowering AssignNode: class=#{owner_class} target=#{target_name}"
+              end
+              lower_expr(ctx, init_expr_id)
+            when CrystalV2::Compiler::Frontend::ConstantNode
+              lower_expr(ctx, init_expr_id)
+            end
+          ensure
+            @current_class = old_class
+          end
+        end
+        @arena = old_arena
+        @deferred_classvar_inits.clear
+
+        # Process deferred constant initializations (string literals, etc.)
+        if env_has?("DEBUG_DEFERRED_CONST")
+          STDERR.puts "[DEFERRED_CONST] Processing #{@deferred_constant_inits.size} deferred constant inits"
+          @deferred_constant_inits.each do |(owner, const_name, value_id, init_arena)|
+            STDERR.puts "[DEFERRED_CONST]   #{owner}::#{const_name}"
+          end
+        end
+        @deferred_constant_inits.each do |(owner, const_name, value_id, init_arena)|
+          @arena = init_arena
+          old_class = @current_class
+          @current_class = owner == "$" ? nil : owner
+          begin
+            value = lower_expr(ctx, value_id)
+            value_type = ctx.type_of(value)
+            full_name = constant_full_name(owner == "$" ? nil : owner, const_name)
+            storage_owner, storage_name = constant_storage_info(full_name)
+            set = ClassVarSet.new(ctx.next_id, value_type, storage_owner, storage_name, value)
+            ctx.emit(set)
+          ensure
+            @current_class = old_class
+          end
+        end
+        @arena = old_arena
+        @deferred_constant_inits.clear
       end
-      @arena = old_arena
-      @deferred_constant_inits.clear
 
       # Lower each top-level expression in order
       last_value : ValueId? = nil
@@ -30543,6 +30575,19 @@ module Crystal::HIR
           cvar_type = inferred
         end
       end
+
+      # Lazy classvar init: emit call to init function before reading
+      if @lazy_classvar_init_active
+        key = "#{class_name}::#{name}"
+        if @classvar_lazy_init_info.has_key?(key)
+          init_func_name = classvar_init_func_name(class_name, name)
+          ensure_classvar_init_function(key, init_func_name, ctx)
+          call = Call.new(ctx.next_id, TypeRef::VOID, nil, init_func_name, [] of ValueId, nil, false)
+          ctx.emit(call)
+          ctx.register_type(call.id, TypeRef::VOID)
+        end
+      end
+
       class_var_get = ClassVarGet.new(ctx.next_id, cvar_type, class_name, name)
       ctx.emit(class_var_get)
       ctx.register_type(class_var_get.id, cvar_type)
@@ -30551,6 +30596,120 @@ module Crystal::HIR
       end
       class_var_get.id
     end
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # LAZY CLASSVAR INIT HELPERS
+    # ═══════════════════════════════════════════════════════════════════════
+
+    private def classvar_init_func_name(owner : String, name : String) : String
+      "__classvar_init__#{owner.gsub("::", "$CC")}__#{name}"
+    end
+
+    # Extract classvar/constant name from a deferred init AST node
+    private def extract_deferred_classvar_name(arena : CrystalV2::Compiler::Frontend::ArenaLike, expr_id : CrystalV2::Compiler::Frontend::ExprId) : String?
+      node = arena[expr_id]
+      case node
+      when CrystalV2::Compiler::Frontend::ClassVarDeclNode
+        String.new(node.name).lstrip('@')
+      when CrystalV2::Compiler::Frontend::AssignNode
+        target_node = arena[node.target]
+        if target_node.is_a?(CrystalV2::Compiler::Frontend::ClassVarNode)
+          String.new(target_node.name).lstrip('@')
+        else
+          nil
+        end
+      when CrystalV2::Compiler::Frontend::ConstantNode
+        # Constants in deferred_classvar_inits: key by constant name
+        String.new(node.name)
+      else
+        nil
+      end
+    end
+
+    # Create a lazy init function for a classvar. Called on first ClassVarGet.
+    # The function checks a boolean flag global and only initializes on first call.
+    private def ensure_classvar_init_function(key : String, func_name : String, caller_ctx : LoweringContext)
+      return if @classvar_init_functions_created.includes?(func_name)
+      @classvar_init_functions_created << func_name
+
+      info = @classvar_lazy_init_info[key]
+      init_expr_id, init_arena, owner_class = info
+
+      # Save state
+      saved_arena = @arena
+      saved_class = @current_class
+      saved_method = @current_method
+      saved_namespace = @current_namespace_override
+
+      # Create init function: void func_name()
+      func = @module.create_function(func_name, TypeRef::VOID)
+      init_ctx = LoweringContext.new(func, @module, init_arena)
+
+      @arena = init_arena
+      @current_class = owner_class
+      @current_method = nil
+
+      # Flag check: load boolean flag global
+      flag_name = "#{func_name}$flag"
+      flag_get = ClassVarGet.new(init_ctx.next_id, TypeRef::BOOL, "__init_flags", flag_name)
+      init_ctx.emit(flag_get)
+      init_ctx.register_type(flag_get.id, TypeRef::BOOL)
+
+      do_init_block = init_ctx.create_block
+      done_block = init_ctx.create_block
+      init_ctx.terminate(Branch.new(flag_get.id, done_block, do_init_block))
+
+      # do_init block: lower the init expression
+      init_ctx.switch_to_block(do_init_block)
+
+      # Set flag to true BEFORE init (prevents infinite recursion on circular deps)
+      true_val = Literal.new(init_ctx.next_id, TypeRef::BOOL, 1_i64)
+      init_ctx.emit(true_val)
+      init_ctx.register_type(true_val.id, TypeRef::BOOL)
+      flag_set = ClassVarSet.new(init_ctx.next_id, TypeRef::BOOL, "__init_flags", flag_name, true_val.id)
+      init_ctx.emit(flag_set)
+
+      # Lower the init expression (same logic as eager deferred init processing)
+      node = @arena[init_expr_id]
+      case node
+      when CrystalV2::Compiler::Frontend::ClassVarDeclNode
+        if val_id = node.value
+          val_node = @arena[val_id]
+          unless val_node.is_a?(CrystalV2::Compiler::Frontend::UninitializedNode)
+            value_id = lower_expr(init_ctx, val_id)
+            value_type = init_ctx.type_of(value_id)
+            cvar_name = String.new(node.name).lstrip('@')
+            set = ClassVarSet.new(init_ctx.next_id, value_type, owner_class, cvar_name, value_id)
+            init_ctx.emit(set)
+          end
+        end
+      when CrystalV2::Compiler::Frontend::AssignNode
+        rhs_node = @arena[node.value]
+        unless rhs_node.is_a?(CrystalV2::Compiler::Frontend::UninitializedNode)
+          lower_expr(init_ctx, init_expr_id)
+        end
+      when CrystalV2::Compiler::Frontend::ConstantNode
+        lower_expr(init_ctx, init_expr_id)
+      end
+
+      init_ctx.terminate(Jump.new(done_block))
+
+      # done block: return void
+      init_ctx.switch_to_block(done_block)
+      init_ctx.terminate(Return.new(nil))
+
+      # Mark as completed so lower_function_if_needed won't try to lower it again.
+      # The function is already in @module via create_function.
+      @function_lowering_states[func_name] = FunctionLoweringState::Completed
+
+      # Restore state
+      @arena = saved_arena
+      @current_class = saved_class
+      @current_method = saved_method
+      @current_namespace_override = saved_namespace
+    end
+
+    # ═══════════════════════════════════════════════════════════════════════
 
     private def lower_self(ctx : LoweringContext, node : CrystalV2::Compiler::Frontend::SelfNode) : ValueId
       emit_self(ctx)
