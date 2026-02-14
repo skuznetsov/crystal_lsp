@@ -258,6 +258,16 @@ about syntax or types and should match what the original compiler would report.
       - `timeout 180 env CRYSTAL_V2_AST_FILTER=1 /tmp/crystal_v2_phi3_dbg spec spec/hir/return_type_inference_spec.cr` => no `%r2.u2p.4` undefined-value error and no `store operand must be a first class value`;
       - `timeout 60 env CRYSTAL_V2_AST_FILTER=1 /tmp/crystal_v2_phi4_dbg spec spec/hir/return_type_inference_spec.cr` => timeout only (`EXIT:124`), no LLVM `opt` errors in log;
       - `./regression_tests/run_all.sh /tmp/crystal_v2_phi4_dbg` => `35 passed, 0 failed`.
+  - Update (2026-02-14): prelude HIR disk-cache feasibility check
+    - conclusion: full prelude HIR cache is feasible, but requires stable serialization/deserialization of HIR + converter state; currently only textual `to_s` exists (no loader).
+    - experiment: cached top-level macro expansion text in `cli.cr`; warm cache hits were low (`2`) and HIR timing delta was within noise on `examples/hello.cr` and `examples/bootstrap_array.cr`, so the experiment was reverted (no commit).
+    - next actionable design:
+      - cache a **prelude registration snapshot** (pass1/pass2 artifacts: type descriptors, class/module/enum/lib registries, function signatures, constant type table), not lowered bodies;
+      - invalidate by: compiler build fingerprint + target flags/critical CLI flags + content hash of all prelude files;
+      - restore snapshot before lowering user code; keep demand-driven body lowering unchanged.
+    - DoD:
+      - with `CRYSTAL_V2_PIPELINE_CACHE=0 CRYSTAL_V2_LLVM_CACHE=0 CRYSTAL_V2_STOP_AFTER_HIR=1`, warm run of `examples/bootstrap_array.cr` reduces HIR time by >=15%;
+      - `./regression_tests/run_all.sh` remains green.
   - Update (2026-02-14): reduced `type_ref_for_name` hot-path work via early raw-key cache hits for complex type shapes.
     - `src/compiler/hir/ast_to_hir.cr`:
       - in `type_ref_for_name`, added early `@type_cache` lookup (by `type_cache_key(raw_name)`) for complex type names (`generic/union/tuple/pointer/nullable`) before expensive normalization+resolution;
