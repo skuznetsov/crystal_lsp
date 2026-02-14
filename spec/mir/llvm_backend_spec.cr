@@ -291,6 +291,55 @@ describe Crystal::MIR::LLVMIRGenerator do
       output.should_not contain("alloca void")
     end
 
+    it "casts ptr to float64 via ptrtoint + uitofp (without dereference)" do
+      mod = Crystal::MIR::Module.new("test")
+      func = mod.create_function("ptr_to_float_cast", Crystal::MIR::TypeRef::FLOAT64)
+      func.add_param("p", Crystal::MIR::TypeRef::POINTER)
+      builder = Crystal::MIR::Builder.new(func)
+
+      casted = builder.cast(Crystal::MIR::CastKind::Bitcast, 0_u32, Crystal::MIR::TypeRef::FLOAT64)
+      builder.ret(casted)
+
+      gen = Crystal::MIR::LLVMIRGenerator.new(mod)
+      gen.emit_type_metadata = false
+      output = gen.generate
+
+      func_ir = output[/define double @ptr_to_float_cast\(ptr %p\)\s*\{.*?\n\}/m]
+      func_ir.should_not be_nil
+      body = func_ir.not_nil!
+
+      body.should contain("ptrtoint ptr %p to i64")
+      body.should contain("uitofp i64")
+      body.should_not contain("load double, ptr %p")
+    end
+
+    it "uses zext for unsigned fixed vararg widening in extern call" do
+      mod = Crystal::MIR::Module.new("test")
+      func = mod.create_function("extern_unsigned_widen", Crystal::MIR::TypeRef::INT32)
+      func.add_param("fmt", Crystal::MIR::TypeRef::POINTER)
+      builder = Crystal::MIR::Builder.new(func)
+
+      dst = builder.const_nil_typed(Crystal::MIR::TypeRef::POINTER)
+      len = builder.const_uint(255_u64, Crystal::MIR::TypeRef::UINT32)
+      call_args = [dst, len, 0_u32] of Crystal::MIR::ValueId
+      res = builder.extern_call("snprintf", call_args, Crystal::MIR::TypeRef::INT32)
+      builder.ret(res)
+
+      gen = Crystal::MIR::LLVMIRGenerator.new(mod)
+      gen.emit_type_metadata = false
+      output = gen.generate
+
+      func_ir = output[/define i32 @extern_unsigned_widen\(ptr %fmt\)\s*\{.*?\n\}/m]
+      func_ir.should_not be_nil
+      body = func_ir.not_nil!
+      cast_lines = body.lines.select(&.includes?("varargs_cast."))
+      cast_lines.should_not be_empty
+      cast_blob = cast_lines.join("\n")
+      cast_blob.should contain("zext i32")
+      cast_blob.should_not contain("sext i32")
+      body.should contain("call i32 (ptr, i64, ptr, ...) @snprintf(")
+    end
+
     it "emits ptr phi when a union phi has ptr incoming" do
       mod = Crystal::MIR::Module.new("phi_union_ptr")
 
