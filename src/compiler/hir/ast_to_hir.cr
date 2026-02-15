@@ -10774,6 +10774,35 @@ module Crystal::HIR
     end
 
     private def register_module_members_from_macro_expansion(module_name : String, expr_id : ExprId)
+      register_module_members_from_macro_expansion(module_name, expr_id, 0)
+    end
+
+    private def expand_module_macro_call(
+      module_name : String,
+      method_name : String,
+      args : Array(ExprId),
+      named_args : Array(CrystalV2::Compiler::Frontend::NamedArgument)?,
+      block_id : ExprId?,
+    ) : {ExprId, CrystalV2::Compiler::Frontend::ArenaLike}?
+      macro_lookup = lookup_macro_entry_with_inheritance(method_name, module_name)
+      if macro_lookup.nil? && module_name != "Object"
+        macro_lookup = lookup_macro_entry(method_name, "Object")
+      end
+      return nil unless macro_lookup
+
+      macro_entry, macro_key = macro_lookup
+      macro_def, macro_arena = macro_entry
+      macro_args, macro_block = extract_macro_block_from_args(args, block_id)
+      expanded_id = expand_macro_expr(macro_def, macro_arena, macro_args, named_args, macro_block, macro_key)
+      return nil if expanded_id.invalid?
+
+      {expanded_id, macro_arena}
+    end
+
+    private def register_module_members_from_macro_expansion(module_name : String, expr_id : ExprId, depth : Int32)
+      # Keep module macro expansion bounded to avoid runaway recursion on
+      # self-recursive macros while still allowing nested helper macros.
+      return if depth > 8
       return if expr_id.invalid?
       member = unwrap_visibility_member(@arena[expr_id])
       case member
@@ -10784,7 +10813,7 @@ module Crystal::HIR
           mark_module_extend_self(child, module_name)
         end
         member.body.each do |child_id|
-          register_module_members_from_macro_expansion(module_name, child_id)
+          register_module_members_from_macro_expansion(module_name, child_id, depth)
         end
       when CrystalV2::Compiler::Frontend::DefNode
         register_module_method_from_def(member, module_name)
@@ -10815,6 +10844,33 @@ module Crystal::HIR
         process_macro_for_in_module(member, module_name)
       when CrystalV2::Compiler::Frontend::MacroLiteralNode
         process_macro_literal_in_module(member, module_name)
+      when CrystalV2::Compiler::Frontend::CallNode
+        callee = @arena[member.callee]
+        if callee.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode)
+          method_name = String.new(callee.name)
+          if expanded = expand_module_macro_call(module_name, method_name, member.args, member.named_args, member.block)
+            expanded_id, macro_arena = expanded
+            old_arena = @arena
+            @arena = macro_arena
+            begin
+              register_module_members_from_macro_expansion(module_name, expanded_id, depth + 1)
+            ensure
+              @arena = old_arena
+            end
+          end
+        end
+      when CrystalV2::Compiler::Frontend::IdentifierNode
+        method_name = String.new(member.name)
+        if expanded = expand_module_macro_call(module_name, method_name, [] of ExprId, nil, nil)
+          expanded_id, macro_arena = expanded
+          old_arena = @arena
+          @arena = macro_arena
+          begin
+            register_module_members_from_macro_expansion(module_name, expanded_id, depth + 1)
+          ensure
+            @arena = old_arena
+          end
+        end
       end
     end
 

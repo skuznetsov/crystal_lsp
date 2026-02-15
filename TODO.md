@@ -565,11 +565,17 @@ about syntax or types and should match what the original compiler would report.
     goes through `lower_macro_body`, so nested type declarations are preserved.
   - Update (2026-02-14): repro `/tmp/nested_macro_record_check.cr` now compiles
     and runs (`11`, `true`), and full regression suite is green (`37/37`).
-- [ ] Evaluate bounded multi-pass macro expansion as a follow-up hardening
+- [x] Evaluate bounded multi-pass macro expansion as a follow-up hardening
   measure for deep nested macro chains (after bootstrap blockers are closed).
   - Update (2026-02-05): expanded macros unconditionally during PASS 1.75 (module/class registration) so macro‑generated defs like `class_getter` are registered before method lookup. Re-test bootstrap missing list to confirm `Unicode.category_*` no longer becomes VOID locals.
   - Update (2026-02-05): class accessor entries now participate in class‑method lookup. `Unicode.category_Lu` is emitted as a call and a real
     `func @Unicode.category_Lu` exists in `/tmp/bootstrap_array.hir` (no longer a VOID local).
+  - Update (2026-02-15): module macro expansion path now performs bounded recursive re-expansion of nested macro calls (`CallNode` and bare `IdentifierNode`) via `register_module_members_from_macro_expansion(..., depth)` and `expand_module_macro_call`.
+    - Guard: recursion is capped (`depth > 8` returns) to prevent runaway self-recursive macro chains.
+    - Validation:
+      - `crystal build src/crystal_v2.cr -o /tmp/crystal_v2_modmacrofix --error-trace` => `EXIT 0`
+      - `regression_tests/run_all.sh /tmp/crystal_v2_modmacrofix` => `40 passed, 0 failed`
+      - `CRYSTAL_V2_PIPELINE_CACHE=0 CRYSTAL_V2_LLVM_CACHE=0 /tmp/crystal_v2_modmacrofix examples/bootstrap_array.cr -o /tmp/bootstrap_array_modmacrofix && scripts/run_safe.sh /tmp/bootstrap_array_modmacrofix 10 768` => `EXIT 0`
 - [x] Add enum literal fast-path in HIR lowering for `.to_i` / `.value` on enum members (e.g., `DayOfWeek::Wednesday.to_i`), emitting const instead of missing call.
   - Update (2026-02-14): verified on current tree; `spec/hir/ast_to_hir_spec.cr`
     example `lowers enum literal to_i/value without a method call` passes and
