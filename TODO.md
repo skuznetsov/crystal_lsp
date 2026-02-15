@@ -19,6 +19,15 @@
 - Float64: arithmetic, ** on literals
 
 ## Recently completed
+- **HIR hash-literal setter-name allocation trim** (2026-02-15) —
+  moved `set_name = "#{hash_type_name}#[]="` out of the per-entry loop in
+  `lower_hash_literal` to avoid repeated String allocations for the same literal.
+  Validation:
+  - build: `crystal build src/crystal_v2.cr -o /tmp/crystal_v2_t3` => `EXIT 0`
+  - bootstrap smoke: `/tmp/crystal_v2_t3 --no-ast-cache --no-llvm-cache examples/bootstrap_array.cr -o /tmp/bootstrap_array_t3` + `scripts/run_safe.sh /tmp/bootstrap_array_t3 10 1024` => `EXIT 0`
+  - microbench (`/tmp/hash_literal_hot.cr`, no-link/no-cache, sequential):
+    - before (`/tmp/crystal_v2_t2`) => `real 13.02s`
+    - after (`/tmp/crystal_v2_t3`) => `real 12.99s`
 - **HIR hash-literal type materialization cache** (2026-02-15) —
   reduced repeated `Hash(K, V)` type-name synthesis and `type_ref_for_name`
   calls in `lower_hash_literal` by adding a pair cache keyed by

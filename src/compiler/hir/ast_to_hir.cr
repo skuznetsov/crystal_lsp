@@ -53021,8 +53021,8 @@ module Crystal::HIR
       ctx.register_type(hash_call.id, hash_type)
 
       # For each entry, call hash[key] = value
+      set_name = "#{hash_type_name}#[]="
       entries.each do |key_id, value_id|
-        set_name = "#{hash_type_name}#[]="
         set_call = Call.new(ctx.next_id, value_type, hash_call.id, set_name, [key_id, value_id], nil, false)
         ctx.emit(set_call)
       end
