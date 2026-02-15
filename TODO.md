@@ -19,6 +19,18 @@
 - Float64: arithmetic, ** on literals
 
 ## Recently completed
+- **HIR parent fallback overload scan single-pass params** (2026-02-15) —
+  reduced allocation churn in `find_method_in_parent_via_index` by replacing
+  `params.reject + count + count + all` with a single pass over params
+  (same overload-selection semantics, fewer temporary arrays/iterations).
+  Validation:
+  - `crystal build src/crystal_v2.cr -o /tmp/crystal_v2_dbg_parentloop1 --error-trace` => `EXIT 0`
+  - `timeout 180 crystal spec spec/hir/return_type_inference_spec.cr` => `13 examples, 0 failures`
+  - `timeout 180 crystal spec spec/mir/llvm_backend_spec.cr` => `59 examples, 0 failures`
+  - `regression_tests/run_all.sh /tmp/crystal_v2_dbg_parentloop1` => `40 passed, 0 failed`
+  - A/B (`CRYSTAL_V2_PIPELINE_CACHE=0 CRYSTAL_V2_AST_FILTER=1 CRYSTAL_V2_PHASE_STATS=1 ... --no-link --no-ast-cache --no-llvm-cache spec/hir/return_type_inference_spec.cr`):
+    - before (`/tmp/crystal_v2_dbg_allocprefix`): `real 105.04s`, `Lookup 1288.9ms`, `parent_fallback_cached 646.4ms`
+    - after (`/tmp/crystal_v2_dbg_parentloop1`): `real 105.19s`, `Lookup 1048.3ms`, `parent_fallback_cached 536.5ms`
 - **HIR allocator init-default lookup prefix cache** (2026-02-15) —
   removed repeated string interpolation in hot allocator scans over
   `@function_defs` by caching `"#{class_name}#initialize$"` prefixes and

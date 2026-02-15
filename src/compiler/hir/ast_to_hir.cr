@@ -1658,10 +1658,26 @@ module Crystal::HIR
           first_found ||= result
           # Check if this is an untyped (generic) overload with matching arity
           if params = def_node.params
-            real_params = params.reject { |p| p.is_block || named_only_separator?(p) }
-            has_splat = real_params.any?(&.is_splat)
-            param_count = real_params.count { |p| !p.is_splat && !p.is_double_splat }
-            required = real_params.count { |p| !p.is_splat && !p.is_double_splat && p.default_value.nil? }
+            has_splat = false
+            param_count = 0
+            required = 0
+            all_untyped = true
+
+            params.each do |p|
+              next if p.is_block || named_only_separator?(p)
+              if p.is_splat || p.is_double_splat
+                has_splat = true
+                next
+              end
+
+              param_count += 1
+              required += 1 if p.default_value.nil?
+
+              if ann = p.type_annotation
+                all_untyped = false unless String.new(ann) == "_"
+              end
+            end
+
             # Arity check: splat absorbs any; exact count; or within required..param_count range (defaults)
             arity_ok = has_splat || param_count == expected_arity || (expected_arity >= required && expected_arity <= param_count)
             next unless arity_ok || expected_arity == 0
@@ -1670,10 +1686,6 @@ module Crystal::HIR
             # Prefer candidates where required param count matches expected arity exactly
             if required == expected_arity && !has_splat
               best_required_match ||= result
-            end
-            all_untyped = real_params.all? do |p|
-              p.is_splat || p.is_double_splat || p.type_annotation.nil? ||
-                (ann = p.type_annotation) && String.new(ann) == "_"
             end
             if all_untyped
               if has_splat
