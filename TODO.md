@@ -145,6 +145,27 @@
   - current `CRYSTAL_V2_DISABLE_INLINE_YIELD=1` blocker moved further to
     `/tmp/rt_inline_off_fixed4.ll:65582`: `ret <union> 0` (invalid union return
     literal; should use union zero-init form).
+  - update: return fallback now normalizes union literals before `ret` so
+    `ret <union> 0` is emitted as `ret <union> zeroinitializer`.
+    Re-verified with:
+    - `crystal build src/crystal_v2.cr -o /tmp/crystal_v2_dbg_union_returnfix --error-trace` => `EXIT 0`
+    - `timeout 180 crystal spec spec/hir/return_type_inference_spec.cr` => `13 examples, 0 failures`
+    - `timeout 180 crystal spec spec/mir/llvm_backend_spec.cr` => `59 examples, 0 failures`
+    - `./regression_tests/run_all.sh /tmp/crystal_v2_dbg_union_returnfix` => `40 passed, 0 failed`
+    - `CRYSTAL_V2_PIPELINE_CACHE=0 /tmp/crystal_v2_dbg_union_returnfix examples/bootstrap_array.cr -o /tmp/bootstrap_array_union_returnfix` + `scripts/run_safe.sh /tmp/bootstrap_array_union_returnfix 10 768` => `EXIT 0`
+  - downstream blocker after the union-return fix moved to
+    `/tmp/bootstrap_array_inline_off_returnfix.ll:8845` (`store ptr %r9` where
+    `%r9` is undefined after `call void` in fallback-inline-yield path).
+  - update: cross-block slot stores now detect `@void_values` and store typed
+    defaults instead of undefined SSA names (`%rN`) when call lowering emitted
+    `void`.
+    Re-verified with:
+    - `crystal build src/crystal_v2.cr -o /tmp/crystal_v2_dbg_inline_voidslotfix --error-trace` => `EXIT 0`
+    - `timeout 180 crystal spec spec/hir/return_type_inference_spec.cr` => `13 examples, 0 failures`
+    - `timeout 180 crystal spec spec/mir/llvm_backend_spec.cr` => `59 examples, 0 failures`
+    - `./regression_tests/run_all.sh /tmp/crystal_v2_dbg_inline_voidslotfix` => `40 passed, 0 failed`
+    - `CRYSTAL_V2_PIPELINE_CACHE=0 /tmp/crystal_v2_dbg_inline_voidslotfix examples/bootstrap_array.cr -o /tmp/bootstrap_array_inline_voidslotfix_default` + `scripts/run_safe.sh /tmp/bootstrap_array_inline_voidslotfix_default 10 768` => `EXIT 0`
+    - `CRYSTAL_V2_PIPELINE_CACHE=0 CRYSTAL_V2_PHASE_STATS=1 CRYSTAL_V2_DISABLE_INLINE_YIELD=1 /tmp/crystal_v2_dbg_inline_voidslotfix examples/bootstrap_array.cr -o /tmp/bootstrap_array_inline_off_voidslotfix` + `scripts/run_safe.sh /tmp/bootstrap_array_inline_off_voidslotfix 10 768` => `EXIT 0` (no `opt` failure reproduced on this workload).
 - **HIR method-name parse churn trim in lookup/lowering** (2026-02-15) —
   reduced hot-path overhead from full `parse_method_name` caching where parsing
   is one-shot:

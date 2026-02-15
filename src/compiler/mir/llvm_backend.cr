@@ -6269,6 +6269,14 @@ module Crystal::MIR
       llvm_type = @type_mapper.llvm_type(val_type)
       llvm_type = "ptr" if llvm_type == "void"
       slot_llvm_type = @cross_block_slot_types[inst_id]?
+      if @void_values.includes?(inst_id)
+        # Mismatched prepass/call lowering can mark a value as cross-block even when it was
+        # emitted as `call void` (no SSA result). Store a typed default instead of `%rN`.
+        fallback_type = slot_llvm_type || llvm_type
+        fallback_type = "ptr" if fallback_type == "void"
+        emit "store #{fallback_type} #{default_literal_for_llvm_type(fallback_type)}, ptr %#{slot_name}"
+        return
+      end
       # Guard: if MIR reuses value IDs, skip store when types are completely incompatible
       if slot_llvm_type && slot_llvm_type != llvm_type &&
          slot_llvm_type.includes?(".union") && !llvm_type.includes?(".union")
@@ -11824,6 +11832,9 @@ module Crystal::MIR
                            else
                              val_ref
                            end
+              if @current_return_type.includes?(".union")
+                actual_val = normalize_union_value(actual_val, @current_return_type)
+              end
               emit "ret #{@current_return_type} #{actual_val}"
             end
           end
@@ -12151,6 +12162,18 @@ module Crystal::MIR
         "zeroinitializer"
       else
         val
+      end
+    end
+
+    private def default_literal_for_llvm_type(type_str : String) : String
+      if type_str.includes?(".union")
+        "zeroinitializer"
+      elsif type_str == "ptr"
+        "null"
+      elsif type_str == "double" || type_str == "float"
+        "0.0"
+      else
+        "0"
       end
     end
 
