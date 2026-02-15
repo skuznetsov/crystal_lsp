@@ -19,6 +19,21 @@
 - Float64: arithmetic, ** on literals
 
 ## Recently completed
+- **HIR pending-callsite fallback index by method name** (2026-02-15) —
+  removed full-map scans in `pending_callsite_args_for_def` miss fallback:
+  - added `@pending_arg_type_base_keys_by_method` (`method -> Set(base_key)`);
+  - `remember_callsite_arg_types` now tracks `base_key` in this index;
+  - `remove_callsite_from_pending_maps` untracks `base_key` when its arity map is empty;
+  - fallback candidate search now iterates only indexed keys for the requested method.
+  Validation:
+  - `crystal build src/crystal_v2.cr -o /tmp/crystal_v2_dbg_missindex --error-trace` => `EXIT 0`
+  - `timeout 180 crystal spec spec/hir/return_type_inference_spec.cr` => `13 examples, 0 failures`
+  - `timeout 180 crystal spec spec/mir/llvm_backend_spec.cr` => `59 examples, 0 failures`
+  - `regression_tests/run_all.sh /tmp/crystal_v2_dbg_missindex` => `40 passed, 0 failed`
+  - `CRYSTAL_V2_PIPELINE_CACHE=0 /tmp/crystal_v2_dbg_missindex examples/bootstrap_array.cr -o /tmp/bootstrap_array_missindex && scripts/run_safe.sh /tmp/bootstrap_array_missindex 10 768` => `EXIT 0`
+  - A/B (`CRYSTAL_V2_PIPELINE_CACHE=0 CRYSTAL_V2_AST_FILTER=1 CRYSTAL_V2_PHASE_STATS=1 ... --no-link --no-ast-cache --no-llvm-cache spec/hir/return_type_inference_spec.cr`):
+    - before (`/tmp/crystal_v2_dbg_emitcache`): `real 104.14s`, `process_pending 7080.8ms`, `emit_tracked_sigs 13868.3ms`, `lower_missing 387.2ms`
+    - after (`/tmp/crystal_v2_dbg_missindex`): `real 103.53s`, `process_pending 6898.4ms`, `emit_tracked_sigs 12934.3ms`, `lower_missing 380.7ms`
 - **HIR tracked-signature safety-net cache cleanup** (2026-02-15) —
   reduced repeated work in `emit_all_tracked_signatures` by:
   - caching `ast_filter_allows_safety_net_name?` decisions per function name;

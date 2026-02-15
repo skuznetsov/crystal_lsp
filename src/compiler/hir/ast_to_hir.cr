@@ -1825,6 +1825,7 @@ module Crystal::HIR
     # Call-site argument types for lazily lowered functions (mangled name -> arg types).
     @pending_arg_types : Hash(String, CallsiteArgs)
     @pending_arg_types_by_arity : Hash(String, Hash(Int32, Array(CallsiteArgs)))
+    @pending_arg_type_base_keys_by_method : Hash(String, Set(String))
     @pending_arg_types_seen_by_arity : Hash(String, Hash(Int32, Set(String)))
     @pending_arg_types_by_signature : Hash(CallSignature, Array(CallsiteArgs))
     @function_def_has_splat : Hash(String, Bool)
@@ -2196,6 +2197,7 @@ module Crystal::HIR
       # Use @function_lowering_states with FunctionLoweringState enum instead.
       @pending_arg_types = {} of String => CallsiteArgs
       @pending_arg_types_by_arity = {} of String => Hash(Int32, Array(CallsiteArgs))
+      @pending_arg_type_base_keys_by_method = {} of String => Set(String)
       @pending_arg_types_seen_by_arity = {} of String => Hash(Int32, Set(String))
       @pending_arg_types_by_signature = {} of CallSignature => Array(CallsiteArgs)
       @function_def_has_splat = {} of String => Bool
@@ -36240,6 +36242,7 @@ module Crystal::HIR
       bucket = by_arity[arg_types.size]? || [] of CallsiteArgs
       bucket << callsite
       by_arity[arg_types.size] = bucket
+      track_pending_base_key_for_method(base_key)
       if debug_hook_filter_match?(name)
         literal_payload = arg_literals ? arg_literals.join(",") : "nil"
         debug_hook(
@@ -36288,6 +36291,34 @@ module Crystal::HIR
       base = strip_type_suffix(name)
       base = base.sub(/_(double_)?splat$/, "")
       base
+    end
+
+    @[AlwaysInline]
+    private def pending_method_name_for_base_key(base_key : String) : String?
+      parts = parse_method_name_compact(base_key)
+      parts.method
+    end
+
+    private def track_pending_base_key_for_method(base_key : String) : Nil
+      return if base_key.empty?
+      method = pending_method_name_for_base_key(base_key)
+      return unless method
+      keys = @pending_arg_type_base_keys_by_method[method]? || begin
+        set = Set(String).new
+        @pending_arg_type_base_keys_by_method[method] = set
+        set
+      end
+      keys << base_key
+    end
+
+    private def untrack_pending_base_key_for_method(base_key : String) : Nil
+      return if base_key.empty?
+      method = pending_method_name_for_base_key(base_key)
+      return unless method
+      if keys = @pending_arg_type_base_keys_by_method[method]?
+        keys.delete(base_key)
+        @pending_arg_type_base_keys_by_method.delete(method) if keys.empty?
+      end
     end
 
     private def pop_pending_callsite_args(name : String, target_name : String) : CallsiteArgs?
@@ -36341,7 +36372,10 @@ module Crystal::HIR
           if idx
             bucket.delete_at(idx)
             by_arity.delete(types.size) if bucket.empty?
-            @pending_arg_types_by_arity.delete(base_key) if by_arity.empty?
+            if by_arity.empty?
+              @pending_arg_types_by_arity.delete(base_key)
+              untrack_pending_base_key_for_method(base_key)
+            end
           end
         end
       end
@@ -36486,24 +36520,28 @@ module Crystal::HIR
       if method
         unique : CallsiteArgs? = nil
         ambiguous = false
-        @pending_arg_types_by_arity.each do |key, bucket_map|
-          next unless key.ends_with?("##{method}") || key.ends_with?(".#{method}")
-          bucket = bucket_map[param_count]?
-          next unless bucket
-          bucket.each do |candidate|
-            next unless params_compatible_with_args?(func_def, candidate.types, func_context)
-            if unique
-              same_types = candidate.types == unique.types
-              same_literals = unique.literals.nil? || candidate.literals.nil? || candidate.literals == unique.literals
-              unless same_types && same_literals
-                ambiguous = true
-                break
+        candidate_keys = @pending_arg_type_base_keys_by_method[method]?
+        if candidate_keys
+          candidate_keys.each do |key|
+            bucket_map = @pending_arg_types_by_arity[key]?
+            next unless bucket_map
+            bucket = bucket_map[param_count]?
+            next unless bucket
+            bucket.each do |candidate|
+              next unless params_compatible_with_args?(func_def, candidate.types, func_context)
+              if unique
+                same_types = candidate.types == unique.types
+                same_literals = unique.literals.nil? || candidate.literals.nil? || candidate.literals == unique.literals
+                unless same_types && same_literals
+                  ambiguous = true
+                  break
+                end
+              else
+                unique = candidate
               end
-            else
-              unique = candidate
             end
+            break if ambiguous
           end
-          break if ambiguous
         end
         return unique if unique && !ambiguous
       end
