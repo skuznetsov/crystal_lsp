@@ -14185,10 +14185,18 @@ module Crystal::HIR
         STDERR.puts "[CLASS_PARENT] class=#{class_name} parent=#{parent_name || "nil"}"
       end
       @module.register_class_parent(class_name, parent_name)
-      if env_has?("DEBUG_CLASS_INFO") &&
-         (class_name == "Crystal::MachO" || class_name == "IO" || class_name.includes?("FileDescriptor") || class_name == "Thread" || class_name == "Crystal::Scheduler" || class_name == "String")
-        ivar_dump = ivars.map { |iv| "#{iv.name}:#{get_type_name_from_ref(iv.type)}@#{iv.offset}" }.join(", ")
-        STDERR.puts "[CLASS_INFO] #{class_name} ivars=[#{ivar_dump}] size=#{offset}"
+      if env_has?("DEBUG_CLASS_INFO")
+        debug_filter = env_get("DEBUG_CLASS_INFO_FILTER")
+        should_dump = if debug_filter.nil? || debug_filter.empty?
+                        class_name == "Crystal::MachO" || class_name == "IO" || class_name.includes?("FileDescriptor") ||
+                          class_name == "Thread" || class_name == "Crystal::Scheduler" || class_name == "String"
+                      else
+                        class_name.includes?(debug_filter)
+                      end
+        if should_dump
+          ivar_dump = ivars.map { |iv| "#{iv.name}:#{get_type_name_from_ref(iv.type)}@#{iv.offset}" }.join(", ")
+          STDERR.puts "[CLASS_INFO] #{class_name} ivars=[#{ivar_dump}] size=#{offset}"
+        end
       end
       short_name = last_namespace_component(class_name)
       if short_name != class_name
@@ -16446,6 +16454,10 @@ module Crystal::HIR
       full_name_override : String? = nil,
       force_class_method : Bool = false,
     )
+      # Some specializations can be monomorphized before all generic reopenings
+      # are discovered. If that happened, class_info may be skeletal (no ivars),
+      # which later produces field offsets = 0 in generated initialize methods.
+      class_info = refresh_specialized_class_info_if_empty(class_name, class_info)
       method_name = String.new(node.name)
       if env_get("DEBUG_MATH_MIN") && (method_name == "min" || method_name == "max") && class_name.includes?("Math")
         call_types = call_arg_types || [] of TypeRef
@@ -17105,7 +17117,15 @@ module Crystal::HIR
         # Check for @param syntax (auto-assignment to ivar via is_instance_var flag)
         if is_instance_var
           ivar_name = "@#{param_name}" # Add @ prefix for ivar lookup
-          ivar_offset = get_ivar_offset(ivar_name)
+          # Prefer the class_info passed to lower_method. It is scoped to the
+          # exact class currently being lowered (including monomorphized classes),
+          # while get_ivar_offset depends on ambient @current_class and can fall
+          # back to 0 when context drifts.
+          ivar_offset = if ivar_info = class_info.ivars.find { |iv| iv.name == ivar_name }
+                          ivar_info.offset
+                        else
+                          get_ivar_offset(ivar_name)
+                        end
           auto_assign_params << {ivar_name, hir_param.id, ivar_offset}
         end
       end
@@ -17336,6 +17356,49 @@ module Crystal::HIR
       @current_class = old_class
       @current_method = old_method
       @current_method_is_class = old_method_is_class || false
+    end
+
+    private def refresh_specialized_class_info_if_empty(class_name : String, class_info : ClassInfo) : ClassInfo
+      return class_info unless class_info.ivars.empty?
+      info = split_generic_base_and_args(class_name)
+      return class_info unless info
+
+      base_name = info[:base]
+      template = @generic_templates[base_name]?
+      return class_info unless template
+
+      type_args = split_generic_type_args(info[:args]).map(&.strip)
+      old_arena = @arena
+      old_class = @current_class
+      old_map = @type_param_map.dup
+      old_suppress = @suppress_monomorphization
+      begin
+        @suppress_monomorphization = true
+        template.type_params.each_with_index do |param, idx|
+          if arg = type_args[idx]?
+            @type_param_map[param] = arg
+          end
+        end
+        @subst_cache_gen &+= 1
+
+        @arena = template.arena
+        register_concrete_class(template.node, class_name, template.is_struct)
+        if reopenings = @generic_reopenings[base_name]?
+          reopenings.each do |reopen|
+            @arena = reopen.arena
+            register_concrete_class(reopen.node, class_name, reopen.is_struct)
+          end
+        end
+        align_class_ivars(class_name)
+      ensure
+        @arena = old_arena
+        @current_class = old_class
+        @type_param_map = old_map
+        @subst_cache_gen &+= 1
+        @suppress_monomorphization = old_suppress
+      end
+
+      @class_info[class_name]? || class_info
     end
 
     # Get primitive TypeRef for self if class_name is a primitive type

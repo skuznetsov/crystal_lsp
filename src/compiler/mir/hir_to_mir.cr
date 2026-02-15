@@ -48,6 +48,8 @@ module Crystal
     @slab_frame_enabled : Bool
     @current_slab_frame : Bool = false
     @current_block_param_id : HIR::ValueId?
+    @inline_block_arg_stack : Array(Array(ValueId))
+    @inlined_block_ids : Set(HIR::BlockId)
     @class_children : Hash(String, Array(String))
 
     # Index: base_name (before "$") → first matching MIR function.
@@ -82,6 +84,8 @@ module Crystal
       @stack_slot_types = {} of ValueId => TypeRef
       @slab_frame_enabled = slab_frame
       @current_block_param_id = nil
+      @inline_block_arg_stack = [] of Array(ValueId)
+      @inlined_block_ids = Set(HIR::BlockId).new
       @class_children = {} of String => Array(String)
       @hir_module.class_parents.each do |name, parent|
         next unless parent
@@ -397,6 +401,8 @@ module Crystal
       @stack_slot_values.clear
       @stack_slot_types.clear
       @inline_struct_ptrs.clear
+      @inline_block_arg_stack.clear
+      @inlined_block_ids.clear
       @builder = Builder.new(mir_func)
 
       # Map HIR params to MIR params (already added in stub)
@@ -542,6 +548,8 @@ module Crystal
     # ─────────────────────────────────────────────────────────────────────────
 
     private def lower_block(hir_block : HIR::Block)
+      return if @inlined_block_ids.includes?(hir_block.id)
+
       builder = @builder.not_nil!
       mir_block_id = @block_map[hir_block.id]
       builder.current_block = mir_block_id
@@ -573,16 +581,35 @@ module Crystal
                  if existing = @value_map[hir_value.id]?
                    existing
                  else
-                   # Block parameter - allocate stack slot for it
-                   builder = @builder.not_nil!
-                   param_type = convert_type(hir_value.type)
-                   slot = builder.alloc(MemoryStrategy::Stack, param_type)
-                   record_stack_slot(slot, param_type)
+                   if inline_args = @inline_block_arg_stack.last?
+                     if hir_value.index >= 0 && hir_value.index < inline_args.size
+                       mapped = inline_args[hir_value.index]
+                       @value_map[hir_value.id] = mapped
+                       mapped
+                     else
+                       # Block parameter without passed value — materialize slot fallback.
+                       builder = @builder.not_nil!
+                       param_type = convert_type(hir_value.type)
+                       slot = builder.alloc(MemoryStrategy::Stack, param_type)
+                       record_stack_slot(slot, param_type)
+                       if (default_id = default_value_for_type(builder, param_type))
+                         builder.store(slot, default_id)
+                       end
+                       @value_map[hir_value.id] = slot
+                       slot
+                     end
+                   else
+                    # Block parameter - allocate stack slot for it
+                    builder = @builder.not_nil!
+                    param_type = convert_type(hir_value.type)
+                    slot = builder.alloc(MemoryStrategy::Stack, param_type)
+                    record_stack_slot(slot, param_type)
                    if (default_id = default_value_for_type(builder, param_type))
                      builder.store(slot, default_id)
+                    end
+                    @value_map[hir_value.id] = slot
+                    slot
                    end
-                   @value_map[hir_value.id] = slot
-                   slot
                  end
                when HIR::Allocate
                  lower_allocate(hir_value)
@@ -1045,6 +1072,77 @@ module Crystal
       builder.extern_call(extern_call.extern_name, args, convert_type(extern_call.type))
     end
 
+    private def trace_with_inline_block_call?(method_name : String) : Bool
+      method_name.starts_with?("Crystal.trace$") && method_name.includes?("_block")
+    end
+
+    private def spinlock_sync_with_inline_block_call?(method_name : String) : Bool
+      method_name == "Crystal::SpinLock#sync$block"
+    end
+
+    private def tap_with_inline_block_call?(method_name : String) : Bool
+      method_name.ends_with?("#tap$block")
+    end
+
+    private def lower_spinlock_sync_with_block(args : Array(ValueId), block_id : HIR::BlockId) : ValueId?
+      return nil if args.empty?
+
+      lock_func = @mir_module.get_function("Crystal::SpinLock#lock")
+      unlock_func = @mir_module.get_function("Crystal::SpinLock#unlock")
+      return nil unless lock_func && unlock_func
+
+      builder = @builder.not_nil!
+      spinlock_obj = args[0]
+
+      # Preserve sync semantics for scheduler/runtime paths even when block params
+      # were lowered without explicit proc types.
+      builder.call(lock_func.id, [spinlock_obj], lock_func.return_type)
+      result = lower_inlined_call_block(block_id) || builder.const_nil
+      builder.call(unlock_func.id, [spinlock_obj], unlock_func.return_type)
+      result
+    end
+
+    private def lower_tap_with_block(args : Array(ValueId), block_id : HIR::BlockId) : ValueId?
+      return nil if args.empty?
+      lower_inlined_call_block(block_id, [args[0]])
+      args[0]
+    end
+
+    private def lower_inlined_call_block(block_id : HIR::BlockId, block_args : Array(ValueId)? = nil) : ValueId?
+      hir_func = @current_hir_func
+      return nil unless hir_func
+
+      hir_block = hir_func.blocks.find { |block| block.id == block_id }
+      return nil unless hir_block
+
+      @inlined_block_ids.add(block_id)
+
+      pushed_inline_args = false
+      if block_args && !block_args.empty?
+        @inline_block_arg_stack << block_args
+        pushed_inline_args = true
+      end
+
+      begin
+        hir_block.instructions.each do |inst|
+          lower_value(inst)
+        end
+      ensure
+        @inline_block_arg_stack.pop? if pushed_inline_args
+      end
+
+      case term = hir_block.terminator
+      when HIR::Return
+        if value_id = term.value
+          get_value(value_id)
+        else
+          @builder.not_nil!.const_nil
+        end
+      else
+        nil
+      end
+    end
+
     private def lower_call(call : HIR::Call) : ValueId
       builder = @builder.not_nil!
       debug_virtual = ENV.has_key?("DEBUG_VIRTUAL_CALLS")
@@ -1060,6 +1158,26 @@ module Crystal
       if recv = call.receiver
         args.unshift(get_value(recv))
       end
+
+      # Crystal.trace(&block) wrappers currently lower to calls with detached
+      # `with_block` HIR blocks. Inline the call-site block here so scheduling
+      # side effects are preserved even when fallback yield lowering is used.
+      if block_id = call.block
+        if trace_with_inline_block_call?(call.method_name)
+          if inlined = lower_inlined_call_block(block_id)
+            return inlined
+          end
+        elsif spinlock_sync_with_inline_block_call?(call.method_name)
+          if lowered = lower_spinlock_sync_with_block(args, block_id)
+            return lowered
+          end
+        elsif tap_with_inline_block_call?(call.method_name)
+          if lowered = lower_tap_with_block(args, block_id)
+            return lowered
+          end
+        end
+      end
+
       if debug_virtual && call.virtual
         recv_type = call.receiver ? @hir_value_types[call.receiver.not_nil!]? : nil
         recv_type_name = hir_type_name(recv_type)
@@ -1199,31 +1317,47 @@ module Crystal
         if debug_virtual && call.virtual
           STDERR.puts "[VIRTUAL_CALL] unresolved method=#{method_name_str} base=#{base_method_name} func=#{@current_lowering_func_name}"
         end
-        # Only apply fuzzy matching for qualified method names (containing . or #)
-        if method_name_str.includes?('.') || method_name_str.includes?('#')
-          # Extract base name (before $ type suffix) without allocating
-          dollar_idx = method_name_str.index('$')
-          base_name = dollar_idx ? method_name_str[0, dollar_idx] : method_name_str
+        # For qualified instance names, walk inheritance first.
+        # Example: IO::FileDescriptor#puts() should resolve to IO#puts().
+        if hash_idx = method_name_str.index('#')
+          receiver_name = method_name_str[0, hash_idx]
+          method_suffix = method_name_str[hash_idx + 1, method_name_str.size - hash_idx - 1]
+          if !receiver_name.empty? && !method_suffix.empty?
+            func = resolve_virtual_method_for_class(receiver_name, method_suffix, call.args.size, allow_module_method: true)
+          end
+        end
 
-          # O(1) lookup via pre-computed index
-          func = @function_by_base_name[base_name]?
-        else
-          # For unqualified method names with a receiver, try to qualify based on receiver type
-          if call.receiver
-            recv_type = @hir_value_types[call.receiver.not_nil!]?
-            if recv_type
-              recv_desc = @hir_module.get_type_descriptor(recv_type)
-              type_name = recv_desc.try(&.name) || hir_type_name(recv_type)
-              if type_name && !type_name.empty?
-                # Try qualified name with type prefix
-                qualified_name = "#{type_name}##{method_name_str}"
-                func = @mir_module.get_function(qualified_name)
+        unless func
+          # Only apply fuzzy matching for qualified method names (containing . or #)
+          if method_name_str.includes?('.') || method_name_str.includes?('#')
+            # Extract base name (before $ type suffix) without allocating
+            dollar_idx = method_name_str.index('$')
+            base_name = dollar_idx ? method_name_str[0, dollar_idx] : method_name_str
 
-                # If not found, try fuzzy matching via index
-                unless func
-                  q_dollar = qualified_name.index('$')
-                  q_base = q_dollar ? qualified_name[0, q_dollar] : qualified_name
-                  func = @function_by_base_name[q_base]?
+            # O(1) lookup via pre-computed index + arity compatibility guard.
+            if candidate = @function_by_base_name[base_name]?
+              func = candidate if call_arity_compatible?(candidate, call.args.size, call.receiver != nil)
+            end
+          else
+            # For unqualified method names with a receiver, try to qualify based on receiver type
+            if call.receiver
+              recv_type = @hir_value_types[call.receiver.not_nil!]?
+              if recv_type
+                recv_desc = @hir_module.get_type_descriptor(recv_type)
+                type_name = recv_desc.try(&.name) || hir_type_name(recv_type)
+                if type_name && !type_name.empty?
+                  # Try qualified name with type prefix
+                  qualified_name = "#{type_name}##{method_name_str}"
+                  func = @mir_module.get_function(qualified_name)
+
+                  # If not found, try fuzzy matching via index
+                  unless func
+                    q_dollar = qualified_name.index('$')
+                    q_base = q_dollar ? qualified_name[0, q_dollar] : qualified_name
+                    if candidate = @function_by_base_name[q_base]?
+                      func = candidate if call_arity_compatible?(candidate, call.args.size, true)
+                    end
+                  end
                 end
               end
             end
@@ -1315,6 +1449,15 @@ module Crystal
         STDERR.puts "[UNRESOLVED_CALL] #{call.method_name} in #{@current_lowering_func_name}"
       end
       builder.extern_call(call.method_name, args, convert_type(call.type))
+    end
+
+    private def call_arity_compatible?(func : Function, explicit_arg_count : Int32, has_receiver : Bool) : Bool
+      provided = explicit_arg_count + (has_receiver ? 1 : 0)
+      total = func.params.size
+      required = func.params.count { |p| p.default_value.nil? }
+      return false if provided < required
+      return false if provided > total
+      true
     end
 
     private def extract_method_suffix_loose(full_name : String) : String?
@@ -3070,9 +3213,19 @@ module Crystal
       # Get the operand value
       operand = get_value(addr_of.operand)
 
-      # For address-of, we need to return the address of the operand
-      # In MIR, this is a pointer to the value's storage location
-      # For now, emit an alloca and return its address
+      # Struct values are represented as pointers in MIR. Taking address-of a
+      # struct would otherwise create pointer-to-pointer and break pointerof
+      # flows (e.g. Channel::Receiver/Sender queue nodes).
+      if hir_type = @hir_value_types[addr_of.operand]?
+        return operand if hir_type_is_struct?(hir_type)
+      end
+
+      # If operand is already an addressable location (stack slot), don't take
+      # address-of again. Doing so creates pointer-to-pointer and breaks
+      # pointerof(value_type) callsites (e.g. channel sender/receiver nodes).
+      return operand if @stack_slot_values.includes?(operand)
+
+      # Primitive/immediate values still need materialized storage to take address.
       builder.addressof(operand, TypeRef::POINTER)
     end
 

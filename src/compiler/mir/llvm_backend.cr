@@ -6276,6 +6276,88 @@ module Crystal::MIR
       elsif produces_value && (slot_name = @cross_block_slots[inst.id]?)
         emit_cross_block_slot_store(inst.id, name, slot_name)
       end
+
+      # Keep hoisted pointerof() backing slots synchronized with the defining value.
+      # This avoids reading uninitialized memory on sibling branches where the
+      # address wasn't first taken (e.g., Char#to_s ASCII fast path).
+      if !@in_phi_block && produces_value
+        sync_addressable_alloca_value(inst.id, name)
+      end
+    end
+
+    private def sync_addressable_alloca_value(value_id : ValueId, emitted_name : String)
+      alloca_ref = @addressable_allocas[value_id]?
+      return unless alloca_ref
+      return if @void_values.includes?(value_id)
+
+      slot_llvm_type = @addressable_alloca_types[value_id]?
+      return unless slot_llvm_type
+      return if slot_llvm_type == "void"
+
+      value_ref_str = if const_val = @constant_values[value_id]?
+                        if slot_llvm_type == "ptr" && const_val == "0"
+                          "null"
+                        else
+                          const_val
+                        end
+                      else
+                        emitted_name
+                      end
+
+      value_type_ref = @value_types[value_id]?
+      value_llvm_type = value_type_ref ? @type_mapper.llvm_type(value_type_ref) : slot_llvm_type
+      if emitted = @emitted_value_types[value_ref_str]? || @emitted_value_types[value_ref_str.lstrip('%')]?
+        value_llvm_type = emitted
+      end
+      if value_llvm_type == "void"
+        value_llvm_type = "ptr"
+        value_ref_str = "null"
+      end
+
+      store_val = value_ref_str
+      store_llvm_type = value_llvm_type
+
+      if store_llvm_type != slot_llvm_type
+        cast_name = "%r#{value_id}.addrsync.#{@cond_counter}"
+        @cond_counter += 1
+
+        if store_llvm_type.starts_with?('i') && slot_llvm_type.starts_with?('i') &&
+           !store_llvm_type.includes?('.') && !slot_llvm_type.includes?('.')
+          src_bits = store_llvm_type[1..].to_i?
+          dst_bits = slot_llvm_type[1..].to_i?
+          return unless src_bits && dst_bits
+          if src_bits < dst_bits
+            emit "#{cast_name} = sext #{store_llvm_type} #{store_val} to #{slot_llvm_type}"
+          elsif src_bits > dst_bits
+            emit "#{cast_name} = trunc #{store_llvm_type} #{store_val} to #{slot_llvm_type}"
+          else
+            emit "#{cast_name} = add #{slot_llvm_type} #{store_val}, 0"
+          end
+          store_val = cast_name
+          store_llvm_type = slot_llvm_type
+        elsif store_llvm_type == "ptr" && slot_llvm_type.starts_with?('i')
+          emit "#{cast_name} = ptrtoint ptr #{store_val} to #{slot_llvm_type}"
+          store_val = cast_name
+          store_llvm_type = slot_llvm_type
+        elsif store_llvm_type.starts_with?('i') && slot_llvm_type == "ptr"
+          emit "#{cast_name} = inttoptr #{store_llvm_type} #{store_val} to ptr"
+          store_val = cast_name
+          store_llvm_type = "ptr"
+        elsif store_llvm_type == "float" && slot_llvm_type == "double"
+          emit "#{cast_name} = fpext float #{store_val} to double"
+          store_val = cast_name
+          store_llvm_type = "double"
+        elsif store_llvm_type == "double" && slot_llvm_type == "float"
+          emit "#{cast_name} = fptrunc double #{store_val} to float"
+          store_val = cast_name
+          store_llvm_type = "float"
+        else
+          return
+        end
+      end
+
+      emit "store #{store_llvm_type} #{store_val}, ptr #{alloca_ref}"
+      @addressable_alloca_initialized << value_id
     end
 
     private def emit_cross_block_slot_store(inst_id : ValueId, name : String, slot_name : String)

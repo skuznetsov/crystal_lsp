@@ -3742,3 +3742,32 @@ crystal build -Ddebug_hooks src/crystal_v2.cr -o bin/crystal_v2 --no-debug
       - pointer arg -> float callee uses `ptrtoint + uitofp` (no accidental dereference);
       - union arg -> float callee payload extraction uses `align 4` load (`%union_to_fp.*.payload_ptr`);
     - verification: `crystal spec spec/mir/llvm_backend_spec.cr` => `55 examples, 0 failures`.
+
+### 8.15 Bootstrap Crash Fix: Slice(UInt8) Layout + MIR Call Resolution (2026-02-15)
+
+- [x] Fix regression where `puts`/`STDOUT.puts` crashed or produced empty output due wrong field offsets in `Slice(UInt8)#initialize`.
+  - Root cause:
+    - early monomorphization could create skeletal `ClassInfo` for specialized generics (`Slice(UInt8)` with empty ivars);
+    - `lower_method` then emitted `FieldSet` with default `field_offset = 0` for `@pointer/@read_only/@size`;
+    - temporary disabled guards in `MIR` call resolution/slot sync amplified runtime instability.
+  - Implemented:
+    - `src/compiler/hir/ast_to_hir.cr`:
+      - added `refresh_specialized_class_info_if_empty` and call from `lower_method` to re-register specialized generic class info from template + reopenings on demand;
+      - run `align_class_ivars(class_name)` after refresh to normalize layout (`@size@0, @read_only@4, @pointer@8` on 64-bit);
+      - auto-assign offset lookup in `lower_method` now prefers local `class_info.ivars` and only falls back to `get_ivar_offset`.
+    - `src/compiler/mir/hir_to_mir.cr`:
+      - re-enabled inheritance-aware qualified method lookup (`resolve_virtual_method_for_class`) for unresolved `Class#method` calls;
+      - restored real `call_arity_compatible?` guard using `MIR::Parameter#default_value`.
+    - `src/compiler/mir/llvm_backend.cr`:
+      - re-enabled `sync_addressable_alloca_value` in normal emission path.
+  - DoD:
+    - `scripts/build.sh debug` => success;
+    - `bin/crystal_v2 /tmp/puts_hi.cr -o /tmp/puts_hi_final` then run binary => prints `hi` (3 bytes with newline), exit `0`;
+    - `bin/crystal_v2 /tmp/stdout_hi.cr -o /tmp/stdout_hi_final` then run binary => prints `hi`, exit `0`;
+    - `scripts/run_safe.sh /tmp/puts_hi_final` => `EXIT 0`;
+    - `scripts/run_safe.sh /tmp/stdout_hi_final` => `EXIT 0`.
+  - Regression sweep:
+    - `regression_tests/run_all.sh bin/crystal_v2` => `39 passed, 2 failed`:
+      - `hash_stress` (functional mismatch: `missing=8`);
+      - `test_case_in_predicate_subject` (segfault in channel receive path).
+    - These two remain open and are next priority.
