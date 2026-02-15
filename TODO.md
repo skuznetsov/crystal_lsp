@@ -133,6 +133,18 @@
   - current `CRYSTAL_V2_DISABLE_INLINE_YIELD=1` blocker moved forward to
     `/tmp/rt_inline_off_fixed3.ll:54143` (`%other` is `ptr` but used as `i32`
     in `add`), i.e. non-union scalar typing mismatch remains in this mode.
+  - update: primitive int override emission now recovers rhs integer type from
+    mangled name suffix (`...$$Int32`) when lowered param metadata degrades to
+    `ptr` (e.g. `Int32#ADD`).
+    Re-verified with:
+    - `crystal build src/crystal_v2.cr -o /tmp/crystal_v2_dbg_union_storefix4 --error-trace` => `EXIT 0`
+    - `timeout 180 crystal spec spec/hir/return_type_inference_spec.cr` => `13 examples, 0 failures`
+    - `timeout 180 crystal spec spec/mir/llvm_backend_spec.cr` => `59 examples, 0 failures`
+    - `./regression_tests/run_all.sh /tmp/crystal_v2_dbg_union_storefix4` => `40 passed, 0 failed`
+    - `CRYSTAL_V2_PIPELINE_CACHE=0 /tmp/crystal_v2_dbg_union_storefix4 examples/bootstrap_array.cr -o /tmp/bootstrap_array_union_storefix4` + `scripts/run_safe.sh /tmp/bootstrap_array_union_storefix4 10 768` => `EXIT 0`
+  - current `CRYSTAL_V2_DISABLE_INLINE_YIELD=1` blocker moved further to
+    `/tmp/rt_inline_off_fixed4.ll:65582`: `ret <union> 0` (invalid union return
+    literal; should use union zero-init form).
 - **HIR method-name parse churn trim in lookup/lowering** (2026-02-15) —
   reduced hot-path overhead from full `parse_method_name` caching where parsing
   is one-shot:

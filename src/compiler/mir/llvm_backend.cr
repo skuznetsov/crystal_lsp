@@ -4489,6 +4489,15 @@ module Crystal::MIR
 
     # Emit correct primitive binary operation for integer/float methods with
     # empty @[Primitive(:binary)] bodies from the Crystal stdlib.
+    @[AlwaysInline]
+    private def primitive_override_rhs_type_name(rest : String) : String?
+      idx = rest.index("$$")
+      return nil unless idx
+      start = idx + 2
+      return nil if start >= rest.bytesize
+      rest.byte_slice(start, rest.bytesize - start)
+    end
+
     private def emit_primitive_binary_override(func : Function, mangled : String) : Bool
       # Match: <Type>$H$<OP>$$<ArgType> patterns
       # Operator mangling: $GT = >, $LT = <, $GE = >=, $LE = <=, $EQ = ==,
@@ -4579,6 +4588,14 @@ module Crystal::MIR
         # Determine the self type in the function params
         self_llvm = func.params.size >= 1 ? @type_mapper.llvm_type(func.params[0].type) : llvm_type
         other_llvm = func.params.size >= 2 ? @type_mapper.llvm_type(func.params[1].type) : llvm_type
+        rhs_type_name = primitive_override_rhs_type_name(rest)
+        if other_llvm == "ptr" && rhs_type_name
+          if rhs_info = int_types[rhs_type_name]?
+            other_llvm = rhs_info[0]
+          elsif rhs_type_name == type_name
+            other_llvm = llvm_type
+          end
+        end
 
         # If self is ptr (because Int primitive methods declare self as class receiver),
         # we need ptrtoint to extract the actual integer value.
