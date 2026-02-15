@@ -1956,6 +1956,10 @@ module Crystal::HIR
     @array_type_for_element_cache : Hash(TypeRef, TypeRef)
     @array_type_for_element_nil_cache : Set(TypeRef)
     @hash_type_for_entry_cache : Hash({TypeRef, TypeRef}, NamedTuple(type: TypeRef, name: String))
+    # Cache user-defined type names by TypeRef to reduce repeated descriptor lookups.
+    @type_name_from_ref_cache : Hash(TypeRef, String)
+    @type_name_from_ref_last_ref : TypeRef = TypeRef::VOID
+    @type_name_from_ref_last_name : String = "Void"
     @type_name_normalize_cache : Hash(String, String)
     # Cache for normalize_declared_type_name keyed on (type_name, context, subst_cache_gen).
     @normalize_decl_cache : Hash({String, String?, UInt64}, String)
@@ -2270,6 +2274,9 @@ module Crystal::HIR
       @array_type_for_element_cache = {} of TypeRef => TypeRef
       @array_type_for_element_nil_cache = Set(TypeRef).new
       @hash_type_for_entry_cache = {} of {TypeRef, TypeRef} => NamedTuple(type: TypeRef, name: String)
+      @type_name_from_ref_cache = Hash(TypeRef, String).new(initial_capacity: 4096)
+      @type_name_from_ref_last_ref = TypeRef::VOID
+      @type_name_from_ref_last_name = "Void"
       @type_name_normalize_cache = Hash(String, String).new(initial_capacity: 4096)
       @normalize_decl_cache = Hash({String, String?, UInt64}, String).new(initial_capacity: 4096)
       @union_in_progress = Set(String).new
@@ -55073,9 +55080,23 @@ module Crystal::HIR
       when TypeRef::SYMBOL  then "Symbol"
       when TypeRef::POINTER then "Pointer"
       else
-        # Look up in type registry
+        if @type_name_from_ref_last_ref == type_ref
+          return @type_name_from_ref_last_name
+        end
+        if cached = @type_name_from_ref_cache[type_ref]?
+          @type_name_from_ref_last_ref = type_ref
+          @type_name_from_ref_last_name = cached
+          return cached
+        end
+
+        # Look up in type registry. Avoid caching Unknown because the descriptor may
+        # appear later during incremental/lazy type registration.
         if desc = @module.get_type_descriptor(type_ref)
-          desc.name
+          name = desc.name
+          @type_name_from_ref_cache[type_ref] = name
+          @type_name_from_ref_last_ref = type_ref
+          @type_name_from_ref_last_name = name
+          name
         else
           "Unknown"
         end
