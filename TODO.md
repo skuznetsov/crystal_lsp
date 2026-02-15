@@ -63,6 +63,11 @@
     - baseline (`/tmp/crystal_v2_dbg_overloadqueue`): `real 82.82s`; `process_pending 6912.7ms`; `emit_tracked_sigs 8098.0ms`; `Lookup 902.1ms`
     - candidate (`/tmp/crystal_v2_dbg_typequeue`): `real 84.28s`, `83.96s`; `process_pending 7539.1/7379.5ms`; `emit_tracked_sigs 8737.3/8712.6ms`; `Lookup 834.5/1093.8ms`
     - stable wall-clock regression (~`+1.30s` avg). Candidate reverted.
+  - overload-queue enqueue dedup simplification (drop `queued` set, dedupe only by
+    `indexed` at consume time):
+    - baseline (`/tmp/crystal_v2_dbg_overloadqueue`): `real 83.03s`, `82.83s`; `process_pending 6922.0/6878.2ms`; `emit_tracked_sigs 8050.7/8064.2ms`
+    - candidate (`/tmp/crystal_v2_dbg_overloadqueue2`): `real 82.50s`, `83.04s`; `process_pending 7003.3/7000.1ms`; `emit_tracked_sigs 8140.8/7963.0ms`
+    - mixed signal (one win, one loss), no robust 2/2 improvement. Candidate reverted.
   Decision: keep all above reverted; continue only with branches that improve
   end-to-end wall clock across at least two A/B runs.
   Note: one transient regression runner failure (`yield_suffix_unless` missing
