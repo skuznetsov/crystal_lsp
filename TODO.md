@@ -19,6 +19,24 @@
 - Float64: arithmetic, ** on literals
 
 ## Recently completed
+- **Experimental no-link knob: optional HIR safety-net skip** (2026-02-15) —
+  added an explicit **opt-in** toggle to skip expensive HIR safety-net lowering
+  (`emit_all_tracked_signatures` + `lower_missing_call_targets`) during
+  `flush_pending_functions`:
+  - new envs: `CRYSTAL_V2_SKIP_SAFETY_NETS=1` (enable), `CRYSTAL_V2_FORCE_SAFETY_NETS=1` (force-disable skip);
+  - default behavior remains safe (`run_safety_nets=true`);
+  - when skip is enabled, CLI prints a warning that mode is experimental and may produce invalid IR.
+  Validation:
+  - build: `crystal build src/crystal_v2.cr -o /tmp/crystal_v2_dbg_nolink_safetynet2` => `EXIT 0`
+  - specs:
+    - `crystal spec spec/hir/return_type_inference_spec.cr` => `13 examples, 0 failures`
+    - `crystal spec spec/mir/llvm_backend_spec.cr` => `59 examples, 0 failures`
+  - regressions: `./regression_tests/run_all.sh /tmp/crystal_v2_dbg_nolink_safetynet2` => `40 passed, 0 failed`
+  - no-link A/B (`CRYSTAL_V2_PIPELINE_CACHE=0 CRYSTAL_V2_AST_FILTER=1 --no-link --no-ast-cache --no-llvm-cache spec/hir/return_type_inference_spec.cr`):
+    - default safety nets: `real 73.45s`, `EXIT 0`
+    - skip safety nets (`CRYSTAL_V2_SKIP_SAFETY_NETS=1`): `real 43.14s`, but **fails** at `opt` with undefined `@Crystal$CCHasher$Hpermute$$UInt64`
+  Decision:
+  - keep feature as experimental manual lever only; do not auto-enable.
 - **CLI policy: auto-disable inline-yield for `--no-link`** (2026-02-15) —
   added a safe fast-path for compile-only/test workloads:
   - `cli` now passes `disable_inline_yield: true` to HIR lowering when `--no-link`

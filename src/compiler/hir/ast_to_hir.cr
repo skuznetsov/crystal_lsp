@@ -27522,7 +27522,7 @@ module Crystal::HIR
     end
 
     # Public method to flush pending functions from external callers (e.g., CLI after lower_def)
-    def flush_pending_functions
+    def flush_pending_functions(run_safety_nets : Bool = true)
       phase_stats = env_has?("CRYSTAL_V2_PHASE_STATS")
 
       # Before activating the filter, seed method names from the initial pending queue.
@@ -27572,7 +27572,7 @@ module Crystal::HIR
 
       process_pending_lower_functions
 
-      # Disable AST filter and lazy RTA for safety nets (emit_tracked_sigs, lower_missing)
+      # Disable AST filter and lazy RTA after the main pending pass.
       @ast_filter_active = false
       @lazy_rta_active = false
 
@@ -27580,6 +27580,13 @@ module Crystal::HIR
         after1 = @module.function_count
         t1 = Time.instant
         STDERR.puts "[PHASE_STATS] process_pending: #{before} -> #{after1} (+#{after1 - before.not_nil!}) in #{(t1.not_nil! - t0.not_nil!).total_milliseconds.round(1)}ms"
+      end
+
+      unless run_safety_nets
+        if phase_stats
+          STDERR.puts "[PHASE_STATS] safety_nets: skipped"
+        end
+        return
       end
 
       # Fix #2: Emit all tracked signatures to ensure functions called from

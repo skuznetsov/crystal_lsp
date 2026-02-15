@@ -701,16 +701,30 @@ module CrystalV2
           STDERR.puts "[PHASE_STATS] AST analysis: #{ast_result[:defs].size}/#{hir_converter.function_defs_count} defs reachable, #{ast_result[:method_names].size} method names (analysis-only, #{(Time.instant - ast_filter_start).total_milliseconds.round(1)}ms)"
         end
 
+        force_safety_nets = case force = ENV["CRYSTAL_V2_FORCE_SAFETY_NETS"]?
+                            when nil, "", "0", "false", "False", "FALSE" then false
+                            else                                                 true
+                            end
+        skip_safety_nets = case skip = ENV["CRYSTAL_V2_SKIP_SAFETY_NETS"]?
+                           when nil, "", "0", "false", "False", "FALSE" then false
+                           else                                               true
+                           end
+        run_safety_nets = true
+        if skip_safety_nets && !force_safety_nets
+          run_safety_nets = false
+          log(options, out_io, "  Warning: skipping HIR safety-net lowering (experimental, may produce invalid IR)")
+        end
+
         # Ensure top-level `fun main` is lowered as a real entrypoint (C ABI).
         did_flush = false
         if fun_main = def_nodes.find { |(n, _)| n.receiver.try { |recv| String.new(recv) == HIR::AstToHir::FUN_DEF_RECEIVER } && String.new(n.name) == "main" }
           hir_converter.arena = fun_main[1]
           hir_converter.lower_def(fun_main[0])
           # Process any pending functions from fun main lowering (e.g., Crystal.init_runtime)
-          hir_converter.flush_pending_functions
+          hir_converter.flush_pending_functions(run_safety_nets)
           did_flush = true
         end
-        hir_converter.flush_pending_functions unless did_flush
+        hir_converter.flush_pending_functions(run_safety_nets) unless did_flush
         STDERR.puts "  Main function created" if options.progress
 
         # Refresh generic type params that were captured as VOID after lowering.
