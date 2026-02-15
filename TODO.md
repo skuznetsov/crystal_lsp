@@ -6,10 +6,10 @@
   - `regression_tests/test_select_map_stress.cr`
   - `regression_tests/test_float_pow_var.cr`
   - `regression_tests/test_string_upcase_large.cr`
-- New runtime repro (2026-02-15): `examples/bench_comprehensive.cr` now compiles
-  and links, but fails at runtime with:
-  - `Unhandled exception: BUG: Unexpected UseDefault value for delivered receive (RuntimeError)`
-  - this replaced earlier `_current` link failure and stack-allocation crash.
+- Runtime crash class remains for scheduler path:
+  - minimal repro `puts "before"; Fiber.suspend` still segfaults (`exit 139`) in debug build.
+- Output-path regression is still open:
+  - trivial `puts "hi"` binary exits `0` but prints nothing (stdout path unresolved).
 - Regression note (2026-02-15): `regression_tests/test_hash_stress.cr` currently
   fails output parity (`missing=8`) in partial `regression_tests/run_all.sh` run.
 
@@ -25,6 +25,22 @@
 - Float64: arithmetic, ** on literals
 
 ## Recently completed
+- **Channel case/in predicate lowering no longer falls back to false extern stubs** (2026-02-15, commit `95b40d1`) —
+  fixed channel wakeup crash caused by `in .delivered?/.closed?/.none?` lowering to unresolved extern calls (`delivered?` etc.),
+  which were emitted as dead-code stubs returning `false`.
+  Changes:
+  - `ast_to_hir`: for `case/in` predicates on subject receiver, detect enum predicates and lower to direct enum-value comparison;
+    avoid re-lowering side-effectful subject expressions.
+  - `llvm_backend`: stabilize `pointerof` lowering for hoisted addressable allocas and boxed struct values
+    (keep object pointer semantics instead of temporary slot address).
+  - `channel.cr`: dequeue loops now advance explicitly after skipped select contexts.
+  Validation:
+  - `./scripts/build.sh debug` => `EXIT 0`
+  - `./bin/crystal_v2 --emit llvm-ir regression_tests/test_case_in_predicate_subject.cr -o /tmp/test_case_predicate_bin` => `EXIT 0`
+  - LLVM check:
+    - in `Channel(Int32)#send`, exactly one `send_internal` call remains;
+    - no `@delivered$Q/@closed$Q/@none$Q` calls in generated IR.
+  - runtime smoke: `./scripts/run_safe.sh /tmp/test_case_predicate_bin` => `EXIT 0` (no `Fiber was awaken...` runtime error).
 - **HIR call resolution: separate instance (`#`) and class (`.`) overload spaces** (2026-02-15) —
   fixed incorrect candidate mixing in `lookup_function_def_for_call` where an
   instance call could resolve to class method when owner+method names matched.
