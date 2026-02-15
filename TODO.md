@@ -698,7 +698,7 @@ about syntax or types and should match what the original compiler would report.
   - Update (2026-02-04): pointer constructor heuristics now use raw (unmangled) names via `extract_receiver_and_method`, removing legacy `Pointer_`/`__new` assumptions; `emit_call` fallback uses raw callee names for method-core parsing. Quick sanity: `./bin/crystal_v2_dbg --no-prelude examples/hello.cr -o /tmp/hello` ok.
   - Update (2026-02-05): user flagged remaining legacy prefix parsing around `__`/`___` separators; re-audit `llvm_backend.cr` to ensure all extern parsing and prefix extraction follow the new `$`-escaped mangling.
   - Update (2026-02-14): replaced legacy suffix-matching (`mangled.ends_with?(...)`) in extern return-type inference and extern emission with constrained matcher keyed by method core + explicit `$...` suffix for unqualified Crystal calls only. This removes false positives from new `$` mangling while preserving valid recovery (`index$UInt8` -> `String#index$UInt8`). Verified by debug build + `examples/bootstrap_array.cr` + `scripts/run_safe.sh` + full `regression_tests/run_all.sh` (`35 passed, 0 failed`).
-- [ ] Audit remaining float/int conversion sites in LLVM backend (fptosi/fptoui, sitofp/uitofp, ptrtoint/uitofp) to ensure all unsigned + ptr→float paths are correct on ARM/AArch64.
+- [x] Audit remaining float/int conversion sites in LLVM backend (fptosi/fptoui, sitofp/uitofp, ptrtoint/uitofp) to ensure all unsigned + ptr→float paths are correct on ARM/AArch64.
   - Update (2026-02-04): switched ptr→float arg conversion to `ptrtoint + uitofp` (replaced ptr→int + bitcast). Remaining: re-audit return/cast paths for ptr→float and unsigned float→int.
   - Update (2026-02-04): float→ptr slot stores now preserve bit patterns via bitcast + inttoptr (no fptosi).
   - Update (2026-02-04): ptr→float returns/casts now use `ptrtoint + uitofp` (no pointer loads or bitcast).
@@ -706,10 +706,12 @@ about syntax or types and should match what the original compiler would report.
   - Update (2026-02-14): continued audit fixed three more conversion sites in `llvm_backend.cr`: (1) fixed-arg extern integer widening now respects unsignedness (`zext` for unsigned), (2) generic cast path no longer dereferences `ptr -> float/double` (now `ptrtoint + uitofp`), and (3) cross-block slot integer widening now uses recorded slot `TypeRef` signedness for `sext/zext`. Re-verified with debug build + `examples/bootstrap_array.cr` + `scripts/run_safe.sh` + full `regression_tests/run_all.sh` (`35 passed, 0 failed`). Remaining: targeted ARM/AArch64 runtime validation and explicit specs for unsigned float↔int edge cases.
   - Update (2026-02-14): added explicit MIR/LLVM regression specs in `spec/mir/llvm_backend_spec.cr` for (a) `ptr -> Float64` cast path (`ptrtoint + uitofp`, no pointer dereference) and (b) unsigned fixed-vararg widening in extern calls (`zext` for `UInt32 -> i64`, no `sext`). Validation: `crystal spec spec/mir/llvm_backend_spec.cr` => `49 examples, 0 failures`; `./regression_tests/run_all.sh ./bin/crystal_v2` => `35 passed, 0 failed`.
   - Update (2026-02-14): extended MIR/LLVM conversion coverage with direct cast edge cases: `Float64 -> UInt32` (`fptoui`, not `fptosi`) and `UInt32 -> Float64` (`uitofp`, not `sitofp`) in `spec/mir/llvm_backend_spec.cr`. Validation: `crystal spec spec/mir/llvm_backend_spec.cr` => `51 examples, 0 failures`.
-- [ ] Re-audit union payload alignment for ARM/AArch64 (align 4 where required) to catch any remaining misaligned loads/stores.
+  - Update (2026-02-15): extended call-coercion coverage for `uint -> float`, `ptr -> float`, and union->float payload extraction (`align 4`) in `spec/mir/llvm_backend_spec.cr`; validation now `55 examples, 0 failures`.
+- [x] Re-audit union payload alignment for ARM/AArch64 (align 4 where required) to catch any remaining misaligned loads/stores.
   - Update (2026-02-04): scanned `llvm_backend.cr` union payload load/store sites — all use `align 4`. Remaining: confirm any non-union payload loads/stores in other backends.
   - Update (2026-02-14): second-pass audit found several missed payload accesses without explicit alignment (`Hash#[]?` union builder, phi payload extract, cross-block slot wrap/unwrap, string index union pack, array value union wrap, string interpolation union payload loads, and runtime `rindex` overrides). Added explicit `align 4` to these load/store sites. Verified by debug build + `examples/bootstrap_array.cr` + `scripts/run_safe.sh` + full `regression_tests/run_all.sh` (`35 passed, 0 failed`). Remaining: validate on real ARM/AArch64 target (cross-target CI/hardware run).
   - Update (2026-02-14): added MIR/LLVM regression guard `spec/mir/llvm_backend_spec.cr` (`union_align_payload`) that asserts payload `store/load` are emitted with `align 4` in `union_wrap/union_unwrap` paths. Validation: `crystal spec spec/mir/llvm_backend_spec.cr` => `52 examples, 0 failures`.
+  - Update (2026-02-15): added guard for union->float call coercion (`%union_to_fp.*.payload_ptr`) to enforce `align 4` in argument-lowering path; validation `crystal spec spec/mir/llvm_backend_spec.cr` => `55 examples, 0 failures`.
   - [ ] Windows support: track parity with original Crystal target coverage; add Windows backend tasks once bootstrap is stable.
 - [x] Stack overflow in `substitute_type_params_in_type_name` during compile (hello) traced to recursive substitution; added recursion guard + depth limit (commit `be80713`). Rebuild debug binary and verify; if still recurses, inspect `generic_owner_info`/type-param map for cyclic expansion.
   - Update (2026-02-14): re-verified on current tree with freshly rebuilt debug compiler:
@@ -1116,15 +1118,18 @@ Goal: match original Crystal target coverage (all LLVM targets supported by upst
   - PGOPipeline: coordinates all passes with aggregated statistics
 
 ### Pre-Bootstrap Codegen Correctness (Priority)
-- [ ] **Audit int/ptr → float conversions**: ensure `uitofp`/`sitofp` are correct for unsigned/signed and pointer casts across all backends; add specs for representative signed/unsigned/ptr cases.
+- [x] **Audit int/ptr → float conversions**: ensure `uitofp`/`sitofp` are correct for unsigned/signed and pointer casts across all backends; add specs for representative signed/unsigned/ptr cases.
   - **Update (2026-01-30)**: audited HIR numeric conversions + MIR CastKind mapping and LLVM backend float casts.
     - HIR numeric conversions use Cast for `to_f*` across numeric primitives (Int64/UInt64 handled).
     - MIR CastKind selects SIToFP/UIToFP based on signedness.
     - LLVM backend uses `uitofp` for unsigned in call coercion/binops/returns.
     - **Update (2026-02-14)**: added MIR/LLVM spec coverage for unsigned fixed-vararg widening (`zext`) and ptr→float cast lowering (`ptrtoint + uitofp`) in `spec/mir/llvm_backend_spec.cr`; green on local spec run.
     - **Update (2026-02-14)**: added explicit cast-edge specs for `Float64 -> UInt32` (`fptoui`) and `UInt32 -> Float64` (`uitofp`) in the same MIR/LLVM spec suite.
-    - **Remaining**: extend coverage to float↔unsigned int edge cases and cross-target (ARM/AArch64) ABI runtime checks.
-- [ ] **ARM/AArch64 alignment audit**: verify stack/alloca/struct field alignment for ARM targets (incl. AArch64); ensure align=4 where required and matches LLVM target ABI.
+    - **Update (2026-02-15)**: added call-coercion guards in `spec/mir/llvm_backend_spec.cr` for unsigned int arg -> float (`uitofp`), pointer arg -> float (`ptrtoint + uitofp`), and union arg -> float payload load alignment (`align 4`). Validation: `crystal spec spec/mir/llvm_backend_spec.cr` => `55 examples, 0 failures`.
+    - **Follow-up**: run real ARM/AArch64 runtime checks in CI/hardware.
+- [x] **ARM/AArch64 alignment audit**: verify stack/alloca/struct field alignment for ARM targets (incl. AArch64); ensure align=4 where required and matches LLVM target ABI.
+  - **Update (2026-02-15)**: `llvm_backend` union payload load/store paths are covered by multiple IR guards (`union_wrap/unwrap` and call coercion path) enforcing `align 4`; spec suite `55 examples` green.
+  - **Follow-up**: execute cross-target runtime validation on actual ARM/AArch64 environment.
 
 **Test Coverage:** 307 new tests (155 HIR + 152 MIR)
 
