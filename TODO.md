@@ -77,6 +77,25 @@
   Note: one transient regression runner failure (`yield_suffix_unless` missing
   `.o` at link) did not reproduce; direct compile passed and rerun of
   `regression_tests/run_all.sh /tmp/crystal_v2_dbg_callsiteast` finished `40/0`.
+- **HIR parent fallback candidate scan: single-pass parse** (2026-02-15) —
+  reduced duplicate method-name parsing in parent fallback lookup:
+  - refactored `find_method_in_parent_via_index` to merge exact-suffix and
+    fallback ranking into one pass over candidates;
+  - keeps previous selection order (exact match first, then untyped/splat/arity
+    fallback preferences), while avoiding a second `parse_method_name_uncached`
+    pass on the same candidates.
+  Validation:
+  - build: `crystal build src/crystal_v2.cr -o /tmp/crystal_v2_dbg_parentsinglepass --error-trace` => `EXIT 0`
+  - spec: `timeout 180 crystal spec spec/hir/return_type_inference_spec.cr` => `13 examples, 0 failures`
+  - regressions: `./regression_tests/run_all.sh /tmp/crystal_v2_dbg_parentsinglepass` => `40 passed, 0 failed`
+  - bootstrap smoke: `CRYSTAL_V2_PIPELINE_CACHE=0 /tmp/crystal_v2_dbg_parentsinglepass examples/bootstrap_array.cr -o /tmp/bootstrap_array_parentsinglepass && ./scripts/run_safe.sh /tmp/bootstrap_array_parentsinglepass 10 768` => `EXIT 0`
+  - fib smoke: `CRYSTAL_V2_PIPELINE_CACHE=0 /tmp/crystal_v2_dbg_parentsinglepass examples/bench_fib42.cr -o /tmp/fib42_parentsinglepass && ./scripts/run_safe.sh /tmp/fib42_parentsinglepass 5 256` => `EXIT 0`
+  - A/B (`CRYSTAL_V2_PIPELINE_CACHE=0 CRYSTAL_V2_AST_FILTER=1 CRYSTAL_V2_PHASE_STATS=1 ... --no-link --no-ast-cache --no-llvm-cache spec/hir/return_type_inference_spec.cr`):
+    - pair1 baseline (`/tmp/crystal_v2_dbg_headperf`): `real 82.94s`; `emit_tracked_sigs 8412.6ms`; `lower_missing 351.6ms`; `Lookup 917.4ms`
+    - pair1 new (`/tmp/crystal_v2_dbg_parentsinglepass`): `real 82.60s`; `emit_tracked_sigs 8230.1ms`; `lower_missing 321.2ms`; `Lookup 912.7ms`
+    - pair2 baseline (`/tmp/crystal_v2_dbg_headperf`): `real 82.72s`; `emit_tracked_sigs 8152.5ms`; `lower_missing 468.8ms`; `Lookup 889.9ms`
+    - pair2 new (`/tmp/crystal_v2_dbg_parentsinglepass`): `real 82.68s`; `emit_tracked_sigs 8092.6ms`; `lower_missing 317.6ms`; `Lookup 1060.3ms`
+  - net: 2/2 wall-clock wins; average `real` improvement ~`0.19s` (~`0.23%`).
 - **HIR method-name parse churn trim in lookup/lowering** (2026-02-15) —
   reduced hot-path overhead from full `parse_method_name` caching where parsing
   is one-shot:

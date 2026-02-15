@@ -1620,7 +1620,15 @@ module Crystal::HIR
       candidates = owner_methods[method]?
       return nil unless candidates
 
-      # Try exact suffix match first
+      expected_arity = suffix ? suffix_param_count(suffix) : 0
+      best_untyped : ParentLookupResult? = nil
+      best_untyped_splat : ParentLookupResult? = nil
+      best_arity_match : ParentLookupResult? = nil
+      best_required_match : ParentLookupResult? = nil
+      first_found : ParentLookupResult? = nil
+
+      # Single pass: prefer exact suffix match; otherwise keep the same fallback
+      # ranking as before while avoiding a second parse of candidate names.
       candidates.each do |candidate_name|
         candidate_parts = parse_method_name_uncached(candidate_name)
         next unless candidate_parts.owner == parent || strip_generic_args(candidate_parts.owner) == base_parent
@@ -1632,35 +1640,20 @@ module Crystal::HIR
               return {def_node, arena, candidate_name}
             end
           end
-        else
-          if candidate_parts.suffix.nil?
-            if def_node = @function_defs[candidate_name]?
-              arena = @function_def_arenas[candidate_name]
-              return {def_node, arena, candidate_name}
-            end
+        elsif candidate_parts.suffix.nil?
+          if def_node = @function_defs[candidate_name]?
+            arena = @function_def_arenas[candidate_name]
+            return {def_node, arena, candidate_name}
           end
         end
-      end
 
-      # Fallback: any candidate from this parent (regardless of suffix).
-      # When the suffix doesn't match any candidate exactly, prefer untyped (generic)
-      # overloads over typed ones with matching arity.  This ensures that e.g.
-      # IO#puts(obj : _) is chosen over IO#puts(string : String) when the subclass
-      # calls puts with an Int32.
-      expected_arity = suffix ? suffix_param_count(suffix) : 0
-      best_untyped : ParentLookupResult? = nil
-      best_untyped_splat : ParentLookupResult? = nil
-      best_arity_match : ParentLookupResult? = nil
-      best_required_match : ParentLookupResult? = nil
-      first_found : ParentLookupResult? = nil
-      candidates.each do |candidate_name|
-        candidate_parts = parse_method_name_uncached(candidate_name)
-        next unless candidate_parts.owner == parent || strip_generic_args(candidate_parts.owner) == base_parent
         if def_node = @function_defs[candidate_name]?
           arena = @function_def_arenas[candidate_name]
           result = {def_node, arena, candidate_name}
           first_found ||= result
-          # Check if this is an untyped (generic) overload with matching arity
+
+          # Fallback: any candidate from this parent (regardless of suffix).
+          # Prefer untyped overloads over typed ones with matching arity.
           if params = def_node.params
             has_splat = false
             param_count = 0
