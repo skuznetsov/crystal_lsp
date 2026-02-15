@@ -365,6 +365,7 @@ module Crystal::MIR
     @emitted_value_types : Hash(String, String)  # SSA name -> LLVM type (per function)
     @emitted_allocas : Set(ValueId) = Set(ValueId).new  # Track pre-emitted allocas
     @addressable_allocas : Hash(ValueId, String) = {} of ValueId => String  # operand_id -> alloca SSA name
+    @addressable_alloca_types : Hash(ValueId, String) = {} of ValueId => String  # operand_id -> hoisted alloca element type
     @addressable_alloca_initialized : Set(ValueId) = Set(ValueId).new  # Track which addressable allocas have been stored to
     @pending_allocas : Array({String, String, Int32}) = [] of {String, String, Int32}  # name, type, align
     @string_counter : Int32 = 0
@@ -4658,6 +4659,7 @@ module Crystal::MIR
       reset_value_names(func)
       @emitted_allocas.clear
       @addressable_allocas.clear
+      @addressable_alloca_types.clear
       @addressable_alloca_initialized.clear
       @value_def_block.clear
       @cross_block_values.clear
@@ -4851,6 +4853,7 @@ module Crystal::MIR
           alloca_name = "r#{operand_id}.addr"
           emit_raw "  %#{alloca_name} = alloca #{alloca_type}, align 8\n"
           @addressable_allocas[operand_id] = "%#{alloca_name}"
+          @addressable_alloca_types[operand_id] = alloca_type
         end
       end
 
@@ -10271,13 +10274,39 @@ module Crystal::MIR
         return
       end
 
+      # Case 1.5: non-stack struct values are represented as pointers in our ABI.
+      # For these values pointerof(x) must return the object pointer itself, not
+      # an address to a temporary alloca that only stores that pointer.
+      operand_type = @value_types[inst.operand]? || TypeRef::POINTER
+      operand_ref = value_ref(inst.operand)
+      if operand_type != TypeRef::POINTER
+        if type_desc = @module.type_registry.get(operand_type)
+          if type_desc.kind.struct?
+            emit "#{name} = getelementptr i8, ptr #{operand_ref}, i64 0"
+            @value_types[inst.id] = TypeRef::POINTER
+            return
+          end
+        end
+      end
+
       # Case 2: Hoisted addressable alloca exists (from pre-scan in emit_hoisted_allocas)
       if alloca_ref = @addressable_allocas[inst.operand]?
+        # If the hoisted slot is non-pointer but the operand was emitted as a ptr,
+        # pointerof should expose the operand pointer directly (boxed/heap-backed value),
+        # not the address of the temporary hoisted slot.
+        if hoisted_type = @addressable_alloca_types[inst.operand]?
+          operand_key = operand_ref.starts_with?('%') ? operand_ref[1..] : operand_ref
+          emitted_llvm_type = @emitted_value_types[operand_ref]? || @emitted_value_types[operand_key]?
+          if hoisted_type != "ptr" && emitted_llvm_type == "ptr"
+            emit "#{name} = getelementptr i8, ptr #{operand_ref}, i64 0"
+            @value_types[inst.id] = TypeRef::POINTER
+            return
+          end
+        end
+
         # Store the operand value on first use (subsequent uses reuse same alloca)
         unless @addressable_alloca_initialized.includes?(inst.operand)
-          operand_type = @value_types[inst.operand]? || TypeRef::POINTER
           llvm_type = @type_mapper.llvm_type(operand_type)
-          operand_ref = value_ref(inst.operand)
           if llvm_type == "void"
             llvm_type = "ptr"
             operand_ref = "null"
@@ -10292,9 +10321,7 @@ module Crystal::MIR
       end
 
       # Case 3: Fallback — create inline alloca (should rarely be hit with hoisting)
-      operand_type = @value_types[inst.operand]? || TypeRef::POINTER
       llvm_type = @type_mapper.llvm_type(operand_type)
-      operand_ref = value_ref(inst.operand)
       if llvm_type == "void"
         llvm_type = "ptr"
         operand_ref = "null"
@@ -11984,6 +12011,21 @@ module Crystal::MIR
       # Check if this was a void call - return safe default literal
       if @void_values.includes?(id)
         return "0"
+      end
+      # For non-constant values whose address was taken via pointerof(),
+      # reads must come from the shared addressable alloca because the value
+      # may have been mutated through that pointer.
+      if !@in_phi_mode && @addressable_alloca_initialized.includes?(id)
+        if alloca_name = @addressable_allocas[id]?
+          val_type = @value_types[id]?
+          llvm_type = val_type ? @type_mapper.llvm_type(val_type) : "i32"
+          if llvm_type != "void" && llvm_type != "ptr"
+            temp = "%r#{id}.addrload.#{@cond_counter}"
+            @cond_counter += 1
+            emit "#{temp} = load #{llvm_type}, ptr #{alloca_name}"
+            return temp
+          end
+        end
       end
       # For cross-block values in phi mode, use direct value reference.
       # Phi nodes are specifically designed to handle values from different paths.

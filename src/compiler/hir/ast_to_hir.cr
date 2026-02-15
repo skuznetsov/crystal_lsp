@@ -35190,7 +35190,7 @@ module Crystal::HIR
 
     # Emit comparison for case/when using appropriate === semantics
     # Returns ValueId of boolean result
-    private def emit_case_comparison(ctx : LoweringContext, subject_id : ValueId, cond_expr : ExprId) : ValueId
+    private def emit_case_comparison(ctx : LoweringContext, subject_id : ValueId, cond_expr : ExprId, subject_expr : ExprId? = nil) : ValueId
       cond_node = @arena[cond_expr]
       if env_get("DEBUG_ENUM_UNION_PREDICATE")
         node_type = cond_node.class.name.split("::").last
@@ -35436,6 +35436,25 @@ module Crystal::HIR
           ctx.register_type(call.id, TypeRef::BOOL)
           return call.id
         else
+          # Parser can expand `in .pred?` to a non-implicit member access on the
+          # case subject. In that shape we must evaluate the predicate itself,
+          # not compare `subject == predicate_result`.
+          matches_subject = case_pattern_object_matches_subject?(ctx, cond_node.object, subject_id, subject_expr)
+          if member_name.ends_with?('?') && matches_subject
+            if enum_cmp = emit_case_enum_predicate_comparison(ctx, subject_id, member_name)
+              return enum_cmp
+            end
+            # Important: evaluate predicate against cached subject_id.
+            # Do NOT lower cond_expr directly here, or side-effectful subjects
+            # (e.g., `case send_internal(v)`) get re-evaluated per branch.
+            pred_call = Call.new(ctx.next_id, TypeRef::BOOL, subject_id, member_name, [] of ValueId)
+            ctx.emit(pred_call)
+            ctx.register_type(pred_call.id, TypeRef::BOOL)
+            pred_val = pred_call.id
+            pred_type = TypeRef::BOOL
+            return lower_truthy_check(ctx, pred_val, pred_type)
+          end
+
           # Non-implicit receiver: lower normally and compare
           cond_val = lower_expr(ctx, cond_expr)
           eq = BinaryOperation.new(ctx.next_id, TypeRef::BOOL, BinaryOp::Eq, subject_id, cond_val)
@@ -35444,23 +35463,17 @@ module Crystal::HIR
         end
       when CrystalV2::Compiler::Frontend::CallNode
         # Check for implicit receiver pattern: .method?() → subject.method?()
-        # CallNode.callee is a MemberAccessNode with ImplicitObjNode
+        # CallNode.callee is a MemberAccessNode with ImplicitObjNode or explicit subject expression.
         callee_node = @arena[cond_node.callee]
         if callee_node.is_a?(CrystalV2::Compiler::Frontend::MemberAccessNode)
           obj_node = @arena[callee_node.object]
           member_name = String.new(callee_node.member)
 
-          # Check for implicit receiver OR explicit receiver that's an identifier or member access
+          # Treat as case-predicate only when receiver is implicit OR exactly matches case subject.
+          # This prevents re-lowering side-effectful subjects (e.g., case send_internal(v) in .delivered?).
           is_implicit = obj_node.is_a?(CrystalV2::Compiler::Frontend::ImplicitObjNode)
-          is_identifier = obj_node.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode)
-          is_member_access = obj_node.is_a?(CrystalV2::Compiler::Frontend::MemberAccessNode)
-          if (is_implicit || is_identifier || is_member_access) && member_name.ends_with?('?')
-            # Implicit receiver call OR explicit subject call: .data1?(), c.red?(), format.format.data1?()
-            # The parser expands "when .data1?" to "subject.data1?()" so the callee's object
-            # represents the SAME expression as the case subject. Use subject_id directly.
-            #
-            # For is_member_access: obj_node is a MemberAccessNode representing subject expression
-            # This is the same expression that was already lowered to subject_id, so reuse it.
+          matches_subject = case_pattern_object_matches_subject?(ctx, callee_node.object, subject_id, subject_expr)
+          if member_name.ends_with?('?') && (is_implicit || matches_subject)
             actual_object_id = subject_id
 
             # Find enum type by matching predicate name against known enum members
@@ -35532,8 +35545,10 @@ module Crystal::HIR
               end
             end
 
-            # Fall through: call the method on actual object
-            call = Call.new(ctx.next_id, TypeRef::BOOL, actual_object_id, member_name, [] of ValueId)
+            # Fall through: call the method on the cached subject.
+            # Lower args from condition call (usually empty for predicate methods).
+            arg_ids = cond_node.args.map { |arg| lower_expr(ctx, arg) }
+            call = Call.new(ctx.next_id, TypeRef::BOOL, actual_object_id, member_name, arg_ids)
             ctx.emit(call)
             ctx.register_type(call.id, TypeRef::BOOL)
             return call.id
@@ -35592,6 +35607,102 @@ module Crystal::HIR
         ["Int32", "Int64", "String", "Bool", "Nil", "Float64"].includes?(name)
     end
 
+    private def case_pattern_object_matches_subject?(ctx : LoweringContext, object_expr : ExprId, subject_id : ValueId, subject_expr : ExprId?) : Bool
+      if subj_expr = subject_expr
+        return true if object_expr == subj_expr
+        return true if @arena[object_expr].span == @arena[subj_expr].span
+      end
+
+      obj_node = @arena[object_expr]
+      if obj_node.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode)
+        if local_id = ctx.lookup_local(String.new(obj_node.name))
+          return local_id == subject_id
+        end
+      end
+
+      false
+    end
+
+    private def emit_case_enum_predicate_comparison(ctx : LoweringContext, subject_id : ValueId, member_name : String) : ValueId?
+      return nil unless member_name.ends_with?('?')
+
+      enum_name = @enum_value_types.try(&.[subject_id]?)
+      subject_type = ctx.type_of(subject_id)
+
+      if enum_name.nil?
+        if type_desc = @module.get_type_descriptor(subject_type)
+          type_name = type_desc.name
+          if @enum_info.try(&.has_key?(type_name))
+            enum_name = type_name
+          elsif type_desc.kind == TypeKind::Union
+            split_union_type_name(type_name).each do |variant_name|
+              if @enum_info.try(&.has_key?(variant_name))
+                enum_name = variant_name
+                break
+              end
+            end
+          end
+        end
+      end
+
+      if enum_name.nil? && @enum_base_types
+        base_name = member_name[0...-1]
+        @enum_base_types.not_nil!.each do |name, base_type|
+          next unless base_type == subject_type
+          next unless members = @enum_info.try(&.[name]?)
+
+          if members.keys.any? { |m| underscore_lower(m) == underscore_lower(base_name) }
+            enum_name = name
+            break
+          end
+        end
+      end
+
+      # Last-resort global enum lookup (guarded to avoid false positives on non-enum types)
+      if enum_name.nil?
+        subject_type_known_non_enum = false
+        if subject_type.id < TypeRef::FIRST_USER_TYPE
+          subject_type_known_non_enum = true
+        elsif td = @module.get_type_descriptor(subject_type)
+          subject_type_known_non_enum = !(@enum_info.try(&.has_key?(td.name)) || false)
+        end
+
+        unless subject_type_known_non_enum
+          base_name = member_name[0...-1]
+          if enum_info = @enum_info
+            enum_info.each do |name, members|
+              if members.keys.any? { |m| underscore_lower(m) == underscore_lower(base_name) }
+                enum_name = name
+                break
+              end
+            end
+          end
+        end
+      end
+
+      return nil unless enum_name
+      enum_info = @enum_info
+      return nil unless enum_info
+      members = enum_info[enum_name]?
+      return nil unless members
+
+      base_name = member_name[0...-1]
+      member_match = members.keys.find { |m| underscore_lower(m) == underscore_lower(base_name) }
+      return nil unless member_match
+
+      member_value = members[member_match]
+      enum_type = enum_base_type(enum_name)
+
+      lit = Literal.new(ctx.next_id, enum_type, member_value)
+      ctx.emit(lit)
+      ctx.register_type(lit.id, enum_type)
+
+      cmp = BinaryOperation.new(ctx.next_id, TypeRef::BOOL, BinaryOp::Eq, subject_id, lit.id)
+      ctx.emit(cmp)
+      ctx.register_type(cmp.id, TypeRef::BOOL)
+      cmp.id
+    end
+
     private def lower_case(ctx : LoweringContext, node : CrystalV2::Compiler::Frontend::CaseNode) : ValueId
       # Save locals state before case for proper phi merging
       pre_case_locals = ctx.save_locals
@@ -35631,7 +35742,7 @@ module Crystal::HIR
         if subject_id
           # Match subject against when values using appropriate === semantics
           conds = when_branch.conditions.map do |cond_expr|
-            emit_case_comparison(ctx, subject_id.not_nil!, cond_expr)
+            emit_case_comparison(ctx, subject_id.not_nil!, cond_expr, node.value)
           end
 
           # Combine with OR

@@ -260,28 +260,32 @@ class Channel(T)
   end
 
   private def dequeue_receiver
-    while receiver_ptr = @receivers.shift?
+    receiver_ptr = @receivers.shift?
+    while receiver_ptr
       select_context = receiver_ptr.value.select_context
       if select_context && !select_context.try_trigger
         receiver_ptr.value.state = DeliveryState::Delivered
+        receiver_ptr = @receivers.shift?
         next
       end
 
-      break
+      return receiver_ptr
     end
 
     receiver_ptr
   end
 
   private def dequeue_sender
-    while sender_ptr = @senders.shift?
+    sender_ptr = @senders.shift?
+    while sender_ptr
       select_context = sender_ptr.value.select_context
       if select_context && !select_context.try_trigger
         sender_ptr.value.state = DeliveryState::Delivered
+        sender_ptr = @senders.shift?
         next
       end
 
-      break
+      return sender_ptr
     end
 
     sender_ptr
