@@ -98,6 +98,18 @@
     - candidate: `real 74.41s`, `real 73.88s` (avg regression ~`+0.70s`, ~`+0.95%`)
   Decision:
   - reverted; keep searching for lower-overhead reductions in `reachable_function_names`.
+- **Rejected perf branch: nested owner->method map in reachability index** (2026-02-15) —
+  replaced flattened `"#{owner}|#{method}"` owner/method index with nested
+  `Hash(String, Hash(String, Array(String)))` to avoid hot-loop string joins.
+  Validation:
+  - specs:
+    - `crystal spec spec/hir/return_type_inference_spec.cr` => `13 examples, 0 failures`
+    - `crystal spec spec/mir/llvm_backend_spec.cr` => `59 examples, 0 failures`
+  - no-link A/B (`CRYSTAL_V2_PIPELINE_CACHE=0 CRYSTAL_V2_AST_FILTER=1 ... --no-link --no-ast-cache --no-llvm-cache spec/hir/return_type_inference_spec.cr`):
+    - baseline (before patch): `real 73.45s`
+    - candidate: `real 73.66s`, `real 74.04s` (avg regression ~`+0.40s`, ~`+0.55%`)
+  Decision:
+  - reverted; extra nested hash lookups outweighed saved string-key construction on this workload.
 - **Cross-compiler full-pipeline baseline (release vs release)** (2026-02-15) —
   reran comparisons with *full compile + full optimization* (no `--no-codegen` shortcut):
   - workload `examples/bench_fib42.cr`:
