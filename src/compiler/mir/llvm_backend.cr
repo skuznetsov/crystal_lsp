@@ -8026,6 +8026,17 @@ module Crystal::MIR
         # Union slot with primitive phi type: the value was stored as union but the phi
         # expects a primitive (e.g., i32). Schedule extraction from the loaded union.
         if slot_llvm_type && slot_llvm_type.includes?(".union") && !phi_type.includes?(".union")
+          # Ptr phis should reuse prepass union->ptr extracts emitted in predecessor blocks.
+          # Falling back to late phi_extract names here can produce undefined SSA values
+          # when predecessor blocks were already emitted.
+          if phi_type == "ptr"
+            if extract_info = @phi_union_to_ptr_extracts[{block, val}]?
+              return "%#{extract_info[0]}"
+            end
+            extract_name = "r#{val}.u2p.#{block}"
+            @phi_union_to_ptr_extracts[{block, val}] = {extract_name, slot_llvm_type}
+            return "%#{extract_name}"
+          end
           extract_name = "r#{val}.phi_extract.#{block}"
           @phi_union_payload_extracts[{block, val}] = {extract_name, pred_load_name, phi_type}
           return "%#{extract_name}"

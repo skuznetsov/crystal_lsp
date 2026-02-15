@@ -1900,6 +1900,15 @@ r2 = maybe(false)  # => nil
     - Remaining blocker after this fix:
       - `CRYSTAL_V2_AST_FILTER=1 CRYSTAL_V2_PHASE_STATS=1 timeout 120 /tmp/crystal_v2_head2 spec/hir/return_type_inference_spec.cr -o /tmp/rti_phase_head2`
       - now fails later with SSA/phi issue: `opt: ... error: use of undefined value '%r7.phi_extract.2'`.
+  - **Update (2026-02-15, follow-up)**: fixed ptr-phi incoming selection for union-backed slots in `llvm_backend`:
+    - `phi_incoming_ref` now reuses prepass `union->ptr` extracts (`u2p`) for ptr phis instead of scheduling late `phi_extract` payload loads.
+    - This removes the `%r7.phi_extract.2` undefined SSA failure on the same workload.
+    - DoD evidence:
+      - `./regression_tests/run_all.sh /tmp/crystal_v2_head3` → `40 passed, 0 failed`.
+      - `timeout 300 /tmp/crystal_v2_head3 examples/bootstrap_array.cr -o /tmp/bootstrap_array_head3` + `./scripts/run_safe.sh /tmp/bootstrap_array_head3 10 768` → compile+run success (exit 0).
+      - `CRYSTAL_V2_AST_FILTER=1 CRYSTAL_V2_PHASE_STATS=1 timeout 120 /tmp/crystal_v2_head3 spec/hir/return_type_inference_spec.cr -o /tmp/rti_phase_head3` no longer reports `%r7.phi_extract.2` undefined.
+    - New downstream blocker on that path:
+      - `opt: ... error: use of undefined value '@__crystal_main'` (requires separate entrypoint/reachability fix when `AST_FILTER=1` is enabled).
 
 **Regressions (open):**
 - [ ] **Bootstrap regression (2026-01-31)**: `bootstrap_array` link fails with 10+ missing symbols after commit b135d46.
