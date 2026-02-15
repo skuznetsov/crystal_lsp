@@ -19,6 +19,35 @@
 - Float64: arithmetic, ** on literals
 
 ## Recently completed
+- **Perf triage ledger (rejected experiments, 2026-02-15)** — recorded and reverted
+  several SAFE perf branches that improved sub-metrics but regressed/stayed flat on
+  end-to-end `real` for
+  `CRYSTAL_V2_PIPELINE_CACHE=0 CRYSTAL_V2_AST_FILTER=1 CRYSTAL_V2_PHASE_STATS=1 ... --no-link --no-ast-cache --no-llvm-cache spec/hir/return_type_inference_spec.cr`:
+  - deferred module context dedup + empty snapshot reuse:
+    - `old`: `real 102.86s`, `process_pending 7049.1ms`, `emit_tracked_sigs 13070.4ms`
+    - `new`: `real 103.10s`, `process_pending 6887.7ms`, `emit_tracked_sigs 12923.5ms`
+  - class included-module Set companion in `record_module_inclusion`:
+    - `old`: `real 102.74s`
+    - `new`: `real 103.07s`
+  - allocator init-def key cache for default propagation:
+    - `old`: `real 102.71s`
+    - `new`: `real 103.20s`
+  - emit safety-net check reorder (`attempted/ast_filter` before state checks):
+    - `old`: `real 103.07s`
+    - `new`: `real 103.34s`
+  Decision: keep all above reverted; continue only with branches that improve
+  end-to-end wall clock across at least two A/B runs.
+- **Emit safety-net telemetry (2026-02-15)** — with `DEBUG_EMIT_SIGS=1`:
+  - `process_pending`: `286 -> 6400` in `7434.7ms`
+  - `emit_tracked_sigs`: `6400 -> 16546` in `13984.6ms`
+  - iterations:
+    - `iter0`: `sigs=401`, `considered=1160`, `skipped_ast=1151`
+    - `iter1`: `sigs=212`, `considered=2001`, `skipped_ast=1979`
+    - `iter2`: `sigs=7`, `considered=2009`, `skipped_ast=1992`
+    - `iter3`: `sigs=1`, `considered=2015`, `skipped_ast=1994`
+  Insight: main work remains in `emit_tracked_sigs/process_pending`; AST filter is
+  rejecting most names, so future wins likely need structural reduction of candidates
+  (not only micro reordering).
 - **HIR fallback arity scan without `select/max` allocations** (2026-02-15) —
   in `pending_callsite_args_for_def`, replaced
   `keys.select(...).max?` (for both direct and ancestor fallback paths) with
