@@ -212,14 +212,14 @@ module CrystalV2
               if t = compute_node_type_no_recurse(node, id)
                 # Successfully computed - mark as done
                 if @debug_enabled
-                  debug("ITERATIVE: #{node.class.name.split("::").last} computed type #{t}")
+                  debug("ITERATIVE: #{last_path_segment(node.class.name)} computed type #{t}")
                 end
                 @context.set_type(id, t)
                 set_expr_state(id, epoch, 2, state_hash)
               else
                 # Complex node - skip in iterative path, leave for recursive fallback
                 if @debug_enabled
-                  debug("ITERATIVE: #{node.class.name.split("::").last} returned nil, will use recursive")
+                  debug("ITERATIVE: #{last_path_segment(node.class.name)} returned nil, will use recursive")
                 end
                 # IMPORTANT: Clear any type that might have been set by cycle detection (line 97)
                 # Otherwise line 86 will skip this node even though it needs recursive processing
@@ -231,14 +231,14 @@ module CrystalV2
           if t1 = @context.get_type(expr_id)
             if @debug_enabled
               node = @program.arena[expr_id]
-              debug("ITERATIVE SUCCESS: #{node.class.name.split("::").last} got type #{t1}")
+              debug("ITERATIVE SUCCESS: #{last_path_segment(node.class.name)} got type #{t1}")
             end
             return t1
           end
           # Fallback to recursive implementation below
           if @debug_enabled
             node = @program.arena[expr_id]
-            debug("FALLBACK TO RECURSIVE: #{node.class.name.split("::").last}")
+            debug("FALLBACK TO RECURSIVE: #{last_path_segment(node.class.name)}")
           end
           debug_hook("infer.fallback", "expr_id=#{expr_id}")
           if @depth > MAX_DEPTH
@@ -1411,7 +1411,7 @@ module CrystalV2
               return @parse_type_cache[name] = instance_type_for(symbol)
             end
 
-            base_name = name.includes?("::") ? name.split("::").last : name
+            base_name = last_path_segment(name)
 
             if prim = primitive_type_for(base_name)
               return @parse_type_cache[name] = prim
@@ -1467,6 +1467,21 @@ module CrystalV2
         end
 
         @[AlwaysInline]
+        private def last_path_segment(name : String) : String
+          if idx = name.rindex("::")
+            start = idx + 2
+            name.byte_slice(start, name.bytesize - start)
+          else
+            name
+          end
+        end
+
+        @[AlwaysInline]
+        private def intern_path_segment(name : String, start_idx : Int32, end_idx : Int32) : String
+          intern_name(name.to_slice[start_idx, end_idx - start_idx])
+        end
+
+        @[AlwaysInline]
         private def whitespace_byte?(byte : UInt8) : Bool
           byte == 32_u8 || byte == 9_u8 || byte == 10_u8 || byte == 13_u8
         end
@@ -1476,12 +1491,24 @@ module CrystalV2
           guard_watchdog!
 
           return nil unless table = @global_table
-          segments = name.split("::")
-          return nil if segments.empty?
+          size = name.bytesize
+          return nil if size == 0
           current_table = table
           current_symbol : Symbol? = nil
 
-          segments.each do |seg|
+          start = 0
+          i = 0
+          while i <= size
+            delim = i + 1 < size && name.byte_at(i) == 58_u8 && name.byte_at(i + 1) == 58_u8
+            at_end = i == size
+            unless delim || at_end
+              i += 1
+              next
+            end
+
+            return nil if i <= start
+
+            seg = intern_path_segment(name, start, i)
             sym = current_table.try(&.lookup(seg))
             return nil unless sym
             current_symbol = sym
@@ -1495,6 +1522,10 @@ module CrystalV2
             else
               current_table = nil
             end
+
+            break if at_end
+            i += 2
+            start = i
           end
 
           current_symbol
@@ -1504,7 +1535,7 @@ module CrystalV2
         private def find_class_symbol_by_suffix(name : String) : ClassSymbol?
           guard_watchdog!
 
-          suffix = name.includes?("::") ? name.split("::").last : name
+          suffix = last_path_segment(name)
           return nil unless suffix
           return nil unless table = @global_table
           queue = [table]

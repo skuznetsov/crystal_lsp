@@ -19,6 +19,19 @@
 - Float64: arithmetic, ** on literals
 
 ## Recently completed
+- **Type inference scoped-name parsing without `split`** (2026-02-15) —
+  replaced hot-path `split("::")` usage in
+  `src/compiler/semantic/type_inference_engine.cr` with zero-copy segment
+  scanning + interned slices:
+  - `parse_type_name`: suffix extraction now uses `last_path_segment`
+  - `resolve_scoped_symbol`: on-the-fly `::` scan (`intern_path_segment`) instead of `split`
+  - `find_class_symbol_by_suffix`: split-free suffix extraction
+  - debug node-kind labels also use split-free suffix helper
+  Validation:
+  - `crystal build src/crystal_v2.cr -o /tmp/crystal_v2_infer_splitfree --error-trace` => `EXIT 0`
+  - `timeout 180 crystal spec spec/hir/return_type_inference_spec.cr` => `13 examples, 0 failures`
+  - `timeout 180 crystal spec spec/mir/llvm_backend_spec.cr` => `59 examples, 0 failures`
+  - `regression_tests/run_all.sh /tmp/crystal_v2_infer_splitfree` => `40 passed, 0 failed`
 - **HIR pointer-size defaults made target-width aware** (2026-02-15) —
   removed hardcoded `8` defaults for reference/pointer size/alignment in
   `ast_to_hir` (`type_size`, `type_alignment`, `sizeof` fallbacks). Added
