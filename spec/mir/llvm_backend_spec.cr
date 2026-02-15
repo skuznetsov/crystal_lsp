@@ -128,7 +128,7 @@ describe Crystal::MIR::LLVMIRGenerator do
       output.should contain("call void @__crystal_v2_slab_frame_pop()")
     end
 
-    it "skips entrypoint when __crystal_main is filtered" do
+    it "keeps entrypoint when __crystal_main contains typeof_ extern calls" do
       mod = Crystal::MIR::Module.new("test")
       func = mod.create_function("__crystal_main", Crystal::MIR::TypeRef::VOID)
       builder = Crystal::MIR::Builder.new(func)
@@ -141,8 +141,8 @@ describe Crystal::MIR::LLVMIRGenerator do
       gen.reachability = true
       output = gen.generate
 
-      output.should_not contain("define i32 @main")
-      output.should_not contain("call void @__crystal_main")
+      output.should contain("define i32 @main")
+      output.should contain("call void @__crystal_main")
     end
 
     it "generates simple function" do
