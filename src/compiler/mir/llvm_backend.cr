@@ -612,7 +612,7 @@ module Crystal::MIR
 
       # Filter out functions with unresolved type patterns (typeof, unsubstituted type params)
       # These are functions that were partially created but couldn't be monomorphized
-      unresolved_patterns = ["typeof(", "typeof_"]
+      unresolved_patterns = ["typeof("]
 
       # Build a skip set by FunctionId so we can propagate skips through the call graph.
       skip_ids = Set(FunctionId).new

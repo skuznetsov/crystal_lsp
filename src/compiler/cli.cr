@@ -659,6 +659,11 @@ module CrystalV2
         elsif main_def = def_nodes.find { |(n, _)| String.new(n.name) == "main" && !(n.receiver.try { |recv| String.new(recv) == HIR::AstToHir::FUN_DEF_RECEIVER } || false) }
           hir_converter.arena = main_def[1]
           hir_converter.lower_main_from_def(main_def[0])
+        else
+          # Keep runtime contract stable: Crystal.main_user_code always expects
+          # __crystal_main(argc, argv), even when user code has no top-level
+          # expressions and no explicit main definition.
+          hir_converter.lower_main(main_exprs)
         end
 
         after_lower_main = hir_converter.module.function_count

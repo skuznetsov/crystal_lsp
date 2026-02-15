@@ -19,6 +19,22 @@
 - Float64: arithmetic, ** on literals
 
 ## Recently completed
+- **LLVM `typeof` skip filter false-positive (`__crystal_main` drop)** (2026-02-15) —
+  fixed a backend skip-filter regression where any extern containing `typeof_`
+  was treated as unresolved and could prune `__crystal_main`, leaving
+  `Crystal.main_user_code` with a dangling `call @__crystal_main` and `opt`
+  failure (`use of undefined value '@__crystal_main'`).
+  Changes:
+  - narrowed unresolved skip pattern in LLVM emission from
+    `["typeof(", "typeof_"]` to `["typeof("]` to avoid matching legitimate
+    methods like `resolve_typeof_in_type_string`.
+  - kept synthetic-main fallback in CLI/driver when there is no top-level body
+    and no explicit user `main`, so runtime contract remains stable.
+  Validation:
+  - repro (no cache, AST filter): `CRYSTAL_V2_PIPELINE_CACHE=0 CRYSTAL_V2_AST_FILTER=1 CRYSTAL_V2_PHASE_STATS=1 /tmp/crystal_v2_t1 --no-link --no-ast-cache --no-llvm-cache spec/hir/return_type_inference_spec.cr -o /tmp/rti_t1_nolink` => no `opt failed` / no undefined `@__crystal_main`.
+  - IR check: `rg "define void @__crystal_main|call void @__crystal_main" /tmp/rti_t1.ll` => both definition and call present.
+  - regressions: `regression_tests/run_all.sh /tmp/crystal_v2_t1` => `40 passed, 0 failed`.
+  - bootstrap smoke: `/tmp/crystal_v2_t1 --no-ast-cache --no-llvm-cache examples/bootstrap_array.cr -o /tmp/bootstrap_array_t1` + `scripts/run_safe.sh /tmp/bootstrap_array_t1 10 1024` => `EXIT 0`.
 - **HIR generic-owner cache (type-param substitution hot path)** (2026-02-14) —
   added generation-scoped cache for `generic_owner_info(owner)` keyed by owner
   and current `@subst_cache_gen`, and avoided mutating cached maps by duping

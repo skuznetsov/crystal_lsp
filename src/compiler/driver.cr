@@ -570,6 +570,12 @@ module Crystal::V2
         hir_converter.arena = main_def[1]
         hir_converter.lower_main_from_def(main_def[0])
         func_count += 1
+      else
+        # Keep runtime contract stable: Crystal.main_user_code always expects
+        # __crystal_main(argc, argv), even when user code has no top-level
+        # expressions and no explicit main definition.
+        hir_converter.lower_main(main_exprs)
+        func_count += 1
       end
       if debug_hir_timings && main_start
         elapsed = (Time.instant - main_start).total_milliseconds
