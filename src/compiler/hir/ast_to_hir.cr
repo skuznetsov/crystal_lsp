@@ -1163,6 +1163,7 @@ module Crystal::HIR
     # generate_allocator / generate_allocator_overload hot paths.
     @allocator_new_name_cache : Hash(String, String) = {} of String => String
     @allocator_init_name_cache : Hash(String, String) = {} of String => String
+    @allocator_init_mangled_prefix_cache : Hash(String, String) = {} of String => String
     @allocator_instance_new_name_cache : Hash(String, String) = {} of String => String
     # Debug-only: lower node histogram (enabled via DEBUG_LOWER_HISTO)
     @lower_histo_counts : Hash(String, Int32) = {} of String => Int32
@@ -15108,6 +15109,19 @@ module Crystal::HIR
       built
     end
 
+    @[AlwaysInline]
+    private def allocator_init_mangled_prefix_for(class_name : String) : String
+      if cached = @allocator_init_mangled_prefix_cache[class_name]?
+        return cached
+      end
+      built = String.build(class_name.bytesize + 12) do |io|
+        io << class_name
+        io << "#initialize$"
+      end
+      @allocator_init_mangled_prefix_cache[class_name] = built
+      built
+    end
+
     # Generate allocator: ClassName.new(...) -> allocates and returns instance
     private def generate_allocator(
       class_name : String,
@@ -15233,8 +15247,9 @@ module Crystal::HIR
       init_def_for_defaults = @function_defs[init_def_key]?
       unless init_def_for_defaults
         # Try mangled key (e.g., Foo#initialize$String_String)
+        init_mangled_prefix = allocator_init_mangled_prefix_for(class_name)
         @function_defs.each_key do |k|
-          if k.starts_with?("#{class_name}#initialize$")
+          if k.starts_with?(init_mangled_prefix)
             init_def_for_defaults = @function_defs[k]
             init_def_key = k
             break
@@ -15507,8 +15522,9 @@ module Crystal::HIR
       init_def_key_ovr = allocator_init_name_for(class_name)
       init_def_for_defaults = @function_defs[init_def_key_ovr]?
       unless init_def_for_defaults
+        init_mangled_prefix = allocator_init_mangled_prefix_for(class_name)
         @function_defs.each_key do |k|
-          if k.starts_with?("#{class_name}#initialize$")
+          if k.starts_with?(init_mangled_prefix)
             init_def_for_defaults = @function_defs[k]
             init_def_key_ovr = k
             break

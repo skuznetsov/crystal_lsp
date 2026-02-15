@@ -19,6 +19,23 @@
 - Float64: arithmetic, ** on literals
 
 ## Recently completed
+- **HIR allocator init-default lookup prefix cache** (2026-02-15) —
+  removed repeated string interpolation in hot allocator scans over
+  `@function_defs` by caching `"#{class_name}#initialize$"` prefixes and
+  reusing them in both `generate_allocator` and `generate_allocator_overload`.
+  Changes in `src/compiler/hir/ast_to_hir.cr`:
+  - new cache: `@allocator_init_mangled_prefix_cache`
+  - new helper: `allocator_init_mangled_prefix_for(class_name)`
+  - replaced per-entry `starts_with?("#{class_name}#initialize$")` with cached
+    prefix checks.
+  Validation:
+  - `crystal build src/crystal_v2.cr -o /tmp/crystal_v2_dbg_allocprefix --error-trace` => `EXIT 0`
+  - `timeout 180 crystal spec spec/hir/return_type_inference_spec.cr` => `13 examples, 0 failures`
+  - `timeout 180 crystal spec spec/mir/llvm_backend_spec.cr` => `59 examples, 0 failures`
+  - `regression_tests/run_all.sh /tmp/crystal_v2_dbg_allocprefix` => `40 passed, 0 failed`
+  - A/B (`CRYSTAL_V2_PIPELINE_CACHE=0 CRYSTAL_V2_AST_FILTER=1 CRYSTAL_V2_PHASE_STATS=1 ... --no-link --no-ast-cache --no-llvm-cache spec/hir/return_type_inference_spec.cr`):
+    - before (`/tmp/crystal_v2_dbg_current`): `real 107.14s`, `emit_tracked_sigs 15154.5ms`, `Lookup 1174.2ms`, `parent_fallback_cached 667.0ms`
+    - after (`/tmp/crystal_v2_dbg_allocprefix`): `real 105.56s`, `emit_tracked_sigs 14716.3ms`, `Lookup 1049.7ms`, `parent_fallback_cached 544.2ms`
 - **Type inference scoped-name parsing without `split`** (2026-02-15) —
   replaced hot-path `split("::")` usage in
   `src/compiler/semantic/type_inference_engine.cr` with zero-copy segment
