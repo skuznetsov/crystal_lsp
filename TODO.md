@@ -53,6 +53,11 @@
     - `aritykey`: `real 103.09s`, `real 102.82s`
     - regression was stable (~`+1.16s` avg slower), despite lower
       `process_pending` in one run; likely GC/hash churn from cache write path.
+  - cache-hit shadow-check gate in `resolve_type_name_in_context`
+    (`maybe_shadowable_short_type_name?` before `nested_shadowed_type_name?`):
+    - baseline (`/tmp/crystal_v2_dbg_methodparts`): `real 84.70s`; `process_pending 7519.5ms`; `emit_tracked_sigs 8766.6ms`; `Lookup 832.1ms`
+    - candidate (`/tmp/crystal_v2_dbg_shadowgate`): `real 84.73s`; `process_pending 7555.9ms`; `emit_tracked_sigs 8673.3ms`; `Lookup 828.1ms`
+    - result near noise/slight wall-clock regression; patch reverted.
   Decision: keep all above reverted; continue only with branches that improve
   end-to-end wall clock across at least two A/B runs.
   Note: one transient regression runner failure (`yield_suffix_unless` missing
