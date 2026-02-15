@@ -1489,8 +1489,25 @@ The key insight is: **Don't compete with LLVM, complement it.**
 - Tier 3: build-only + IR/obj generation sanity (no runtime)
 
 #### 5.3.5 Immediate Validation & Hardening
-- [ ] **Unsigned→Float cast audit**: verify all unsigned integer → float (and ptr → float) use `uitofp` in LLVM backend; add a spec covering UInt32/UInt64/UInt128 conversions (cross-platform).
-- [ ] **ARM/AArch64 alignment audit**: verify struct/union layout alignment (incl. 4-byte align on ARM) matches original compiler/ABI; add a small ABI spec for ARM targets.
+- [x] **Unsigned→Float cast audit** (2026-02-15): verified backend uses `uitofp` for unsigned→float and ptr→float paths; expanded MIR LLVM spec coverage to UInt32/UInt64/UInt128 plus call-site coercion.
+  - Coverage:
+    - `spec/mir/llvm_backend_spec.cr`:
+      - `uses uitofp for uint32 to float64 cast`
+      - `uses uitofp for uint64 to float64 cast`
+      - `uses uitofp for uint128 to float64 cast`
+      - `uses uitofp for uint128 argument when calling float64 callee`
+      - `uses ptrtoint + uitofp for pointer argument when calling float64 callee`
+  - DoD:
+    - `crystal spec spec/mir/llvm_backend_spec.cr --example "uses uitofp for uint64 to float64 cast"` => `1 examples, 0 failures`
+    - `crystal spec spec/mir/llvm_backend_spec.cr --example "uses uitofp for uint128 to float64 cast"` => `1 examples, 0 failures`
+    - `crystal spec spec/mir/llvm_backend_spec.cr --example "uses uitofp for uint128 argument when calling float64 callee"` => `1 examples, 0 failures`
+- [x] **ARM/AArch64 alignment audit** (2026-02-15): verified union payload accesses keep conservative `align 4` for 8-byte payload reads/writes in backend coercion/wrap paths (ARM-safe).
+  - Coverage:
+    - existing: `uses align 4 for union payload load in union-to-float call coercion`
+    - existing: `emits align 4 for union payload store/load`
+    - added: `emits align 4 for UInt64 union payload store/load`
+  - DoD:
+    - `crystal spec spec/mir/llvm_backend_spec.cr --example "emits align 4 for UInt64 union payload store/load"` => `1 examples, 0 failures`
 - [x] **Structural NoAlias Analysis** (2025-12-11): Paradigm shift from ultra-conservative to allocation-site based.
   - Track allocation sites through Load/GEP chains
   - Track escaped allocations (stored to field/container)
