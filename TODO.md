@@ -86,6 +86,27 @@
   - avg delta: `+3.54s` (~`+4.10%`)
   - phase impact: `emit_tracked_sigs` regressed (e.g., `8117.4ms -> 9406.0ms`)
   Decision: keep reverted.
+- **Rejected perf branch: set-based owner dedup in `reachable_function_names`** (2026-02-15) —
+  replaced `owners.includes?`/`module_includers_base.includes?` dedup with `Set`
+  tracking inside RTA virtual-dispatch expansion.
+  Validation:
+  - specs:
+    - `crystal spec spec/hir/return_type_inference_spec.cr` => `13 examples, 0 failures`
+    - `crystal spec spec/mir/llvm_backend_spec.cr` => `59 examples, 0 failures`
+  - no-link A/B (`CRYSTAL_V2_PIPELINE_CACHE=0 CRYSTAL_V2_AST_FILTER=1 ... --no-link --no-ast-cache --no-llvm-cache spec/hir/return_type_inference_spec.cr`):
+    - baseline (before patch): `real 73.45s`
+    - candidate: `real 74.41s`, `real 73.88s` (avg regression ~`+0.70s`, ~`+0.95%`)
+  Decision:
+  - reverted; keep searching for lower-overhead reductions in `reachable_function_names`.
+- **Cross-compiler full-pipeline baseline (release vs release)** (2026-02-15) —
+  reran comparisons with *full compile + full optimization* (no `--no-codegen` shortcut):
+  - workload `examples/bench_fib42.cr`:
+    - original (`Crystal 1.19.1`): `crystal build --release ...` => `real 3.75s`
+    - v2 (`/tmp/crystal_v2_rel_cmp`): `--release --no-ast-cache --no-llvm-cache ...` => `real 4.36s`
+  - workload `examples/bootstrap_array.cr`:
+    - original: `real 3.50s`
+    - v2: `real 3.89s`
+  - current gap on these two workloads: v2 is ~`11-16%` slower in compile time (much smaller than older no-link-only deltas).
 - **Perf triage ledger (rejected experiments, 2026-02-15)** — recorded and reverted
   several SAFE perf branches that improved sub-metrics but regressed/stayed flat on
   end-to-end `real` for
