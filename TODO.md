@@ -47,6 +47,12 @@
     - `aritykey`: `real 102.88s`, `real 102.98s`
     - mixed phase deltas (`emit_tracked_sigs` sometimes lower, `process_pending`
       sometimes higher), no stable wall-clock improvement.
+  - `strip_generic_receiver_from_base_name` cache reuse (last-hit + direct-mapped
+    + content cache, with fast-path for names without `(`):
+    - `stripcache`: `real 104.07s`, `real 104.16s`
+    - `aritykey`: `real 103.09s`, `real 102.82s`
+    - regression was stable (~`+1.16s` avg slower), despite lower
+      `process_pending` in one run; likely GC/hash churn from cache write path.
   Decision: keep all above reverted; continue only with branches that improve
   end-to-end wall clock across at least two A/B runs.
   Note: one transient regression runner failure (`yield_suffix_unless` missing
