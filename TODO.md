@@ -68,6 +68,10 @@
     - baseline (`/tmp/crystal_v2_dbg_overloadqueue`): `real 83.03s`, `82.83s`; `process_pending 6922.0/6878.2ms`; `emit_tracked_sigs 8050.7/8064.2ms`
     - candidate (`/tmp/crystal_v2_dbg_overloadqueue2`): `real 82.50s`, `83.04s`; `process_pending 7003.3/7000.1ms`; `emit_tracked_sigs 8140.8/7963.0ms`
     - mixed signal (one win, one loss), no robust 2/2 improvement. Candidate reverted.
+  - `type_name_exists?` last-hit cache (`@type_name_exists_last_*`) fast-path:
+    - baseline (`/tmp/crystal_v2_dbg_overloadqueue`): `real 82.66s`, `82.29s`; `process_pending 6988.9/6901.8ms`; `emit_tracked_sigs 8051.8/7955.7ms`
+    - candidate (`/tmp/crystal_v2_dbg_typename_lasthit`): `real 82.69s`, `83.00s`; `process_pending 6884.6/7023.8ms`; `emit_tracked_sigs 8131.3/8132.6ms`
+    - net regression (~`+0.37s` avg), candidate reverted.
   Decision: keep all above reverted; continue only with branches that improve
   end-to-end wall clock across at least two A/B runs.
   Note: one transient regression runner failure (`yield_suffix_unless` missing
