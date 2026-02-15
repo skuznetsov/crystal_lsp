@@ -19,6 +19,19 @@
 - Float64: arithmetic, ** on literals
 
 ## Recently completed
+- **HIR parent fallback arity count without suffix type parsing** (2026-02-15) —
+  removed `parse_types_from_suffix(...).size` from
+  `find_method_in_parent_via_index` and switched to `suffix_param_count`
+  (keeps arity intent while avoiding per-lookup type parsing/allocation).
+  Validation:
+  - `crystal build src/crystal_v2.cr -o /tmp/crystal_v2_dbg_parentloop2 --error-trace` => `EXIT 0`
+  - `timeout 180 crystal spec spec/hir/return_type_inference_spec.cr` => `13 examples, 0 failures`
+  - `timeout 180 crystal spec spec/mir/llvm_backend_spec.cr` => `59 examples, 0 failures`
+  - `regression_tests/run_all.sh /tmp/crystal_v2_dbg_parentloop2` => `40 passed, 0 failed`
+  - bootstrap smoke: `/tmp/crystal_v2_dbg_parentloop2 examples/bootstrap_array.cr -o /tmp/bootstrap_array_parentloop2` + `scripts/run_safe.sh /tmp/bootstrap_array_parentloop2 10 768` => `EXIT 0`
+  - A/B (`CRYSTAL_V2_PIPELINE_CACHE=0 CRYSTAL_V2_AST_FILTER=1 CRYSTAL_V2_PHASE_STATS=1 ... --no-link --no-ast-cache --no-llvm-cache spec/hir/return_type_inference_spec.cr`):
+    - before (`/tmp/crystal_v2_dbg_parentloop1`): `real 105.08s`, `emit_tracked_sigs 14730.4ms`, `Lookup 1274.5ms`, `miss 468.5ms`
+    - after (`/tmp/crystal_v2_dbg_parentloop2`): `real 104.74s`, `emit_tracked_sigs 14633.9ms`, `Lookup 1178.4ms`, `miss 331.0ms`
 - **HIR parent fallback overload scan single-pass params** (2026-02-15) —
   reduced allocation churn in `find_method_in_parent_via_index` by replacing
   `params.reject + count + count + all` with a single pass over params

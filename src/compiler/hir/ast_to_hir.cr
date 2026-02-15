@@ -1643,7 +1643,7 @@ module Crystal::HIR
       # overloads over typed ones with matching arity.  This ensures that e.g.
       # IO#puts(obj : _) is chosen over IO#puts(string : String) when the subclass
       # calls puts with an Int32.
-      expected_arity = suffix ? parse_types_from_suffix(suffix).size : 0
+      expected_arity = suffix ? suffix_param_count(suffix) : 0
       best_untyped : ParentLookupResult? = nil
       best_untyped_splat : ParentLookupResult? = nil
       best_arity_match : ParentLookupResult? = nil
