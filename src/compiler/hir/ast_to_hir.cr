@@ -1944,6 +1944,7 @@ module Crystal::HIR
     @type_cache_keys_by_generic_prefix : Hash(String, Set(String))
     @array_type_for_element_cache : Hash(TypeRef, TypeRef)
     @array_type_for_element_nil_cache : Set(TypeRef)
+    @hash_type_for_entry_cache : Hash({TypeRef, TypeRef}, NamedTuple(type: TypeRef, name: String))
     @type_name_normalize_cache : Hash(String, String)
     # Cache for normalize_declared_type_name keyed on (type_name, context, subst_cache_gen).
     @normalize_decl_cache : Hash({String, String?, UInt64}, String)
@@ -2252,6 +2253,7 @@ module Crystal::HIR
       @method_name_compact_last = nil
       @array_type_for_element_cache = {} of TypeRef => TypeRef
       @array_type_for_element_nil_cache = Set(TypeRef).new
+      @hash_type_for_entry_cache = {} of {TypeRef, TypeRef} => NamedTuple(type: TypeRef, name: String)
       @type_name_normalize_cache = Hash(String, String).new(initial_capacity: 4096)
       @normalize_decl_cache = Hash({String, String?, UInt64}, String).new(initial_capacity: 4096)
       @union_in_progress = Set(String).new
@@ -53004,10 +53006,9 @@ module Crystal::HIR
                    else
                      TypeRef::VOID
                    end
-      key_name = get_type_name_from_ref(key_type)
-      value_name = get_type_name_from_ref(value_type)
-      hash_type_name = "Hash(#{key_name}, #{value_name})"
-      hash_type = type_ref_for_name(hash_type_name)
+      hash_info = hash_type_for_entry_types(key_type, value_type)
+      hash_type_name = hash_info[:name]
+      hash_type = hash_info[:type]
 
       # Direct allocation via runtime helper — bypasses broken constructor overload chains
       # (Hash.new has multiple overloads that become dead-code stubs calling each other
@@ -53027,6 +53028,21 @@ module Crystal::HIR
       end
 
       hash_call.id
+    end
+
+    private def hash_type_for_entry_types(key_type : TypeRef, value_type : TypeRef) : NamedTuple(type: TypeRef, name: String)
+      cache_key = {key_type, value_type}
+      if cached = @hash_type_for_entry_cache[cache_key]?
+        return cached
+      end
+
+      key_name = get_type_name_from_ref(key_type)
+      value_name = get_type_name_from_ref(value_type)
+      hash_type_name = "Hash(#{key_name}, #{value_name})"
+      hash_type = type_ref_for_name(hash_type_name)
+      info = {type: hash_type, name: hash_type_name}
+      @hash_type_for_entry_cache[cache_key] = info
+      info
     end
 
     private def lower_tuple_literal(ctx : LoweringContext, node : CrystalV2::Compiler::Frontend::TupleLiteralNode) : ValueId

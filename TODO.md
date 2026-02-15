@@ -19,6 +19,23 @@
 - Float64: arithmetic, ** on literals
 
 ## Recently completed
+- **HIR hash-literal type materialization cache** (2026-02-15) —
+  reduced repeated `Hash(K, V)` type-name synthesis and `type_ref_for_name`
+  calls in `lower_hash_literal` by adding a pair cache keyed by
+  `{key_type, value_type}`.
+  Changes in `ast_to_hir`:
+  - new cache: `@hash_type_for_entry_cache`
+  - new helper: `hash_type_for_entry_types(key_type, value_type)`
+  - `lower_hash_literal` now reuses cached `{type, name}` instead of rebuilding
+    `Hash(#{key_name}, #{value_name})` every time.
+  Validation:
+  - build: `crystal build src/crystal_v2.cr -o /tmp/crystal_v2_t2` => `EXIT 0`
+  - regressions: `regression_tests/run_all.sh /tmp/crystal_v2_t2` => `40 passed, 0 failed`
+  - bootstrap smoke: `/tmp/crystal_v2_t2 --no-ast-cache --no-llvm-cache examples/bootstrap_array.cr -o /tmp/bootstrap_array_t2` + `scripts/run_safe.sh /tmp/bootstrap_array_t2 10 1024` => `EXIT 0`
+  - microbench (`/tmp/hash_literal_hot.cr`, no-link/no-cache):
+    - `/tmp/crystal_v2_t1` => `real 13.10s`
+    - `/tmp/crystal_v2_t2` => `real 12.88s`
+    (~1.7% faster on hash-literal-heavy compile path).
 - **LLVM `typeof` skip filter false-positive (`__crystal_main` drop)** (2026-02-15) —
   fixed a backend skip-filter regression where any extern containing `typeof_`
   was treated as unresolved and could prune `__crystal_main`, leaving
