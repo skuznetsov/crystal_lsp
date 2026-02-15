@@ -998,6 +998,10 @@ module Crystal::HIR
     @function_def_overloads : Hash(String, Array(String))
     @function_defs_cache_size : Int32
     @function_defs_processed_for_overloads : Int32 = 0
+    @function_defs_overload_queue : Array(String)
+    @function_defs_overload_queue_pos : Int32 = 0
+    @function_defs_overload_queued : Set(String)
+    @function_defs_overload_indexed : Set(String)
     @function_param_stats : Hash(String, DefParamStats)
     @function_type_keys_by_base : Hash(String, Array(String))
     @function_type_keys_by_base_size : Int32
@@ -2183,6 +2187,10 @@ module Crystal::HIR
       @function_def_arenas = Hash(String, CrystalV2::Compiler::Frontend::ArenaLike).new(initial_capacity: 32768)
       @function_def_overloads = Hash(String, Array(String)).new(initial_capacity: 8192)
       @function_defs_cache_size = 0
+      @function_defs_overload_queue = [] of String
+      @function_defs_overload_queue_pos = 0
+      @function_defs_overload_queued = Set(String).new(initial_capacity: 32768)
+      @function_defs_overload_indexed = Set(String).new(initial_capacity: 32768)
       @function_param_stats = {} of String => DefParamStats
       @function_type_keys_by_base = Hash(String, Array(String)).new(initial_capacity: 8192)
       @function_type_keys_by_base_size = 0
@@ -5725,6 +5733,7 @@ module Crystal::HIR
 
     private def set_function_def_arena(name : String, arena : CrystalV2::Compiler::Frontend::ArenaLike) : Nil
       @function_def_arenas[name] = arena
+      enqueue_function_def_for_overloads(name)
       add_unique_def_arena(arena)
       @function_def_arenas_last_refresh_size = @function_def_arenas.size
     end
@@ -5732,6 +5741,13 @@ module Crystal::HIR
     private def set_function_def_arena_if_missing(name : String, arena : CrystalV2::Compiler::Frontend::ArenaLike) : Nil
       return if @function_def_arenas.has_key?(name)
       set_function_def_arena(name, arena)
+    end
+
+    private def enqueue_function_def_for_overloads(name : String) : Nil
+      return unless @function_defs.has_key?(name)
+      return if @function_defs_overload_indexed.includes?(name) || @function_defs_overload_queued.includes?(name)
+      @function_defs_overload_queue << name
+      @function_defs_overload_queued << name
     end
 
     private def refresh_unique_def_arenas! : Nil
@@ -19261,59 +19277,25 @@ module Crystal::HIR
     end
 
     private def rebuild_function_def_overloads
-      # Incremental: only process new entries since last rebuild
-      count = 0
-      @function_defs.each do |key, def_node|
-        count += 1
-        next if count <= @function_defs_processed_for_overloads
-        base = if idx = key.index('$')
-                 key[0, idx]
-               else
-                 key
-               end
-        list = @function_def_overloads[base]?
-        if list
-          list << key
-        else
-          @function_def_overloads[base] = [key]
+      # Incremental: process queued keys collected at def-registration time.
+      while @function_defs_overload_queue_pos < @function_defs_overload_queue.size
+        key = @function_defs_overload_queue[@function_defs_overload_queue_pos]
+        @function_defs_overload_queue_pos += 1
+        @function_defs_overload_queued.delete(key)
+        next if @function_defs_overload_indexed.includes?(key)
+        if def_node = @function_defs[key]?
+          index_function_def_for_overloads(key, def_node)
         end
-        if key.includes?("_double_splat")
-          @function_def_has_double_splat[base] = true
-        elsif key.includes?("_splat")
-          @function_def_has_splat[base] = true
-        end
-        @function_def_overloads_cache[base] = @function_def_overloads[base]
-        stripped_base = base
-        if base.includes?('#') || base.includes?('.')
-          parts = parse_method_name_compact(base)
-          if parts.separator && parts.method
-            owner_base = strip_generic_args(parts.owner)
-            stripped_base = parts.separator == '#' ? "#{owner_base}##{parts.method.not_nil!}" : "#{owner_base}.#{parts.method.not_nil!}"
-          end
-        end
-        if stripped_base != base && !@function_def_overloads_stripped_by_base.has_key?(base)
-          @function_def_overloads_stripped_by_base[base] = stripped_base
-        end
-        stripped_list = @function_def_overloads_stripped_index[stripped_base]?
-        if stripped_list
-          stripped_list << key
-        else
-          @function_def_overloads_stripped_index[stripped_base] = [key]
-        end
-        if stripped_base != base
-          if key.includes?("_double_splat")
-            @function_def_has_double_splat[stripped_base] = true
-          elsif key.includes?("_splat")
-            @function_def_has_splat[stripped_base] = true
-          end
-        end
-        @function_def_overloads_cache[stripped_base] = @function_def_overloads_stripped_index[stripped_base]
-        if @function_def_overloads_stripped_cache.has_key?(stripped_base)
-          @function_def_overloads_stripped_cache[stripped_base] = @function_def_overloads_stripped_index[stripped_base]
-        end
-        @function_param_stats[key] = build_param_stats(def_node) unless @function_param_stats.has_key?(key)
       end
-      @function_defs_processed_for_overloads = count
+
+      # Safety net for any paths that add @function_defs without set_function_def_arena.
+      if @function_defs_overload_indexed.size < @function_defs.size
+        @function_defs.each do |key, def_node|
+          next if @function_defs_overload_indexed.includes?(key)
+          index_function_def_for_overloads(key, def_node)
+        end
+      end
+      @function_defs_processed_for_overloads = @function_defs_overload_indexed.size
 
       # Incremental for function_type_keys_by_base
       type_count = 0
@@ -19337,6 +19319,67 @@ module Crystal::HIR
       @function_type_keys_by_base_size = @function_types.size
       @function_defs_cache_size = @function_defs.size
       @function_def_overloads_cache_size = @function_defs_cache_size
+    end
+
+    private def index_function_def_for_overloads(
+      key : String,
+      def_node : CrystalV2::Compiler::Frontend::DefNode,
+    ) : Nil
+      return if @function_defs_overload_indexed.includes?(key)
+      @function_defs_overload_indexed << key
+
+      base = if idx = key.index('$')
+               key[0, idx]
+             else
+               key
+             end
+
+      list = @function_def_overloads[base]?
+      if list
+        list << key
+      else
+        @function_def_overloads[base] = [key]
+      end
+
+      if key.includes?("_double_splat")
+        @function_def_has_double_splat[base] = true
+      elsif key.includes?("_splat")
+        @function_def_has_splat[base] = true
+      end
+      @function_def_overloads_cache[base] = @function_def_overloads[base]
+
+      stripped_base = base
+      if base.includes?('#') || base.includes?('.')
+        parts = parse_method_name_compact(base)
+        if parts.separator && parts.method
+          owner_base = strip_generic_args(parts.owner)
+          stripped_base = parts.separator == '#' ? "#{owner_base}##{parts.method.not_nil!}" : "#{owner_base}.#{parts.method.not_nil!}"
+        end
+      end
+
+      if stripped_base != base && !@function_def_overloads_stripped_by_base.has_key?(base)
+        @function_def_overloads_stripped_by_base[base] = stripped_base
+      end
+
+      stripped_list = @function_def_overloads_stripped_index[stripped_base]?
+      if stripped_list
+        stripped_list << key
+      else
+        @function_def_overloads_stripped_index[stripped_base] = [key]
+      end
+
+      if stripped_base != base
+        if key.includes?("_double_splat")
+          @function_def_has_double_splat[stripped_base] = true
+        elsif key.includes?("_splat")
+          @function_def_has_splat[stripped_base] = true
+        end
+      end
+      @function_def_overloads_cache[stripped_base] = @function_def_overloads_stripped_index[stripped_base]
+      if @function_def_overloads_stripped_cache.has_key?(stripped_base)
+        @function_def_overloads_stripped_cache[stripped_base] = @function_def_overloads_stripped_index[stripped_base]
+      end
+      @function_param_stats[key] = build_param_stats(def_node) unless @function_param_stats.has_key?(key)
     end
 
     private def function_type_keys_for_base(base_name : String) : Array(String)

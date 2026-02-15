@@ -81,6 +81,23 @@
     - baseline (`/tmp/crystal_v2_dbg_lazyrta_default`): `real 85.26s`, `84.73s`; `emit_tracked_sigs 8924.0ms`, `8848.9ms`; `Lookup 873.5ms`, `863.1ms`; `method_name_parts 64983/32798`, `65072/32868`
     - new (`/tmp/crystal_v2_dbg_methodparts`): `real 84.96s`, `84.65s`; `emit_tracked_sigs 8693.6ms`, `8653.8ms`; `Lookup 835.3ms`, `948.3ms`; no `method_name_parts` entries in cache histo
   - net: small but consistent wall-clock gain (~`0.19s` avg, ~`0.22%`) with no regressions.
+- **HIR overload index rebuild: queued incremental keys** (2026-02-15) —
+  removed repeated full `@function_defs` scans on overload-index refresh:
+  - added queue-driven indexing of newly registered defs from
+    `set_function_def_arena`;
+  - `rebuild_function_def_overloads` now consumes pending keys first and
+    falls back to full-scan only as a safety net if queue coverage is incomplete;
+  - kept behavior for `function_def_has_splat`/`_double_splat` and stripped-base
+    indexes unchanged.
+  Validation:
+  - build: `crystal build src/crystal_v2.cr -o /tmp/crystal_v2_dbg_overloadqueue --error-trace` => `EXIT 0`
+  - spec: `timeout 180 crystal spec spec/hir/return_type_inference_spec.cr` => `13 examples, 0 failures`
+  - regressions: `./regression_tests/run_all.sh /tmp/crystal_v2_dbg_overloadqueue` => `40 passed, 0 failed`
+  - bootstrap smoke: `CRYSTAL_V2_PIPELINE_CACHE=0 /tmp/crystal_v2_dbg_overloadqueue examples/bootstrap_array.cr -o /tmp/bootstrap_array_overloadqueue && ./scripts/run_safe.sh /tmp/bootstrap_array_overloadqueue 10 768` => `EXIT 0`
+  - A/B (`CRYSTAL_V2_PIPELINE_CACHE=0 CRYSTAL_V2_AST_FILTER=1 CRYSTAL_V2_PHASE_STATS=1 ... --no-link --no-ast-cache --no-llvm-cache spec/hir/return_type_inference_spec.cr`):
+    - baseline (`/tmp/crystal_v2_dbg_methodparts`): `real 83.31s`, `83.19s`; `process_pending 7006.7/7066.9ms`; `emit_tracked_sigs 8232.4/8273.9ms`
+    - new (`/tmp/crystal_v2_dbg_overloadqueue`): `real 82.74s`, `83.26s`; `process_pending 6968.7/6910.0ms`; `emit_tracked_sigs 8235.0/8306.0ms`
+  - net: mixed run-to-run signal, but lower average wall-clock (~`0.25s` faster, ~`0.30%`) and consistently lower `process_pending`.
 - **Lazy RTA default-on (opt-out)** (2026-02-15) — enabled lazy RTA by default in
   `process_pending`/`flush_pending` with explicit opt-out:
   - `CRYSTAL_V2_LAZY_RTA=0` (or `false`) disables lazy RTA.
