@@ -106,6 +106,26 @@ describe "MIR ABI layout sanity" do
     fields.find(&.name.==("@b")).not_nil!.offset.should eq(8)
   end
 
+  it "uses pointer-sized alignment for reference ivars" do
+    code = <<-CRYSTAL
+      class RefHolder
+        @s : String
+      end
+    CRYSTAL
+
+    mir_mod = build_mir_module(code)
+    t = mir_mod.type_registry.get_by_name("RefHolder").not_nil!
+
+    expected_ptr_align = {% if flag?(:i386) || flag?(:arm) %}4{% else %}8{% end %}
+    expected_size = {% if flag?(:i386) || flag?(:arm) %}8{% else %}16{% end %}
+    expected_offset = {% if flag?(:i386) || flag?(:arm) %}4{% else %}8{% end %}
+
+    t.kind.reference?.should be_true
+    t.alignment.should eq(expected_ptr_align)
+    t.size.should eq(expected_size)
+    t.fields.not_nil!.find(&.name.==("@s")).not_nil!.offset.should eq(expected_offset)
+  end
+
   it "computes union header and payload offsets" do
     code = <<-CRYSTAL
       class U

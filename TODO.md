@@ -19,6 +19,15 @@
 - Float64: arithmetic, ** on literals
 
 ## Recently completed
+- **HIR pointer-size defaults made target-width aware** (2026-02-15) —
+  removed hardcoded `8` defaults for reference/pointer size/alignment in
+  `ast_to_hir` (`type_size`, `type_alignment`, `sizeof` fallbacks). Added
+  compile-target helper (`i386/arm => 4`, otherwise `8`) and ABI coverage for
+  reference ivars.
+  Validation:
+  - `crystal spec spec/mir/abi_layout_spec.cr` => `6 examples, 0 failures`
+  - `crystal build src/crystal_v2.cr -o /tmp/crystal_v2_ptrsize_fix --error-trace` => `EXIT 0`
+  - `regression_tests/run_all.sh /tmp/crystal_v2_ptrsize_fix` => `40 passed, 0 failed`
 - **HIR include-namespace resolution without `split/join`** (2026-02-15) —
   replaced `class_name.split("::") + join` loop in
   `register_module_instance_methods_for` with zero-copy owner-chain scanning

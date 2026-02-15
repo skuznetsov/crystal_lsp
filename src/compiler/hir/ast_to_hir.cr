@@ -20490,6 +20490,20 @@ module Crystal::HIR
       nil
     end
 
+    @[AlwaysInline]
+    private def pointer_word_bytes_i32 : Int32
+      {% if flag?(:i386) || flag?(:arm) %}
+        4
+      {% else %}
+        8
+      {% end %}
+    end
+
+    @[AlwaysInline]
+    private def pointer_word_bytes_i64 : Int64
+      pointer_word_bytes_i32.to_i64
+    end
+
     # Helper to get type size in bytes
     private def type_size(type : TypeRef, c_context : Bool = false) : Int32
       case type
@@ -20526,7 +20540,7 @@ module Crystal::HIR
             return sa_size
           end
         end
-        8 # Pointer size for reference types
+        pointer_word_bytes_i32 # Pointer size for reference types
       end
     end
 
@@ -20564,7 +20578,7 @@ module Crystal::HIR
       when TypeRef::INT128, TypeRef::UINT128
         16
       else
-        8 # Pointer/reference types align to 8
+        pointer_word_bytes_i32 # Pointer/reference types align to pointer size
       end
     end
 
@@ -30486,7 +30500,7 @@ module Crystal::HIR
     private def lower_sizeof(ctx : LoweringContext, node : CrystalV2::Compiler::Frontend::SizeofNode) : ValueId
       # sizeof(T) returns the size of type T in bytes
       # For basic types, we can compute this at compile time
-      size = 8_i64 # Default pointer size
+      size = pointer_word_bytes_i64 # Default pointer size
       if node.args.size > 0
         type_node = @arena[node.args.first]
         size = compute_type_size(type_node)
@@ -30561,7 +30575,7 @@ module Crystal::HIR
         if current = @current_class
           return size_for_type_name(current)
         end
-        8_i64
+        pointer_word_bytes_i64
       when CrystalV2::Compiler::Frontend::IdentifierNode
         name = String.new(type_node.name)
         # Resolve type parameters if present
@@ -30571,7 +30585,7 @@ module Crystal::HIR
           if current = @current_class
             return size_for_type_name(current)
           end
-          return 8_i64
+          return pointer_word_bytes_i64
         end
         size_for_type_name(name)
       when CrystalV2::Compiler::Frontend::ConstantNode
@@ -30579,7 +30593,7 @@ module Crystal::HIR
         name = @type_param_map[name]? || name
         size_for_type_name(name)
       else
-        8_i64 # Default pointer size
+        pointer_word_bytes_i64 # Default pointer size
       end
     end
 
@@ -30591,7 +30605,7 @@ module Crystal::HIR
       when "Int32", "UInt32", "Float32", "Char" then 4_i64
       when "Int64", "UInt64", "Float64"         then 8_i64
       when "Int128", "UInt128"                  then 16_i64
-      else                                           8_i64 # Pointer/reference size
+      else                                           pointer_word_bytes_i64 # Pointer/reference size
       end
     end
 
