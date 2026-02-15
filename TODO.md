@@ -149,7 +149,9 @@
   compilers in one command:
   - compiles both binaries in `--release`;
   - verifies same stdout and same exit code before runtime comparison;
-  - runs runtime N times and reports average ratios (`compile_ratio_v2_over_orig`, `run_ratio_orig_over_v2`) in CSV.
+  - runs runtime N times and reports average and minimum timings in CSV
+    (`run_orig_avg_s`, `run_v2_avg_s`, `run_orig_min_s`, `run_v2_min_s`) plus
+    corresponding ratios.
   Usage:
   - same source for both: `scripts/benchmark.sh examples/bench_fib42_crystal.cr`
   - explicit source pair: `scripts/benchmark.sh v2_source.cr:orig_source.cr`

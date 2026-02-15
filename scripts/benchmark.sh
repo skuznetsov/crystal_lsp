@@ -178,7 +178,7 @@ runtime_measure() {
     'BEGIN { printf "OK\n%.6f\n%.6f\n%.6f\n", s / n, min, max }'
 }
 
-printf 'case,compile_orig_s,compile_v2_s,compile_ratio_v2_over_orig,run_orig_avg_s,run_v2_avg_s,run_ratio_orig_over_v2,status\n'
+printf 'case,compile_orig_s,compile_v2_s,compile_ratio_v2_over_orig,run_orig_avg_s,run_v2_avg_s,run_ratio_orig_over_v2,run_orig_min_s,run_v2_min_s,run_min_ratio_orig_over_v2,status\n'
 
 for spec in "$@"; do
   mapfile -t pair < <(resolve_pair "$spec")
@@ -202,7 +202,7 @@ for spec in "$@"; do
   orig_rc="${orig_compile[0]}"
   orig_compile_s="${orig_compile[1]}"
   if [[ "$orig_rc" -ne 0 ]]; then
-    printf '%s,NA,NA,NA,NA,NA,NA,orig_compile_failed\n' "$spec"
+    printf '%s,NA,NA,NA,NA,NA,NA,NA,NA,NA,orig_compile_failed\n' "$spec"
     continue
   fi
 
@@ -210,7 +210,7 @@ for spec in "$@"; do
   v2_rc="${v2_compile[0]}"
   v2_compile_s="${v2_compile[1]}"
   if [[ "$v2_rc" -ne 0 ]]; then
-    printf '%s,%s,NA,NA,NA,NA,NA,v2_compile_failed\n' "$spec" "$orig_compile_s"
+    printf '%s,%s,NA,NA,NA,NA,NA,NA,NA,NA,v2_compile_failed\n' "$spec" "$orig_compile_s"
     continue
   fi
 
@@ -232,22 +232,23 @@ for spec in "$@"; do
   compile_ratio="$(awk -v o="$orig_compile_s" -v v="$v2_compile_s" 'BEGIN { if (o == 0) print "NA"; else printf "%.4f", v / o }')"
 
   if [[ "$orig_status" -ne "$v2_status" || "$orig_stdout" != "$v2_stdout" ]]; then
-    printf '%s,%s,%s,%s,NA,NA,NA,output_mismatch\n' "$spec" "$orig_compile_s" "$v2_compile_s" "$compile_ratio"
+    printf '%s,%s,%s,%s,NA,NA,NA,NA,NA,NA,output_mismatch\n' "$spec" "$orig_compile_s" "$v2_compile_s" "$compile_ratio"
     continue
   fi
 
   mapfile -t orig_run < <(runtime_measure "$orig_out" "$RUNS" "$orig_stdout" "$orig_status")
   if [[ "${orig_run[0]}" != "OK" ]]; then
-    printf '%s,%s,%s,%s,NA,NA,NA,orig_runtime_mismatch\n' "$spec" "$orig_compile_s" "$v2_compile_s" "$compile_ratio"
+    printf '%s,%s,%s,%s,NA,NA,NA,NA,NA,NA,orig_runtime_mismatch\n' "$spec" "$orig_compile_s" "$v2_compile_s" "$compile_ratio"
     continue
   fi
 
   mapfile -t v2_run < <(runtime_measure "$v2_out" "$RUNS" "$orig_stdout" "$orig_status")
   if [[ "${v2_run[0]}" != "OK" ]]; then
-    printf '%s,%s,%s,%s,%s,NA,NA,v2_runtime_mismatch\n' "$spec" "$orig_compile_s" "$v2_compile_s" "$compile_ratio" "${orig_run[1]}"
+    printf '%s,%s,%s,%s,%s,NA,NA,%s,NA,NA,v2_runtime_mismatch\n' "$spec" "$orig_compile_s" "$v2_compile_s" "$compile_ratio" "${orig_run[1]}" "${orig_run[2]}"
     continue
   fi
 
   run_ratio="$(awk -v o="${orig_run[1]}" -v v="${v2_run[1]}" 'BEGIN { if (v == 0) print "NA"; else printf "%.4f", o / v }')"
-  printf '%s,%s,%s,%s,%s,%s,%s,ok\n' "$spec" "$orig_compile_s" "$v2_compile_s" "$compile_ratio" "${orig_run[1]}" "${v2_run[1]}" "$run_ratio"
+  min_ratio="$(awk -v o="${orig_run[2]}" -v v="${v2_run[2]}" 'BEGIN { if (v == 0) print "NA"; else printf "%.4f", o / v }')"
+  printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,ok\n' "$spec" "$orig_compile_s" "$v2_compile_s" "$compile_ratio" "${orig_run[1]}" "${v2_run[1]}" "$run_ratio" "${orig_run[2]}" "${v2_run[2]}" "$min_ratio"
 done
