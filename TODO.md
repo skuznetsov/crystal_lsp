@@ -100,6 +100,28 @@
     - pair2 baseline (`/tmp/crystal_v2_dbg_headperf`): `real 82.72s`; `emit_tracked_sigs 8152.5ms`; `lower_missing 468.8ms`; `Lookup 889.9ms`
     - pair2 new (`/tmp/crystal_v2_dbg_parentsinglepass`): `real 82.68s`; `emit_tracked_sigs 8092.6ms`; `lower_missing 317.6ms`; `Lookup 1060.3ms`
   - net: 2/2 wall-clock wins; average `real` improvement ~`0.19s` (~`0.23%`).
+- **MIR union store hardening for scalar/ptr emit paths** (2026-02-15) —
+  fixed backend type mismatches when a value is logically union-typed in MIR but
+  emitted as scalar/ptr in LLVM:
+  - `emit_array_new` now records emitted SSA type for `%name` (`ptr`);
+  - `emit_store` now wraps scalar/ptr payloads into union storage when target type
+    is union and emitted SSA type differs;
+  - `emit_cross_block_slot_store` now applies the same pre-wrap before slot writes.
+  Validation:
+  - build: `crystal build src/crystal_v2.cr -o /tmp/crystal_v2_dbg_union_storefix2 --error-trace` => `EXIT 0`
+  - specs:
+    - `timeout 180 crystal spec spec/hir/return_type_inference_spec.cr` => `13 examples, 0 failures`
+    - `timeout 180 crystal spec spec/mir/llvm_backend_spec.cr` => `59 examples, 0 failures`
+  - regressions: `./regression_tests/run_all.sh /tmp/crystal_v2_dbg_union_storefix2` => `40 passed, 0 failed`
+  - bootstrap smoke:
+    - `CRYSTAL_V2_PIPELINE_CACHE=0 /tmp/crystal_v2_dbg_union_storefix2 examples/bootstrap_array.cr -o /tmp/bootstrap_array_union_storefix2` + `scripts/run_safe.sh /tmp/bootstrap_array_union_storefix2 10 768` => `EXIT 0`
+    - `CRYSTAL_V2_PIPELINE_CACHE=0 /tmp/crystal_v2_dbg_union_storefix2 examples/bench_fib42.cr -o /tmp/fib42_union_storefix2` + `scripts/run_safe.sh /tmp/fib42_union_storefix2 5 256` => `EXIT 0`
+  - perf sanity (`--no-link --no-ast-cache --no-llvm-cache spec/hir/return_type_inference_spec.cr`):
+    - before (`/tmp/crystal_v2_dbg_parentsinglepass`): `real 83.00s`; `emit_tracked_sigs 8070.9ms`; `lower_missing 470.8ms`; `Lookup 884.8ms`
+    - after (`/tmp/crystal_v2_dbg_union_storefix2`): `real 82.73s`; `emit_tracked_sigs 8147.9ms`; `lower_missing 326.1ms`; `Lookup 795.4ms`
+  - note: this removes the first `CRYSTAL_V2_DISABLE_INLINE_YIELD=1` `opt` failure
+    (`store union %ptr` at `/tmp/rt_inline_off.ll:17315`), but a later mismatch
+    still remains (`getelementptr ... ptr %union` at `/tmp/rt_inline_off_fixed2.ll:17360`).
 - **HIR method-name parse churn trim in lookup/lowering** (2026-02-15) —
   reduced hot-path overhead from full `parse_method_name` caching where parsing
   is one-shot:

@@ -6267,6 +6267,28 @@ module Crystal::MIR
       end
       store_val = name
       store_type = llvm_type
+      actual_name_type = @emitted_value_types[name]?
+      if !actual_name_type && name.starts_with?('%')
+        actual_name_type = @emitted_value_types[name[1..]]?
+      end
+
+      if llvm_type.includes?(".union") && actual_name_type && !actual_name_type.includes?(".union") && actual_name_type != "void"
+        if union_desc = @module.get_union_descriptor(val_type)
+          if variant = select_union_variant_for_store(union_desc, actual_name_type, name)
+            base = name.lstrip('%')
+            emit "%#{base}.slot_prewrap_ptr = alloca #{llvm_type}, align 8"
+            emit "%#{base}.slot_prewrap_tid = getelementptr #{llvm_type}, ptr %#{base}.slot_prewrap_ptr, i32 0, i32 0"
+            emit "store i32 #{variant.type_id}, ptr %#{base}.slot_prewrap_tid"
+            emit "%#{base}.slot_prewrap_pay = getelementptr #{llvm_type}, ptr %#{base}.slot_prewrap_ptr, i32 0, i32 1"
+            emit "store #{actual_name_type} #{name}, ptr %#{base}.slot_prewrap_pay, align 4"
+            emit "%#{base}.slot_prewrap_val = load #{llvm_type}, ptr %#{base}.slot_prewrap_ptr"
+            store_val = "%#{base}.slot_prewrap_val"
+            store_type = llvm_type
+            record_emitted_type(store_val, llvm_type)
+          end
+        end
+      end
+
       if slot_llvm_type && slot_llvm_type != llvm_type
         base = name.lstrip('%')
         if slot_llvm_type.includes?(".union") && !llvm_type.includes?(".union")
@@ -6578,6 +6600,41 @@ module Crystal::MIR
       variants.all? { |v| @type_mapper.llvm_type(v.type_ref) == "ptr" }
     end
 
+    private def select_union_variant_for_store(
+      union_desc : UnionDescriptor,
+      payload_llvm_type : String,
+      payload_value : String,
+    ) : UnionVariantDescriptor?
+      if payload_llvm_type == "void" || payload_value == "null" || payload_value == "0"
+        return union_desc.variants.find { |v| v.type_ref == TypeRef::NIL }
+      end
+
+      variant = union_desc.variants.find do |v|
+        next false if v.type_ref == TypeRef::NIL || v.type_ref == TypeRef::VOID
+        @type_mapper.llvm_type(v.type_ref) == payload_llvm_type
+      end
+      return variant if variant
+
+      if payload_llvm_type.starts_with?('i')
+        variant = union_desc.variants.find do |v|
+          next false if v.type_ref == TypeRef::NIL || v.type_ref == TypeRef::VOID
+          @type_mapper.llvm_type(v.type_ref).starts_with?('i')
+        end
+      elsif payload_llvm_type == "double" || payload_llvm_type == "float"
+        variant = union_desc.variants.find do |v|
+          vt = @type_mapper.llvm_type(v.type_ref)
+          vt == "double" || vt == "float"
+        end
+      elsif payload_llvm_type == "ptr"
+        variant = union_desc.variants.find do |v|
+          v.type_ref != TypeRef::NIL && v.type_ref != TypeRef::VOID &&
+            @type_mapper.llvm_type(v.type_ref) == "ptr"
+        end
+      end
+
+      variant || union_desc.variants.find { |v| v.type_ref != TypeRef::NIL && v.type_ref != TypeRef::VOID }
+    end
+
     private def emit_store(inst : Store)
       ptr = value_ref(inst.ptr)
       val = value_ref(inst.value)
@@ -6621,7 +6678,35 @@ module Crystal::MIR
       if actual_val_type && actual_val_type != "void" && actual_val_type != val_type_str
         if val.starts_with?('%')
           base = "r#{inst.id}.store_cast"
-          if actual_val_type.starts_with?('i') && val_type_str == "ptr"
+          if val_type_str.includes?(".union") && !actual_val_type.includes?(".union")
+            wrapped = false
+            if union_type_ref = @value_types[inst.value]?
+              if union_desc = @module.get_union_descriptor(union_type_ref)
+                if variant = select_union_variant_for_store(union_desc, actual_val_type, val)
+                  emit "%#{base}.union_ptr = alloca #{val_type_str}, align 8"
+                  emit "%#{base}.union_type_id_ptr = getelementptr #{val_type_str}, ptr %#{base}.union_ptr, i32 0, i32 0"
+                  emit "store i32 #{variant.type_id}, ptr %#{base}.union_type_id_ptr"
+                  emit "%#{base}.union_payload_ptr = getelementptr #{val_type_str}, ptr %#{base}.union_ptr, i32 0, i32 1"
+                  if actual_val_type == "void"
+                    emit "store i8 0, ptr %#{base}.union_payload_ptr, align 4"
+                  else
+                    store_val = val
+                    store_val = "null" if actual_val_type == "ptr" && store_val == "0"
+                    emit "store #{actual_val_type} #{store_val}, ptr %#{base}.union_payload_ptr, align 4"
+                  end
+                  emit "%#{base}.union_val = load #{val_type_str}, ptr %#{base}.union_ptr"
+                  val = "%#{base}.union_val"
+                  record_emitted_type(val, val_type_str)
+                  wrapped = true
+                end
+              end
+            end
+
+            unless wrapped
+              # Conservative fallback keeps IR type-consistent if no variant was found.
+              val_type_str = actual_val_type
+            end
+          elsif actual_val_type.starts_with?('i') && val_type_str == "ptr"
             emit "%#{base} = inttoptr #{actual_val_type} #{val} to ptr"
             val = "%#{base}"
             val_type_str = "ptr"
@@ -10742,6 +10827,7 @@ module Crystal::MIR
 
       # Alias so %name resolves to the Array pointer
       emit "#{name} = bitcast ptr %#{base_name}.arr to ptr"
+      record_emitted_type(name, "ptr")
 
       # Register as array for IndexGet/IndexSet/ArraySize
       @array_info[inst.id] = {element_type, 0}
