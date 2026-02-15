@@ -19,6 +19,26 @@
 - Float64: arithmetic, ** on literals
 
 ## Recently completed
+- **CLI policy: auto-disable inline-yield for `--no-link`** (2026-02-15) —
+  added a safe fast-path for compile-only/test workloads:
+  - `cli` now passes `disable_inline_yield: true` to HIR lowering when `--no-link`
+    is used;
+  - override: set `CRYSTAL_V2_FORCE_INLINE_YIELD=1` to keep inline-yield enabled
+    even with `--no-link`;
+  - explicit `CRYSTAL_V2_DISABLE_INLINE_YIELD` still has highest priority.
+  Validation:
+  - build: `crystal build src/crystal_v2.cr -o /tmp/crystal_v2_dbg_auto_inlineoff --error-trace` => `EXIT 0`
+  - specs:
+    - `timeout 180 crystal spec spec/hir/return_type_inference_spec.cr` => `13 examples, 0 failures`
+    - `timeout 180 crystal spec spec/mir/llvm_backend_spec.cr` => `59 examples, 0 failures`
+  - regressions: `./regression_tests/run_all.sh /tmp/crystal_v2_dbg_auto_inlineoff` => `40 passed, 0 failed`
+  - smoke:
+    - default link mode: `examples/bootstrap_array.cr` + `scripts/run_safe.sh` => `EXIT 0`
+    - no-link mode: `--no-link --no-ast-cache --no-llvm-cache examples/bootstrap_array.cr` => `EXIT 0`
+  - perf check (`CRYSTAL_V2_PIPELINE_CACHE=0 CRYSTAL_V2_AST_FILTER=1 ... --no-link --no-ast-cache --no-llvm-cache spec/hir/return_type_inference_spec.cr`):
+    - auto mode: `real 69.90s`
+    - forced inline (`CRYSTAL_V2_FORCE_INLINE_YIELD=1`): `real 84.37s`
+    - net: auto mode faster by `14.47s` (~`17.1%`, `1.21x`).
 - **MIR/LLVM: inline-yield-off union ABI guard for `Hash#[]?` override** (2026-02-15) —
   fixed invalid fallback union name synthesis in `llvm_backend` (`__vdispatch__Hash::Entry...`)
   that produced undefined/opaque union LLVM types under `CRYSTAL_V2_DISABLE_INLINE_YIELD=1`.
@@ -104,7 +124,11 @@
   - global inline-yield off (`CRYSTAL_V2_DISABLE_INLINE_YIELD=1`):
     - candidate: `real 66.55s` (large speedup potential), but codegen is invalid:
       `opt: ... error: '%r18' defined with type 'ptr' but expected 'Nil | Array(String).union'` (`/tmp/rt_inline_off.ll:17315`).
-    - conclusion: keep disabled-by-default only as debug lever; not safe for production until type-coercion bug is fixed.
+    - conclusion (historical): kept disabled-by-default only as debug lever.
+    - update (2026-02-15): critical inline-off ABI/type issues were fixed (including
+      Hash `[]?` vdispatch union naming), `CRYSTAL_V2_DISABLE_INLINE_YIELD=1`
+      now passes `spec/hir/return_type_inference_spec` no-link and `40/40`
+      regressions on current branch.
   Decision: keep all above reverted; continue only with branches that improve
   end-to-end wall clock across at least two A/B runs.
   Note: one transient regression runner failure (`yield_suffix_unless` missing

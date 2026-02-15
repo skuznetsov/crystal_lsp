@@ -2134,13 +2134,16 @@ module Crystal::HIR
     @classvar_init_functions_created = Set(String).new
     # Whether lazy classvar init is active (disabled by CRYSTAL_V2_EAGER_CLASSVAR_INIT=1)
     @lazy_classvar_init_active : Bool = !ENV.has_key?("CRYSTAL_V2_EAGER_CLASSVAR_INIT")
+    @disable_inline_yield : Bool
 
     def initialize(
       @arena,
       module_name : String = "main",
       sources_by_arena : Hash(CrystalV2::Compiler::Frontend::ArenaLike, String)? = nil,
       paths_by_arena : Hash(CrystalV2::Compiler::Frontend::ArenaLike, String)? = nil,
+      disable_inline_yield : Bool = ENV.has_key?("CRYSTAL_V2_DISABLE_INLINE_YIELD"),
     )
+      @disable_inline_yield = disable_inline_yield
       @module = Module.new(module_name)
       @function_types = Hash(String, TypeRef).new(initial_capacity: 8192)
       @function_base_names = Set(String).new(initial_capacity: 8192)
@@ -42131,7 +42134,7 @@ module Crystal::HIR
         block_param_types_inline = [type_ref_for_name(static_class_name)]
       end
 
-      disable_inline_yield = env_has?("CRYSTAL_V2_DISABLE_INLINE_YIELD")
+      disable_inline_yield = @disable_inline_yield
       if (block_for_inline || proc_for_inline) && !disable_inline_yield
         try_inline_allowed = env_has?("CRYSTAL_V2_INLINE_TRY") || !env_has?("CRYSTAL_V2_DISABLE_TRY_INLINE")
         if method_name == "try"
@@ -48700,7 +48703,7 @@ module Crystal::HIR
       block_param_types : Array(TypeRef)?,
       callee_arena : CrystalV2::Compiler::Frontend::ArenaLike,
     ) : ValueId
-      if env_has?("CRYSTAL_V2_DISABLE_INLINE_YIELD")
+      if @disable_inline_yield
         return inline_yield_fallback_call(ctx, inline_key, receiver_id, call_args, block, block_param_types)
       end
       ctx.push_scope(ScopeKind::Block)

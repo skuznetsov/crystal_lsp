@@ -432,7 +432,22 @@ module CrystalV2
           sources_by_arena[arena] = source
           paths_by_arena[arena] = path
         end
-        hir_converter = HIR::AstToHir.new(first_arena, input_file, sources_by_arena, paths_by_arena)
+        force_inline_yield = case force = ENV["CRYSTAL_V2_FORCE_INLINE_YIELD"]?
+                             when nil, "", "0", "false", "False", "FALSE" then false
+                             else                                                true
+                             end
+        auto_disable_inline_yield = !options.link && !force_inline_yield
+        disable_inline_yield = ENV.has_key?("CRYSTAL_V2_DISABLE_INLINE_YIELD") || auto_disable_inline_yield
+        if auto_disable_inline_yield && !ENV.has_key?("CRYSTAL_V2_DISABLE_INLINE_YIELD")
+          log(options, out_io, "  Auto: disabling inline-yield for --no-link (set CRYSTAL_V2_FORCE_INLINE_YIELD=1 to override)")
+        end
+        hir_converter = HIR::AstToHir.new(
+          first_arena,
+          input_file,
+          sources_by_arena,
+          paths_by_arena,
+          disable_inline_yield: disable_inline_yield
+        )
         link_libs.each { |lib_name| hir_converter.module.add_link_library(lib_name) }
 
         # Collect nodes by type
