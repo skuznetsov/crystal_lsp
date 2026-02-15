@@ -35,8 +35,17 @@
   - emit safety-net check reorder (`attempted/ast_filter` before state checks):
     - `old`: `real 103.07s`
     - `new`: `real 103.34s`
+  - callsite recording prune under active AST filter (`remember_callsite_arg_types`
+    early-return via cached `ast_filter_allows_safety_net_name?`):
+    - `callsiteast`: `real 103.30s`, `real 103.10s`
+    - `aritykey`: `real 103.06s`, `real 102.94s`
+    - phase comparison stayed near-noise (`emit_tracked_sigs ~13.0s`,
+      `process_pending ~6.9-7.1s`), no robust win.
   Decision: keep all above reverted; continue only with branches that improve
   end-to-end wall clock across at least two A/B runs.
+  Note: one transient regression runner failure (`yield_suffix_unless` missing
+  `.o` at link) did not reproduce; direct compile passed and rerun of
+  `regression_tests/run_all.sh /tmp/crystal_v2_dbg_callsiteast` finished `40/0`.
 - **Emit safety-net telemetry (2026-02-15)** — with `DEBUG_EMIT_SIGS=1`:
   - `process_pending`: `286 -> 6400` in `7434.7ms`
   - `emit_tracked_sigs`: `6400 -> 16546` in `13984.6ms`
