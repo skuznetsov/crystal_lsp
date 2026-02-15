@@ -144,6 +144,17 @@
       - original avg `real 0.150s`, v2 avg `real 0.118s` (~`1.27x` faster v2)
     - caveat: `/tmp/bench_runtime_cmp.cr` (Int64-heavy variant) produced output mismatch
       (`2399999989227465` original vs `1965973559` v2), so it is tracked as a correctness bug candidate and excluded from speed comparison.
+- **Benchmark protocol/tooling: compile + runtime with output parity** (2026-02-15) —
+  updated `scripts/benchmark.sh` to make performance checks reproducible for both
+  compilers in one command:
+  - compiles both binaries in `--release`;
+  - verifies same stdout and same exit code before runtime comparison;
+  - runs runtime N times and reports average ratios (`compile_ratio_v2_over_orig`, `run_ratio_orig_over_v2`) in CSV.
+  Usage:
+  - same source for both: `scripts/benchmark.sh examples/bench_fib42_crystal.cr`
+  - explicit source pair: `scripts/benchmark.sh v2_source.cr:orig_source.cr`
+  Validation:
+  - `scripts/benchmark.sh --runs 2 examples/bench_fib42_crystal.cr` => status `ok`.
 - **Perf triage ledger (rejected experiments, 2026-02-15)** — recorded and reverted
   several SAFE perf branches that improved sub-metrics but regressed/stayed flat on
   end-to-end `real` for
