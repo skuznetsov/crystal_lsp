@@ -27708,6 +27708,7 @@ module Crystal::HIR
           # Skip functions with bare generic types (they need concrete instantiation)
           has_double_splat_def = function_def_has_double_splat?(base_name)
           has_bare_generic = args.types.any? do |t|
+            next false if t.id < TypeRef::FIRST_USER_TYPE
             if desc = @module.get_type_descriptor(t)
               is_bare = !desc.name.includes?('(') && KNOWN_GENERIC_TYPES.includes?(desc.name)
               if is_bare && desc.name == "NamedTuple" && has_double_splat_def
@@ -27764,6 +27765,7 @@ module Crystal::HIR
               next
             end
             has_bare_generic = args.types.any? do |t|
+              next false if t.id < TypeRef::FIRST_USER_TYPE
               if desc = @module.get_type_descriptor(t)
                 is_bare = !desc.name.includes?('(') && KNOWN_GENERIC_TYPES.includes?(desc.name)
                 if is_bare && desc.name == "NamedTuple" && has_double_splat_def

@@ -205,6 +205,33 @@
       - run A: `real 88.74s`; `emit_tracked_sigs 8487.8ms`; `process_pending 7568.9ms`; `Lookup 840.8ms`
       - run B: `real 88.31s`; `emit_tracked_sigs 8585.8ms`; `process_pending 7455.7ms`; `Lookup 1251.5ms`
   - net: 2/2 wall-clock wins; average `real` improvement ~`0.63s` (~`0.70%`).
+- **HIR emit-tracked signatures: skip descriptor lookup for primitive arg types** (2026-02-15) —
+  trimmed `emit_all_tracked_signatures` `has_bare_generic` checks by avoiding
+  `@module.get_type_descriptor` calls for primitive `TypeRef` IDs:
+  - added early guard: `next false if t.id < TypeRef::FIRST_USER_TYPE`.
+  Validation:
+  - build: `crystal build src/crystal_v2.cr -o /tmp/crystal_v2_dbg_emitguard --error-trace` => `EXIT 0`
+  - specs:
+    - `timeout 180 crystal spec spec/hir/return_type_inference_spec.cr` => `13 examples, 0 failures`
+    - `timeout 180 crystal spec spec/mir/llvm_backend_spec.cr` => `59 examples, 0 failures`
+  - regressions: `./regression_tests/run_all.sh /tmp/crystal_v2_dbg_emitguard` => `40 passed, 0 failed`
+  - bootstrap smoke:
+    - `CRYSTAL_V2_PIPELINE_CACHE=0 /tmp/crystal_v2_dbg_emitguard examples/bootstrap_array.cr -o /tmp/bootstrap_array_emitguard` + `scripts/run_safe.sh /tmp/bootstrap_array_emitguard 10 768` => `EXIT 0`
+  - A/B (`CRYSTAL_V2_PIPELINE_CACHE=0 CRYSTAL_V2_AST_FILTER=1 CRYSTAL_V2_PHASE_STATS=1 ... --no-link --no-ast-cache --no-llvm-cache spec/hir/return_type_inference_spec.cr`):
+    - baseline (`/tmp/crystal_v2_dbg_typename_refcache`):
+      - run A: `real 94.93s`; `emit_tracked_sigs 8964.5ms`; `process_pending 8347.2ms`; `Lookup 898.0ms`
+      - run B: `real 92.09s`; `emit_tracked_sigs 8794.7ms`; `process_pending 7701.5ms`; `Lookup 865.6ms`
+      - control run: `real 89.95s`; `emit_tracked_sigs 8939.3ms`; `process_pending 7440.6ms`
+    - candidate (`/tmp/crystal_v2_dbg_emitguard`):
+      - run A: `real 92.91s`; `emit_tracked_sigs 8841.6ms`; `process_pending 8270.9ms`; `Lookup 884.6ms`
+      - run B: `real 90.49s`; `emit_tracked_sigs 8925.6ms`; `process_pending 7668.2ms`; `Lookup 860.3ms`
+      - control run: `real 89.74s`; `emit_tracked_sigs 8651.6ms`; `process_pending 7511.9ms`
+  - net: wall-clock win on 3/3 candidate runs in this session (`~0.21s` to
+    `~2.02s` faster; average `~1.42s`, ~`1.5%`).
+  - rejected branch (documented): arg-vector hash memoization for
+    `all-void/has_bare_generic` checks regressed (`candidate2_a 90.10s` /
+    `candidate2_b 90.02s` vs `baseline2_a 89.12s` / `baseline2_b 89.39s`), so
+    it was reverted.
 - **HIR overload index rebuild: queued incremental keys** (2026-02-15) —
   removed repeated full `@function_defs` scans on overload-index refresh:
   - added queue-driven indexing of newly registered defs from
