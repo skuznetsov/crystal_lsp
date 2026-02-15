@@ -72,6 +72,10 @@
     - baseline (`/tmp/crystal_v2_dbg_overloadqueue`): `real 82.66s`, `82.29s`; `process_pending 6988.9/6901.8ms`; `emit_tracked_sigs 8051.8/7955.7ms`
     - candidate (`/tmp/crystal_v2_dbg_typename_lasthit`): `real 82.69s`, `83.00s`; `process_pending 6884.6/7023.8ms`; `emit_tracked_sigs 8131.3/8132.6ms`
     - net regression (~`+0.37s` avg), candidate reverted.
+  - global inline-yield off (`CRYSTAL_V2_DISABLE_INLINE_YIELD=1`):
+    - candidate: `real 66.55s` (large speedup potential), but codegen is invalid:
+      `opt: ... error: '%r18' defined with type 'ptr' but expected 'Nil | Array(String).union'` (`/tmp/rt_inline_off.ll:17315`).
+    - conclusion: keep disabled-by-default only as debug lever; not safe for production until type-coercion bug is fixed.
   Decision: keep all above reverted; continue only with branches that improve
   end-to-end wall clock across at least two A/B runs.
   Note: one transient regression runner failure (`yield_suffix_unless` missing
