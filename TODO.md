@@ -58,6 +58,11 @@
     - baseline (`/tmp/crystal_v2_dbg_methodparts`): `real 84.70s`; `process_pending 7519.5ms`; `emit_tracked_sigs 8766.6ms`; `Lookup 832.1ms`
     - candidate (`/tmp/crystal_v2_dbg_shadowgate`): `real 84.73s`; `process_pending 7555.9ms`; `emit_tracked_sigs 8673.3ms`; `Lookup 828.1ms`
     - result near noise/slight wall-clock regression; patch reverted.
+  - function-type keys queue (`@function_types` incremental queue feeding
+    `function_type_keys_by_base`):
+    - baseline (`/tmp/crystal_v2_dbg_overloadqueue`): `real 82.82s`; `process_pending 6912.7ms`; `emit_tracked_sigs 8098.0ms`; `Lookup 902.1ms`
+    - candidate (`/tmp/crystal_v2_dbg_typequeue`): `real 84.28s`, `83.96s`; `process_pending 7539.1/7379.5ms`; `emit_tracked_sigs 8737.3/8712.6ms`; `Lookup 834.5/1093.8ms`
+    - stable wall-clock regression (~`+1.30s` avg). Candidate reverted.
   Decision: keep all above reverted; continue only with branches that improve
   end-to-end wall clock across at least two A/B runs.
   Note: one transient regression runner failure (`yield_suffix_unless` missing
