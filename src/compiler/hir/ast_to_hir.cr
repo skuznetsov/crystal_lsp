@@ -29558,9 +29558,29 @@ module Crystal::HIR
       if info = split_generic_base_and_args(resolved)
         type_vars = split_generic_type_args(info[:args]).map(&.strip)
         if template = @generic_templates[info[:base]]?
-          if type_vars.size != template.type_params.size
+          expected_arity = template.type_params.size
+
+          # Keep macro generic parsing aligned with type_ref_for_name:
+          # if proc-arrow disambiguation collapsed multiple args into one,
+          # retry strict splitting for arity validation.
+          if type_vars.size != expected_arity
+            strict_vars = split_proc_type_inputs(info[:args]).map(&.strip)
+            type_vars = strict_vars if strict_vars.size == expected_arity
+          end
+
+          # Guard against malformed collapsed args like "String, String, String"
+          # being treated as a single generic arg for one-arity templates.
+          if expected_arity == 1 && type_vars.size == 1
+            only = type_vars[0]
+            strict_parts = split_proc_type_inputs(only).map(&.strip)
+            if strict_parts.size > 1 && !only.includes?("->")
+              type_vars = strict_parts
+            end
+          end
+
+          if type_vars.size != expected_arity
             if env_get("DEBUG_MACRO_TYPE_MISMATCH")
-              STDERR.puts "[MACRO_TYPE_MISMATCH] name=#{type_name} resolved=#{resolved} expected=#{template.type_params.size} got=#{type_vars.size}"
+              STDERR.puts "[MACRO_TYPE_MISMATCH] name=#{type_name} resolved=#{resolved} expected=#{expected_arity} got=#{type_vars.size}"
             end
             return CrystalV2::Compiler::Semantic::MacroTypeValue.new(
               resolved,
@@ -54398,6 +54418,7 @@ module Crystal::HIR
         # Parse generic: "Pointer(K)" -> base="Pointer", params=["K"]
         base_name = info[:base]
         params_str = info[:args]
+        expected_arity : Int32? = nil
 
         # First split generic args with proc-arrow disambiguation (so `A, B -> C`
         # stays a single arg). If arity doesn't match the template, retry with a
@@ -54410,6 +54431,19 @@ module Crystal::HIR
           if raw_params.size != expected_arity
             strict_params = split_proc_type_inputs(params_str)
             raw_params = strict_params if strict_params.size == expected_arity
+          end
+        end
+
+        # If the generic arity is still invalid, don't materialize the type.
+        # This prevents malformed macro-expanded names like Pointer(A, B, C)
+        # from crashing monomorphization.
+        if expected = expected_arity
+          if raw_params.size != expected
+            if env_get("DEBUG_ARITY_MISMATCH")
+              STDERR.puts "[TYPE_ARITY_MISMATCH] name=#{raw_name} lookup=#{lookup_name} base=#{base_name} expected=#{expected} got=#{raw_params.size}"
+            end
+            @type_cache.delete(cache_key)
+            return TypeRef::VOID
           end
         end
 

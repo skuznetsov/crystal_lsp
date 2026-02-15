@@ -1865,6 +1865,11 @@ r2 = maybe(false)  # => nil
       - `./regression_tests/run_all.sh ./bin/crystal_v2` → `35 passed, 0 failed`.
       - `DEBUG_MONO=1 DEBUG_ARITY_MISMATCH=1 timeout 120 /tmp/crystal_v2_fresh_verify src/crystal_v2.cr -o /tmp/crystal_v2_self_verify_dbg` → timeout only; no `arity mismatch base=Pointer` and no `Generic Pointer expects` in `/tmp/crystal_v2_self_verify_dbg.log`.
       - `timeout 240 /tmp/crystal_v2_fresh_verify src/crystal_v2.cr -o /tmp/crystal_v2_self_verify` → timeout only; `/tmp/crystal_v2_self_verify.log` contains no crash/error lines.
+  - **Update (2026-02-15)**: added a generic arity gate in `type_ref_for_name` before type materialization/monomorphization. If parsed generic args still don't match template arity (after strict split fallback), we now return `TypeRef::VOID` instead of attempting monomorphization. This fixes the reopened crash path where macro lowering still reached `Pointer(String, String, String)` and raised `Generic Pointer expects 1 type args, got 3`.
+    - DoD evidence:
+      - `DEBUG_MONO=1 DEBUG_ARITY_MISMATCH=1 timeout 120 /tmp/crystal_v2_head spec/hir/return_type_inference_spec.cr -o /tmp/rti_spec_head` → timeout only; no `Generic Pointer expects` / no `ARITY_MISMATCH` in `/tmp/rti_spec_head.stderr`.
+      - `./regression_tests/run_all.sh /tmp/crystal_v2_head` → `40 passed, 0 failed`.
+      - `timeout 300 /tmp/crystal_v2_head examples/bootstrap_array.cr -o /tmp/bootstrap_array_head` + `./scripts/run_safe.sh /tmp/bootstrap_array_head 10 768` → compile+run success (exit 0).
   - Update (2026-01-30): pending queue observed growing rapidly during self-host (`[PENDING] iteration=0 pending=1112`, `iteration=1 pending=3675` with `DEBUG_PENDING=1`), indicating aggressive fan-out in deferred lowering.
   - Update (2026-01-30): added cache for stripped overload lookups (`@function_def_overloads_stripped_cache`) to reduce repeated generic-strip scans (commit `b50b1ec`).
   - Update (2026-01-30): switched pending lowering to an explicit queue (`@pending_function_queue`) to avoid repeated full-hash scans in `process_pending_lower_functions` (commit `c54b26f`). Still observing fan-out; monitoring self-host run with `DEBUG_PENDING=1`.
