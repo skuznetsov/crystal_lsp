@@ -41,6 +41,12 @@
     - `aritykey`: `real 103.06s`, `real 102.94s`
     - phase comparison stayed near-noise (`emit_tracked_sigs ~13.0s`,
       `process_pending ~6.9-7.1s`), no robust win.
+  - pending-callsite stale prune in `emit_all_tracked_signatures` (+ duplicate
+    `debug_hook` block removal in `remember_callsite_arg_types`):
+    - `prune`: `real 103.27s`, `real 102.81s`
+    - `aritykey`: `real 102.88s`, `real 102.98s`
+    - mixed phase deltas (`emit_tracked_sigs` sometimes lower, `process_pending`
+      sometimes higher), no stable wall-clock improvement.
   Decision: keep all above reverted; continue only with branches that improve
   end-to-end wall clock across at least two A/B runs.
   Note: one transient regression runner failure (`yield_suffix_unless` missing
