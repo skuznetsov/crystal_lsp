@@ -436,10 +436,12 @@ module CrystalV2
                              when nil, "", "0", "false", "False", "FALSE" then false
                              else                                                true
                              end
-        auto_disable_inline_yield = !options.link && !force_inline_yield
+        # Inline-yield lowering is currently unstable in full link mode for some stdlib paths
+        # (e.g., DWARF parsing callbacks). Keep it disabled by default for deterministic bootstrap.
+        auto_disable_inline_yield = !force_inline_yield
         disable_inline_yield = ENV.has_key?("CRYSTAL_V2_DISABLE_INLINE_YIELD") || auto_disable_inline_yield
         if auto_disable_inline_yield && !ENV.has_key?("CRYSTAL_V2_DISABLE_INLINE_YIELD")
-          log(options, out_io, "  Auto: disabling inline-yield for --no-link (set CRYSTAL_V2_FORCE_INLINE_YIELD=1 to override)")
+          log(options, out_io, "  Auto: disabling inline-yield by default (set CRYSTAL_V2_FORCE_INLINE_YIELD=1 to override)")
         end
         hir_converter = HIR::AstToHir.new(
           first_arena,

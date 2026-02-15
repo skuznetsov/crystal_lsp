@@ -3771,3 +3771,17 @@ crystal build -Ddebug_hooks src/crystal_v2.cr -o bin/crystal_v2 --no-debug
       - `hash_stress` (functional mismatch: `missing=8`);
       - `test_case_in_predicate_subject` (segfault in channel receive path).
     - These two remain open and are next priority.
+
+  - Update (2026-02-15, pass 2):
+    - fixed LLVM backend type-safety regressions that blocked link-mode compilation:
+      - cross-block cast source type recovery for `%rN.fromslot.K` in `emit_cast`;
+      - indirect-call argument normalization for `Nil/Void` (`ptr null` instead of invalid `void 0`);
+      - ptr condition compare normalization (`icmp ne ptr ..., null` instead of `..., 0`).
+    - temporarily stabilized frontend by disabling inline-yield **by default** (opt-in via `CRYSTAL_V2_FORCE_INLINE_YIELD=1`) because inline-yield path still produces invalid IR in DWARF callback lowering (`%r87.fromslot.24` / `bitcast ptr` mismatch).
+    - verification (clean pipeline: `CRYSTAL_V2_PIPELINE_CACHE=0`, `--no-ast-cache`, `--no-llvm-cache`):
+      - `regression_tests/test_case_in_predicate_subject.cr` now compiles in link mode (`EXIT 0`);
+      - `regression_tests/hash_stress.cr` now compiles in link mode (`EXIT 0`).
+    - remaining issue (new top blocker):
+      - produced binaries currently exit `0` without expected stdout markers (`hello`, `test_case_in_predicate_subject`, `hash_stress`);
+      - IR inspection shows `Crystal$Dmain$$block` path returns after runtime init and does not execute `Crystal$Dmain_user_code...` in the normal `setjmp == 0` branch.
+      - next task: fix main wrapper/control-flow in `Crystal$Dmain$$block` lowering so user code executes in non-exception path.

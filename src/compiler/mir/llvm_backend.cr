@@ -7882,7 +7882,7 @@ module Crystal::MIR
       dst_type = @type_mapper.llvm_type(inst.type)
       value = value_ref(inst.value)
       # If the value was emitted earlier with a known LLVM type, prefer it.
-      emitted_type = @emitted_value_types[value]?
+      emitted_type = @emitted_value_types[value]? || @emitted_value_types[value.lstrip('%')]?
       if emitted_type
         src_type = emitted_type
         src_type_ref = case emitted_type
@@ -7914,11 +7914,13 @@ module Crystal::MIR
         end
       end
 
-      # Fallback: if the value was loaded from a cross-block slot, recover slot type from the name.
-      if !emitted_type && src_type == "ptr" && (match = value.match(/^%r(\d+)\.fromslot/))
+      # `%rN.fromslot.K` is a concrete load from a cross-block slot, so its source
+      # LLVM type must follow the slot allocation type even if emitted_type metadata
+      # was polluted by later conversions.
+      if match = value.match(/^%r(\d+)\.fromslot\.\d+$/)
         slot_id = ValueId.new(match[1].to_i)
         if slot_type = @cross_block_slot_types[slot_id]?
-          if slot_type != "void"
+          if slot_type != "void" && slot_type != src_type
             src_type = slot_type
             src_type_ref = case slot_type
                            when "double" then TypeRef::FLOAT64
@@ -9658,10 +9660,14 @@ module Crystal::MIR
       # Non-union values should be passed by value with their LLVM type.
       arg_strs = inst.args.compact_map do |a|
         arg_type = @value_types[a]?
-        next if arg_type == TypeRef::VOID
+        if arg_type == TypeRef::VOID || arg_type == TypeRef::NIL
+          next "ptr null"
+        end
         if arg_type
           arg_llvm_type = @type_mapper.llvm_type(arg_type)
-          if arg_llvm_type.includes?(".union")
+          if arg_llvm_type == "void"
+            "ptr null"
+          elsif arg_llvm_type.includes?(".union")
             # For union types, check if we have a cross-block slot to use
             if slot_name = @cross_block_slots[a]?
               "ptr %#{slot_name}"
@@ -12030,6 +12036,9 @@ module Crystal::MIR
             @cond_counter += 1
             if cond_llvm_type == "double" || cond_llvm_type == "float"
               emit "%cond#{c}.not_zero = fcmp one #{cond_llvm_type} #{cond}, 0.0"
+            elsif cond_llvm_type == "ptr"
+              cond_ptr = cond == "0" ? "null" : cond
+              emit "%cond#{c}.not_zero = icmp ne ptr #{cond_ptr}, null"
             else
               emit "%cond#{c}.not_zero = icmp ne #{cond_llvm_type} #{cond}, 0"
             end
