@@ -58,6 +58,20 @@
   Note: one transient regression runner failure (`yield_suffix_unless` missing
   `.o` at link) did not reproduce; direct compile passed and rerun of
   `regression_tests/run_all.sh /tmp/crystal_v2_dbg_callsiteast` finished `40/0`.
+- **Lazy RTA default-on (opt-out)** (2026-02-15) — enabled lazy RTA by default in
+  `process_pending`/`flush_pending` with explicit opt-out:
+  - `CRYSTAL_V2_LAZY_RTA=0` (or `false`) disables lazy RTA.
+  - default path now prunes dead pending work earlier, especially in
+    `emit_tracked_sigs`.
+  Validation:
+  - build: `crystal build src/crystal_v2.cr -o /tmp/crystal_v2_dbg_lazyrta_default --error-trace` => `EXIT 0`
+  - specs: `spec/hir/return_type_inference_spec.cr` + `spec/mir/llvm_backend_spec.cr` => pass
+  - regressions: `./regression_tests/run_all.sh /tmp/crystal_v2_dbg_lazyrta_default` => `40 passed, 0 failed`
+  - bootstrap smoke: `CRYSTAL_V2_PIPELINE_CACHE=0 /tmp/crystal_v2_dbg_lazyrta_default examples/bootstrap_array.cr -o /tmp/bootstrap_array_lazyrta_default && ./scripts/run_safe.sh /tmp/bootstrap_array_lazyrta_default 10 768` => `EXIT 0`
+  - A/B on `spec/hir/return_type_inference_spec.cr` (`--no-link --no-ast-cache --no-llvm-cache`):
+    - default-on: `real 83.03s`, `82.66s`; `emit_tracked_sigs 8222.4ms`, `8117.2ms`
+    - opt-out (`CRYSTAL_V2_LAZY_RTA=0`): `real 103.30s`, `103.18s`; `emit_tracked_sigs 13119.2ms`, `12962.3ms`
+  - net: ~`20%` wall-clock improvement with stable correctness on current suites.
 - **Emit safety-net telemetry (2026-02-15)** — with `DEBUG_EMIT_SIGS=1`:
   - `process_pending`: `286 -> 6400` in `7434.7ms`
   - `emit_tracked_sigs`: `6400 -> 16546` in `13984.6ms`

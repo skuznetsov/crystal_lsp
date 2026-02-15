@@ -2348,6 +2348,16 @@ module Crystal::HIR
       !env_get(key).nil?
     end
 
+    # Lazy RTA is enabled by default and can be disabled with:
+    #   CRYSTAL_V2_LAZY_RTA=0
+    #   CRYSTAL_V2_LAZY_RTA=false
+    @[AlwaysInline]
+    private def lazy_rta_enabled? : Bool
+      value = env_get("CRYSTAL_V2_LAZY_RTA")
+      return true unless value
+      value != "0" && value != "false"
+    end
+
     private def debug_env_filter_match?(env_key : String, *texts : String) : Bool
       value = env_get(env_key)
       return false unless value
@@ -27502,8 +27512,9 @@ module Crystal::HIR
 
       # Enable AST filter during process_pending phase (if set)
       @ast_filter_active = @ast_reachable_functions != nil
-      # Enable lazy RTA during the main process_pending pass only
-      if env_has?("CRYSTAL_V2_LAZY_RTA")
+      # Enable lazy RTA during the main process_pending pass only.
+      # Default-on (opt-out via CRYSTAL_V2_LAZY_RTA=0).
+      if lazy_rta_enabled?
         initialize_lazy_rta
         @lazy_rta_active = true
       end
@@ -27932,8 +27943,8 @@ module Crystal::HIR
       lazy_rta = @lazy_rta_active
       # Main lowering path (`lower_main`) calls process_pending_lower_functions directly,
       # bypassing flush_pending_functions where lazy RTA is normally initialized.
-      # Honor CRYSTAL_V2_LAZY_RTA here as well so the optimization works in both paths.
-      if !lazy_rta && env_has?("CRYSTAL_V2_LAZY_RTA")
+      # Keep lazy RTA behavior consistent in both paths (default-on).
+      if !lazy_rta && lazy_rta_enabled?
         initialize_lazy_rta
         @lazy_rta_active = true
         lazy_rta = true
