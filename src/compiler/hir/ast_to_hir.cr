@@ -6551,16 +6551,8 @@ module Crystal::HIR
       unless @module_defs.has_key?(module_full_name)
         # Extract namespace from class_name (e.g., Float::FastFloat from Float::FastFloat::BinaryFormat_Float64)
         if class_name.includes?("::")
-          parts = class_name.split("::")
-          parts.pop # Remove the class name itself
-          # Try progressively shorter namespaces
-          while parts.size > 0
-            qualified_name = "#{parts.join("::")}::#{module_full_name}"
-            if @module_defs.has_key?(qualified_name)
-              module_full_name = qualified_name
-              break
-            end
-            parts.pop
+          if qualified_name = resolve_module_name_in_owner_namespaces(class_name, module_full_name)
+            module_full_name = qualified_name
           end
         end
         # STDERR.puts "[INC_DEBUG] after resolution: module_full_name=#{module_full_name}"
@@ -6922,6 +6914,21 @@ module Crystal::HIR
         end
       end
       offset
+    end
+
+    # Resolve an unqualified module name against progressively shorter owner namespaces.
+    # Example: owner "A::B::C", module "M" -> tries "A::B::M", then "A::M".
+    private def resolve_module_name_in_owner_namespaces(owner_class : String, module_name : String) : String?
+      scan_end = owner_class.bytesize
+      while scan_end > 0
+        idx = owner_class.rindex("::", scan_end - 1)
+        break unless idx
+        owner_prefix = owner_class.byte_slice(0, idx)
+        candidate = "#{owner_prefix}::#{module_name}"
+        return candidate if @module_defs.has_key?(candidate)
+        scan_end = idx
+      end
+      nil
     end
 
     private def register_module_class_methods_for(

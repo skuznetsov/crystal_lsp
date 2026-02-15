@@ -19,6 +19,18 @@
 - Float64: arithmetic, ** on literals
 
 ## Recently completed
+- **HIR include-namespace resolution without `split/join`** (2026-02-15) —
+  replaced `class_name.split("::") + join` loop in
+  `register_module_instance_methods_for` with zero-copy owner-chain scanning
+  (`rindex("::")` + `byte_slice`) via
+  `resolve_module_name_in_owner_namespaces(owner_class, module_name)`.
+  Validation:
+  - build: `crystal build src/crystal_v2.cr -o /tmp/crystal_v2_t4` => `EXIT 0`
+  - regressions: `regression_tests/run_all.sh /tmp/crystal_v2_t4` => `40 passed, 0 failed`
+  - bootstrap smoke: `/tmp/crystal_v2_t4 --no-ast-cache --no-llvm-cache examples/bootstrap_array.cr -o /tmp/bootstrap_array_t4` + `scripts/run_safe.sh /tmp/bootstrap_array_t4 10 1024` => `EXIT 0`
+  - include-heavy microbench (`/tmp/include_resolve_hot.cr`, no-link/no-cache):
+    - before (`/tmp/crystal_v2_t3`) => `real 48.52s`
+    - after (`/tmp/crystal_v2_t4`) => `real 48.39s`
 - **HIR hash-literal setter-name allocation trim** (2026-02-15) —
   moved `set_name = "#{hash_type_name}#[]="` out of the per-entry loop in
   `lower_hash_literal` to avoid repeated String allocations for the same literal.
