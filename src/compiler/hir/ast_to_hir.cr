@@ -10638,8 +10638,7 @@ module Crystal::HIR
           end
         when CrystalV2::Compiler::Frontend::MacroPiece::Kind::ControlStart
           keyword = piece.control_keyword || ""
-          cond_expr = piece.expr
-          cond = cond_expr ? try_evaluate_macro_condition(cond_expr) : nil
+          cond = macro_piece_condition_value(piece, source, bytesize)
           if keyword == "unless"
             cond = cond.nil? ? nil : !cond
           end
@@ -10658,8 +10657,7 @@ module Crystal::HIR
         when CrystalV2::Compiler::Frontend::MacroPiece::Kind::ControlElseIf
           next if control_stack.empty?
           parent_active, branch_taken, _ = control_stack[-1]
-          cond_expr = piece.expr
-          cond = cond_expr ? try_evaluate_macro_condition(cond_expr) : nil
+          cond = macro_piece_condition_value(piece, source, bytesize)
           take = !branch_taken && cond == true
           branch_active = if cond == false
                             false
@@ -10690,6 +10688,50 @@ module Crystal::HIR
       end
 
       texts
+    end
+
+    private def macro_piece_condition_value(
+      piece : CrystalV2::Compiler::Frontend::MacroPiece,
+      source : String?,
+      bytesize : Int32,
+    ) : Bool?
+      cond_expr = piece.expr
+      cond = cond_expr ? try_evaluate_macro_condition(cond_expr) : nil
+      return cond unless cond.nil?
+      return nil unless source
+      span = piece.span
+      return nil unless span
+
+      start = span.start_offset
+      length = span.end_offset - span.start_offset
+      return nil if length <= 0
+      return nil if start < 0 || start >= bytesize
+      if start + length > bytesize
+        length = bytesize - start
+      end
+      return nil if length <= 0
+
+      raw = source.byte_slice(start, length)
+      keyword = piece.control_keyword
+      return nil unless keyword
+      cond_src = macro_control_condition_text(raw, keyword)
+      return nil unless cond_src
+      evaluate_flag_condition_string(cond_src)
+    end
+
+    private def macro_control_condition_text(raw : String, keyword : String) : String?
+      kw_idx = raw.index(keyword)
+      return nil unless kw_idx
+
+      cond_start = kw_idx + keyword.bytesize
+      return nil if cond_start >= raw.bytesize
+      cond = raw.byte_slice(cond_start, raw.bytesize - cond_start)
+      if close = cond.index("%}")
+        cond = close > 0 ? cond.byte_slice(0, close) : ""
+      end
+      cond = cond.strip
+      return nil if cond.empty?
+      cond
     end
 
     private def strip_macro_lines(code : String) : String
@@ -11542,7 +11584,12 @@ module Crystal::HIR
             end
           end
         end
-        expanded = expand_flag_macro_text(raw_text) || raw_text
+        expanded_candidate = expand_flag_macro_text(raw_text)
+        expanded = expanded_candidate || raw_text
+        if env_get("DEBUG_FIBER_MACRO_EXPANDED") && class_name == "Fiber"
+          has_exec_ctx = expanded.includes?("ExecutionContext")
+          STDERR.puts "[DEBUG_FIBER_MACRO_EXPANDED] from_flag=#{!expanded_candidate.nil?} has_exec_ctx=#{has_exec_ctx}"
+        end
         sanitized = strip_macro_lines(expanded)
         if filter = env_get("DEBUG_MACRO_LITERAL_CLASS")
           if filter == "1" || class_name.includes?(filter)
@@ -23414,7 +23461,14 @@ module Crystal::HIR
       # namespace scanning becomes O(N^2).
       unless @signature_scan_mode
         if fast = resolve_class_name_in_signature_context(name)
-          return fast
+          if fast != name ||
+             type_name_exists?(name) ||
+             @class_info.has_key?(name) ||
+             @generic_templates.has_key?(name) ||
+             @module_defs.has_key?(name) ||
+             @top_level_class_kinds.has_key?(name)
+            return fast
+          end
         end
       end
 
@@ -23695,6 +23749,10 @@ module Crystal::HIR
                   # Prefer a forward reference in the current namespace over an ancestor.
                   result = "#{current_base}::#{name}"
                 end
+              elsif !@top_level_type_names.includes?(name)
+                # Parent is top-level/non-namespaced; still preserve the current
+                # namespace forward reference (e.g. Fiber::ExecutionContext).
+                result = "#{current_base}::#{name}"
               end
             elsif parent_namespace && type_name_exists?("#{parent_namespace}::#{name}")
               result = "#{parent_namespace}::#{name}"
@@ -23715,7 +23773,11 @@ module Crystal::HIR
               end
             else
               namespace = nil
-              if current_base.includes?("::") || @module_defs.has_key?(current_base)
+              if current_base.includes?("::") ||
+                 @module_defs.has_key?(current_base) ||
+                 @class_info.has_key?(current_base) ||
+                 @generic_templates.has_key?(current_base) ||
+                 @module.class_parents.has_key?(current_base)
                 nested = @nested_type_names[current_base]? || @nested_type_names[current]?
                 if nested && nested.includes?(name)
                   namespace = current_base
@@ -29610,6 +29672,27 @@ module Crystal::HIR
         else
           nil
         end
+      when CrystalV2::Compiler::Frontend::BinaryNode
+        left = macro_value_for_expr(expr_node.left)
+        right = macro_value_for_expr(expr_node.right)
+        return nil unless left && right
+
+        op = String.new(expr_node.operator)
+        case op
+        when "&&", "||"
+          left_bool = left.as?(CrystalV2::Compiler::Semantic::MacroBoolValue)
+          right_bool = right.as?(CrystalV2::Compiler::Semantic::MacroBoolValue)
+          return nil unless left_bool && right_bool
+
+          if op == "&&"
+            CrystalV2::Compiler::Semantic::MacroBoolValue.new(left_bool.value && right_bool.value)
+          else
+            CrystalV2::Compiler::Semantic::MacroBoolValue.new(left_bool.value || right_bool.value)
+          end
+        else
+          result = left.call_method(op, [right], nil)
+          result.is_a?(CrystalV2::Compiler::Semantic::MacroNilValue) ? nil : result
+        end
       when CrystalV2::Compiler::Frontend::ConstantNode
         raw_name = String.new(expr_node.name)
         resolved = resolve_constant_name_in_context(raw_name) || raw_name
@@ -30295,10 +30378,113 @@ module Crystal::HIR
           return nil if chosen.empty?
           return expand_flag_macro_text(chosen) || chosen
         end
-        return nil
+        return ""
+      end
+
+      if expanded_inline = expand_inline_flag_macro_text(text)
+        return expanded_inline
       end
 
       nil
+    end
+
+    private def expand_inline_flag_macro_text(text : String) : String?
+      return nil unless text.includes?("{%")
+
+      tag_re = /\{%\s*(if|elsif|else|end|unless)\b(.*?)%\}/m
+      result = String::Builder.new
+      idx = 0
+      changed = false
+      debug_inline = env_get("DEBUG_INLINE_FLAG_EXPAND")
+
+      while idx < text.bytesize
+        match = tag_re.match(text, idx)
+        unless match
+          result << text.byte_slice(idx, text.bytesize - idx) if idx < text.bytesize
+          break
+        end
+
+        tag = match[1]? || ""
+        unless tag == "if" || tag == "unless"
+          STDERR.puts "[DEBUG_INLINE_FLAG_EXPAND] unsupported top-level tag=#{tag}" if debug_inline
+          return nil
+        end
+
+        start_idx = match.begin
+        result << text.byte_slice(idx, start_idx - idx) if start_idx > idx
+
+        cond = (match[2]? || "").strip
+        cond = "!#{cond}" if tag == "unless"
+
+        depth = 0
+        pos = match.end
+        current_start = pos
+        current_cond = cond
+        branches = [] of Tuple(String, String)
+        else_body : String? = nil
+        matched_end = false
+
+        while inner = tag_re.match(text, pos)
+          inner_tag = inner[1]? || ""
+          case inner_tag
+          when "if", "unless"
+            depth += 1
+          when "end"
+            if depth == 0
+              body = text.byte_slice(current_start, inner.begin - current_start)
+              if else_body.nil?
+                branches << {current_cond, body}
+              else
+                else_body = body
+              end
+
+              chosen : String? = nil
+              branches.each do |branch_cond, branch_body|
+                verdict = evaluate_flag_condition_string(branch_cond)
+                if verdict.nil?
+                  STDERR.puts "[DEBUG_INLINE_FLAG_EXPAND] unknown condition=#{branch_cond}" if debug_inline
+                  return nil
+                end
+                if verdict
+                  chosen = branch_body
+                  break
+                end
+              end
+              chosen ||= else_body
+              chosen_text = chosen || ""
+              result << (expand_flag_macro_text(chosen_text) || chosen_text)
+              idx = inner.end
+              matched_end = true
+              changed = true
+              break
+            else
+              depth -= 1
+            end
+          when "elsif"
+            if depth == 0 && else_body.nil?
+              body = text.byte_slice(current_start, inner.begin - current_start)
+              branches << {current_cond, body}
+              current_cond = (inner[2]? || "").strip
+              current_start = inner.end
+            end
+          when "else"
+            if depth == 0 && else_body.nil?
+              body = text.byte_slice(current_start, inner.begin - current_start)
+              branches << {current_cond, body}
+              else_body = ""
+              current_start = inner.end
+            end
+          end
+          pos = inner.end
+        end
+
+        unless matched_end
+          STDERR.puts "[DEBUG_INLINE_FLAG_EXPAND] unmatched if/unless block" if debug_inline
+          return nil
+        end
+      end
+
+      changed ? result.to_s : nil
     end
 
     private def parse_flag_macro_branches(text : String) : Tuple(Array(Tuple(String, String)), String?)?
@@ -31145,7 +31331,9 @@ module Crystal::HIR
         if env_get("DEBUG_THREAD_NAME") && name == "Thread"
           STDERR.puts "[DEBUG_THREAD_NAME] name=#{name} resolved=#{resolved} current=#{@current_class || "nil"} ns_override=#{@current_namespace_override || "nil"} type_exists=#{type_name_exists?(resolved)}"
         end
-        return lower_type_literal_from_name(ctx, resolved) if type_name_exists?(resolved)
+        if type_name_exists?(resolved) || @module_defs.has_key?(resolved) || @generic_templates.has_key?(resolved)
+          return lower_type_literal_from_name(ctx, resolved)
+        end
       end
 
       if full_name = resolve_constant_name_in_context(name)
@@ -44093,26 +44281,43 @@ module Crystal::HIR
         arg_exprs.each_with_index do |arg_expr, idx|
           @arena = call_arena
           arg_node = @arena[arg_expr]
+          expected_type = param_types[idx]?
+          arg_val : ValueId
           if arg_node.is_a?(CrystalV2::Compiler::Frontend::OutNode)
-            expected_type = param_types[idx]? || TypeRef::POINTER
-            result << lower_out_arg(ctx, arg_node, expected_type)
+            out_type = expected_type || TypeRef::POINTER
+            arg_val = lower_out_arg(ctx, arg_node, out_type)
           elsif arg_node.is_a?(CrystalV2::Compiler::Frontend::ProcLiteralNode)
             # Proc literal passed to C function — generate a standalone callback
             # function and pass its address as a raw function pointer.
-            result << lower_proc_as_c_callback(ctx, arg_node, extern_func, idx)
+            arg_val = lower_proc_as_c_callback(ctx, arg_node, extern_func, idx)
           else
             arg_val = lower_expr(ctx, arg_expr)
             # Crystal implicitly calls to_unsafe when passing a class instance
             # to a C function. Check if the arg is `self` and the class has to_unsafe.
             arg_val = try_implicit_to_unsafe(ctx, arg_val, arg_node)
-            result << arg_val
           end
+
+          if expected_type && expected_type != TypeRef::VOID
+            arg_val = coerce_extern_arg_type(ctx, arg_val, expected_type)
+          end
+          result << arg_val
         end
       ensure
         @arena = old_arena
       end
 
       result
+    end
+
+    private def coerce_extern_arg_type(ctx : LoweringContext, arg_id : ValueId, expected_type : TypeRef) : ValueId
+      actual_type = ctx.type_of(arg_id)
+      return arg_id if actual_type == expected_type
+      return arg_id if actual_type == TypeRef::VOID
+
+      cast = Cast.new(ctx.next_id, expected_type, arg_id, expected_type)
+      ctx.emit(cast)
+      ctx.register_type(cast.id, expected_type)
+      cast.id
     end
 
     # Crystal implicitly calls to_unsafe when passing a class instance to a C function.
@@ -44755,6 +44960,17 @@ module Crystal::HIR
             if candidates = owner_methods[parts.method.not_nil!]?
               overload_keys = candidates unless candidates.empty?
             end
+          end
+          # Keep instance/class overload spaces separate for the same owner+method name.
+          # Without this, an instance call like `obj.enqueue(...)` can resolve to
+          # `Owner.enqueue(...)` (class method) when both exist, causing recursion.
+          if !overload_keys.empty?
+            same_separator = [] of String
+            overload_keys.each do |cand|
+              cand_parts = parse_method_name_compact(cand)
+              same_separator << cand if cand_parts.separator == parts.separator
+            end
+            overload_keys = same_separator unless same_separator.empty?
           end
           # If the callsite owner is a concrete generic instance, prefer
           # candidates that match the exact owner (avoid falling back to
@@ -45608,6 +45824,13 @@ module Crystal::HIR
       saved_receiver_type : TypeRef? = receiver_id ? ctx.type_of(receiver_id) : nil
       begin
         locals = ctx.all_locals
+        # Default argument expressions are evaluated in callee context.
+        # Even for static/class calls without an explicit receiver ValueId,
+        # we still need the callee's class/module scope for constant/type lookup
+        # (e.g. Fiber.new default `ExecutionContext.current`).
+        if func_context && !func_context.empty?
+          @current_class = func_context
+        end
         # Bind `self` to the receiver so default expressions like `size - 1`
         # evaluate on the correct object (matches original Crystal's behavior
         # of creating wrapper overloads where `self` is the receiver).
@@ -45622,7 +45845,6 @@ module Crystal::HIR
             if receiver_type != TypeRef::VOID
               ctx.register_type(receiver_id, receiver_type)
             end
-            @current_class = func_context
           end
         end
         param_local_names.each_with_index do |name, idx|
@@ -50071,6 +50293,9 @@ module Crystal::HIR
                @enum_info.try(&.has_key?(resolved_name)) ||
                is_module_method?(resolved_name, member_name) ||
                primitive_self_type(resolved_name)
+              class_name_str = resolved_name
+            elsif resolved_name != name && resolved_name.includes?("::")
+              # Forward-resolved nested type/module reference (may be defined later).
               class_name_str = resolved_name
             end
           end

@@ -6,9 +6,12 @@
   - `regression_tests/test_select_map_stress.cr`
   - `regression_tests/test_float_pow_var.cr`
   - `regression_tests/test_string_upcase_large.cr`
-- New repro (2026-02-15): `examples/bench_comprehensive.cr` fails at link in v2
-  with undefined `_current` (fiber runtime symbol), while original Crystal
-  compiles and links the same source.
+- New runtime repro (2026-02-15): `examples/bench_comprehensive.cr` now compiles
+  and links, but fails at runtime with:
+  - `Unhandled exception: BUG: Unexpected UseDefault value for delivered receive (RuntimeError)`
+  - this replaced earlier `_current` link failure and stack-allocation crash.
+- Regression note (2026-02-15): `regression_tests/test_hash_stress.cr` currently
+  fails output parity (`missing=8`) in partial `regression_tests/run_all.sh` run.
 
 ## Working Features
 - Basic output: puts String/Int32/Float64, string interpolation
@@ -22,6 +25,43 @@
 - Float64: arithmetic, ** on literals
 
 ## Recently completed
+- **HIR call resolution: separate instance (`#`) and class (`.`) overload spaces** (2026-02-15) —
+  fixed incorrect candidate mixing in `lookup_function_def_for_call` where an
+  instance call could resolve to class method when owner+method names matched.
+  Repro before fix:
+  - `Crystal::Scheduler.enqueue(fiber)` called `scheduler.enqueue(fiber)` and
+    resolved back to `Crystal::Scheduler.enqueue$Fiber`, causing infinite recursion
+    and `EXC_BAD_ACCESS`.
+  Change:
+  - in `src/compiler/hir/ast_to_hir.cr`, filter `overload_keys` by the requested
+    separator from `func_name` (`#` vs `.`) before overload scoring.
+  Validation:
+  - build: `./scripts/build.sh debug` => `EXIT 0`
+  - HIR check:
+    - `CRYSTAL_V2_PIPELINE_CACHE=0 ./bin/crystal_v2 --emit hir --no-link examples/bench_comprehensive.cr -o /tmp/bench_after_sep_filter`
+    - now contains `func @Crystal::Scheduler#enqueue$Fiber(...)`
+    - class method body now calls `%16.Crystal::Scheduler#enqueue$Fiber(%17)` (no self-recursion)
+  - runtime shift:
+    - `examples/bench_comprehensive.cr` no longer segfaults in scheduler recursion;
+      now reaches later runtime bug (`Unexpected UseDefault value for delivered receive`).
+- **Constant expression folding for numeric binary expressions in HIR macro evaluator** (2026-02-15) —
+  fixed missing evaluation for constants like `8 * 1024 * 1024` used by
+  `Fiber::StackPool::STACK_SIZE`.
+  Problem:
+  - `macro_value_for_expr` did not handle `BinaryNode`, so non-literal numeric
+    constant expressions were not recorded as `MacroNumberValue`;
+  - global constants defaulted to `0` (e.g., `STACK_SIZE`), breaking fiber stack allocation.
+  Change:
+  - in `src/compiler/hir/ast_to_hir.cr`, added `BinaryNode` branch in
+    `macro_value_for_expr`:
+    - evaluates arithmetic/comparison via `MacroValue#call_method`
+    - evaluates boolean `&&`/`||` for `MacroBoolValue`.
+  Validation:
+  - build: `./scripts/build.sh debug` => `EXIT 0`
+  - compile: `CRYSTAL_V2_PIPELINE_CACHE=0 ./bin/crystal_v2 examples/bench_comprehensive.cr -o /tmp/bench_comprehensive_after_const_eval_fix` => `EXIT 0`
+  - LLVM check:
+    - `@Fiber$CCStackPool__classvar__STACK_SIZE = global i32 8388608`
+    - (previously `0`).
 - **Experimental no-link knob: optional HIR safety-net skip** (2026-02-15) —
   added an explicit **opt-in** toggle to skip expensive HIR safety-net lowering
   (`emit_all_tracked_signatures` + `lower_missing_call_targets`) during

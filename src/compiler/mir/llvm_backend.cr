@@ -6073,8 +6073,19 @@ module Crystal::MIR
 
         extract_name, union_type = info
         val_ref_str = value_ref(val_id)
+        val_ref_type = @emitted_value_types[val_ref_str]? || @emitted_value_types[val_ref_str.lstrip('%')]?
         if val_ref_str == "null"
           emit "%#{extract_name} = inttoptr i64 0 to ptr"
+          record_emitted_type("%#{extract_name}", "ptr")
+          next
+        end
+
+        # value_ref may already have extracted union payload to ptr (for cross-block
+        # slot loads with expected ptr type). Avoid a second extraction which would
+        # attempt to store ptr as a full union value.
+        if val_ref_type == "ptr"
+          emit "%#{extract_name} = bitcast ptr #{val_ref_str} to ptr"
+          record_emitted_type("%#{extract_name}", "ptr")
           next
         end
 
@@ -6083,6 +6094,7 @@ module Crystal::MIR
         emit "store #{union_type} #{val_ref_str}, ptr %#{extract_name}.alloca"
         emit "%#{extract_name}.pay_ptr = getelementptr #{union_type}, ptr %#{extract_name}.alloca, i32 0, i32 1"
         emit "%#{extract_name} = load ptr, ptr %#{extract_name}.pay_ptr, align 4"
+        record_emitted_type("%#{extract_name}", "ptr")
       end
     end
 
