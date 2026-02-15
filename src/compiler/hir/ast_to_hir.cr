@@ -27670,6 +27670,7 @@ module Crystal::HIR
       ast_owner_types = @ast_reachable_owner_types
       ast_method_bases = @ast_reachable_method_bases
       ast_filter_cache = Hash(String, Bool).new(initial_capacity: 8192)
+      bare_generic_kind_cache = Hash(TypeRef, UInt8).new(initial_capacity: 512)
 
       while iteration < max_iterations
         # Collect all unique function names from pending arg types
@@ -27708,17 +27709,22 @@ module Crystal::HIR
           # Skip functions with bare generic types (they need concrete instantiation)
           has_double_splat_def = function_def_has_double_splat?(base_name)
           has_bare_generic = args.types.any? do |t|
-            next false if t.id < TypeRef::FIRST_USER_TYPE
-            if desc = @module.get_type_descriptor(t)
-              is_bare = !desc.name.includes?('(') && KNOWN_GENERIC_TYPES.includes?(desc.name)
-              if is_bare && desc.name == "NamedTuple" && has_double_splat_def
-                false
-              else
-                is_bare
+            kind = bare_generic_kind_cache[t]?
+            if kind.nil?
+              computed = 0_u8
+              if t.id >= TypeRef::FIRST_USER_TYPE
+                if desc = @module.get_type_descriptor(t)
+                  if !desc.name.includes?('(') && KNOWN_GENERIC_TYPES.includes?(desc.name)
+                    computed = desc.name == "NamedTuple" ? 2_u8 : 1_u8
+                  end
+                end
               end
-            else
-              false
+              bare_generic_kind_cache[t] = computed
+              kind = computed
             end
+            next false if kind == 0_u8
+            next false if kind == 2_u8 && has_double_splat_def
+            true
           end
           if has_bare_generic
             skipped_bare += 1 if debug_emit
@@ -27765,17 +27771,22 @@ module Crystal::HIR
               next
             end
             has_bare_generic = args.types.any? do |t|
-              next false if t.id < TypeRef::FIRST_USER_TYPE
-              if desc = @module.get_type_descriptor(t)
-                is_bare = !desc.name.includes?('(') && KNOWN_GENERIC_TYPES.includes?(desc.name)
-                if is_bare && desc.name == "NamedTuple" && has_double_splat_def
-                  false
-                else
-                  is_bare
+              kind = bare_generic_kind_cache[t]?
+              if kind.nil?
+                computed = 0_u8
+                if t.id >= TypeRef::FIRST_USER_TYPE
+                  if desc = @module.get_type_descriptor(t)
+                    if !desc.name.includes?('(') && KNOWN_GENERIC_TYPES.includes?(desc.name)
+                      computed = desc.name == "NamedTuple" ? 2_u8 : 1_u8
+                    end
+                  end
                 end
-              else
-                false
+                bare_generic_kind_cache[t] = computed
+                kind = computed
               end
+              next false if kind == 0_u8
+              next false if kind == 2_u8 && has_double_splat_def
+              true
             end
             if has_bare_generic
               skipped_bare += 1 if debug_emit

@@ -232,6 +232,28 @@
     `all-void/has_bare_generic` checks regressed (`candidate2_a 90.10s` /
     `candidate2_b 90.02s` vs `baseline2_a 89.12s` / `baseline2_b 89.39s`), so
     it was reverted.
+- **HIR emit-tracked signatures: cache bare-generic kind per TypeRef** (2026-02-15) —
+  reduced repeated descriptor checks inside `emit_all_tracked_signatures` by
+  caching local classification `TypeRef -> kind`:
+  - `0`: not bare generic
+  - `1`: bare generic
+  - `2`: bare `NamedTuple` (special-cased by `has_double_splat_def`)
+  Validation:
+  - build: `crystal build src/crystal_v2.cr -o /tmp/crystal_v2_dbg_barekind_cache --error-trace` => `EXIT 0`
+  - specs:
+    - `timeout 180 crystal spec spec/hir/return_type_inference_spec.cr` => `13 examples, 0 failures`
+    - `timeout 180 crystal spec spec/mir/llvm_backend_spec.cr` => `59 examples, 0 failures`
+  - regressions: `./regression_tests/run_all.sh /tmp/crystal_v2_dbg_barekind_cache` => `40 passed, 0 failed`
+  - bootstrap smoke:
+    - `CRYSTAL_V2_PIPELINE_CACHE=0 /tmp/crystal_v2_dbg_barekind_cache examples/bootstrap_array.cr -o /tmp/bootstrap_array_barekind_cache` + `scripts/run_safe.sh /tmp/bootstrap_array_barekind_cache 10 768` => `EXIT 0`
+  - A/B (`CRYSTAL_V2_PIPELINE_CACHE=0 CRYSTAL_V2_AST_FILTER=1 CRYSTAL_V2_PHASE_STATS=1 ... --no-link --no-ast-cache --no-llvm-cache spec/hir/return_type_inference_spec.cr`):
+    - baseline (`/tmp/crystal_v2_dbg_emitguard`):
+      - run A: `real 89.62s`; `emit_tracked_sigs 8805.7ms`; `process_pending 7353.4ms`; `Lookup 855.1ms`
+      - run B: `real 89.77s`; `emit_tracked_sigs 8598.5ms`; `process_pending 7474.4ms`; `Lookup 858.8ms`
+    - candidate (`/tmp/crystal_v2_dbg_barekind_cache`):
+      - run A: `real 89.40s`; `emit_tracked_sigs 8826.3ms`; `process_pending 7427.9ms`; `Lookup 1110.0ms`
+      - run B: `real 89.17s`; `emit_tracked_sigs 8561.8ms`; `process_pending 7491.1ms`; `Lookup 846.4ms`
+  - net: 2/2 wall-clock wins; average `real` improvement ~`0.41s` (~`0.46%`).
 - **HIR overload index rebuild: queued incremental keys** (2026-02-15) —
   removed repeated full `@function_defs` scans on overload-index refresh:
   - added queue-driven indexing of newly registered defs from
