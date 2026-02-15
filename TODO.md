@@ -3019,5 +3019,12 @@ crystal build -Ddebug_hooks src/crystal_v2.cr -o bin/crystal_v2 --no-debug
    **DoD**: no `_Crystal::EventLoop::Polling#system_run$Bool_block` missing.
 
 **Platform parity follow-ups:**
-- [ ] Audit **all** int/ptr → float conversions (`uitofp` vs `sitofp`) beyond the single fixed site; verify `float`/`double` conversions in call-arg/return lowering and union coercions.
-- [ ] Confirm **AArch64/ARM** union-payload alignment (`align 4`) in *every* payload load/store (including pointer unions). Add a spec or IR grep guard.
+- [x] Audit **all** int/ptr → float conversions (`uitofp` vs `sitofp`) beyond the single fixed site; verify `float`/`double` conversions in call-arg/return lowering and union coercions.
+- [x] Confirm **AArch64/ARM** union-payload alignment (`align 4`) in *every* payload load/store (including pointer unions). Add a spec or IR grep guard.
+  - Update (2026-02-15):
+    - audited conversion sites in `src/compiler/mir/llvm_backend.cr` (`emit_call`, `emit_cast`, `emit_return`, union coercion) via `rg -n "uitofp|sitofp|fptoui|fptosi|ptrtoint"`;
+    - added LLVM guard specs in `spec/mir/llvm_backend_spec.cr`:
+      - unsigned int arg -> float callee uses `uitofp` (no `sitofp`);
+      - pointer arg -> float callee uses `ptrtoint + uitofp` (no accidental dereference);
+      - union arg -> float callee payload extraction uses `align 4` load (`%union_to_fp.*.payload_ptr`);
+    - verification: `crystal spec spec/mir/llvm_backend_spec.cr` => `55 examples, 0 failures`.

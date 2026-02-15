@@ -380,6 +380,113 @@ describe Crystal::MIR::LLVMIRGenerator do
       body.should_not contain("sitofp i32 %x to double")
     end
 
+    it "uses uitofp for uint32 argument when calling float64 callee" do
+      mod = Crystal::MIR::Module.new("test")
+
+      callee = mod.create_function("takes_f64_arg", Crystal::MIR::TypeRef::FLOAT64)
+      callee.add_param("x", Crystal::MIR::TypeRef::FLOAT64)
+      callee_builder = Crystal::MIR::Builder.new(callee)
+      callee_builder.ret(0_u32)
+
+      caller = mod.create_function("call_uint_to_f64_arg", Crystal::MIR::TypeRef::FLOAT64)
+      caller.add_param("x", Crystal::MIR::TypeRef::UINT32)
+      caller_builder = Crystal::MIR::Builder.new(caller)
+      call = caller_builder.call(callee.id, ([0_u32] of Crystal::MIR::ValueId), Crystal::MIR::TypeRef::FLOAT64)
+      caller_builder.ret(call)
+
+      gen = Crystal::MIR::LLVMIRGenerator.new(mod)
+      gen.emit_type_metadata = false
+      output = gen.generate
+
+      func_ir = output[/define double @call_uint_to_f64_arg\([^)]*\)\s*\{.*?\n\}/m]
+      func_ir.should_not be_nil
+      body = func_ir.not_nil!
+
+      body.should contain("uitofp i32 %x to double")
+      body.should_not contain("sitofp i32 %x to double")
+    end
+
+    it "uses ptrtoint + uitofp for pointer argument when calling float64 callee" do
+      mod = Crystal::MIR::Module.new("test")
+
+      callee = mod.create_function("takes_f64_ptr_arg", Crystal::MIR::TypeRef::FLOAT64)
+      callee.add_param("x", Crystal::MIR::TypeRef::FLOAT64)
+      callee_builder = Crystal::MIR::Builder.new(callee)
+      callee_builder.ret(0_u32)
+
+      caller = mod.create_function("call_ptr_to_f64_arg", Crystal::MIR::TypeRef::FLOAT64)
+      caller.add_param("p", Crystal::MIR::TypeRef::POINTER)
+      caller_builder = Crystal::MIR::Builder.new(caller)
+      call = caller_builder.call(callee.id, ([0_u32] of Crystal::MIR::ValueId), Crystal::MIR::TypeRef::FLOAT64)
+      caller_builder.ret(call)
+
+      gen = Crystal::MIR::LLVMIRGenerator.new(mod)
+      gen.emit_type_metadata = false
+      output = gen.generate
+
+      func_ir = output[/define double @call_ptr_to_f64_arg\([^)]*\)\s*\{.*?\n\}/m]
+      func_ir.should_not be_nil
+      body = func_ir.not_nil!
+
+      body.should contain("ptrtoint ptr %p to i64")
+      body.should match(/uitofp i64 %ptrtofp\.\d+\.int to double/)
+      body.should_not contain("load double, ptr %p")
+    end
+
+    it "uses align 4 for union payload load in union-to-float call coercion" do
+      mod = Crystal::MIR::Module.new("test")
+
+      union_type = mod.type_registry.create_type(Crystal::MIR::TypeKind::Union, "FloatOrNilArg", 16, 8)
+      union_ref = Crystal::MIR::TypeRef.new(union_type.id)
+      mod.register_union(
+        union_ref,
+        Crystal::MIR::UnionDescriptor.new(
+          "FloatOrNilArg",
+          [
+            Crystal::MIR::UnionVariantDescriptor.new(
+              type_id: 0,
+              type_ref: Crystal::MIR::TypeRef::FLOAT64,
+              full_name: "Float64",
+              size: 8,
+              alignment: 8,
+              field_offsets: nil
+            ),
+            Crystal::MIR::UnionVariantDescriptor.new(
+              type_id: 1,
+              type_ref: Crystal::MIR::TypeRef::NIL,
+              full_name: "Nil",
+              size: 0,
+              alignment: 1,
+              field_offsets: nil
+            ),
+          ],
+          16,
+          8
+        )
+      )
+
+      callee = mod.create_function("takes_union_coerced_f64", Crystal::MIR::TypeRef::FLOAT64)
+      callee.add_param("x", Crystal::MIR::TypeRef::FLOAT64)
+      callee_builder = Crystal::MIR::Builder.new(callee)
+      callee_builder.ret(0_u32)
+
+      caller = mod.create_function("call_union_to_f64_arg", Crystal::MIR::TypeRef::FLOAT64)
+      caller.add_param("u", union_ref)
+      caller_builder = Crystal::MIR::Builder.new(caller)
+      call = caller_builder.call(callee.id, ([0_u32] of Crystal::MIR::ValueId), Crystal::MIR::TypeRef::FLOAT64)
+      caller_builder.ret(call)
+
+      gen = Crystal::MIR::LLVMIRGenerator.new(mod)
+      gen.emit_type_metadata = false
+      output = gen.generate
+
+      func_ir = output[/define double @call_union_to_f64_arg\([^)]*\)\s*\{.*?\n\}/m]
+      func_ir.should_not be_nil
+      body = func_ir.not_nil!
+
+      body.should match(/%union_to_fp\.\d+\.val = load double, ptr %union_to_fp\.\d+\.payload_ptr, align 4/)
+    end
+
     it "emits ptr phi when a union phi has ptr incoming" do
       mod = Crystal::MIR::Module.new("phi_union_ptr")
 
