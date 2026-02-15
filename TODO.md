@@ -6,6 +6,9 @@
   - `regression_tests/test_select_map_stress.cr`
   - `regression_tests/test_float_pow_var.cr`
   - `regression_tests/test_string_upcase_large.cr`
+- New repro (2026-02-15): `examples/bench_comprehensive.cr` fails at link in v2
+  with undefined `_current` (fiber runtime symbol), while original Crystal
+  compiles and links the same source.
 
 ## Working Features
 - Basic output: puts String/Int32/Float64, string interpolation
@@ -110,6 +113,19 @@
     - candidate: `real 73.66s`, `real 74.04s` (avg regression ~`+0.40s`, ~`+0.55%`)
   Decision:
   - reverted; extra nested hash lookups outweighed saved string-key construction on this workload.
+- **Rejected perf branch: id-based reachability BFS (`Set(Int32)`/worklist ids)** (2026-02-15) —
+  switched `reachable_function_names` traversal from function-name strings to
+  integer ids (string->id map + id candidate sets) to reduce string hashing in
+  BFS/`reachable.includes?` checks.
+  Validation:
+  - specs:
+    - `crystal spec spec/hir/return_type_inference_spec.cr` => `13 examples, 0 failures`
+    - `crystal spec spec/mir/llvm_backend_spec.cr` => `59 examples, 0 failures`
+  - no-link A/B (`CRYSTAL_V2_PIPELINE_CACHE=0 CRYSTAL_V2_AST_FILTER=1 ... --no-link --no-ast-cache --no-llvm-cache spec/hir/return_type_inference_spec.cr`):
+    - baseline (before patch): `real 73.45s`
+    - candidate: `real 73.87s`, `real 73.88s` (avg regression ~`+0.43s`, ~`+0.58%`)
+  Decision:
+  - reverted; added id-map overhead outweighed reduced string set operations for this workload.
 - **Cross-compiler full-pipeline baseline (release vs release)** (2026-02-15) —
   reran comparisons with *full compile + full optimization* (no `--no-codegen` shortcut):
   - workload `examples/bench_fib42.cr`:
@@ -119,6 +135,15 @@
     - original: `real 3.50s`
     - v2: `real 3.89s`
   - current gap on these two workloads: v2 is ~`11-16%` slower in compile time (much smaller than older no-link-only deltas).
+  - runtime checks (same source compiled by each compiler, 5 runs, output parity required):
+    - `examples/bench_fib42_crystal.cr`:
+      - output parity: `267914296` == `267914296`
+      - original avg `real 1.036s`, v2 avg `real 0.832s` (~`1.25x` faster v2)
+    - `/tmp/bench_runtime_cmp_i32.cr` (loop+fib Int32 workload):
+      - output parity: `991077472` == `991077472`
+      - original avg `real 0.150s`, v2 avg `real 0.118s` (~`1.27x` faster v2)
+    - caveat: `/tmp/bench_runtime_cmp.cr` (Int64-heavy variant) produced output mismatch
+      (`2399999989227465` original vs `1965973559` v2), so it is tracked as a correctness bug candidate and excluded from speed comparison.
 - **Perf triage ledger (rejected experiments, 2026-02-15)** — recorded and reverted
   several SAFE perf branches that improved sub-metrics but regressed/stayed flat on
   end-to-end `real` for
