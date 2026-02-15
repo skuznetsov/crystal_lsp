@@ -25,6 +25,26 @@
 - Float64: arithmetic, ** on literals
 
 ## Recently completed
+- **Removed name-hardcoded collection/member return fallback in HIR type inference** (2026-02-15) —
+  replaced method-name lists (`unsafe_fetch/[]/first/last/shift/pop/...`) with
+  dynamic return resolution from method defs:
+  - added `infer_member_return_type_via_defs(...)` in `ast_to_hir`:
+    - resolves candidates via inheritance + overload index;
+    - derives return types via `get_function_return_type` / `resolve_return_type_from_def`;
+    - falls back to callsite-based inference for unresolved generic returns.
+  - wired dynamic resolver into:
+    - `infer_type_from_expr` member access path;
+    - `infer_type_from_expr` call path fallback;
+    - `infer_collection_member_return_type` (now generic, no name list);
+    - `lower_member_access` unresolved return fallback.
+  Validation:
+  - `crystal spec spec/hir/return_type_inference_spec.cr --error-trace` => `13 examples, 0 failures`
+  - `bin/crystal_v2 build examples/bench_fib42.cr -o /tmp/fib42_test` => `EXIT 0`
+  - `scripts/run_safe.sh /tmp/fib42_test 10 1024` => `EXIT 0`
+  Notes:
+  - `spec/hir/ast_to_hir_spec.cr` currently has pre-existing failures in
+    closure/cast/generic-block tests on this tree; this patch does not add new
+    failures in `return_type_inference_spec`.
 - **Channel case/in predicate lowering no longer falls back to false extern stubs** (2026-02-15, commit `95b40d1`) —
   fixed channel wakeup crash caused by `in .delivered?/.closed?/.none?` lowering to unresolved extern calls (`delivered?` etc.),
   which were emitted as dead-code stubs returning `false`.
