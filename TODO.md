@@ -25,6 +25,57 @@
 - Float64: arithmetic, ** on literals
 
 ## Recently completed
+- **MIR: stabilized Proc accessor lowering to unblock fiber context setup** (2026-02-15) —
+  fixed runtime `segfault` in `regression_tests/test_case_in_predicate_subject.cr`
+  after enabling primitive `fiber_swapcontext`.
+  Root cause:
+  - `Proc` literals were lowered as raw function pointers (`func_pointer`), but
+    stdlib `Proc#pointer` path expects `Proc`-shaped storage and tried to
+    dereference `internal_representation`.
+  Change:
+  - `src/compiler/mir/hir_to_mir.cr`:
+    - add Proc intrinsic accessor lowering in `lower_call` for proc receivers:
+      `pointer` returns receiver value directly, `closure_data` returns null
+      pointer, `closure?` returns `false`.
+  Validation:
+  - `crystal build src/main.cr -o bin/crystal_v2` => `EXIT 0`
+  - `CRYSTAL_V2_PIPELINE_CACHE=0 ./bin/crystal_v2 --no-ast-cache --no-llvm-cache regression_tests/test_case_in_predicate_subject.cr -o /tmp/test_case_pred_fix1` => `EXIT 0`
+  - `scripts/run_safe.sh /tmp/test_case_pred_fix1 10 512` => `EXIT 0` (no segfault)
+  - targeted runtime smoke:
+    - `regression_tests/test_hash_stress.cr` => `EXIT 0`
+    - `regression_tests/basic_sanity.cr` => `EXIT 0`
+- **Forced inline-yield path restored from LLVM hard-fail to runnable state** (2026-02-15) —
+  removed an invalid non-union `union_unwrap` fallback that emitted pointer
+  bitcasts for scalar values (`i32 -> ptr`) and caused `opt` failure
+  (`%r88.fromslot.24 expected ptr`).
+  Changes:
+  - `src/compiler/mir/hir_to_mir.cr`:
+    - keep declared `UnionUnwrap` result type unless descriptor override is
+      actually required (`Void/Nil/Pointer/Union placeholder`).
+  - `src/compiler/mir/llvm_backend.cr`:
+    - fixed non-union `emit_union_unwrap` scalar fallback:
+      - scalar passthrough now emits typed identity (`add i32 ..., 0` etc.),
+      - int/ptr conversions use `inttoptr`/`ptrtoint` instead of invalid
+        `bitcast ptr` on scalar SSA values.
+  - `spec/mir/llvm_backend_spec.cr`:
+    - added regression `keeps scalar passthrough for non-union union_unwrap`.
+  Validation:
+  - `crystal spec spec/mir/llvm_backend_spec.cr --example "keeps scalar passthrough for non-union union_unwrap"` => `1 examples, 0 failures`.
+  - `CRYSTAL_V2_PIPELINE_CACHE=0 CRYSTAL_V2_FORCE_INLINE_YIELD=1 ./bin/crystal_v2 regression_tests/basic_sanity.cr -o /tmp/basic_sanity_unionfix4` => `EXIT 0`.
+  - `/tmp/basic_sanity_unionfix4` => prints expected output and exits `0`.
+  - `CRYSTAL_V2_FORCE_INLINE_YIELD=1 regression_tests/run_all.sh ./bin/crystal_v2` => `39 passed, 2 failed` (remaining at that checkpoint: `hash_stress` output mismatch `missing=16`; `test_case_in_predicate_subject` runtime fiber-state bug).
+- **Nilable query fallback made overload-safe for `[]?`** (2026-02-15) —
+  fixed a forced-inline runtime segfault root cause where `Slice(UInt8)#[]`
+  was inferred as `Nil | UInt8` (instead of `Nil | Slice(UInt8)`) for
+  `[]?(start, count)`, then converted `UInt8` to pointer (`inttoptr`).
+  Changes in `src/compiler/hir/ast_to_hir.cr`:
+  - added `should_apply_nilable_query_fallback?(method_name, return_type, arg_count)`;
+  - apply structural nilable fallback only when return type is unresolved
+    (`Void/Nil/Bool`);
+  - skip structural fallback for multi-arg `[]?` (overload-sensitive path);
+  - in `get_function_return_type`, normalize method names with `strip_type_suffix`
+    and avoid structural fallback for mangled `[]?$...` signatures without
+    callsite context.
 - **Removed name-hardcoded collection/member return fallback in HIR type inference** (2026-02-15) —
   replaced method-name lists (`unsafe_fetch/[]/first/last/shift/pop/...`) with
   dynamic return resolution from method defs:
