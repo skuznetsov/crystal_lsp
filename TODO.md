@@ -1918,12 +1918,17 @@ r2 = maybe(false)  # => nil
     - `UInt32 | Hash(Tuple(UInt64, Symbol), Nil)#to_i32!`
     - log: `/private/tmp/bootstrap_array_full.link.log`
   - Update (2026-02-01): added fallback return-type inference from def bodies when signature type is missing, and numeric union unwrap/cast for member calls (`to_i*`/`to_u*`/`to_f*`). **Needs re-run** of `bootstrap_array` to confirm whether the `to_i32!` missing symbol is gone.
-- [ ] GH #10 (crystal_lsp): prelude build links for minimal `fib.cr`, but runtime segfault persists.
+- [x] GH #10 (crystal_lsp): prelude build links for minimal `fib.cr`, but runtime segfault persists.
   - Repro (2026-01-xx): `./bin/crystal_v2 build --release --no-llvm-metadata /tmp/fib.cr -o /tmp/fib` succeeds; `/tmp/fib` exits 139.
   - `--no-prelude` path works: `/tmp/fib_no_prelude` prints `267914296` and exits 0.
   - DoD: prelude build runs without segfault and prints correct result.
   - Update (2026-01-xx): after lowering stdlib `fun main` as C-ABI entrypoint, build now fails at link with 27 missing symbols (see `/tmp/fib_noputs.link.log`).
   - Update (2026-01-xx): resolve forward refs in nested namespaces to current scope; `Crystal__System__Entry_name` removed. Link now fails with 64 missing symbols (see `/tmp/fib_noputs.link.log`).
+  - Update (2026-02-15): re-validated with current tree/binary:
+    - `cat >/tmp/fib_issue10.cr ...`
+    - `/tmp/crystal_v2_nobootfast --release --no-llvm-metadata /tmp/fib_issue10.cr -o /tmp/fib_issue10`
+    - `scripts/run_safe.sh /tmp/fib_issue10 10 256` => stdout `267914296`, `EXIT 0`.
+  - Result: historical runtime segfault is not reproducible anymore; issue considered closed in this repo state.
 - [x] LLVM opt/llc type mismatch in full-prelude `fib.cr` build.
   - Fix: resolve `.class` type literals before context prefixing; ByteFormat `UInt32.class` no longer resolves to `IO::ByteFormat::LittleEndian::UInt32`.
   - DoD: `./bin/crystal_v2 build --release --no-llvm-metadata /tmp/fib.cr -o /tmp/fib` now reaches link stage (missing symbols only).
