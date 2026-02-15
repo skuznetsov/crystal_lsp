@@ -121,8 +121,13 @@ module CrystalV2
 
           # Additional
           p.on("--dump-symbols", "Dump symbol table") { options.dump_symbols = true }
+          {% if flag?(:bootstrap_fast) %}
+          p.on("--ast-cache", "Ignored in -Dbootstrap_fast (AST cache is compiled out)") { options.ast_cache = false }
+          p.on("--no-ast-cache", "Ignored in -Dbootstrap_fast (AST cache is compiled out)") { options.ast_cache = false }
+          {% else %}
           p.on("--ast-cache", "Enable AST cache (file-based)") { options.ast_cache = true }
           p.on("--no-ast-cache", "Disable AST cache (file-based)") { options.ast_cache = false }
+          {% end %}
           p.on("--no-llvm-opt", "Skip LLVM opt (faster, less optimized)") { options.llvm_opt = false }
           p.on("--llvm-cache", "Enable LLVM opt/llc cache") { options.llvm_cache = true }
           p.on("--no-llvm-cache", "Disable LLVM opt/llc cache") { options.llvm_cache = false }
@@ -230,9 +235,13 @@ module CrystalV2
         property progress : Bool = false
         property check_only : Bool = false
         property dump_symbols : Bool = false
-        # Enabled by default: stdlib/prelude parsing dominates cold starts, and cache
-        # is invalidated by source mtime + compiler mtime in LSP::AstCache.
+        # Enabled by default (except in bootstrap_fast): stdlib/prelude parsing dominates
+        # cold starts, and cache is invalidated by source mtime + compiler mtime.
+        {% if flag?(:bootstrap_fast) %}
+        property ast_cache : Bool = false
+        {% else %}
         property ast_cache : Bool = ENV["CRYSTAL_V2_AST_CACHE"]? != "0"
+        {% end %}
         property llvm_opt : Bool = true
         property llvm_cache : Bool = ENV["CRYSTAL_V2_LLVM_CACHE"]? != "0"
         property pipeline_cache : Bool = ENV["CRYSTAL_V2_PIPELINE_CACHE"]? != "0"

@@ -2939,9 +2939,20 @@ Pending follow-ups:
 - Ensure `get_function_return_type` prefers concrete lowered return type over union cache; confirm `Hash#key_hash` returns concrete type and removes `#to_i32!` symbol.
 
 ### 8.12 Bootstrap Fast Mode (AstCache disabled)
-- [ ] Add `-Dbootstrap_fast` compile flag to skip `LSP::AstCache` in CLI + driver parse paths.
+- [x] Add `-Dbootstrap_fast` compile flag to skip `LSP::AstCache` in CLI + driver parse paths.
   - Expose via `CRYSTAL_V2_BOOTSTRAP_FAST=1 ./scripts/build.sh`.
   - DoD: self-host HIR run shows fewer monomorphized LSP symbols and reduced pending loop time.
+  - Update (2026-02-15):
+    - completed wiring: `cli.cr` now compiles `ast_cache=false` in `-Dbootstrap_fast`, keeps `--ast-cache/--no-ast-cache` as safe no-op flags, and `driver.cr` no longer requires `./lsp/ast_cache` under `bootstrap_fast`;
+    - build + regressions + bootstrap smoke:
+      - `crystal build src/crystal_v2.cr -o /tmp/crystal_v2_bootfast --error-trace -Dbootstrap_fast` => `EXIT 0`;
+      - `regression_tests/run_all.sh /tmp/crystal_v2_bootfast` => `40 passed, 0 failed`;
+      - `CRYSTAL_V2_PIPELINE_CACHE=0 CRYSTAL_V2_LLVM_CACHE=0 /tmp/crystal_v2_bootfast examples/bootstrap_array.cr -o /tmp/bootstrap_array_bootfast` + `scripts/run_safe.sh /tmp/bootstrap_array_bootfast 10 768` => `EXIT 0`;
+      - adversary check: `/tmp/crystal_v2_bootfast --ast-cache examples/hello.cr ...` and `--no-ast-cache ...` both compile+run (no behavior change, no crash);
+    - compiler build deltas on same machine/session (`/usr/bin/time -p crystal build src/crystal_v2.cr ...`):
+      - without flag: `real 7.46s`, with `-Dbootstrap_fast`: `real 7.22s`;
+      - binary size: `26,491,000` -> `26,190,248` bytes;
+      - string-symbol check: `strings ... | rg "LSP::AstCache"`: `2` -> `0`.
 
 ### 8.13 Platform Parity (Bonus)
 - [ ] Track LLVM target parity (all targets from `llvm-config --targets-builtin`) and document deltas.

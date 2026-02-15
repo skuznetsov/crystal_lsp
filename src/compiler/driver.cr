@@ -20,7 +20,9 @@ require "./mir/mir"
 require "./mir/optimizations"
 require "./mir/hir_to_mir"
 require "./mir/llvm_backend"
+{% unless flag?(:bootstrap_fast) %}
 require "./lsp/ast_cache"
+{% end %}
 require "../runtime"
 
 module Crystal::V2
@@ -1051,7 +1053,11 @@ module Crystal::V2
     end
 
     private def ast_cache_enabled? : Bool
+      {% if flag?(:bootstrap_fast) %}
+      false
+      {% else %}
       ENV["CRYSTAL_V2_AST_CACHE"]? != "0"
+      {% end %}
     end
 
     private def digest_string(value : String) : String
