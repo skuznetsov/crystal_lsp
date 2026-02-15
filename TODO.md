@@ -19,6 +19,35 @@
 - Float64: arithmetic, ** on literals
 
 ## Recently completed
+- **MIR/LLVM: inline-yield-off union ABI guard for `Hash#[]?` override** (2026-02-15) —
+  fixed invalid fallback union name synthesis in `llvm_backend` (`__vdispatch__Hash::Entry...`)
+  that produced undefined/opaque union LLVM types under `CRYSTAL_V2_DISABLE_INLINE_YIELD=1`.
+  Change:
+  - in `emit_inline_override_if_needed`, `Hash#[]?` fast override now requires
+    concrete `find_entry` union return type from module metadata;
+  - removed synthetic fallback `%Nil$_$OR$_#{entry_type_name}.union` for this path.
+  Validation:
+  - build: `crystal build src/crystal_v2.cr -o /tmp/crystal_v2_dbg_inlineoff_unionfix --error-trace` => `EXIT 0`
+  - specs:
+    - `timeout 180 crystal spec spec/hir/return_type_inference_spec.cr` => `13 examples, 0 failures`
+    - `timeout 180 crystal spec spec/mir/llvm_backend_spec.cr` => `59 examples, 0 failures`
+  - regressions: `./regression_tests/run_all.sh /tmp/crystal_v2_dbg_inlineoff_unionfix` => `40 passed, 0 failed`
+  - smoke:
+    - default: `CRYSTAL_V2_PIPELINE_CACHE=0 /tmp/crystal_v2_dbg_inlineoff_unionfix examples/bootstrap_array.cr -o /tmp/bootstrap_array_unionfix_on && ./scripts/run_safe.sh /tmp/bootstrap_array_unionfix_on 10 768` => `EXIT 0`
+    - inline-off: `CRYSTAL_V2_PIPELINE_CACHE=0 CRYSTAL_V2_DISABLE_INLINE_YIELD=1 /tmp/crystal_v2_dbg_inlineoff_unionfix examples/bootstrap_array.cr -o /tmp/bootstrap_array_unionfix_off && ./scripts/run_safe.sh /tmp/bootstrap_array_unionfix_off 10 768` => `EXIT 0`
+  - targeted repro (previously failed with `store operand must be a first class value`):
+    - `CRYSTAL_V2_PIPELINE_CACHE=0 CRYSTAL_V2_AST_FILTER=1 CRYSTAL_V2_DISABLE_INLINE_YIELD=1 /tmp/crystal_v2_dbg_inlineoff_unionfix --no-link --no-ast-cache --no-llvm-cache spec/hir/return_type_inference_spec.cr` => `EXIT 0`, `real 69.41s`
+  - control timing:
+    - inline-on: `real 83.74s`
+    - inline-off: `real 69.41s` (~`17.1%` less wall time, `14.33s` faster)
+- **Rejected perf branch: context-key object_id+generation rewrite** (2026-02-15) —
+  attempted to replace `Hash#hash`-based type-name context key parts with
+  `object_id + version/generation`; reverted due stable regression.
+  - baseline (`/tmp/crystal_v2_dbg_barekind_cache`): `real 83.76s`, `89.17s`
+  - candidate (`/tmp/crystal_v2_dbg_ctxkey`): `real 89.33s`, `90.69s`
+  - avg delta: `+3.54s` (~`+4.10%`)
+  - phase impact: `emit_tracked_sigs` regressed (e.g., `8117.4ms -> 9406.0ms`)
+  Decision: keep reverted.
 - **Perf triage ledger (rejected experiments, 2026-02-15)** — recorded and reverted
   several SAFE perf branches that improved sub-metrics but regressed/stayed flat on
   end-to-end `real` for

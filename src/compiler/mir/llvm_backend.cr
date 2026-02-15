@@ -4390,10 +4390,10 @@ module Crystal::MIR
         find_entry_name = "#{hash_prefix}$Hfind_entry$$#{key_type_suffix}"
 
         # Union type name for Nil | Entry (returned by find_entry).
-        # Do not synthesize this from hash_prefix: for specialized callsites
-        # the key type may stay generic in hash_prefix ("Key") while find_entry
-        # return type is concrete (e.g. HTTP::Headers::Key). Reuse the actual
-        # declared return type from module metadata when available.
+        # Always use the declared return type from module metadata.
+        # Synthesizing from mangled prefixes can produce invalid names for
+        # vdispatch wrappers (e.g. "__vdispatch__Hash::Entry"), which then
+        # emit opaque/undefined union LLVM types.
         find_entry_ret_union = begin
           if find_entry_func = @module.functions.find { |f| mangle_function_name(f.name) == find_entry_name }
             @type_mapper.llvm_type(find_entry_func.return_type)
@@ -4401,8 +4401,8 @@ module Crystal::MIR
         rescue
           nil
         end
-        entry_type_name = hash_prefix.sub("Hash$L", "Hash$CCEntry$L")
-        nil_or_entry_union = find_entry_ret_union || "%Nil$_$OR$_#{entry_type_name}.union"
+        return false unless find_entry_ret_union
+        nil_or_entry_union = find_entry_ret_union
 
         # Use the declared function return type for the union ABI.
         # Only keep this fast override for canonical two-variant unions: Nil | V.
