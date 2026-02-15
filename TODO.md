@@ -58,6 +58,24 @@
   Note: one transient regression runner failure (`yield_suffix_unless` missing
   `.o` at link) did not reproduce; direct compile passed and rerun of
   `regression_tests/run_all.sh /tmp/crystal_v2_dbg_callsiteast` finished `40/0`.
+- **HIR method-name parse churn trim in lookup/lowering** (2026-02-15) —
+  reduced hot-path overhead from full `parse_method_name` caching where parsing
+  is one-shot:
+  - switched several lookup/lowering callsites to
+    `parse_method_name_uncached` (single-pass, no hash cache churn);
+  - switched callsites that only need `{owner, method, separator, base}` to
+    `parse_method_name_compact`;
+  - parent fallback candidate loops now use uncached parsing (avoid filling
+    `method_name_parts` cache with transient names).
+  Validation:
+  - build: `crystal build src/crystal_v2.cr -o /tmp/crystal_v2_dbg_methodparts --error-trace` => `EXIT 0`
+  - spec: `timeout 180 crystal spec spec/hir/return_type_inference_spec.cr` => `13 examples, 0 failures`
+  - regressions: `./regression_tests/run_all.sh /tmp/crystal_v2_dbg_methodparts` => `40 passed, 0 failed`
+  - bootstrap smoke: `CRYSTAL_V2_PIPELINE_CACHE=0 /tmp/crystal_v2_dbg_methodparts examples/bootstrap_array.cr -o /tmp/bootstrap_array_methodparts && ./scripts/run_safe.sh /tmp/bootstrap_array_methodparts 10 768` => `EXIT 0`
+  - A/B (`CRYSTAL_V2_PIPELINE_CACHE=0 CRYSTAL_V2_AST_FILTER=1 CRYSTAL_V2_PHASE_STATS=1 DEBUG_CACHE_HISTO=1 ... --no-link --no-ast-cache --no-llvm-cache spec/hir/return_type_inference_spec.cr`):
+    - baseline (`/tmp/crystal_v2_dbg_lazyrta_default`): `real 85.26s`, `84.73s`; `emit_tracked_sigs 8924.0ms`, `8848.9ms`; `Lookup 873.5ms`, `863.1ms`; `method_name_parts 64983/32798`, `65072/32868`
+    - new (`/tmp/crystal_v2_dbg_methodparts`): `real 84.96s`, `84.65s`; `emit_tracked_sigs 8693.6ms`, `8653.8ms`; `Lookup 835.3ms`, `948.3ms`; no `method_name_parts` entries in cache histo
+  - net: small but consistent wall-clock gain (~`0.19s` avg, ~`0.22%`) with no regressions.
 - **Lazy RTA default-on (opt-out)** (2026-02-15) — enabled lazy RTA by default in
   `process_pending`/`flush_pending` with explicit opt-out:
   - `CRYSTAL_V2_LAZY_RTA=0` (or `false`) disables lazy RTA.

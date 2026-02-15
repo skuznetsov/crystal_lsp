@@ -1618,7 +1618,7 @@ module Crystal::HIR
 
       # Try exact suffix match first
       candidates.each do |candidate_name|
-        candidate_parts = parse_method_name(candidate_name)
+        candidate_parts = parse_method_name_uncached(candidate_name)
         next unless candidate_parts.owner == parent || strip_generic_args(candidate_parts.owner) == base_parent
 
         if suffix
@@ -1650,7 +1650,7 @@ module Crystal::HIR
       best_required_match : ParentLookupResult? = nil
       first_found : ParentLookupResult? = nil
       candidates.each do |candidate_name|
-        candidate_parts = parse_method_name(candidate_name)
+        candidate_parts = parse_method_name_uncached(candidate_name)
         next unless candidate_parts.owner == parent || strip_generic_args(candidate_parts.owner) == base_parent
         if def_node = @function_defs[candidate_name]?
           arena = @function_def_arenas[candidate_name]
@@ -37145,7 +37145,7 @@ module Crystal::HIR
       target_name = name
       lookup_start_instant = Time.instant if env_has?("CRYSTAL_V2_PHASE_STATS")
       # Parse name once at the start - reuse for all lookups
-      name_parts = parse_method_name(name)
+      name_parts = parse_method_name_uncached(name)
       base_name = name_parts.base
       primitive_template_map : Hash(String, String)? = nil
       debug_hook("function.lookup.start", name)
@@ -37678,7 +37678,7 @@ module Crystal::HIR
             set_function_def_arena_if_missing(name, arena)
             set_function_def_arena_if_missing(base_name, arena)
             # Extract matched parent from resolved name for namespace override
-            resolved_parts = parse_method_name(resolved_name)
+            resolved_parts = parse_method_name_uncached(resolved_name)
             matched_parent = resolved_parts.owner
             if matched_parent != name_parts.owner
               store_function_namespace_override(name, base_name, matched_parent)
@@ -38290,7 +38290,7 @@ module Crystal::HIR
       resolved_owner : String? = nil
       resolved_target_name = target_name
       # Parse target_name once - get all parts in single pass
-      target_parts = parse_method_name(target_name)
+      target_parts = parse_method_name_uncached(target_name)
       base_target_name = target_parts.base
       force_class_method = target_parts.is_class
       if sep = target_parts.separator
@@ -38399,7 +38399,7 @@ module Crystal::HIR
 
       target_name = resolved_target_name
       # Re-parse resolved target name once for use in the rest of this function
-      resolved_parts = parse_method_name(target_name)
+      resolved_parts = parse_method_name_uncached(target_name)
       @function_lowering_states[target_name] = FunctionLoweringState::InProgress
 
       # WORK QUEUE: Track that we're inside lowering to defer nested calls
@@ -38666,8 +38666,8 @@ module Crystal::HIR
 
     private def maybe_generate_accessor_for_name(name : String) : Bool
       base_name = strip_type_suffix(name)
-      parts = parse_method_name(base_name)
-      return false unless parts.is_instance
+      parts = parse_method_name_compact(base_name)
+      return false unless parts.separator == '#'
 
       owner = parts.owner
       method_name = parts.method || ""
@@ -43458,8 +43458,8 @@ module Crystal::HIR
                 call_virtual = true
               end
             else
-              fn_parts = parse_method_name(ctx.function.name)
-              if fn_parts.is_instance
+              fn_parts = parse_method_name_compact(ctx.function.name)
+              if fn_parts.separator == '#'
                 owner = strip_generic_args(fn_parts.owner)
                 if @module_defs.has_key?(owner)
                   call_virtual = true
@@ -45482,7 +45482,7 @@ module Crystal::HIR
       func_entry = lookup_function_def_for_call(func_name, args.size, has_block_call, arg_types, false, true)
       # If not found directly, try parent classes (for inherited methods with defaults)
       unless func_entry
-        parts = parse_method_name(func_name)
+        parts = parse_method_name_compact(func_name)
         if parts.separator == '#' && (method_part = parts.method)
           parent = @class_info[parts.owner]?.try(&.parent_name)
           visited = Set(String).new
@@ -48825,12 +48825,12 @@ module Crystal::HIR
             end
           end
         end
-        parts = parse_method_name(base_inline_name)
+        parts = parse_method_name_compact(base_inline_name)
         if method_name = parts.method
           unless parts.owner.empty?
             @current_class = parts.owner
             @current_method = method_name unless method_name.empty?
-            @current_method_is_class = parts.is_class
+            @current_method_is_class = parts.separator == '.'
           end
         end
         if recv = func_def.receiver
@@ -51305,8 +51305,8 @@ module Crystal::HIR
                 call_virtual = true
               end
             else
-              fn_parts = parse_method_name(ctx.function.name)
-              if fn_parts.is_instance
+              fn_parts = parse_method_name_compact(ctx.function.name)
+              if fn_parts.separator == '#'
                 owner = strip_generic_args(fn_parts.owner)
                 if @module_defs.has_key?(owner)
                   call_virtual = true
