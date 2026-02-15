@@ -27613,6 +27613,7 @@ module Crystal::HIR
       ast_method_names = @ast_reachable_method_names
       ast_owner_types = @ast_reachable_owner_types
       ast_method_bases = @ast_reachable_method_bases
+      ast_filter_cache = Hash(String, Bool).new(initial_capacity: 8192)
 
       while iteration < max_iterations
         # Collect all unique function names from pending arg types
@@ -27626,10 +27627,18 @@ module Crystal::HIR
         @pending_arg_types.each do |name, args|
           considered += 1
           next if @module.has_function?(name)
-          next if function_state(name).completed?
-          next if function_state(name).in_progress?
+          state = function_state(name)
+          next if state.completed?
+          next if state.in_progress?
           next if attempted.includes?(name)
-          unless ast_filter_allows_safety_net_name?(name, ast_method_names, ast_owner_types, ast_method_bases)
+          ast_allowed = if cached = ast_filter_cache[name]?
+                          cached
+                        else
+                          allowed = ast_filter_allows_safety_net_name?(name, ast_method_names, ast_owner_types, ast_method_bases)
+                          ast_filter_cache[name] = allowed
+                          allowed
+                        end
+          unless ast_allowed
             skipped_ast += 1 if debug_emit
             next
           end
@@ -27639,9 +27648,8 @@ module Crystal::HIR
           end
           # Skip incomplete names (must have class prefix with # or .)
           base_name = strip_type_suffix(name)
-          next unless base_name.includes?('#') || base_name.includes?('.')
+          next unless has_method_separator?(base_name)
           # Skip functions with bare generic types (they need concrete instantiation)
-          base_name = strip_type_suffix(name)
           has_double_splat_def = function_def_has_double_splat?(base_name)
           has_bare_generic = args.types.any? do |t|
             if desc = @module.get_type_descriptor(t)
@@ -27670,24 +27678,32 @@ module Crystal::HIR
         @recorded_arg_types_by_signature.each do |signature, entries|
           base_name = signature.base_name
           next if base_name.empty?
-          next unless base_name.includes?('#') || base_name.includes?('.')
+          next unless has_method_separator?(base_name)
           has_double_splat_def = function_def_has_double_splat?(base_name)
+          has_splat_def = function_def_has_splat?(base_name) || has_double_splat_def
           entries.each do |args|
             if !args.types.empty? && args.types.all? { |t| t == TypeRef::VOID }
               skipped_void += 1 if debug_emit
               next
             end
-            has_splat_def = function_def_has_splat?(base_name) || function_def_has_double_splat?(base_name)
             name = if entry = lookup_function_def_for_call(base_name, args.types.size, signature.has_block, args.types, has_splat_def)
                      entry[0]
                    else
                      mangle_function_name(base_name, args.types, signature.has_block)
                    end
             next if @module.has_function?(name)
-            next if function_state(name).completed?
-            next if function_state(name).in_progress?
+            state = function_state(name)
+            next if state.completed?
+            next if state.in_progress?
             next if attempted.includes?(name)
-            unless ast_filter_allows_safety_net_name?(name, ast_method_names, ast_owner_types, ast_method_bases)
+            ast_allowed = if cached = ast_filter_cache[name]?
+                            cached
+                          else
+                            allowed = ast_filter_allows_safety_net_name?(name, ast_method_names, ast_owner_types, ast_method_bases)
+                            ast_filter_cache[name] = allowed
+                            allowed
+                          end
+            unless ast_allowed
               skipped_ast += 1 if debug_emit
               next
             end

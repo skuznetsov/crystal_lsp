@@ -19,6 +19,20 @@
 - Float64: arithmetic, ** on literals
 
 ## Recently completed
+- **HIR tracked-signature safety-net cache cleanup** (2026-02-15) —
+  reduced repeated work in `emit_all_tracked_signatures` by:
+  - caching `ast_filter_allows_safety_net_name?` decisions per function name;
+  - avoiding repeated `function_state(name)` lookups per candidate;
+  - removing duplicate `strip_type_suffix` and per-entry splat checks
+    (`has_splat_def` now computed once per signature base).
+  Validation:
+  - `crystal build src/crystal_v2.cr -o /tmp/crystal_v2_dbg_emitcache --error-trace` => `EXIT 0`
+  - `timeout 180 crystal spec spec/hir/return_type_inference_spec.cr` => `13 examples, 0 failures`
+  - `timeout 180 crystal spec spec/mir/llvm_backend_spec.cr` => `59 examples, 0 failures`
+  - `regression_tests/run_all.sh /tmp/crystal_v2_dbg_emitcache` => `40 passed, 0 failed`
+  - A/B (`CRYSTAL_V2_PIPELINE_CACHE=0 CRYSTAL_V2_AST_FILTER=1 CRYSTAL_V2_PHASE_STATS=1 ... --no-link --no-ast-cache --no-llvm-cache spec/hir/return_type_inference_spec.cr`):
+    - before (`/tmp/crystal_v2_dbg_head`): `real 105.22s`, `emit_tracked_sigs 14749.3ms`, `Lookup 1046.7ms`
+    - after (`/tmp/crystal_v2_dbg_emitcache`): `real 104.14s`, `emit_tracked_sigs 13868.3ms`, `Lookup 1030.1ms`
 - **HIR parent fallback arity count without suffix type parsing** (2026-02-15) —
   removed `parse_types_from_suffix(...).size` from
   `find_method_in_parent_via_index` and switched to `suffix_param_count`
