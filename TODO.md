@@ -1889,6 +1889,17 @@ r2 = maybe(false)  # => nil
   - [ ] Re-audit int/uint → float conversion paths; ensure all integer→float casts use correct `uitofp`/`sitofp` (not just one patch).
   - [ ] Verify AArch64/ARM alignment (4-byte or platform-specific) for struct layout, stack slots, and pointer arithmetic; fix misaligned GEP/alloca if present.
   - [ ] Validate generated code output vs expected on small fixtures (sanity checks before full bootstrap runs).
+  - **Update (2026-02-15)**: fixed `Hash#[]?` LLVM override for union return ABI:
+    - override now uses declared MIR union metadata (`get_union_descriptor`) instead of manually synthesized `%Nil$_$OR$_...` names;
+    - fast-path enabled only for canonical `Nil | V` (single non-nil variant), otherwise falls back to normal lowering;
+    - variant discriminator now uses real `type_id` from union descriptor (not hardcoded `1`), with explicit nil variant handling.
+    - DoD evidence:
+      - `./regression_tests/run_all.sh /tmp/crystal_v2_head2` → `40 passed, 0 failed`.
+      - `timeout 300 /tmp/crystal_v2_head2 examples/bootstrap_array.cr -o /tmp/bootstrap_array_head2` + `./scripts/run_safe.sh /tmp/bootstrap_array_head2 10 768` → compile+run success (exit 0).
+      - prior `opt` error `invalid type for null constant` on `%Nil$_$OR$_String$_$OR$_Array$LString$R.union` is no longer reproduced.
+    - Remaining blocker after this fix:
+      - `CRYSTAL_V2_AST_FILTER=1 CRYSTAL_V2_PHASE_STATS=1 timeout 120 /tmp/crystal_v2_head2 spec/hir/return_type_inference_spec.cr -o /tmp/rti_phase_head2`
+      - now fails later with SSA/phi issue: `opt: ... error: use of undefined value '%r7.phi_extract.2'`.
 
 **Regressions (open):**
 - [ ] **Bootstrap regression (2026-01-31)**: `bootstrap_array` link fails with 10+ missing symbols after commit b135d46.

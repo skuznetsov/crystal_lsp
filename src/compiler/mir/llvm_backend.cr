@@ -4385,18 +4385,6 @@ module Crystal::MIR
                          else
                            ""
                          end
-        value_llvm_type = case value_type_str
-                          when "Int32", "UInt32" then "i32"
-                          when "Int64", "UInt64" then "i64"
-                          when "Bool"            then "i1"
-                          else                        "ptr"
-                          end
-
-        # Compute value offset in Entry body: after @key field, aligned to value type
-        # Entry struct layout: @key at 0, @value at aligned(key_size, value_align), @hash after
-        key_size = key_is_ptr ? 8 : 4
-        value_align = (value_llvm_type == "ptr" || value_llvm_type == "i64") ? 8 : 4
-        value_offset = (key_size + value_align - 1) & ~(value_align - 1)
 
         # Find the find_entry function name
         find_entry_name = "#{hash_prefix}$Hfind_entry$$#{key_type_suffix}"
@@ -4416,16 +4404,34 @@ module Crystal::MIR
         entry_type_name = hash_prefix.sub("Hash$L", "Hash$CCEntry$L")
         nil_or_entry_union = find_entry_ret_union || "%Nil$_$OR$_#{entry_type_name}.union"
 
-        # Nil | V union type name — this is what []? returns
-        value_type_name = case value_type_str
-                          when "Int32"  then "Int32"
-                          when "UInt32" then "UInt32"
-                          when "Int64"  then "Int64"
-                          when "UInt64" then "UInt64"
-                          when "Bool"   then "Bool"
-                          else               value_type_str
-                          end
-        value_union_name = "%Nil$_$OR$_#{value_type_name}.union"
+        # Use the declared function return type for the union ABI.
+        # Only keep this fast override for canonical two-variant unions: Nil | V.
+        return_desc = @module.get_union_descriptor(func.return_type)
+        return false unless return_desc
+        nil_variant = return_desc.variants.find { |variant| variant.type_ref == TypeRef::NIL }
+        return false unless nil_variant
+        non_nil_variants = return_desc.variants.reject { |variant| variant.type_ref == TypeRef::NIL }
+        return false unless non_nil_variants.size == 1
+
+        value_variant = non_nil_variants.first
+        value_ref = value_variant.type_ref
+        value_variant_id = value_variant.type_id
+        nil_variant_id = nil_variant.type_id
+        value_union_name = @type_mapper.llvm_type(func.return_type)
+        value_llvm_type = @type_mapper.llvm_type(value_ref)
+        # Complex payloads are handled by the normal lowering path.
+        return false if value_llvm_type.starts_with?("%") || value_llvm_type.starts_with?("[")
+
+        # Compute value offset in Entry body: after @key field, aligned to value type.
+        # Entry struct layout: @key at 0, @value at aligned(key_size, value_align), @hash after.
+        key_size = key_is_ptr ? 8 : 4
+        value_align = case value_llvm_type
+                      when "ptr", "i64" then 8
+                      when "i1", "i8"  then 1
+                      when "i16"        then 2
+                      else                   4
+                      end
+        value_offset = (key_size + value_align - 1) & ~(value_align - 1)
 
         emit_raw "; #{mangled} — union return override for Hash#[]?\n"
         emit_raw "define #{value_union_name} @#{mangled}(ptr %self, #{key_llvm_type} %key) {\n"
@@ -4446,13 +4452,22 @@ module Crystal::MIR
         emit_raw "  %result_ptr = alloca #{value_union_name}, align 8\n"
         emit_raw "  store #{value_union_name} zeroinitializer, ptr %result_ptr\n"
         emit_raw "  %rtid = getelementptr #{value_union_name}, ptr %result_ptr, i32 0, i32 0\n"
-        emit_raw "  store i32 1, ptr %rtid\n"
+        emit_raw "  store i32 #{value_variant_id}, ptr %rtid\n"
         emit_raw "  %rpay = getelementptr #{value_union_name}, ptr %result_ptr, i32 0, i32 1\n"
         emit_raw "  store #{value_llvm_type} %val, ptr %rpay, align 4\n"
         emit_raw "  %result_found = load #{value_union_name}, ptr %result_ptr\n"
         emit_raw "  ret #{value_union_name} %result_found\n"
         emit_raw "notfound_bb:\n"
-        emit_raw "  ret #{value_union_name} zeroinitializer\n"
+        if nil_variant_id == 0
+          emit_raw "  ret #{value_union_name} zeroinitializer\n"
+        else
+          emit_raw "  %notfound_ptr = alloca #{value_union_name}, align 8\n"
+          emit_raw "  store #{value_union_name} zeroinitializer, ptr %notfound_ptr\n"
+          emit_raw "  %nftid = getelementptr #{value_union_name}, ptr %notfound_ptr, i32 0, i32 0\n"
+          emit_raw "  store i32 #{nil_variant_id}, ptr %nftid\n"
+          emit_raw "  %notfound = load #{value_union_name}, ptr %notfound_ptr\n"
+          emit_raw "  ret #{value_union_name} %notfound\n"
+        end
         emit_raw "}\n\n"
         # Record the actual return type so call sites use the correct ABI
         mangled = mangle_function_name(func.name)
