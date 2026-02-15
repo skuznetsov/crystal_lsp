@@ -36420,6 +36420,26 @@ module Crystal::HIR
       best
     end
 
+    @[AlwaysInline]
+    private def best_pending_arity_key(
+      by_arity : Hash(Int32, Array(CallsiteArgs)),
+      required_count : Int32,
+      param_count : Int32,
+      has_splat : Bool,
+    ) : Int32?
+      best : Int32? = nil
+      by_arity.each_key do |key|
+        next if key < required_count
+        next if !has_splat && key > param_count
+        if current = best
+          best = key if key > current
+        else
+          best = key
+        end
+      end
+      best
+    end
+
     private def pending_callsite_args_for_def(
       func_def : CrystalV2::Compiler::Frontend::DefNode,
       name : String,
@@ -36463,11 +36483,7 @@ module Crystal::HIR
           end
         end
 
-        fallback_key = if has_splat
-                         by_arity.keys.select { |key| key >= required_count }.max?
-                       else
-                         by_arity.keys.select { |key| key >= required_count && key <= param_count }.max?
-                       end
+        fallback_key = best_pending_arity_key(by_arity, required_count, param_count, has_splat)
         if fallback_key
           if bucket = by_arity[fallback_key]?
             match = select_best_callsite_args(func_def, bucket, func_context) || bucket.first?
@@ -36502,11 +36518,7 @@ module Crystal::HIR
               end
             end
 
-            fallback_key = if has_splat
-                             ancestor_by_arity.keys.select { |key| key >= required_count }.max?
-                           else
-                             ancestor_by_arity.keys.select { |key| key >= required_count && key <= param_count }.max?
-                           end
+            fallback_key = best_pending_arity_key(ancestor_by_arity, required_count, param_count, has_splat)
             if fallback_key
               if bucket = ancestor_by_arity[fallback_key]?
                 match = select_best_callsite_args(func_def, bucket, func_context) || bucket.first?

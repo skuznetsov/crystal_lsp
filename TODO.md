@@ -19,6 +19,20 @@
 - Float64: arithmetic, ** on literals
 
 ## Recently completed
+- **HIR fallback arity scan without `select/max` allocations** (2026-02-15) —
+  in `pending_callsite_args_for_def`, replaced
+  `keys.select(...).max?` (for both direct and ancestor fallback paths) with
+  a single-pass helper `best_pending_arity_key(...)`.
+  Validation:
+  - `crystal build src/crystal_v2.cr -o /tmp/crystal_v2_dbg_aritykey --error-trace` => `EXIT 0`
+  - `timeout 180 crystal spec spec/hir/return_type_inference_spec.cr` => `13 examples, 0 failures`
+  - `timeout 180 crystal spec spec/mir/llvm_backend_spec.cr` => `59 examples, 0 failures`
+  - `regression_tests/run_all.sh /tmp/crystal_v2_dbg_aritykey` => `40 passed, 0 failed`
+  - `CRYSTAL_V2_PIPELINE_CACHE=0 /tmp/crystal_v2_dbg_aritykey examples/bootstrap_array.cr -o /tmp/bootstrap_array_aritykey && scripts/run_safe.sh /tmp/bootstrap_array_aritykey 10 768` => `EXIT 0`
+  - A/B no-cache/no-link (`CRYSTAL_V2_PIPELINE_CACHE=0 CRYSTAL_V2_AST_FILTER=1 CRYSTAL_V2_PHASE_STATS=1 ... spec/hir/return_type_inference_spec.cr`):
+    - before (`/tmp/crystal_v2_dbg_missindex`, recheck): `real 103.43s`, `process_pending 6879.5ms`, `emit_tracked_sigs 12940.7ms`
+    - after (`/tmp/crystal_v2_dbg_aritykey`, best of 2): `real 102.98s`, `process_pending 6812.1ms`, `emit_tracked_sigs 13042.0ms`
+  - net: small overall speedup with noisy per-phase distribution; keep as low-risk allocation trim.
 - **HIR pending-callsite fallback index by method name** (2026-02-15) —
   removed full-map scans in `pending_callsite_args_for_def` miss fallback:
   - added `@pending_arg_type_base_keys_by_method` (`method -> Set(base_key)`);
