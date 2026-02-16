@@ -39171,8 +39171,19 @@ module Crystal::HIR
                   # that must reach the direct STDOUT interception below, not become
                   # dead-code stubs like Foo#puts(String).
                   unless method_name == "puts" || method_name == "print" || method_name == "p" || method_name == "pp"
-                    receiver_id = self_id
-                    full_method_name = resolve_method_with_inheritance(self_name, method_name) || self_method_name
+                    resolved = resolve_method_with_inheritance(self_name, method_name)
+                    resolved_name = resolved || self_method_name
+                    # Only bind to self if the resolved name actually exists in registries.
+                    # If resolve_method_with_inheritance returns a rebased name like
+                    # "Array(String)#each" (from finding Indexable#each), that name may not
+                    # exist as a function_def. In that case, fall through to the @current_class
+                    # module check below which properly looks up included module methods.
+                    if @function_types.has_key?(resolved_name) ||
+                       has_function_base?(resolved_name) ||
+                       @function_defs.has_key?(resolved_name)
+                      receiver_id = self_id
+                      full_method_name = resolved_name
+                    end
                   end
                 end
               end
@@ -39337,6 +39348,19 @@ module Crystal::HIR
           full_method_name = "#{current}.#{method_name}"
           receiver_id = nil
           static_class_name = current
+        end
+
+        # String#each_char { |ch| ... } intrinsic for bare calls (IdentifierNode path).
+        # Same as the MemberAccessNode intrinsic below, but for when each_char is called
+        # without explicit receiver inside a String method (e.g., starts_with?).
+        # receiver_id may be nil here because each_char isn't pre-registered in function
+        # registries — emit self explicitly when inside a String instance method.
+        if method_name == "each_char" && block_expr && call_args.empty? && @current_class == "String"
+          self_id = receiver_id || emit_self(ctx)
+          blk_node = @arena[block_expr]
+          if blk_node.is_a?(CrystalV2::Compiler::Frontend::BlockNode)
+            return lower_string_each_char_intrinsic(ctx, self_id, blk_node)
+          end
         end
       when CrystalV2::Compiler::Frontend::MemberAccessNode
         # Could be method call: obj.method() or class method: ClassName.new()
@@ -47944,16 +47968,22 @@ module Crystal::HIR
       body_exit_block = ctx.current_block
       ctx.pop_scope
 
-      # Patch phi nodes with updated values from the body
-      assigned_vars.each do |var_name|
-        if phi = phi_nodes[var_name]?
-          if updated_val = ctx.lookup_local(var_name)
-            phi.add_incoming(body_exit_block, updated_val)
+      # Check if the body already terminated (e.g., via `return` from enclosing method).
+      # If so, don't overwrite the terminator with a jump to the increment block.
+      body_already_terminated = !ctx.get_block(body_exit_block).terminator.is_a?(Unreachable)
+
+      unless body_already_terminated
+        # Patch phi nodes with updated values from the body
+        assigned_vars.each do |var_name|
+          if phi = phi_nodes[var_name]?
+            if updated_val = ctx.lookup_local(var_name)
+              phi.add_incoming(body_exit_block, updated_val)
+            end
           end
         end
-      end
 
-      ctx.terminate(Jump.new(incr_block))
+        ctx.terminate(Jump.new(incr_block))
+      end
 
       # Incr block: i++
       ctx.current_block = incr_block
