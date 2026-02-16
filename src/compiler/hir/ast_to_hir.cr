@@ -2693,6 +2693,11 @@ module Crystal::HIR
       if old_type = @function_types[full_name]?
         old_name = get_type_name_from_ref(old_type)
         new_name = get_type_name_from_ref(return_type)
+        # Never degrade an already known union/nilable signature back to Nil/Void.
+        # This can happen when a later lowering pass has incomplete generic context.
+        if old_name.includes?(" | ") && (return_type == TypeRef::NIL || return_type == TypeRef::VOID)
+          return
+        end
         # If existing type is a union/nilable (contains "|") and new type is a plain type
         # that doesn't match the container type, keep the existing type.
         if old_name.includes?(" | ") && !new_name.includes?(" | ")
@@ -7434,34 +7439,84 @@ module Crystal::HIR
       NILABLE_QUERY_METHODS.includes?(method_name) ? TypeRef::VOID : TypeRef::BOOL
     end
 
+    private def should_apply_nilable_query_fallback?(
+      method_name : String,
+      current_return_type : TypeRef,
+      arg_count : Int32
+    ) : Bool
+      return false unless NILABLE_QUERY_METHODS.includes?(method_name)
+      return false unless current_return_type == TypeRef::BOOL ||
+                          current_return_type == TypeRef::VOID ||
+                          current_return_type == TypeRef::NIL
+      # []? has overloads with different return shapes (element vs slice/range).
+      # For multi-arg calls rely on def-based inference to avoid collapsing
+      # return type to element type.
+      return false if method_name == "[]?" && arg_count > 1
+      true
+    end
+
     # Some stdlib methods end in `?` but return a value (typically `T?` / `V?`) rather than `Bool`.
     # We need correct return types early (during signature registration) so callers lowered before the
     # callee body still get a stable type (avoids emitting `i1` where `i32`/union is expected).
     private def infer_unannotated_query_return_type(method_name : String, self_type : TypeRef) : TypeRef?
       return nil unless NILABLE_QUERY_METHODS.includes?(method_name)
 
+      debug_query = debug_env_filter_match?("DEBUG_QUERY_RET", method_name, get_type_name_from_ref(self_type))
       desc = @module.get_type_descriptor(self_type)
-      return nil unless desc
+      unless desc
+        STDERR.puts "[QUERY_RET] method=#{method_name} self=#{get_type_name_from_ref(self_type)} kind=nil desc=nil" if debug_query
+        return nil
+      end
+
+      read_generic_arg = ->(index : Int32) do
+        if arg = desc.type_params[index]?
+          if arg != TypeRef::VOID
+            arg
+          else
+            nil
+          end
+        else
+          if info = split_generic_base_and_args(desc.name)
+            args = split_generic_type_args(info[:args])
+            if raw = args[index]?
+              arg_ref = type_ref_for_name(raw)
+              arg_ref == TypeRef::VOID ? nil : arg_ref
+            else
+              nil
+            end
+          else
+            nil
+          end
+        end
+      end
+      if debug_query
+        STDERR.puts "[QUERY_RET] method=#{method_name} self=#{get_type_name_from_ref(self_type)} kind=#{desc.kind} name=#{desc.name} tparams=#{desc.type_params.map { |t| get_type_name_from_ref(t) }.join(",")}"
+      end
 
       case desc.kind
       when TypeKind::Array
-        elem = desc.type_params.first?
+        elem = read_generic_arg.call(0)
         return nil unless elem
         create_union_type_for_nullable(elem)
       when TypeKind::Hash
-        value = desc.type_params[1]?
+        value = read_generic_arg.call(1)
         return nil unless value
         create_union_type_for_nullable(value)
-      when TypeKind::Class, TypeKind::Struct
-        elem = desc.type_params.first?
-        return nil unless elem
+      when TypeKind::Class, TypeKind::Struct, TypeKind::Generic
         base = desc.name
         if paren = base.index('(')
           base = base[0, paren]
         end
         short_base = last_namespace_component(base)
+        if short_base == "Hash"
+          value = read_generic_arg.call(1)
+          return nil unless value
+          return create_union_type_for_nullable(value)
+        end
+        elem = read_generic_arg.call(0)
+        return nil unless elem
         case short_base
-        when "Deque", "Slice", "StaticArray", "Set"
+        when "Array", "Deque", "Slice", "StaticArray", "Set"
           create_union_type_for_nullable(elem)
         when "PointerLinkedList"
           elem_name = get_type_name_from_ref(elem)
@@ -7480,6 +7535,25 @@ module Crystal::HIR
       else
         nil
       end
+    end
+
+    private def infer_query_return_type_for_owner(
+      method_name : String,
+      owner_name : String,
+      owner_type : TypeRef
+    ) : TypeRef?
+      if inferred = infer_unannotated_query_return_type(method_name, owner_type)
+        return inferred unless inferred == TypeRef::VOID
+      end
+
+      owner_ref = type_ref_for_name(owner_name)
+      if owner_ref != TypeRef::VOID && owner_ref != owner_type
+        if inferred = infer_unannotated_query_return_type(method_name, owner_ref)
+          return inferred unless inferred == TypeRef::VOID
+        end
+      end
+
+      nil
     end
 
     private def infer_unannotated_search_return_type(method_name : String, self_type : TypeRef) : TypeRef?
@@ -11543,11 +11617,38 @@ module Crystal::HIR
       return if parsed_any
     end
 
+    private def register_class_macro_def_from_expansion(
+      def_node : CrystalV2::Compiler::Frontend::DefNode,
+      class_name : String,
+      ivars : Array(IVarInfo)? = nil,
+      offset_ref : Pointer(Int32)? = nil,
+      init_capture : InitParamsCapture? = nil,
+    ) : Nil
+      register_type_method_from_def(def_node, class_name)
+
+      return unless String.new(def_node.name) == "initialize"
+      return unless ivars && offset_ref
+
+      if init_capture && init_capture.source == :none
+        init_capture.source = :class
+        if params = def_node.params
+          new_params = capture_initialize_params(params, ivars, offset_ref, class_name)
+          init_capture.params.clear
+          new_params.each { |param| init_capture.params << param }
+        end
+      end
+
+      if body = def_node.body
+        infer_ivars_from_body(body, ivars, offset_ref)
+      end
+    end
+
     private def process_macro_if_in_class(
       node : CrystalV2::Compiler::Frontend::MacroIfNode,
       class_name : String,
       ivars : Array(IVarInfo)? = nil,
       offset_ref : Pointer(Int32)? = nil,
+      init_capture : InitParamsCapture? = nil,
     )
       if raw_text = macro_if_raw_text(node)
         if filter = env_get("DEBUG_MACRO_LITERAL_CLASS")
@@ -11567,11 +11668,11 @@ module Crystal::HIR
                   expr_node = @arena[expr_id]
                   case expr_node
                   when CrystalV2::Compiler::Frontend::DefNode
-                    register_type_method_from_def(expr_node, class_name)
+                    register_class_macro_def_from_expansion(expr_node, class_name, ivars, offset_ref, init_capture)
                   when CrystalV2::Compiler::Frontend::MacroIfNode
-                    process_macro_if_in_class(expr_node, class_name, ivars, offset_ref)
+                    process_macro_if_in_class(expr_node, class_name, ivars, offset_ref, init_capture)
                   when CrystalV2::Compiler::Frontend::MacroLiteralNode
-                    process_macro_literal_in_class(expr_node, class_name, ivars, offset_ref)
+                    process_macro_literal_in_class(expr_node, class_name, ivars, offset_ref, init_capture)
                   when CrystalV2::Compiler::Frontend::ClassNode
                     nested_name = String.new(expr_node.name)
                     full_nested_name = "#{class_name}::#{nested_name}"
@@ -11608,21 +11709,21 @@ module Crystal::HIR
 
       result = try_evaluate_macro_condition(node.condition)
       if result == true
-        process_macro_body_in_class(node.then_body, class_name, ivars, offset_ref)
+        process_macro_body_in_class(node.then_body, class_name, ivars, offset_ref, init_capture)
       elsif result == false
         if else_node = node.else_body
           else_ast = @arena[else_node]
           case else_ast
           when CrystalV2::Compiler::Frontend::MacroIfNode
-            process_macro_if_in_class(else_ast, class_name, ivars, offset_ref)
+            process_macro_if_in_class(else_ast, class_name, ivars, offset_ref, init_capture)
           else
-            process_macro_body_in_class(else_node, class_name, ivars, offset_ref)
+            process_macro_body_in_class(else_node, class_name, ivars, offset_ref, init_capture)
           end
         end
       else
-        process_macro_body_in_class(node.then_body, class_name, ivars, offset_ref)
+        process_macro_body_in_class(node.then_body, class_name, ivars, offset_ref, init_capture)
         if else_node = node.else_body
-          process_macro_body_in_class(else_node, class_name, ivars, offset_ref)
+          process_macro_body_in_class(else_node, class_name, ivars, offset_ref, init_capture)
         end
       end
     end
@@ -11632,6 +11733,7 @@ module Crystal::HIR
       class_name : String,
       ivars : Array(IVarInfo)? = nil,
       offset_ref : Pointer(Int32)? = nil,
+      init_capture : InitParamsCapture? = nil,
     )
       body_node = @arena[body_id]
       if filter = env_get("DEBUG_MACRO_LITERAL_CLASS")
@@ -11641,13 +11743,13 @@ module Crystal::HIR
       end
       case body_node
       when CrystalV2::Compiler::Frontend::MacroLiteralNode
-        process_macro_literal_in_class(body_node, class_name, ivars, offset_ref)
+        process_macro_literal_in_class(body_node, class_name, ivars, offset_ref, init_capture)
       when CrystalV2::Compiler::Frontend::DefNode
-        register_type_method_from_def(body_node, class_name)
+        register_class_macro_def_from_expansion(body_node, class_name, ivars, offset_ref, init_capture)
       when CrystalV2::Compiler::Frontend::MacroIfNode
-        process_macro_if_in_class(body_node, class_name, ivars, offset_ref)
+        process_macro_if_in_class(body_node, class_name, ivars, offset_ref, init_capture)
       when CrystalV2::Compiler::Frontend::MacroForNode
-        process_macro_for_in_class(body_node, class_name, ivars, offset_ref)
+        process_macro_for_in_class(body_node, class_name, ivars, offset_ref, init_capture)
       when CrystalV2::Compiler::Frontend::GetterNode
         register_accessors_in_class(body_node, class_name, ivars, offset_ref)
       when CrystalV2::Compiler::Frontend::SetterNode
@@ -11669,6 +11771,7 @@ module Crystal::HIR
       class_name : String,
       ivars : Array(IVarInfo)? = nil,
       offset_ref : Pointer(Int32)? = nil,
+      init_capture : InitParamsCapture? = nil,
     )
       if raw_text = macro_literal_raw_text(node)
         if filter = env_get("DEBUG_MACRO_LITERAL_CLASS")
@@ -11702,13 +11805,13 @@ module Crystal::HIR
               expr_node = @arena[expr_id]
               case expr_node
               when CrystalV2::Compiler::Frontend::DefNode
-                register_type_method_from_def(expr_node, class_name)
+                register_class_macro_def_from_expansion(expr_node, class_name, ivars, offset_ref, init_capture)
               when CrystalV2::Compiler::Frontend::MacroIfNode
-                process_macro_if_in_class(expr_node, class_name, ivars, offset_ref)
+                process_macro_if_in_class(expr_node, class_name, ivars, offset_ref, init_capture)
               when CrystalV2::Compiler::Frontend::MacroForNode
-                process_macro_for_in_class(expr_node, class_name, ivars, offset_ref)
+                process_macro_for_in_class(expr_node, class_name, ivars, offset_ref, init_capture)
               when CrystalV2::Compiler::Frontend::MacroLiteralNode
-                process_macro_literal_in_class(expr_node, class_name, ivars, offset_ref)
+                process_macro_literal_in_class(expr_node, class_name, ivars, offset_ref, init_capture)
               when CrystalV2::Compiler::Frontend::GetterNode
                 register_accessors_in_class(expr_node, class_name, ivars, offset_ref)
               when CrystalV2::Compiler::Frontend::SetterNode
@@ -11743,13 +11846,13 @@ module Crystal::HIR
             expr_node = @arena[expr_id]
             case expr_node
             when CrystalV2::Compiler::Frontend::DefNode
-              register_type_method_from_def(expr_node, class_name)
+              register_class_macro_def_from_expansion(expr_node, class_name, ivars, offset_ref, init_capture)
             when CrystalV2::Compiler::Frontend::MacroIfNode
-              process_macro_if_in_class(expr_node, class_name, ivars, offset_ref)
+              process_macro_if_in_class(expr_node, class_name, ivars, offset_ref, init_capture)
             when CrystalV2::Compiler::Frontend::MacroForNode
-              process_macro_for_in_class(expr_node, class_name, ivars, offset_ref)
+              process_macro_for_in_class(expr_node, class_name, ivars, offset_ref, init_capture)
             when CrystalV2::Compiler::Frontend::MacroLiteralNode
-              process_macro_literal_in_class(expr_node, class_name, ivars, offset_ref)
+              process_macro_literal_in_class(expr_node, class_name, ivars, offset_ref, init_capture)
             when CrystalV2::Compiler::Frontend::ClassNode
               nested_name = String.new(expr_node.name)
               full_nested_name = "#{class_name}::#{nested_name}"
@@ -11797,13 +11900,13 @@ module Crystal::HIR
               expr_node = @arena[expr_id]
               case expr_node
               when CrystalV2::Compiler::Frontend::DefNode
-                register_type_method_from_def(expr_node, class_name)
+                register_class_macro_def_from_expansion(expr_node, class_name, ivars, offset_ref, init_capture)
               when CrystalV2::Compiler::Frontend::MacroIfNode
-                process_macro_if_in_class(expr_node, class_name, ivars, offset_ref)
+                process_macro_if_in_class(expr_node, class_name, ivars, offset_ref, init_capture)
               when CrystalV2::Compiler::Frontend::MacroForNode
-                process_macro_for_in_class(expr_node, class_name, ivars, offset_ref)
+                process_macro_for_in_class(expr_node, class_name, ivars, offset_ref, init_capture)
               when CrystalV2::Compiler::Frontend::MacroLiteralNode
-                process_macro_literal_in_class(expr_node, class_name, ivars, offset_ref)
+                process_macro_literal_in_class(expr_node, class_name, ivars, offset_ref, init_capture)
               when CrystalV2::Compiler::Frontend::ClassNode
                 nested_name = String.new(expr_node.name)
                 full_nested_name = "#{class_name}::#{nested_name}"
@@ -11835,6 +11938,7 @@ module Crystal::HIR
       class_name : String,
       ivars : Array(IVarInfo)? = nil,
       offset_ref : Pointer(Int32)? = nil,
+      init_capture : InitParamsCapture? = nil,
     )
       iter_vars = node.iter_vars.map { |name| String.new(name) }
       return if iter_vars.empty?
@@ -11872,13 +11976,13 @@ module Crystal::HIR
             expr_node = @arena[expr_id]
             case expr_node
             when CrystalV2::Compiler::Frontend::DefNode
-              register_type_method_from_def(expr_node, class_name)
+              register_class_macro_def_from_expansion(expr_node, class_name, ivars, offset_ref, init_capture)
             when CrystalV2::Compiler::Frontend::MacroIfNode
-              process_macro_if_in_class(expr_node, class_name, ivars, offset_ref)
+              process_macro_if_in_class(expr_node, class_name, ivars, offset_ref, init_capture)
             when CrystalV2::Compiler::Frontend::MacroForNode
-              process_macro_for_in_class(expr_node, class_name, ivars, offset_ref)
+              process_macro_for_in_class(expr_node, class_name, ivars, offset_ref, init_capture)
             when CrystalV2::Compiler::Frontend::MacroLiteralNode
-              process_macro_literal_in_class(expr_node, class_name, ivars, offset_ref)
+              process_macro_literal_in_class(expr_node, class_name, ivars, offset_ref, init_capture)
             when CrystalV2::Compiler::Frontend::ClassNode
               nested_name = String.new(expr_node.name)
               full_nested_name = "#{class_name}::#{nested_name}"
@@ -13019,7 +13123,6 @@ module Crystal::HIR
       full_name = full_name_override || function_full_name_for_def(base_name, param_types, node.params, has_block)
 
       register_pending_method_effects(full_name, param_types.size)
-
       func = @module.create_function(full_name, return_type)
       ctx = LoweringContext.new(func, @module, @arena)
       if ctx.lookup_local("self").nil? && func.name.includes?('#')
@@ -13178,14 +13281,20 @@ module Crystal::HIR
         if inferred_types.any?
           inferred_type = merge_return_types(inferred_types)
           if inferred_type && inferred_type != TypeRef::VOID && inferred_type != return_type
-            return_type = inferred_type
-            func.return_type = inferred_type
+            # Keep nilable query signatures stable (e.g. []? : Nil | V). Body-based
+            # inference for generic helpers may collapse to scalar payload types.
+            preserve_nilable_query = NILABLE_QUERY_METHODS.includes?(method_name) &&
+                                     is_union_or_nilable_type?(return_type) &&
+                                     !is_union_or_nilable_type?(inferred_type)
+            unless preserve_nilable_query
+              return_type = inferred_type
+              func.return_type = inferred_type
+            end
           end
         end
       end
 
       register_function_type(full_name, return_type)
-
       @current_typeof_locals = old_typeof_locals
       @current_typeof_local_names = old_typeof_local_names
 
@@ -13836,11 +13945,11 @@ module Crystal::HIR
                 end
               end
             when CrystalV2::Compiler::Frontend::MacroIfNode
-              process_macro_if_in_class(member, class_name, ivars, pointerof(offset))
+              process_macro_if_in_class(member, class_name, ivars, pointerof(offset), init_capture)
             when CrystalV2::Compiler::Frontend::MacroForNode
-              process_macro_for_in_class(member, class_name, ivars, pointerof(offset))
+              process_macro_for_in_class(member, class_name, ivars, pointerof(offset), init_capture)
             when CrystalV2::Compiler::Frontend::MacroLiteralNode
-              process_macro_literal_in_class(member, class_name, ivars, pointerof(offset))
+              process_macro_literal_in_class(member, class_name, ivars, pointerof(offset), init_capture)
             when CrystalV2::Compiler::Frontend::CallNode
               callee = @arena[member.callee]
               if callee.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode)
@@ -16995,7 +17104,7 @@ module Crystal::HIR
                           type_ref_for_name(rt_name)
                         end
                       elsif method_name.ends_with?('?')
-                        inferred = infer_unannotated_query_return_type(method_name, class_info.type_ref)
+                        inferred = infer_query_return_type_for_owner(method_name, class_name, class_info.type_ref)
                         inferred ||= infer_concrete_return_type_from_body(node, class_name)
                         inferred || fallback_query_return_type(method_name)
                       else
@@ -17019,7 +17128,7 @@ module Crystal::HIR
                             type_ref_for_name(rt_name)
                           end
                         elsif method_name.ends_with?('?')
-                          inferred = infer_unannotated_query_return_type(method_name, class_info.type_ref)
+                          inferred = infer_query_return_type_for_owner(method_name, class_name, class_info.type_ref)
                           inferred || fallback_query_return_type(method_name)
                         else
                           # Try to infer return type from getter-style methods (single ivar access)
@@ -17044,7 +17153,6 @@ module Crystal::HIR
 
       register_pending_method_effects(full_name, param_types.size)
       register_function_type(full_name, return_type)
-
       if debug_env_filter_match?("DEBUG_FROM_CHARS", base_name, full_name)
         STDERR.puts "[LOWER_METHOD] base_name=#{base_name}, full_name=#{full_name}, param_types=#{param_types.map(&.to_s)}, override=#{full_name_override}"
         STDERR.flush
@@ -17330,15 +17438,21 @@ module Crystal::HIR
         if inferred_types.any?
           inferred_type = merge_return_types(inferred_types)
           if inferred_type && inferred_type != TypeRef::VOID && inferred_type != return_type
-            return_type = inferred_type
-            func.return_type = inferred_type
+            # Keep nilable query signatures stable (e.g. []? : Nil | V). Body-based
+            # inference for generic helpers may collapse to scalar payload types.
+            preserve_nilable_query = NILABLE_QUERY_METHODS.includes?(method_name) &&
+                                     is_union_or_nilable_type?(return_type) &&
+                                     !is_union_or_nilable_type?(inferred_type)
+            unless preserve_nilable_query
+              return_type = inferred_type
+              func.return_type = inferred_type
+            end
           end
         end
       end
 
       # Ensure the return type map matches the lowered function.
       register_function_type(full_name, return_type)
-
       # Add implicit return if not already terminated
       # BUT don't add return after raise (which sets Unreachable terminator)
       block = ctx.get_block(ctx.current_block)
@@ -18057,6 +18171,8 @@ module Crystal::HIR
         lower_primitive_pointer_realloc(ctx, receiver_id, args)
       when "pointer_diff"
         lower_primitive_pointer_diff(ctx, receiver_id, args, mangled_name)
+      when "fiber_swapcontext"
+        lower_primitive_fiber_swapcontext(ctx, args)
       when "object_crystal_type_id"
         lower_primitive_crystal_type_id(ctx, receiver_id)
       when "object_id"
@@ -18127,6 +18243,17 @@ module Crystal::HIR
       ctx.emit(cast)
       ctx.register_type(cast.id, target)
       cast.id
+    end
+
+    private def lower_primitive_fiber_swapcontext(
+      ctx : LoweringContext,
+      args : Array(ValueId),
+    ) : ValueId?
+      return nil unless args.size == 2
+      call = ExternCall.new(ctx.next_id, TypeRef::VOID, "__crystal_v2_fiber_swapcontext", args)
+      ctx.emit(call)
+      ctx.register_type(call.id, TypeRef::VOID)
+      call.id
     end
 
     private def type_ref_for_conversion_method(method_name : String) : TypeRef?
@@ -22616,6 +22743,49 @@ module Crystal::HIR
       end
     end
 
+    private def inferred_nilable_query_return_for_function(name : String, base_name : String) : TypeRef?
+      query_name =
+        if name.ends_with?('?')
+          name
+        elsif base_name.ends_with?('?')
+          base_name
+        else
+          nil
+        end
+      return nil unless query_name
+
+      receiver_name = nil.as(String?)
+      method_name = nil.as(String?)
+      if idx = query_name.rindex('#')
+        receiver_name = query_name[0, idx]
+        method_name = query_name[(idx + 1)..]
+      elsif idx = query_name.rindex('.')
+        receiver_name = query_name[0, idx]
+        method_name = query_name[(idx + 1)..]
+      end
+      return nil unless receiver_name && method_name
+
+      normalized_method = strip_type_suffix(method_name)
+      # Overload-sensitive []? signature (e.g. []?$Int32_Int32):
+      # skip structural fallback without callsite context.
+      if normalized_method == "[]?" && normalized_method != method_name
+        return nil
+      end
+      return nil unless NILABLE_QUERY_METHODS.includes?(normalized_method)
+
+      receiver_ref = type_ref_for_name(receiver_name)
+      return nil if receiver_ref == TypeRef::VOID
+
+      infer_unannotated_query_return_type(normalized_method, receiver_ref)
+    end
+
+    private def should_replace_with_query_inferred_return?(current_type : TypeRef, inferred_type : TypeRef) : Bool
+      return true if current_type == TypeRef::VOID || current_type == TypeRef::NIL || current_type == TypeRef::BOOL
+      return false if current_type == inferred_type
+      return true if is_union_or_nilable_type?(inferred_type) && !is_union_or_nilable_type?(current_type)
+      false
+    end
+
     # Look up return type of a function by name
     private def get_function_return_type(name : String) : TypeRef
       base_name = strip_type_suffix(name)
@@ -22925,23 +23095,11 @@ module Crystal::HIR
             end
           end
         end
-        if type == TypeRef::BOOL && name.ends_with?('?')
-          receiver_name = nil.as(String?)
-          method_name = nil.as(String?)
-          if idx = name.rindex('#')
-            receiver_name = name[0, idx]
-            method_name = name[(idx + 1)..]
-          elsif idx = name.rindex('.')
-            receiver_name = name[0, idx]
-            method_name = name[(idx + 1)..]
-          end
-          if receiver_name && method_name && NILABLE_QUERY_METHODS.includes?(method_name)
-            receiver_ref = type_ref_for_name(receiver_name)
-            if receiver_ref != TypeRef::VOID
-              if inferred = infer_unannotated_query_return_type(method_name, receiver_ref)
-                return inferred
-              end
-            end
+        if inferred = inferred_nilable_query_return_for_function(name, base_name)
+          if should_replace_with_query_inferred_return?(type, inferred)
+            @function_types[name] = inferred
+            @function_base_return_types[base_name] = inferred unless base_name.includes?('$')
+            return inferred
           end
         end
         # Special case: X#to_s with no args should return String, not Nil
@@ -22974,24 +23132,8 @@ module Crystal::HIR
       if cached = @function_base_return_types[base_name]?
         return cached
       end
-      if name.ends_with?('?')
-        receiver_name = nil.as(String?)
-        method_name = nil.as(String?)
-        if idx = name.rindex('#')
-          receiver_name = name[0, idx]
-          method_name = name[(idx + 1)..]
-        elsif idx = name.rindex('.')
-          receiver_name = name[0, idx]
-          method_name = name[(idx + 1)..]
-        end
-        if receiver_name && method_name && NILABLE_QUERY_METHODS.includes?(method_name)
-          receiver_ref = type_ref_for_name(receiver_name)
-          if receiver_ref != TypeRef::VOID
-            if inferred = infer_unannotated_query_return_type(method_name, receiver_ref)
-              return inferred
-            end
-          end
-        end
+      if inferred = inferred_nilable_query_return_for_function(name, base_name)
+        return inferred
       end
       # Fall back to already-lowered functions
       if func = @module.function_by_name(name)
@@ -43370,21 +43512,9 @@ module Crystal::HIR
         # must also use the union type. Without this, `if val = h[key]?` treats val as
         # the raw value type (always truthy) instead of Nil | V (properly nilable).
         recv_type_for_infer = ctx.type_of(receiver_id)
-        recv_desc_for_infer = @module.get_type_descriptor(recv_type_for_infer)
-        # Only apply nilable inference for Hash receivers (which have LLVM override)
-        # and when return type is not already nilable/bool
-        is_hash_receiver = recv_desc_for_infer && recv_desc_for_infer.kind == TypeKind::Hash
-        should_infer_nilable = if is_hash_receiver && method_name == "[]?"
-                                 true
-                               else
-                                 (return_type == TypeRef::BOOL ||
-                                   return_type == TypeRef::VOID ||
-                                   return_type == TypeRef::NIL) &&
-                                   NILABLE_QUERY_METHODS.includes?(method_name)
-                               end
-        if should_infer_nilable
+        if should_apply_nilable_query_fallback?(method_name, return_type, callsite_arg_types.size)
           if inferred = infer_unannotated_query_return_type(method_name, recv_type_for_infer)
-            return_type = inferred
+            return_type = inferred unless inferred == TypeRef::VOID
           end
         end
       end
@@ -52027,10 +52157,9 @@ module Crystal::HIR
           end
         end
       end
-      if member_name.ends_with?('?') &&
-         (return_type == TypeRef::BOOL || return_type == TypeRef::VOID || return_type == TypeRef::NIL)
+      if should_apply_nilable_query_fallback?(member_name, return_type, 0)
         if inferred = infer_unannotated_query_return_type(member_name, ctx.type_of(object_id))
-          return_type = inferred
+          return_type = inferred unless inferred == TypeRef::VOID
         end
       end
 
@@ -52357,6 +52486,11 @@ module Crystal::HIR
       args = coerce_args_to_param_types(ctx, args, actual_name)
       if debug_env_filter_match?("DEBUG_CALL_TRACE", member_name, actual_name, primary_name)
         STDERR.puts "[CALL_TRACE] stage=before_emit method=#{member_name} actual=#{actual_name} args=#{args.size}"
+      end
+      if should_apply_nilable_query_fallback?(member_name, return_type, args.size)
+        if inferred = infer_unannotated_query_return_type(member_name, ctx.type_of(object_id))
+          return_type = inferred unless inferred == TypeRef::VOID
+        end
       end
       if debug_env_filter_match?("DEBUG_MEMBER_CALL", member_name, actual_name)
         STDERR.puts "[MEMBER_CALL] name=#{actual_name} return_id=#{return_type.id} return=#{get_type_name_from_ref(return_type)}"

@@ -25,6 +25,30 @@
 - Float64: arithmetic, ** on literals
 
 ## Recently completed
+- **Fiber context path stabilized via primitive lowering + class-macro init capture** (2026-02-15) —
+  fixed invalid scheduler/runtime path where `Fiber.swapcontext` asm in stdlib
+  was not reliably lowered and class macro-expanded `initialize` overloads could
+  drop proc-bearing init params.
+  Changes:
+  - `src/stdlib/fiber/context/aarch64-generic.cr`
+  - `src/stdlib/fiber/context/x86_64-sysv.cr`
+    - replaced inline asm bodies with `@[Primitive(:fiber_swapcontext)]` entrypoint.
+  - `src/compiler/hir/ast_to_hir.cr`
+    - added primitive lowering for `fiber_swapcontext` to
+      `__crystal_v2_fiber_swapcontext`;
+    - propagated `init_capture` through class macro expansion paths and
+      registration helpers so macro-expanded `initialize` keeps correct params.
+  - `src/compiler/mir/llvm_backend.cr`
+    - added runtime helper emission for `__crystal_v2_fiber_swapcontext`
+      (AArch64 + x86_64 variants).
+  Validation:
+  - `crystal build src/main.cr -o bin/crystal_v2` => `EXIT 0`
+  - `CRYSTAL_V2_PIPELINE_CACHE=0 ./bin/crystal_v2 --emit llvm-ir --no-ast-cache --no-llvm-cache regression_tests/test_case_in_predicate_subject.cr -o /tmp/test_case_pred_fiber_commit` => `EXIT 0`
+  - `/tmp/test_case_pred_fiber_commit.ll` contains:
+    - `define void @__crystal_v2_fiber_swapcontext(...)`
+    - `call void @__crystal_v2_fiber_swapcontext(...)`
+  - `CRYSTAL_V2_PIPELINE_CACHE=0 ./bin/crystal_v2 --no-ast-cache --no-llvm-cache regression_tests/test_case_in_predicate_subject.cr -o /tmp/test_case_pred_fiber_commit_bin` => `EXIT 0`
+  - `scripts/run_safe.sh /tmp/test_case_pred_fiber_commit_bin 10 512` => `EXIT 0`
 - **MIR: stabilized Proc accessor lowering to unblock fiber context setup** (2026-02-15) —
   fixed runtime `segfault` in `regression_tests/test_case_in_predicate_subject.cr`
   after enabling primitive `fiber_swapcontext`.

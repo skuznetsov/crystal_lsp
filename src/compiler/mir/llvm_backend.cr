@@ -1744,6 +1744,17 @@ module Crystal::MIR
       emit_raw "  ret ptr %ptr\n"
       emit_raw "}\n\n"
 
+      # Fiber context switch runtime helper used by @[Primitive(:fiber_swapcontext)].
+      emit_raw "define void @__crystal_v2_fiber_swapcontext(ptr %current_context, ptr %new_context) {\n"
+      emit_raw "entry:\n"
+      if @target_triple.includes?("arm64") || @target_triple.includes?("aarch64")
+        emit_raw "  call void asm sideeffect \"stp d15, d14, [sp, #-22*8]!\\0Astp d13, d12, [sp, #2*8]\\0Astp d11, d10, [sp, #4*8]\\0Astp d9, d8, [sp, #6*8]\\0Astp x30, x29, [sp, #8*8]\\0Astp x28, x27, [sp, #10*8]\\0Astp x26, x25, [sp, #12*8]\\0Astp x24, x23, [sp, #14*8]\\0Astp x22, x21, [sp, #16*8]\\0Astp x20, x19, [sp, #18*8]\\0Astp $0, $1, [sp, #20*8]\\0Amov x19, sp\\0Astr x19, [$0, #0]\\0Admb ish\\0Amov x19, #1\\0Astr x19, [$0, #8]\\0Amov x19, #0\\0Astr x19, [$1, #8]\\0Aldr x19, [$1, #0]\\0Amov sp, x19\\0Aldp x0, x1, [sp, #20*8]\\0Aldp x20, x19, [sp, #18*8]\\0Aldp x22, x21, [sp, #16*8]\\0Aldp x24, x23, [sp, #14*8]\\0Aldp x26, x25, [sp, #12*8]\\0Aldp x28, x27, [sp, #10*8]\\0Aldp x30, x29, [sp, #8*8]\\0Aldp d9, d8, [sp, #6*8]\\0Aldp d11, d10, [sp, #4*8]\\0Aldp d13, d12, [sp, #2*8]\\0Aldp d15, d14, [sp], #22*8\\0Amov x16, x30\\0Amov x30, #0\\0Abr x16\", \"r,r,~{x0},~{x1},~{x16},~{x19},~{x20},~{x21},~{x22},~{x23},~{x24},~{x25},~{x26},~{x27},~{x28},~{x29},~{x30},~{d8},~{d9},~{d10},~{d11},~{d12},~{d13},~{d14},~{d15},~{memory},~{dirflag},~{fpsr},~{flags}\"(ptr %current_context, ptr %new_context)\n"
+      elsif @target_triple.includes?("x86_64")
+        emit_raw "  call void asm sideeffect \"pushq %rdi\\0Apushq %rbx\\0Apushq %rbp\\0Apushq %r12\\0Apushq %r13\\0Apushq %r14\\0Apushq %r15\\0Amovq %rsp, 0($0)\\0Amovl $$1, 8($0)\\0Amovl $$0, 8($1)\\0Amovq 0($1), %rsp\\0Apopq %r15\\0Apopq %r14\\0Apopq %r13\\0Apopq %r12\\0Apopq %rbp\\0Apopq %rbx\\0Apopq %rdi\", \"r,r,~{rdi},~{rbx},~{rbp},~{r12},~{r13},~{r14},~{r15},~{memory},~{dirflag},~{fpsr},~{flags}\"(ptr %current_context, ptr %new_context)\n"
+      end
+      emit_raw "  ret void\n"
+      emit_raw "}\n\n"
+
       emit_raw "define ptr @__crystal_malloc_atomic64(i64 %size) {\n"
       emit_raw "  %ptr = call ptr @malloc(i64 %size)\n"
       emit_raw "  ret ptr %ptr\n"
