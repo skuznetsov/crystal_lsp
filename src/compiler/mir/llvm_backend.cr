@@ -1703,16 +1703,19 @@ module Crystal::MIR
 
     private def emit_union_type(type : Type, payload_size : UInt64? = nil)
       name = @type_mapper.mangle_name(type.name)
-      # Union = { i32 discriminator, [payload_bytes x i8] data }
-      # Use type.size (total_size from MIR, which includes alignment padding)
-      # minus 4 (discriminator) to get the payload array size.
-      # This ensures the LLVM struct size matches the MIR total_size used for byte offsets.
+      # Union = { i32 discriminator, [N x i32] data }
+      # Use i32 elements instead of i8 to prevent LLVM's ARM64 ABI lowering from
+      # decomposing the payload into individual byte arguments when passed by value.
+      # With [N x i8], a 24-byte union gets decomposed into 20 separate i8 register
+      # args, corrupting pointer values. With [N x i32], it stays as a few i32 args.
       if type.size > 4
         payload_bytes = type.size - 4
       else
         payload_bytes = payload_size || type.variants.try(&.map(&.size).max) || 8_u64
       end
-      emit_raw "%#{name}.union = type { i32, [#{payload_bytes} x i8] }\n"
+      # Round up to multiple of 4 bytes for i32 element array
+      payload_i32s = (payload_bytes + 3) // 4
+      emit_raw "%#{name}.union = type { i32, [#{payload_i32s} x i32] }\n"
     end
 
     private def emit_runtime_declarations
@@ -4849,6 +4852,12 @@ module Crystal::MIR
           @value_names[inst.id] = "r#{inst.id}"
           type = @type_mapper.llvm_alloca_type(inst.alloc_type)
           type = "i8" if type == "void"
+          # When LLVM type is just 'ptr' (8 bytes) but MIR needs more space
+          # (e.g. Tuples containing union elements), use a byte array alloca
+          # to ensure sufficient storage for discriminated union stores.
+          if type == "ptr" && inst.size > 8
+            type = "[#{inst.size} x i8]"
+          end
           emit_raw "  #{name} = alloca #{type}, align #{inst.align}\n"
           @emitted_allocas << inst.id
           @value_types[inst.id] = TypeRef::POINTER
@@ -6103,21 +6112,30 @@ module Crystal::MIR
         # Get the original value reference
         val_ref = value_ref(val_id)
 
-        # Emit the appropriate conversion instruction
-        if from_bits < to_bits
-          # Widening: use sext for signed, zext for unsigned
-          # Check if the type is signed based on @value_types
+        # Check actual emitted type — value_ref may have already cast from slot type
+        actual_type = @emitted_value_types[val_ref]?
+        actual_bits = if actual_type && actual_type.starts_with?('i') && !actual_type.includes?('.')
+                        actual_type[1..].to_i? || from_bits
+                      else
+                        from_bits
+                      end
+
+        # Skip conversion if value already has the target type
+        if actual_bits == to_bits
+          emit "%#{conv_name} = add i#{to_bits} #{val_ref}, 0"
+        elsif actual_bits < to_bits
+          # Widening from actual type
           val_type = @value_types[val_id]?
           is_signed = val_type && (val_type == TypeRef::INT8 || val_type == TypeRef::INT16 ||
                                    val_type == TypeRef::INT32 || val_type == TypeRef::INT64)
           if is_signed
-            emit "%#{conv_name} = sext i#{from_bits} #{val_ref} to i#{to_bits}"
+            emit "%#{conv_name} = sext i#{actual_bits} #{val_ref} to i#{to_bits}"
           else
-            emit "%#{conv_name} = zext i#{from_bits} #{val_ref} to i#{to_bits}"
+            emit "%#{conv_name} = zext i#{actual_bits} #{val_ref} to i#{to_bits}"
           end
         else
           # Narrowing: use trunc
-          emit "%#{conv_name} = trunc i#{from_bits} #{val_ref} to i#{to_bits}"
+          emit "%#{conv_name} = trunc i#{actual_bits} #{val_ref} to i#{to_bits}"
         end
       end
     end
@@ -6406,7 +6424,15 @@ module Crystal::MIR
       store_type = llvm_type
       if slot_llvm_type && slot_llvm_type != llvm_type
         base = name.lstrip('%')
-        if slot_llvm_type.includes?(".union") && !llvm_type.includes?(".union")
+        if slot_llvm_type.includes?(".union") && llvm_type.includes?(".union")
+          # Union-to-union reinterpretation: both are unions but different named types.
+          # Use alloca + store + load to reinterpret through memory.
+          emit "%#{base}.u2u.slot.alloca = alloca #{slot_llvm_type}, align 8"
+          emit "store #{llvm_type} #{name}, ptr %#{base}.u2u.slot.alloca"
+          emit "%#{base}.u2u.slot.val = load #{slot_llvm_type}, ptr %#{base}.u2u.slot.alloca"
+          store_val = "%#{base}.u2u.slot.val"
+          store_type = slot_llvm_type
+        elsif slot_llvm_type.includes?(".union") && !llvm_type.includes?(".union")
           emit "%#{base}.slot_wrap_ptr = alloca #{slot_llvm_type}, align 8"
           emit "store #{slot_llvm_type} zeroinitializer, ptr %#{base}.slot_wrap_ptr"
           emit "%#{base}.slot_wrap_tid = getelementptr #{slot_llvm_type}, ptr %#{base}.slot_wrap_ptr, i32 0, i32 0"
@@ -6582,6 +6608,10 @@ module Crystal::MIR
         type = @type_mapper.llvm_alloca_type(inst.alloc_type)
         # Guard against void type - use i8 for minimal allocation
         type = "i8" if type == "void"
+        # When LLVM type is just 'ptr' but MIR needs more space, use byte array
+        if type == "ptr" && inst.size > 8
+          type = "[#{inst.size} x i8]"
+        end
         emit "#{name} = alloca #{type}, align #{inst.align}"
       when MemoryStrategy::Slab
         size_class = compute_size_class(inst.size)
@@ -9013,14 +9043,29 @@ module Crystal::MIR
       # Check if we already emitted this function with a DIFFERENT return type
       # (e.g., []? override returns union but MIR callee says i32)
       emitted_ret = @emitted_function_return_types[callee_name]?
+      needs_ptr_to_union_wrap = false
+      ptr_to_union_target_type = ""
       return_type = if emitted_ret && emitted_ret != "void"
                       # Use the ACTUAL emitted function's return type for ABI correctness
                       emitted_ret
                     elsif callee_func
                       callee_ret = @type_mapper.llvm_type(callee_func.return_type)
-                      # If inst.type is a union (nilable) but callee says non-union,
-                      # use inst.type — the HIR correctly typed this as nilable
-                      if inst_return_type.includes?(".union") && !callee_ret.includes?(".union")
+                      # If inst.type is a union (nilable) but callee returns ptr (not union),
+                      # use callee's actual return type for ABI correctness, then wrap the
+                      # ptr result into a union struct after the call. Using the union type
+                      # directly would cause an LLVM IR type mismatch (function returns ptr
+                      # but call declares union struct return).
+                      if inst_return_type.includes?(".union") && callee_ret == "ptr" && inst_return_type.includes?("Nil")
+                        # Callee returns ptr (nullable reference) but caller expects Nil|X union.
+                        # Only apply for nilable unions (Nil | X) where null ptr = nil.
+                        # Use ptr for the call, then wrap into union after.
+                        needs_ptr_to_union_wrap = true
+                        ptr_to_union_target_type = inst_return_type
+                        callee_ret
+                      elsif inst_return_type.includes?(".union") && !callee_ret.includes?(".union")
+                        # Non-ptr, non-union callee return (e.g., i32) but caller expects union.
+                        # Use inst type — the function may actually return a union that the type
+                        # mapper doesn't recognize as such.
                         inst_return_type
                       # Prefer inst.type when callee returns void but MIR expects a value
                       elsif callee_ret == "void" && inst_return_type != "void"
@@ -9050,6 +9095,10 @@ module Crystal::MIR
             # then extract the payload to the desired type after the call.
             needs_union_abi_fix = true
             union_abi_desired_type = prepass_llvm_type
+          elsif needs_ptr_to_union_wrap
+            # Don't let prepass override return_type back to union — we need to use
+            # the callee's actual return type (ptr) for ABI correctness, then wrap.
+            # Keep return_type as ptr; the wrapping will produce the union type.
           else
             return_type = prepass_llvm_type
           end
@@ -9562,6 +9611,29 @@ module Crystal::MIR
         emit "call void @#{callee_name}(#{args})"
         # Mark as void so value_ref returns a safe default for downstream uses
         @void_values << inst.id
+      elsif needs_ptr_to_union_wrap
+        # ABI fix: callee returns ptr but caller expects union struct.
+        # For nilable reference types, the callee uses ptr (null = nil, non-null = value)
+        # but downstream code expects a union struct {i32 type_id, [N x i32] payload}.
+        # Emit call with ptr return, then wrap into union.
+        @value_names[inst.id] ||= "r#{inst.id}"
+        c = @cond_counter
+        @cond_counter += 1
+        call_reg = "%ptr2union.#{c}.raw"
+        emit "#{call_reg} = call #{return_type} @#{callee_name}(#{args})"
+        record_emitted_type(call_reg, return_type)
+        emit "%ptr2union.#{c}.alloca = alloca #{ptr_to_union_target_type}, align 8"
+        emit "store #{ptr_to_union_target_type} zeroinitializer, ptr %ptr2union.#{c}.alloca"
+        # Determine type_id: 0 = nil (ptr is null), 1 = non-nil
+        emit "%ptr2union.#{c}.is_nil = icmp eq ptr #{call_reg}, null"
+        emit "%ptr2union.#{c}.tid = select i1 %ptr2union.#{c}.is_nil, i32 0, i32 1"
+        emit "%ptr2union.#{c}.tid_ptr = getelementptr #{ptr_to_union_target_type}, ptr %ptr2union.#{c}.alloca, i32 0, i32 0"
+        emit "store i32 %ptr2union.#{c}.tid, ptr %ptr2union.#{c}.tid_ptr"
+        emit "%ptr2union.#{c}.pay_ptr = getelementptr #{ptr_to_union_target_type}, ptr %ptr2union.#{c}.alloca, i32 0, i32 1"
+        emit "store ptr #{call_reg}, ptr %ptr2union.#{c}.pay_ptr, align 4"
+        emit "#{name} = load #{ptr_to_union_target_type}, ptr %ptr2union.#{c}.alloca"
+        record_emitted_type(name, ptr_to_union_target_type)
+        @value_types[inst.id] = inst.type
       elsif needs_union_abi_fix
         # Ensure value_names is registered (may have been skipped if prepass wrongly marked void)
         @value_names[inst.id] ||= "r#{inst.id}"
@@ -11004,7 +11076,18 @@ module Crystal::MIR
         array_llvm_type = @type_mapper.llvm_type(array_value_type)
         actual_val_type = lookup_value_llvm_type(inst.array_value, "")
         if array_llvm_type.includes?(".union")
-          # Extract pointer from union payload
+          # Check if the union's non-nil variant is a tuple (value type stored inline)
+          # vs an array/class (reference type stored as pointer in payload).
+          # Tuples are stored inline in the union payload, so we must NOT dereference
+          # through the payload — the payload_ptr IS the pointer to the tuple data.
+          union_has_tuple_variant = false
+          if union_desc = @module.get_union_descriptor(array_value_type)
+            if union_desc.variants.any? { |v| (t = @module.type_registry.get(v.type_ref)) && t.kind.tuple? }
+              union_has_tuple_variant = true
+            end
+          end
+
+          # Extract value from union payload
           emit "%#{base_name}.union_ptr = alloca #{array_llvm_type}, align 8"
           union_val = array_ptr
           actual_val_type = lookup_value_llvm_type(inst.array_value, "")
@@ -11014,8 +11097,17 @@ module Crystal::MIR
           end
           emit "store #{array_llvm_type} #{normalize_union_value(union_val, array_llvm_type)}, ptr %#{base_name}.union_ptr"
           emit "%#{base_name}.payload_ptr = getelementptr #{array_llvm_type}, ptr %#{base_name}.union_ptr, i32 0, i32 1"
-          emit "%#{base_name}.arr_ptr = load ptr, ptr %#{base_name}.payload_ptr, align 4"
-          array_ptr = "%#{base_name}.arr_ptr"
+
+          if union_has_tuple_variant
+            # Tuple data is stored inline in the union payload — the payload_ptr
+            # IS the pointer to the tuple struct. No extra load needed.
+            array_ptr = "%#{base_name}.payload_ptr"
+          else
+            # Array/class values are reference types — the payload holds a pointer
+            # to the heap-allocated object. Load the pointer.
+            emit "%#{base_name}.arr_ptr = load ptr, ptr %#{base_name}.payload_ptr, align 4"
+            array_ptr = "%#{base_name}.arr_ptr"
+          end
         elsif array_llvm_type != "ptr" && !array_llvm_type.starts_with?('%') && !array_llvm_type.starts_with?('[') && actual_val_type != "ptr"
           # Non-ptr, non-struct type (e.g., i1, i32) - this is a MIR type inference issue
           # Use inttoptr conversion as fallback
