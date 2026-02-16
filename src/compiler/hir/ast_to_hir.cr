@@ -2031,6 +2031,10 @@ module Crystal::HIR
     @proc_function_counter : Int32 = 0
     # Track captured values for proc closures: FuncPointer ValueId → Array of parent ValueIds
     @proc_captures_by_value = {} of ValueId => Array(ValueId)
+    # Closure by-reference cells: var_name → {classvar_class, classvar_name, type}
+    # When set, reads/writes to this var go through ClassVarGet/ClassVarSet (global cell)
+    @closure_ref_cells = {} of String => {String, String, TypeRef}
+    @closure_cell_counter : Int32 = 0
 
     # Inline return handling for yield-function inlining.
     class InlineReturnContext
@@ -12646,6 +12650,8 @@ module Crystal::HIR
       # Enum value tracking is per-function; preserve outer context.
       old_enum_value_types = @enum_value_types
       @enum_value_types = nil
+      saved_closure_ref_cells_mm = @closure_ref_cells.dup
+      @closure_ref_cells.clear
 
       old_class = @current_class
       old_method = @current_method
@@ -13066,6 +13072,7 @@ module Crystal::HIR
       end
 
       @enum_value_types = old_enum_value_types
+      @closure_ref_cells = saved_closure_ref_cells_mm
     end
 
     # Register a class type and its methods (pass 1)
@@ -16612,6 +16619,8 @@ module Crystal::HIR
       # Enum value tracking is per-function; preserve outer context.
       old_enum_value_types = @enum_value_types
       @enum_value_types = nil
+      saved_closure_ref_cells_lm = @closure_ref_cells.dup
+      @closure_ref_cells.clear
 
       # Track current method for super calls
       old_class = @current_class
@@ -17194,6 +17203,7 @@ module Crystal::HIR
       @current_typeof_local_names = old_typeof_local_names
 
       @enum_value_types = old_enum_value_types
+      @closure_ref_cells = saved_closure_ref_cells_lm
 
       # Restore previous method context
       @current_class = old_class
@@ -26847,6 +26857,9 @@ module Crystal::HIR
       # Enum value tracking is per-function; preserve outer context.
       old_enum_value_types = @enum_value_types
       @enum_value_types = nil
+      # Closure ref cells are per-function scope; save and clear for new function.
+      saved_closure_ref_cells = @closure_ref_cells.dup
+      @closure_ref_cells.clear
       base_name = String.new(node.name)
       if debug_env_filter_match?("DEBUG_STRING_METHOD_LOWER", base_name)
         STDERR.puts "[DEBUG_LOWER_DEF] name=#{base_name} override=#{full_name_override || "(none)"} current_class=#{@current_class || "(none)"}"
@@ -27077,6 +27090,7 @@ module Crystal::HIR
       # Idempotency: avoid lowering the same function twice (can happen with conditional defs).
       if existing = @module.function_by_name(full_name)
         @enum_value_types = old_enum_value_types
+        @closure_ref_cells = saved_closure_ref_cells
         return existing
       end
 
@@ -27223,6 +27237,7 @@ module Crystal::HIR
       @current_typeof_local_names = old_typeof_local_names
 
       @enum_value_types = old_enum_value_types
+      @closure_ref_cells = saved_closure_ref_cells
 
       func
     end
@@ -31045,6 +31060,15 @@ module Crystal::HIR
         lit = Literal.new(ctx.next_id, TypeRef::INT32, line.to_i64)
         ctx.emit(lit)
         return lit.id
+      end
+
+      # Check if variable is stored in a closure cell (by-reference capture)
+      if ref_cell = @closure_ref_cells[name]?
+        cell_class, cell_name, cell_type = ref_cell
+        get = ClassVarGet.new(ctx.next_id, cell_type, cell_class, cell_name)
+        ctx.emit(get)
+        ctx.register_type(get.id, cell_type)
+        return get.id
       end
 
       # Check if it's a local variable first
@@ -44002,6 +44026,18 @@ module Crystal::HIR
         end
       end
 
+      # When the call has a block that was NOT inlined (we've reached the regular Call
+      # emission path), convert the block to a Proc and append to args. The callee's
+      # &block parameter expects a function pointer, not null.
+      if block_expr && block_id
+        blk_node = @arena[block_expr]
+        if blk_node.is_a?(CrystalV2::Compiler::Frontend::BlockNode)
+          block_arena_for_proc = @block_node_arenas[blk_node.object_id]? || resolve_arena_for_block(blk_node, @arena) || @arena
+          proc_id = lower_block_to_proc(ctx, blk_node, block_param_types, block_arena_for_proc)
+          args << proc_id
+        end
+      end
+
       call = Call.new(ctx.next_id, return_type, receiver_id, mangled_method_name, args, block_id, call_virtual)
       ctx.emit(call)
       ctx.register_type(call.id, return_type)
@@ -48735,8 +48771,12 @@ module Crystal::HIR
       base_inline_name = strip_type_suffix(inline_key)
       # Nested inline-yield inside an inlined block body is the main source of
       # runaway recursion in release builds (inline_yield -> inline_block_body -> lower_call -> ...).
-      # Fall back to a normal call as soon as we're inside any inlined block body.
-      if @inline_yield_block_body_depth > 0
+      # Allow one level of nesting (depth <= 1) since the MIR lowering doesn't
+      # support block callbacks via lower_call — the block parameter would be null.
+      # The existing depth (inline_yield_name_stack) and repeat limits still guard
+      # against runaway recursion.
+      max_block_body_depth = (env_get("INLINE_YIELD_MAX_BLOCK_BODY_DEPTH") || "1").to_i
+      if @inline_yield_block_body_depth > max_block_body_depth
         if env_has?("DEBUG_YIELD_INLINE")
           STDERR.puts "[INLINE_YIELD] skipping nested block-body inline: #{inline_key} depth=#{@inline_yield_block_body_depth}"
         end
@@ -48969,7 +49009,15 @@ module Crystal::HIR
             params.each_with_index do |param, idx|
               if pname = param.name
                 param_name = String.new(pname)
-                if idx < call_args.size
+                if param.is_block
+                  # &block parameter: convert the caller's block to a Proc and bind it.
+                  # Without this, methods that store blocks as Procs (e.g., OptionParser#on)
+                  # would receive null instead of a valid function pointer.
+                  block_arena_for_proc = @block_node_arenas[block.object_id]? || resolve_arena_for_block(block, caller_arena) || caller_arena
+                  proc_id = lower_block_to_proc(ctx, block, block_param_types, block_arena_for_proc)
+                  ctx.register_local(param_name, proc_id)
+                  ctx.register_type(proc_id, ctx.type_of(proc_id))
+                elsif idx < call_args.size
                   arg_id = call_args[idx]
                   ctx.register_local(param_name, arg_id)
                   # Also register the type so it's available when the parameter is accessed
@@ -51576,6 +51624,14 @@ module Crystal::HIR
       when CrystalV2::Compiler::Frontend::IdentifierNode
         name = String.new(target_node.name)
         value_type = ctx.type_of(value_id)
+        # Check if this variable is stored in a closure cell (by-reference capture)
+        if ref_cell = @closure_ref_cells[name]?
+          cell_class, cell_name, cell_type = ref_cell
+          set = ClassVarSet.new(ctx.next_id, cell_type, cell_class, cell_name, value_id)
+          ctx.emit(set)
+          ctx.register_type(set.id, cell_type)
+          return set.id
+        end
         if debug_name = env_get("DEBUG_ASSIGN_VAR")
           if debug_name == name
             type_name = value_type == TypeRef::VOID ? "Void" : get_type_name_from_ref(value_type)
@@ -52954,6 +53010,57 @@ module Crystal::HIR
       end
     end
 
+    # Detect which captured variable names are WRITTEN to in the block body.
+    # Returns the set of capture names that appear as assignment targets.
+    private def detect_written_captures(body : Array(ExprId), capture_names : Set(String), arena : CrystalV2::Compiler::Frontend::ArenaLike) : Set(String)
+      written = Set(String).new
+      saved_arena = @arena
+      @arena = arena
+      body.each { |eid| detect_written_captures_walk(eid, capture_names, written) }
+      @arena = saved_arena
+      written
+    end
+
+    private def detect_written_captures_walk(expr_id : ExprId, capture_names : Set(String), written : Set(String))
+      return if expr_id.index < 0 || expr_id.index >= @arena.size
+      node = @arena[expr_id]
+      case node
+      when CrystalV2::Compiler::Frontend::AssignNode
+        target = @arena[node.target]
+        if target.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode)
+          name = String.new(target.name)
+          written.add(name) if capture_names.includes?(name)
+        end
+        detect_written_captures_walk(node.value, capture_names, written)
+      when CrystalV2::Compiler::Frontend::IfNode
+        detect_written_captures_walk(node.condition, capture_names, written)
+        node.then_body.each { |e| detect_written_captures_walk(e, capture_names, written) }
+        if eb = node.else_body
+          eb.each { |e| detect_written_captures_walk(e, capture_names, written) }
+        end
+      when CrystalV2::Compiler::Frontend::WhileNode
+        detect_written_captures_walk(node.condition, capture_names, written)
+        node.body.each { |e| detect_written_captures_walk(e, capture_names, written) }
+      when CrystalV2::Compiler::Frontend::BlockNode
+        node.body.each { |e| detect_written_captures_walk(e, capture_names, written) }
+      when CrystalV2::Compiler::Frontend::CallNode
+        node.args.each { |a| detect_written_captures_walk(a, capture_names, written) }
+        if blk = node.block
+          detect_written_captures_walk(blk, capture_names, written)
+        end
+      when CrystalV2::Compiler::Frontend::CaseNode
+        if cond = node.value
+          detect_written_captures_walk(cond, capture_names, written)
+        end
+        node.when_branches.each do |wb|
+          wb.body.each { |b| detect_written_captures_walk(b, capture_names, written) }
+        end
+        if eb = node.else_branch
+          eb.each { |e| detect_written_captures_walk(e, capture_names, written) }
+        end
+      end
+    end
+
     private def lower_proc_literal(
       ctx : LoweringContext,
       node : CrystalV2::Compiler::Frontend::ProcLiteralNode,
@@ -53046,11 +53153,39 @@ module Crystal::HIR
       @current_typeof_locals = saved_typeof_locals ? saved_typeof_locals.dup : nil
       @current_typeof_local_names = saved_typeof_local_names ? saved_typeof_local_names.dup : nil
 
+      # Save and isolate inline-yield state — proc body is a separate function context
+      saved_return_stack_pl = @inline_yield_return_stack
+      saved_override_stack_pl = @inline_yield_return_override_stack
+      saved_block_body_depth_pl = @inline_yield_block_body_depth
+      @inline_yield_return_stack = [] of InlineReturnContext
+      @inline_yield_return_override_stack = [] of InlineReturnOverride
+      @inline_yield_block_body_depth = 0
+
+      # Save and isolate loop stacks
+      saved_loop_exit_stack_pl = @loop_exit_stack
+      saved_loop_cond_stack_pl = @loop_cond_stack
+      saved_loop_phi_stack_pl = @loop_phi_stack
+      saved_loop_break_info_stack_pl = @loop_break_info_stack
+      saved_loop_break_value_stack_pl = @loop_break_value_stack
+      @loop_exit_stack = [] of BlockId
+      @loop_cond_stack = [] of BlockId
+      @loop_phi_stack = [] of Hash(String, Phi)
+      @loop_break_info_stack = [] of Array({BlockId, Hash(String, ValueId)})
+      @loop_break_value_stack = [] of Array({BlockId, ValueId})
+
       @inline_yield_proc_depth += 1
       last_value = begin
         lower_body(proc_ctx, node.body)
       ensure
         @inline_yield_proc_depth -= 1
+        @inline_yield_return_stack = saved_return_stack_pl
+        @inline_yield_return_override_stack = saved_override_stack_pl
+        @inline_yield_block_body_depth = saved_block_body_depth_pl
+        @loop_exit_stack = saved_loop_exit_stack_pl
+        @loop_cond_stack = saved_loop_cond_stack_pl
+        @loop_phi_stack = saved_loop_phi_stack_pl
+        @loop_break_info_stack = saved_loop_break_info_stack_pl
+        @loop_break_value_stack = saved_loop_break_value_stack_pl
       end
 
       # Terminate the proc function — always add Return unless already terminated with Return
@@ -53076,6 +53211,206 @@ module Crystal::HIR
       proc_type = @module.intern_type(TypeDescriptor.new(TypeKind::Proc, "Proc", proc_param_types + [proc_return_type]))
 
       # Return FuncPointer in caller's context, registered with Proc type
+      fp = FuncPointer.new(ctx.next_id, proc_type, proc_func_name)
+      ctx.emit(fp)
+      ctx.register_type(fp.id, proc_type)
+
+      # Store capture parent value IDs for use at call site
+      if !captures.empty?
+        capture_parent_ids = captures.map { |_, parent_vid, _| parent_vid }
+        @proc_captures_by_value[fp.id] = capture_parent_ids
+      end
+
+      fp.id
+    end
+
+    # Convert a BlockNode into a Proc (FuncPointer). This is used when a method
+    # takes `&block : T ->` and the block must be stored/captured rather than
+    # yielded inline.
+    private def lower_block_to_proc(
+      ctx : LoweringContext,
+      block_node : CrystalV2::Compiler::Frontend::BlockNode,
+      param_types : Array(TypeRef)?,
+      block_arena : CrystalV2::Compiler::Frontend::ArenaLike,
+    ) : ValueId
+      proc_func_name = "__crystal_block_proc_#{@proc_function_counter}"
+      @proc_function_counter += 1
+
+      # Determine param types from annotation or override
+      proc_param_types = [] of TypeRef
+      if params = block_node.params
+        params.each_with_index do |param, idx|
+          if param_name = param.name
+            param_type = if ta = param.type_annotation
+                           type_ref_for_name(String.new(ta))
+                         elsif param_types && (override = param_types[idx]?)
+                           override
+                         else
+                           TypeRef::VOID
+                         end
+            proc_param_types << param_type
+          end
+        end
+      elsif param_types
+        proc_param_types = param_types.dup
+      end
+
+      proc_return_type = TypeRef::VOID
+
+      # Create standalone function for the block body
+      proc_func = @module.create_function(proc_func_name, proc_return_type)
+      proc_ctx = LoweringContext.new(proc_func, @module, block_arena)
+
+      # Collect block param names (to exclude from capture detection)
+      block_param_names = Set(String).new
+      if params = block_node.params
+        params.each do |param|
+          if pname = param.name
+            block_param_names.add(String.new(pname))
+          end
+        end
+      end
+
+      # Detect captures: scan block body for identifiers referencing parent locals
+      saved_arena = @arena
+      @arena = block_arena
+      referenced_names = collect_proc_body_identifiers(block_node.body)
+      @arena = saved_arena
+
+      parent_locals = ctx.save_locals
+      captures = [] of {String, ValueId, TypeRef}
+      referenced_names.each do |name|
+        next if block_param_names.includes?(name)
+        next if name == "self"
+        if parent_value_id = parent_locals[name]?
+          parent_type = ctx.type_of(parent_value_id)
+          next if parent_type == TypeRef::VOID
+          captures << {name, parent_value_id, parent_type}
+        end
+      end
+
+      # Detect which captures are WRITTEN to inside the block body.
+      # These need by-reference semantics via global closure cells.
+      all_capture_names = captures.map { |name, _, _| name }.to_set
+      written_captures = detect_written_captures(block_node.body, all_capture_names, block_arena)
+
+      # For written captures, set up global closure cells
+      by_ref_captures = [] of {String, String, String, TypeRef}  # {var_name, class_name, cell_name, type}
+      written_captures.each do |var_name|
+        cap = captures.find { |n, _, _| n == var_name }
+        next unless cap
+        cap_name, parent_vid, cap_type = cap
+        cell_name = "__closure_cell_#{@closure_cell_counter}"
+        @closure_cell_counter += 1
+        class_name = "__closure"
+        # Store the current value of the captured variable into the global cell
+        set = ClassVarSet.new(ctx.next_id, cap_type, class_name, cell_name, parent_vid)
+        ctx.emit(set)
+        ctx.register_type(set.id, cap_type)
+        # Register this variable as a closure-ref cell for both proc body and parent's remaining code
+        @closure_ref_cells[var_name] = {class_name, cell_name, cap_type}
+        by_ref_captures << {var_name, class_name, cell_name, cap_type}
+      end
+
+      # Remove by-ref captures from the by-value captures list (they're accessed via globals)
+      captures.reject! { |name, _, _| written_captures.includes?(name) }
+
+      # Add parameters to the standalone function
+      if params = block_node.params
+        params.each_with_index do |param, idx|
+          if pname = param.name
+            name = String.new(pname)
+            param_type = proc_param_types[idx]? || TypeRef::VOID
+            hir_param = proc_func.add_param(name, param_type)
+            proc_ctx.register_local(name, hir_param.id)
+            proc_ctx.register_type(hir_param.id, param_type)
+          end
+        end
+      elsif param_types
+        # No named params but we know the types — create synthetic params
+        param_types.each_with_index do |param_type, idx|
+          name = "__arg#{idx}"
+          hir_param = proc_func.add_param(name, param_type)
+          proc_ctx.register_local(name, hir_param.id)
+          proc_ctx.register_type(hir_param.id, param_type)
+        end
+      end
+
+      # Add captured variables as hidden extra parameters (by-value only)
+      captures.each do |cap_name, _parent_vid, cap_type|
+        hir_param = proc_func.add_param("__capture_#{cap_name}", cap_type)
+        proc_ctx.register_local(cap_name, hir_param.id)
+        proc_ctx.register_type(hir_param.id, cap_type)
+      end
+
+      # Lower block body into the standalone function
+      saved_class = @current_class
+      saved_typeof_locals = @current_typeof_locals
+      saved_typeof_local_names = @current_typeof_local_names
+      @current_typeof_locals = saved_typeof_locals ? saved_typeof_locals.dup : nil
+      @current_typeof_local_names = saved_typeof_local_names ? saved_typeof_local_names.dup : nil
+
+      # Save and isolate inline-yield state — proc body is a separate function context
+      saved_return_stack = @inline_yield_return_stack
+      saved_override_stack = @inline_yield_return_override_stack
+      saved_block_body_depth = @inline_yield_block_body_depth
+      @inline_yield_return_stack = [] of InlineReturnContext
+      @inline_yield_return_override_stack = [] of InlineReturnOverride
+      @inline_yield_block_body_depth = 0
+
+      # Save and isolate loop stacks — proc body cannot break/next to parent loops
+      saved_loop_exit_stack = @loop_exit_stack
+      saved_loop_cond_stack = @loop_cond_stack
+      saved_loop_phi_stack = @loop_phi_stack
+      saved_loop_break_info_stack = @loop_break_info_stack
+      saved_loop_break_value_stack = @loop_break_value_stack
+      @loop_exit_stack = [] of BlockId
+      @loop_cond_stack = [] of BlockId
+      @loop_phi_stack = [] of Hash(String, Phi)
+      @loop_break_info_stack = [] of Array({BlockId, Hash(String, ValueId)})
+      @loop_break_value_stack = [] of Array({BlockId, ValueId})
+
+      saved_arena_outer = @arena
+      @arena = block_arena
+      @inline_yield_proc_depth += 1
+      last_value = begin
+        lower_body(proc_ctx, block_node.body)
+      ensure
+        @inline_yield_proc_depth -= 1
+        @arena = saved_arena_outer
+        @inline_yield_return_stack = saved_return_stack
+        @inline_yield_return_override_stack = saved_override_stack
+        @inline_yield_block_body_depth = saved_block_body_depth
+        @loop_exit_stack = saved_loop_exit_stack
+        @loop_cond_stack = saved_loop_cond_stack
+        @loop_phi_stack = saved_loop_phi_stack
+        @loop_break_info_stack = saved_loop_break_info_stack
+        @loop_break_value_stack = saved_loop_break_value_stack
+      end
+
+      # Terminate the proc function
+      fn_block = proc_func.get_block(proc_ctx.current_block)
+      unless fn_block.terminator.is_a?(Return)
+        proc_ctx.terminate(Return.new(last_value))
+      end
+
+      # Update return type
+      if proc_return_type == TypeRef::VOID
+        actual_return_type = proc_ctx.type_of(last_value)
+        if actual_return_type != TypeRef::VOID
+          proc_return_type = actual_return_type
+          proc_func.return_type = proc_return_type
+        end
+      end
+
+      @current_class = saved_class
+      @current_typeof_locals = saved_typeof_locals
+      @current_typeof_local_names = saved_typeof_local_names
+
+      # Compute proc type (does NOT include captures)
+      proc_type = @module.intern_type(TypeDescriptor.new(TypeKind::Proc, "Proc", proc_param_types + [proc_return_type]))
+
+      # Return FuncPointer in caller's context
       fp = FuncPointer.new(ctx.next_id, proc_type, proc_func_name)
       ctx.emit(fp)
       ctx.register_type(fp.id, proc_type)
