@@ -1470,6 +1470,14 @@ module Crystal::HIR
       @lib_names.includes?(name)
     end
 
+    private def unionish_return_type?(type_ref : TypeRef) : Bool
+      if type = @types[type_ref.id]?
+        return true if type.kind.union?
+        return type.name.includes?('|')
+      end
+      false
+    end
+
     def create_function(name : String, return_type : TypeRef) : Function
       if ENV.has_key?("DBG_FILE_NEW") && (name.includes?("File") || name.includes?("file"))
         STDERR.puts "[FUNC_CREATE_FILE] name=#{name} return=#{return_type.id}"
@@ -1478,8 +1486,17 @@ module Crystal::HIR
       if existing = @functions_by_name[name]?
         if existing.return_type == TypeRef::VOID && return_type != TypeRef::VOID
           existing.return_type = return_type
-        elsif existing.return_type != return_type && return_type != TypeRef::VOID && ENV.has_key?("DEBUG_DUP_FUNCTION")
-          STDERR.puts "[DEBUG_DUP_FUNCTION] Duplicate function #{name}: existing=#{existing.return_type.id}, new=#{return_type.id}"
+        elsif existing.return_type != return_type && return_type != TypeRef::VOID
+          # Prefer a more informative return type when possible. This keeps
+          # signatures stable when an early placeholder/scalar type is later
+          # refined (for example, Nil|V query methods).
+          if existing.return_type == TypeRef::NIL ||
+             (existing.return_type == TypeRef::POINTER && return_type != TypeRef::POINTER) ||
+             (unionish_return_type?(return_type) && !unionish_return_type?(existing.return_type))
+            existing.return_type = return_type
+          elsif ENV.has_key?("DEBUG_DUP_FUNCTION")
+            STDERR.puts "[DEBUG_DUP_FUNCTION] Duplicate function #{name}: existing=#{existing.return_type.id}, new=#{return_type.id}"
+          end
         end
         return existing
       end

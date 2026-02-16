@@ -10593,6 +10593,8 @@ module Crystal::MIR
         # Not a union struct - just use the value directly
         # Check if union_val is an integer literal (type mismatch from defaulting to POINTER)
         is_int_literal = union_val.match(/^-?\d+$/) && union_val != "null"
+        src_is_int = union_type.starts_with?('i')
+        dst_is_int = result_type.starts_with?('i')
 
         if is_int_literal
           # union_val is an int literal, use it directly for int result types
@@ -10603,13 +10605,46 @@ module Crystal::MIR
           else
             emit "#{name} = add i64 #{union_val}, 0"
           end
-        elsif result_type == "ptr" || result_type == union_type
-          emit "#{name} = bitcast ptr #{union_val} to ptr"
-        elsif result_type.starts_with?('i')
-          # Need to convert ptr to int
-          emit "#{name} = ptrtoint ptr #{union_val} to #{result_type}"
+        elsif result_type == union_type
+          if result_type == "ptr"
+            emit "#{name} = bitcast ptr #{union_val} to ptr"
+          elsif result_type == "float"
+            emit "#{name} = fadd float #{union_val}, 0.0"
+          elsif result_type == "double"
+            emit "#{name} = fadd double #{union_val}, 0.0"
+          elsif dst_is_int
+            emit "#{name} = add #{result_type} #{union_val}, 0"
+          else
+            emit "#{name} = add i64 0, 0"
+          end
+        elsif result_type == "ptr"
+          if src_is_int
+            emit "#{name} = inttoptr #{union_type} #{union_val} to ptr"
+          else
+            emit "#{name} = bitcast ptr #{union_val} to ptr"
+          end
+        elsif dst_is_int
+          if union_type == "ptr"
+            emit "#{name} = ptrtoint ptr #{union_val} to #{result_type}"
+          elsif src_is_int
+            src_bits = union_type[1..].to_i?
+            dst_bits = result_type[1..].to_i?
+            if src_bits && dst_bits
+              if src_bits == dst_bits
+                emit "#{name} = add #{result_type} #{union_val}, 0"
+              elsif src_bits < dst_bits
+                emit "#{name} = sext #{union_type} #{union_val} to #{result_type}"
+              else
+                emit "#{name} = trunc #{union_type} #{union_val} to #{result_type}"
+              end
+            else
+              emit "#{name} = add #{result_type} 0, 0"
+            end
+          else
+            emit "#{name} = add #{result_type} 0, 0"
+          end
         else
-          # Fallback: bitcast
+          # Fallback: keep IR valid, prefer zero-init over invalid ptr bitcasts.
           emit "#{name} = bitcast ptr #{union_val} to ptr"
         end
       end

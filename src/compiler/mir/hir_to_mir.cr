@@ -2887,19 +2887,18 @@ module Crystal
     private def lower_union_unwrap(unwrap : HIR::UnionUnwrap) : ValueId
       builder = @builder.not_nil!
       union_value = get_value(unwrap.union_value)
-      result_type = convert_type(unwrap.type)
+      declared_result_type = convert_type(unwrap.type)
+      result_type = declared_result_type
       if union_hir_type = @hir_value_types[unwrap.union_value]?
         union_mir_type = convert_type(union_hir_type)
         if descriptor = @mir_module.union_descriptors[union_mir_type]?
           if variant = descriptor.variants.find { |v| v.type_id == unwrap.variant_type_id }
-            result_type = variant.type_ref
-            if nested = @mir_module.union_descriptors[result_type]?
-              if nested_variant = nested.variants.find { |v| v.type_ref != TypeRef::NIL && v.type_ref != TypeRef::VOID }
-                result_type = nested_variant.type_ref
-              end
+            descriptor_result_type = variant.type_ref
+            if should_override_union_unwrap_result_type?(declared_result_type, descriptor_result_type)
+              result_type = descriptor_result_type
             end
             if ENV.has_key?("DEBUG_UNION_UNWRAP")
-              STDERR.puts "[UNION_UNWRAP] union_type=#{union_mir_type.id} variant_id=#{unwrap.variant_type_id} variant_type=#{variant.type_ref.id}"
+              STDERR.puts "[UNION_UNWRAP] union_type=#{union_mir_type.id} variant_id=#{unwrap.variant_type_id} variant_type=#{variant.type_ref.id} declared=#{declared_result_type.id} result=#{result_type.id}"
             end
           elsif ENV.has_key?("DEBUG_UNION_UNWRAP")
             STDERR.puts "[UNION_UNWRAP] union_type=#{union_mir_type.id} variant_id=#{unwrap.variant_type_id} variant_type=nil"
@@ -2926,6 +2925,12 @@ module Crystal
         unwrap.safe
       )
       builder.emit(mir_unwrap)
+    end
+
+    private def should_override_union_unwrap_result_type?(declared_type : TypeRef, descriptor_type : TypeRef) : Bool
+      return false if declared_type == descriptor_type
+      return true if declared_type == TypeRef::VOID || declared_type == TypeRef::NIL || declared_type == TypeRef::POINTER
+      @mir_module.union_descriptors.has_key?(declared_type)
     end
 
     private def lower_union_type_id(type_id : HIR::UnionTypeId) : ValueId

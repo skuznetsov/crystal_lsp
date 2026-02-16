@@ -721,6 +721,26 @@ describe Crystal::MIR::LLVMIRGenerator do
       body.should match(/load i64, ptr %.*payload_ptr, align 4/)
     end
 
+    it "keeps scalar passthrough for non-union union_unwrap" do
+      mod = Crystal::MIR::Module.new("union_unwrap_passthrough")
+      func = mod.create_function("union_unwrap_passthrough_i32", Crystal::MIR::TypeRef::INT32)
+      func.add_param("x", Crystal::MIR::TypeRef::INT32)
+
+      builder = Crystal::MIR::Builder.new(func)
+      unwrapped = builder.emit(Crystal::MIR::UnionUnwrap.new(func.next_value_id, Crystal::MIR::TypeRef::INT32, 0_u32, 1))
+      builder.ret(unwrapped)
+
+      gen = Crystal::MIR::LLVMIRGenerator.new(mod)
+      gen.emit_type_metadata = false
+      output = gen.generate
+
+      func_ir = output[/define i32 @union_unwrap_passthrough_i32\(i32 %x\)\s*\{.*?\n\}/m]
+      func_ir.should_not be_nil
+      body = func_ir.not_nil!
+      body.should match(/= add i32 %x, 0/)
+      body.should_not contain("bitcast ptr %x to ptr")
+    end
+
     it "generates RC increment and decrement" do
       mod = Crystal::MIR::Module.new("test")
       func = mod.create_function("rc_test", Crystal::MIR::TypeRef::VOID)
