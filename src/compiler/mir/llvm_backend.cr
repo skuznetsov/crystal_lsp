@@ -12309,8 +12309,13 @@ module Crystal::MIR
             record_emitted_type(cast_name, expected_type)
             return cast_name
           elsif llvm_type.includes?(".union") && expected_type.includes?(".union") && llvm_type != expected_type
-            # Different union types - bitcast through ptr (they have same layout)
-            emit "#{cast_name} = bitcast #{llvm_type} #{temp_name} to #{expected_type}"
+            # Different union types with same layout - reinterpret through memory
+            # (LLVM doesn't allow bitcast between aggregate types)
+            u2u_ptr = "%r#{id}.fromslot.u2u.#{@cond_counter}"
+            @cond_counter += 1
+            emit "#{u2u_ptr} = alloca #{expected_type}, align 8"
+            emit "store #{llvm_type} #{temp_name}, ptr #{u2u_ptr}"
+            emit "#{cast_name} = load #{expected_type}, ptr #{u2u_ptr}"
             record_emitted_type(cast_name, expected_type)
             return cast_name
           end
