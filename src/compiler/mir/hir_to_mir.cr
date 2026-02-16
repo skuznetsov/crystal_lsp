@@ -324,6 +324,8 @@ module Crystal
           is_inline = elem_kind && (elem_kind.primitive? || elem_kind.enum?)
           elem_size = if is_inline && elem_type && elem_type.size > 0
                         elem_type.size
+                      elsif elem_kind && elem_kind.union? && elem_type && elem_type.size > 8
+                        elem_type.size  # Union discriminated repr needs more than a pointer
                       else
                         8_u64  # Pointer/reference size
                       end
@@ -788,6 +790,8 @@ module Crystal
               is_inline = elem.kind.primitive? || elem.kind.enum?
               elem_size = if is_inline && elem.size > 0
                             elem.size
+                          elsif elem.kind.union? && elem.size > 8
+                            elem.size  # Union discriminated repr needs more than a pointer
                           else
                             8_u64  # Pointer/reference size
                           end
