@@ -432,8 +432,9 @@ module Crystal::MIR
     # Maps (pred_block, value_id) -> (extract_name, union_llvm_type)
     @phi_union_to_ptr_extracts : Hash({BlockId, ValueId}, {String, String}) = {} of {BlockId, ValueId} => {String, String}
     # Phi union-to-union converts: for union values that must be reinterpreted as a different union type
-    # Maps (pred_block, value_id) -> (convert_name, src_union_llvm_type, dst_union_llvm_type)
-    @phi_union_to_union_converts : Hash({BlockId, ValueId}, {String, String, String}) = {} of {BlockId, ValueId} => {String, String, String}
+    # Maps (pred_block, value_id) -> array of (convert_name, src_union_llvm_type, dst_union_llvm_type)
+    # An array is needed because the same value may be used by multiple phi nodes expecting different types
+    @phi_union_to_union_converts : Hash({BlockId, ValueId}, Array({String, String, String})) = {} of {BlockId, ValueId} => Array({String, String, String})
     # Phi union payload extracts: for union-typed slot values where phi expects a primitive
     # Maps (pred_block, value_id) -> (extract_name, load_name, target_llvm_type)
     @phi_union_payload_extracts : Hash({BlockId, ValueId}, {String, String, String}) = {} of {BlockId, ValueId} => {String, String, String}
@@ -444,6 +445,9 @@ module Crystal::MIR
     # Track phi nodes that have nil incoming values (for union return type handling)
     # Maps phi value_id -> set of blocks that contribute nil
     @phi_nil_incoming_blocks : Hash(ValueId, Set(BlockId)) = {} of ValueId => Set(BlockId)
+
+    # Track emitted union type definitions to avoid duplicates and ensure forward declarations
+    @emitted_union_type_names : Set(String) = Set(String).new
 
     # Type metadata for debug DX
     @type_info_entries : Array(TypeInfoEntry)
@@ -856,6 +860,20 @@ module Crystal::MIR
           # (Nil, Unknown, wrong-type dispatch). These arise from type inference
           # gaps where the compiler emits calls that would never execute at runtime.
           emit_raw stub
+        elsif name.matches?(/\Ast_[a-z]/) || name == "st_mtimespec"
+          # C struct field accessors (e.g., st_mtimespec from struct stat) that are
+          # incorrectly lowered as function calls instead of GEP+load. Provide no-op stubs.
+          emit_raw "define #{return_type} @#{name}(...) {\n"
+          if return_type == "void"
+            emit_raw "  ret void\n"
+          elsif return_type == "ptr"
+            emit_raw "  ret ptr null\n"
+          elsif return_type.starts_with?('i')
+            emit_raw "  ret #{return_type} 0\n"
+          else
+            emit_raw "  ret #{return_type} zeroinitializer\n"
+          end
+          emit_raw "}\n"
         else
           # Declare with varargs to accept any arguments
           emit_raw "declare #{return_type} @#{name}(...)\n"
@@ -1507,12 +1525,15 @@ module Crystal::MIR
         emit_raw "@#{mangled_name} = external global #{llvm_type}\n"
       end
 
-      # Emit defined globals
+      # Emit defined globals (deduplicate — MIR may register the same global multiple times)
+      emitted_globals = Set(String).new
       @module.globals.each do |global|
         llvm_type = @type_mapper.llvm_type(global.type)
         llvm_type = "ptr" if llvm_type == "void"
         initial = global.initial_value || 0_i64
         mangled_name = @type_mapper.mangle_name(global.name)
+        next if emitted_globals.includes?(mangled_name)
+        emitted_globals << mangled_name
         actual_name = mangled_name
         # Check for constant initial value override
         const_val = @constant_initial_values[mangled_name]?
@@ -1628,6 +1649,7 @@ module Crystal::MIR
         elsif type.kind.union?
           emit_union_type(type, union_payload_sizes[type_name]?)
           emitted_types << type_name
+          @emitted_union_type_names << "#{type_name}.union"
         end
       end
 
@@ -4389,6 +4411,12 @@ module Crystal::MIR
         # Find the find_entry function name
         find_entry_name = "#{hash_prefix}$Hfind_entry$$#{key_type_suffix}"
 
+        # Bail out if find_entry function isn't in the module — can't generate the
+        # override wrapper without it. Fall through to normal lowering path.
+        find_entry_func_exists = @module.functions.any? { |f| mangle_function_name(f.name) == find_entry_name } ||
+                                 @emitted_functions.includes?(find_entry_name)
+        return false unless find_entry_func_exists
+
         # Union type name for Nil | Entry (returned by find_entry).
         # Do not synthesize this from hash_prefix: for specialized callsites
         # the key type may stay generic in hash_prefix ("Key") while find_entry
@@ -4403,6 +4431,16 @@ module Crystal::MIR
         end
         entry_type_name = hash_prefix.sub("Hash$L", "Hash$CCEntry$L")
         nil_or_entry_union = find_entry_ret_union || "%Nil$_$OR$_#{entry_type_name}.union"
+
+        # Ensure the entry union type is declared (it may not be in the type registry
+        # if Hash::Entry isn't directly referenced in user code).
+        if nil_or_entry_union.starts_with?('%') && nil_or_entry_union.ends_with?(".union")
+          type_base = nil_or_entry_union[1..]  # strip leading %
+          unless @emitted_union_type_names.includes?(type_base)
+            emit_raw "%#{type_base} = type { i32, [12 x i8] }\n"
+            @emitted_union_type_names << type_base
+          end
+        end
 
         # Use the declared function return type for the union ABI.
         # Only keep this fast override for canonical two-variant unions: Nil | V.
@@ -4789,6 +4827,9 @@ module Crystal::MIR
       # Prepass: identify which union incoming values need ptr payload extraction
       # in predecessor blocks for ptr-emitted phi nodes.
       prepass_collect_phi_union_to_ptr_extracts(func)
+      # Prepass: identify which union-slotted incoming values need scalar payload extraction
+      # in predecessor blocks for primitive-typed phi nodes (e.g., phi i32 from union slot).
+      prepass_collect_phi_union_payload_extracts(func)
 
       func.blocks.each do |block|
         emit_block(block, func)
@@ -5003,7 +5044,6 @@ module Crystal::MIR
           next unless phi_llvm_type.includes?(".union")
 
           phi.incoming.each do |(pred_block_id, val_id)|
-            next if @phi_union_to_union_converts.has_key?({pred_block_id, val_id})
             # Skip if already handled by union wrap prepass
             next if @phi_predecessor_union_wraps.has_key?({pred_block_id, val_id})
 
@@ -5013,8 +5053,16 @@ module Crystal::MIR
             # Only handle union-to-different-union case
             next unless val_llvm_type && val_llvm_type.includes?(".union") && val_llvm_type != phi_llvm_type
 
-            convert_name = "r#{val_id}.u2u.#{pred_block_id}"
-            @phi_union_to_union_converts[{pred_block_id, val_id}] = {convert_name, val_llvm_type, phi_llvm_type}
+            # Check if conversion for this dst type already registered
+            existing = @phi_union_to_union_converts[{pred_block_id, val_id}]?
+            if existing && existing.any? { |e| e[2] == phi_llvm_type }
+              next
+            end
+
+            suffix = existing ? ".#{existing.size}" : ""
+            convert_name = "r#{val_id}.u2u.#{pred_block_id}#{suffix}"
+            arr = @phi_union_to_union_converts[{pred_block_id, val_id}] ||= [] of {String, String, String}
+            arr << {convert_name, val_llvm_type, phi_llvm_type}
           end
         end
       end
@@ -5069,16 +5117,77 @@ module Crystal::MIR
           next unless emit_ptr_phi
 
           phi.incoming.each do |(pred_block_id, val_id)|
-            next if @phi_union_to_ptr_extracts.has_key?({pred_block_id, val_id})
+            # The phi emission normalizes UnionUnwrap values back to their source union
+            # (see emit_phi lines 8210+). Account for this: if val is a UnionUnwrap
+            # and the phi's MIR type matches the source union, the phi will reference the
+            # source union value after normalization. Pre-register u2p for it.
+            check_vals = [val_id]
+            if phi_mir_type.includes?(".union")
+              if uw_inst = find_def_inst(val_id)
+                if uw_inst.is_a?(UnionUnwrap)
+                  union_val = uw_inst.union_value
+                  union_type_ref = @value_types[union_val]?
+                  union_llvm_type = union_type_ref ? @type_mapper.llvm_type(union_type_ref) : nil
+                  if union_llvm_type == phi_mir_type
+                    check_vals << union_val
+                  end
+                end
+              end
+            end
 
-            val_type = @value_types[val_id]?
-            next unless val_type
+            check_vals.each do |vid|
+              next if @phi_union_to_ptr_extracts.has_key?({pred_block_id, vid})
 
-            val_llvm_type = @type_mapper.llvm_type(val_type)
-            next unless val_llvm_type.includes?(".union")
+              vt = @value_types[vid]?
+              slt = @cross_block_slot_types[vid]?
 
-            extract_name = "r#{val_id}.u2p.#{pred_block_id}"
-            @phi_union_to_ptr_extracts[{pred_block_id, val_id}] = {extract_name, val_llvm_type}
+              # Only use @value_types and @cross_block_slot_types — not MIR type,
+              # which may differ from the actual emitted type after prepass resolution.
+              actual_union_type = nil.as(String?)
+              if vt
+                vlt = @type_mapper.llvm_type(vt)
+                actual_union_type = vlt if vlt.includes?(".union")
+              end
+              if actual_union_type.nil? && slt && slt.includes?(".union")
+                actual_union_type = slt
+              end
+              next unless actual_union_type
+
+              extract_name = "r#{vid}.u2p.#{pred_block_id}"
+              @phi_union_to_ptr_extracts[{pred_block_id, vid}] = {extract_name, actual_union_type}
+            end
+          end
+        end
+      end
+    end
+
+    # Prepass: for primitive-typed phis (i32, i1, etc.) whose incoming values
+    # are stored in union-typed cross-block slots, schedule payload extraction
+    # in the predecessor block. Without this, the extraction would only be
+    # scheduled during phi emission (too late if the predecessor was already emitted).
+    private def prepass_collect_phi_union_payload_extracts(func : Function)
+      func.blocks.each do |block|
+        block.instructions.each do |inst|
+          next unless inst.is_a?(Phi)
+          phi = inst
+
+          phi_type = @type_mapper.llvm_type(phi.type)
+          # Only handle primitive scalar phi types (not union, not ptr, not void —
+          # those either have their own prepasses or aren't loadable)
+          next if phi_type == "ptr" || phi_type == "void" || phi_type.includes?(".union")
+
+          phi.incoming.each do |(pred_block_id, val_id)|
+            # Skip if already registered
+            next if @phi_union_payload_extracts.has_key?({pred_block_id, val_id})
+
+            slot_type = @cross_block_slot_types[val_id]?
+            next unless slot_type && slot_type.includes?(".union")
+
+            # The value is stored in a union slot but the phi expects a primitive.
+            # Schedule extraction of the payload from the union.
+            extract_name = "r#{val_id}.phi_extract.#{pred_block_id}"
+            load_name = "r#{val_id}.phi_load.#{pred_block_id}"
+            @phi_union_payload_extracts[{pred_block_id, val_id}] = {extract_name, load_name, phi_type}
           end
         end
       end
@@ -6061,6 +6170,15 @@ module Crystal::MIR
           next
         end
 
+        # Check if value_ref already cast the union to ptr (when @value_types differs
+        # from slot type). In that case, the ptr is already extracted.
+        emitted_type = @emitted_value_types[val_ref_str]?
+        if emitted_type == "ptr"
+          # Already a ptr — no union extraction needed, just alias
+          emit "%#{extract_name} = bitcast ptr #{val_ref_str} to ptr"
+          next
+        end
+
         # Extract ptr from union: alloca → store → GEP to payload → load ptr
         emit "%#{extract_name}.alloca = alloca #{union_type}, align 8"
         emit "store #{union_type} #{val_ref_str}, ptr %#{extract_name}.alloca"
@@ -6073,17 +6191,33 @@ module Crystal::MIR
     # where the value's union type differs from the phi's union type. Both union types have the
     # same physical layout {i32, [N x i8]}, so we reinterpret through memory: alloca → store → load.
     private def emit_phi_union_to_union_converts(block : BasicBlock)
-      @phi_union_to_union_converts.each do |(key, info)|
+      @phi_union_to_union_converts.each do |(key, entries)|
         pred_block_id, val_id = key
         next unless pred_block_id == block.id
 
-        convert_name, src_union_type, dst_union_type = info
         val_ref_str = value_ref(val_id)
 
-        # Reinterpret union: alloca source type → store → load as destination type
-        emit "%#{convert_name}.alloca = alloca #{src_union_type}, align 8"
-        emit "store #{src_union_type} #{val_ref_str}, ptr %#{convert_name}.alloca"
-        emit "%#{convert_name} = load #{dst_union_type}, ptr %#{convert_name}.alloca"
+        entries.each do |info|
+          convert_name, src_union_type, dst_union_type = info
+
+          # Check if value_ref already cast away from union (e.g., union → ptr)
+          emitted_type = @emitted_value_types[val_ref_str]?
+          if emitted_type && !emitted_type.includes?(".union")
+            # value_ref extracted a non-union value; wrap it into the destination union
+            emit "%#{convert_name}.alloca = alloca #{dst_union_type}, align 8"
+            emit "store #{dst_union_type} zeroinitializer, ptr %#{convert_name}.alloca"
+            emit "%#{convert_name}.tid_ptr = getelementptr #{dst_union_type}, ptr %#{convert_name}.alloca, i32 0, i32 0"
+            emit "store i32 0, ptr %#{convert_name}.tid_ptr"
+            emit "%#{convert_name}.pay_ptr = getelementptr #{dst_union_type}, ptr %#{convert_name}.alloca, i32 0, i32 1"
+            emit "store #{emitted_type} #{val_ref_str}, ptr %#{convert_name}.pay_ptr, align 4"
+            emit "%#{convert_name} = load #{dst_union_type}, ptr %#{convert_name}.alloca"
+          else
+            # Reinterpret union: alloca source type → store → load as destination type
+            emit "%#{convert_name}.alloca = alloca #{src_union_type}, align 8"
+            emit "store #{src_union_type} #{val_ref_str}, ptr %#{convert_name}.alloca"
+            emit "%#{convert_name} = load #{dst_union_type}, ptr %#{convert_name}.alloca"
+          end
+        end
       end
     end
 
@@ -6111,10 +6245,13 @@ module Crystal::MIR
       # Check if this instruction produces a value (has a result register)
       # Store, Free, RCIncrement, RCDecrement, GlobalStore, AtomicStore don't produce values
       # Also exclude void-returning calls - they emit `call void` without result
-      is_void_call = (inst.is_a?(Call) || inst.is_a?(ExternCall)) && begin
+      is_void_call = (inst.is_a?(Call) || inst.is_a?(ExternCall) || inst.is_a?(IndirectCall)) && begin
+        # Check both prepass type and MIR type — the emission functions use inst.type
+        # which may differ from @value_types (prepass can resolve void → ptr).
+        mir_llvm_type = @type_mapper.llvm_type(inst.type)
         call_ret_type = @value_types[inst.id]?
         call_llvm_type = call_ret_type ? @type_mapper.llvm_type(call_ret_type) : nil
-        call_llvm_type == "void"
+        call_llvm_type == "void" || mir_llvm_type == "void"
       end
       produces_value = !inst.is_a?(Store) && !inst.is_a?(Free) &&
                        !inst.is_a?(RCIncrement) && !inst.is_a?(RCDecrement) &&
@@ -7911,6 +8048,18 @@ module Crystal::MIR
         return
       end
 
+      # Guard: can't inttoptr union to ptr - extract payload instead
+      if op == "inttoptr" && src_type.includes?(".union") && dst_type == "ptr"
+        base_name = name.lstrip('%')
+        emit "%#{base_name}.union_ptr = alloca #{src_type}, align 8"
+        emit "store #{src_type} #{normalize_union_value(value, src_type)}, ptr %#{base_name}.union_ptr"
+        emit "%#{base_name}.payload_ptr = getelementptr #{src_type}, ptr %#{base_name}.union_ptr, i32 0, i32 1"
+        emit "#{name} = load ptr, ptr %#{base_name}.payload_ptr, align 4"
+        record_emitted_type(name, "ptr")
+        @value_types[inst.id] = TypeRef::POINTER
+        return
+      end
+
       # Guard: can't bitcast union to ptr - extract payload instead
       if op == "bitcast" && src_type.includes?(".union") && dst_type == "ptr"
         base_name = name.lstrip('%')
@@ -7991,9 +8140,15 @@ module Crystal::MIR
           return "%#{wrap_name}"
         end
         # Union-to-union reinterpretation in predecessor block
-        if convert_info = @phi_union_to_union_converts[{block, val}]?
-          convert_name, _, _ = convert_info
-          return "%#{convert_name}"
+        if convert_entries = @phi_union_to_union_converts[{block, val}]?
+          # Find the conversion matching this phi's expected type
+          matching = convert_entries.find { |e| e[2] == phi_type }
+          if matching
+            convert_name, _, _ = matching
+            return "%#{convert_name}"
+          end
+          # No matching conversion — value type may already match phi type,
+          # fall through to normal handling
         end
       end
       # Check for predecessor-loaded value (for cross-block SSA fix)
@@ -8540,8 +8695,15 @@ module Crystal::MIR
               "[#{ref}, %#{block_name.call(block)}]"
             elsif val_type_str && val_type_str.includes?(".union") && val_type_str != phi_type
               # Different union type - defer reinterpret to predecessor block
-              convert_name = "r#{val}.u2u.#{block}"
-              @phi_union_to_union_converts[{block, val}] = {convert_name, val_type_str, phi_type}
+              existing = @phi_union_to_union_converts[{block, val}]?
+              if existing && (match = existing.find { |e| e[2] == phi_type })
+                convert_name = match[0]
+              else
+                suffix = existing ? ".#{existing.size}" : ""
+                convert_name = "r#{val}.u2u.#{block}#{suffix}"
+                arr = @phi_union_to_union_converts[{block, val}] ||= [] of {String, String, String}
+                arr << {convert_name, val_type_str, phi_type}
+              end
               "[%#{convert_name}, %#{block_name.call(block)}]"
             else
               # Non-union type mismatch - use zeroinitializer (nil case)
@@ -9002,7 +9164,9 @@ module Crystal::MIR
                         elsif default_val == "false"
                           "#{param_llvm} 0"
                         else
-                          "#{param_llvm} #{default_val}"
+                          # Strip Crystal numeric suffixes (e.g., "0_u64" → "0", "8_u32" → "8")
+                          clean_val = default_val.gsub(/_(?:i|u)(?:8|16|32|64|128)|_f(?:32|64)\z/, "")
+                          "#{param_llvm} #{clean_val}"
                         end
                       end
                     else
@@ -9029,7 +9193,10 @@ module Crystal::MIR
                  expected_llvm_type = @type_mapper.llvm_type(param_type)
                  actual_type = @value_types[a]? || TypeRef::POINTER
                  actual_llvm_type = @type_mapper.llvm_type(actual_type)
-                 if @cross_block_slot_types[a]? == "ptr"
+                 # If the slot is ptr but value_types maps to a non-ptr type,
+                 # value_ref will load as ptr and then cast to the value type.
+                 # Only override to ptr if value_types also agrees it's ptr (or is unknown).
+                 if @cross_block_slot_types[a]? == "ptr" && (actual_llvm_type == "ptr" || actual_llvm_type == "void")
                    actual_type = TypeRef::POINTER
                    actual_llvm_type = "ptr"
                  end
@@ -9236,11 +9403,37 @@ module Crystal::MIR
                  elsif expected_llvm_type.starts_with?('i') && actual_llvm_type == "ptr"
                    # Ptr to int conversion needed (ptrtoint)
                    val = value_ref(a)
-                   c = @cond_counter
-                   @cond_counter += 1
-                   temp_int = "%ptrtoint.#{c}"
-                   emit "#{temp_int} = ptrtoint ptr #{val} to #{expected_llvm_type}"
-                   "#{expected_llvm_type} #{temp_int}"
+                   # value_ref may have already cast from ptr to int (e.g., slot was ptr
+                   # but @value_types says int). Check the actual emitted type.
+                   emitted_type = @emitted_value_types[val]?
+                   if emitted_type && emitted_type == expected_llvm_type
+                     "#{expected_llvm_type} #{val}"
+                   elsif emitted_type && emitted_type.starts_with?('i') && !emitted_type.includes?(".union")
+                     # Already an integer, but might need widening/narrowing
+                     if emitted_type == expected_llvm_type
+                       "#{expected_llvm_type} #{val}"
+                     else
+                       c = @cond_counter
+                       @cond_counter += 1
+                       src_bits = emitted_type[1..].to_i? || 32
+                       dst_bits = expected_llvm_type[1..].to_i? || 32
+                       if dst_bits < src_bits
+                         emit "%int_trunc.#{c} = trunc #{emitted_type} #{val} to #{expected_llvm_type}"
+                         "#{expected_llvm_type} %int_trunc.#{c}"
+                       elsif dst_bits > src_bits
+                         emit "%int_ext.#{c} = sext #{emitted_type} #{val} to #{expected_llvm_type}"
+                         "#{expected_llvm_type} %int_ext.#{c}"
+                       else
+                         "#{expected_llvm_type} #{val}"
+                       end
+                     end
+                   else
+                     c = @cond_counter
+                     @cond_counter += 1
+                     temp_int = "%ptrtoint.#{c}"
+                     emit "#{temp_int} = ptrtoint ptr #{val} to #{expected_llvm_type}"
+                     "#{expected_llvm_type} #{temp_int}"
+                   end
                  elsif is_union_llvm_type?(expected_llvm_type) &&
                        (actual_llvm_type.starts_with?('i') || actual_llvm_type == "float" || actual_llvm_type == "double")
                    # Scalar to union conversion - wrap scalar payload with type_id=0 (non-nil)
@@ -9509,8 +9702,31 @@ module Crystal::MIR
           emit "#{cond_i1} = trunc #{cond_type} #{cond_val} to i1"
           cond_val = cond_i1
         end
+        # If obj is a union struct (not ptr), extract the payload pointer first
+        obj_type_ref = @value_types[inst.args[1]]?
+        obj_llvm_type = obj_type_ref ? @type_mapper.llvm_type(obj_type_ref) : "ptr"
+        if obj_llvm_type.includes?(".union")
+          # Extract payload ptr from union: alloca union → store → gep to payload → load ptr
+          base = name.lstrip('%')
+          emit "%#{base}.sel_union = alloca #{obj_llvm_type}, align 8"
+          emit "store #{obj_llvm_type} #{obj_val}, ptr %#{base}.sel_union"
+          emit "%#{base}.sel_pay = getelementptr #{obj_llvm_type}, ptr %#{base}.sel_union, i32 0, i32 1"
+          emit "%#{base}.sel_ptr = load ptr, ptr %#{base}.sel_pay, align 4"
+          obj_val = "%#{base}.sel_ptr"
+        elsif obj_llvm_type != "ptr" && obj_llvm_type.starts_with?('i')
+          # Integer value (e.g., i32 ExprId) used in select_ptr — cast to ptr
+          base = name.lstrip('%')
+          if obj_llvm_type == "i64"
+            emit "%#{base}.sel_itp = inttoptr i64 #{obj_val} to ptr"
+          else
+            emit "%#{base}.sel_ext = sext #{obj_llvm_type} #{obj_val} to i64"
+            emit "%#{base}.sel_itp = inttoptr i64 %#{base}.sel_ext to ptr"
+          end
+          obj_val = "%#{base}.sel_itp"
+        end
         emit "#{name} = select i1 #{cond_val}, ptr #{obj_val}, ptr null"
-        @value_types[inst.id] = @value_types[inst.args[1]]? || TypeRef::POINTER
+        # Always register as POINTER — the select returns ptr (payload extracted above if union)
+        @value_types[inst.id] = TypeRef::POINTER
         return
       end
 
@@ -10619,6 +10835,12 @@ module Crystal::MIR
                 emit "%#{base_name}.elem#{idx}_conv = inttoptr #{actual_elem_type_str} #{elem_val} to ptr"
                 elem_val = "%#{base_name}.elem#{idx}_conv"
               end
+            elsif is_elem_union && actual_elem_type_str.includes?(".union")
+              # union → union (different types, same physical layout): reinterpret through memory
+              emit "%#{base_name}.elem#{idx}_u2u_ptr = alloca #{actual_elem_type_str}, align 8"
+              emit "store #{actual_elem_type_str} #{normalize_union_value(elem_val, actual_elem_type_str)}, ptr %#{base_name}.elem#{idx}_u2u_ptr"
+              emit "%#{base_name}.elem#{idx}_u2u = load #{element_type}, ptr %#{base_name}.elem#{idx}_u2u_ptr"
+              elem_val = "%#{base_name}.elem#{idx}_u2u"
             end
           end
           # For ptr type, convert 0 to null
@@ -10742,6 +10964,10 @@ module Crystal::MIR
 
       # Alias so %name resolves to the Array pointer
       emit "#{name} = bitcast ptr %#{base_name}.arr to ptr"
+
+      # The emitted value is always ptr — ensure type tracking reflects this
+      # so that cross-block slot stores do proper union wrapping if needed
+      @value_types[inst.id] = TypeRef::POINTER
 
       # Register as array for IndexGet/IndexSet/ArraySize
       @array_info[inst.id] = {element_type, 0}
@@ -11023,8 +11249,14 @@ module Crystal::MIR
         emit "%#{base_name}.val_payload_ptr = getelementptr #{actual_value_type}, ptr %#{base_name}.val_union_ptr, i32 0, i32 1"
         emit "%#{base_name}.val_ptr = load ptr, ptr %#{base_name}.val_payload_ptr, align 4"
         value = "%#{base_name}.val_ptr"
-      elsif actual_value_type.includes?(".union") && element_type != actual_value_type
-        # Union → different type: extract payload and convert
+      elsif actual_value_type.includes?(".union") && element_type.includes?(".union") && element_type != actual_value_type
+        # Union → different union type (same physical layout): reinterpret through memory
+        emit "%#{base_name}.val_u2u_ptr = alloca #{actual_value_type}, align 8"
+        emit "store #{actual_value_type} #{normalize_union_value(value, actual_value_type)}, ptr %#{base_name}.val_u2u_ptr"
+        emit "%#{base_name}.val_u2u = load #{element_type}, ptr %#{base_name}.val_u2u_ptr"
+        value = "%#{base_name}.val_u2u"
+      elsif actual_value_type.includes?(".union") && !element_type.includes?(".union") && element_type != actual_value_type
+        # Union → non-union type: extract payload and convert
         emit "%#{base_name}.val_union_ptr = alloca #{actual_value_type}, align 8"
         emit "store #{actual_value_type} #{normalize_union_value(value, actual_value_type)}, ptr %#{base_name}.val_union_ptr"
         emit "%#{base_name}.val_payload_ptr = getelementptr #{actual_value_type}, ptr %#{base_name}.val_union_ptr, i32 0, i32 1"
@@ -11037,6 +11269,31 @@ module Crystal::MIR
         emit "store i32 0, ptr %#{base_name}.val_tid_ptr"
         emit "%#{base_name}.val_pay_ptr = getelementptr #{element_type}, ptr %#{base_name}.val_union_ptr, i32 0, i32 1"
         emit "store ptr #{value}, ptr %#{base_name}.val_pay_ptr, align 4"
+        emit "%#{base_name}.val_union = load #{element_type}, ptr %#{base_name}.val_union_ptr"
+        value = "%#{base_name}.val_union"
+      elsif actual_value_type.starts_with?('i') && element_type.includes?(".union")
+        # primitive int → union: wrap in union struct (e.g., enum value into Nil|Enum union)
+        # Determine type_id: look up union descriptor for variant matching the value type
+        val_type_ref = @value_types[inst.value_id]?
+        val_type_id = 0
+        if val_type_ref
+          union_desc = @module.get_union_descriptor(inst.element_type)
+          if union_desc
+            union_desc.variants.each do |v|
+              if v.type_ref == val_type_ref
+                val_type_id = v.type_id.to_i32
+                break
+              end
+            end
+          end
+          val_type_id = val_type_ref.id.to_i32 if val_type_id == 0
+        end
+        emit "%#{base_name}.val_union_ptr = alloca #{element_type}, align 8"
+        emit "call void @llvm.memset.p0.i64(ptr %#{base_name}.val_union_ptr, i8 0, i64 16, i1 false)"
+        emit "%#{base_name}.val_tid_ptr = getelementptr #{element_type}, ptr %#{base_name}.val_union_ptr, i32 0, i32 0"
+        emit "store i32 #{val_type_id}, ptr %#{base_name}.val_tid_ptr"
+        emit "%#{base_name}.val_pay_ptr = getelementptr #{element_type}, ptr %#{base_name}.val_union_ptr, i32 0, i32 1"
+        emit "store #{actual_value_type} #{value}, ptr %#{base_name}.val_pay_ptr, align 4"
         emit "%#{base_name}.val_union = load #{element_type}, ptr %#{base_name}.val_union_ptr"
         value = "%#{base_name}.val_union"
       elsif actual_value_type.starts_with?('i') && element_type.starts_with?('i') && actual_value_type != element_type
@@ -11119,6 +11376,11 @@ module Crystal::MIR
           # Convert int64 to string
           emit "%#{base_name}.conv#{idx} = call ptr @__crystal_v2_int64_to_string(i64 #{part_ref})"
           string_parts << "%#{base_name}.conv#{idx}"
+        elsif part_type == TypeRef::INT128 || part_type == TypeRef::UINT128
+          # Convert int128 to string (truncate to i64 — sufficient for practical values like unix_ns)
+          emit "%#{base_name}.trunc#{idx} = trunc i128 #{part_ref} to i64"
+          emit "%#{base_name}.conv#{idx} = call ptr @__crystal_v2_int64_to_string(i64 %#{base_name}.trunc#{idx})"
+          string_parts << "%#{base_name}.conv#{idx}"
         elsif part_type == TypeRef::INT8 || part_type == TypeRef::UINT8
           # Extend i8 to i32 then convert to string
           emit "%#{base_name}.ext#{idx} = zext i8 #{part_ref} to i32"
@@ -11142,6 +11404,10 @@ module Crystal::MIR
           elsif part_llvm_type == "i64"
             emit "%#{base_name}.conv#{idx} = call ptr @__crystal_v2_int64_to_string(i64 #{part_ref})"
             string_parts << "%#{base_name}.conv#{idx}"
+          elsif part_llvm_type == "i128"
+            emit "%#{base_name}.trunc#{idx} = trunc i128 #{part_ref} to i64"
+            emit "%#{base_name}.conv#{idx} = call ptr @__crystal_v2_int64_to_string(i64 %#{base_name}.trunc#{idx})"
+            string_parts << "%#{base_name}.conv#{idx}"
           elsif part_llvm_type == "i8"
             emit "%#{base_name}.ext#{idx} = zext i8 #{part_ref} to i32"
             emit "%#{base_name}.conv#{idx} = call ptr @__crystal_v2_int_to_string(i32 %#{base_name}.ext#{idx})"
@@ -11164,6 +11430,29 @@ module Crystal::MIR
           elsif part_llvm_type.includes?(".union")
             # Union type — must check payload type, not always assume ptr.
             # For Nil|Int32, payload is i32; for Nil|String, payload is ptr.
+            # IMPORTANT: The actual slot type may differ from the MIR TypeRef.
+            # If the slot stores a primitive (not a union), use the slot type instead.
+            actual_slot_type = @cross_block_slot_types[part_id]?
+            if actual_slot_type && !actual_slot_type.includes?(".union") && actual_slot_type != part_llvm_type
+              # Slot is a primitive — use the primitive conversion path instead of union
+              case actual_slot_type
+              when "i32"
+                emit "%#{base_name}.conv#{idx} = call ptr @__crystal_v2_int_to_string(i32 #{part_ref})"
+              when "i64"
+                emit "%#{base_name}.conv#{idx} = call ptr @__crystal_v2_int64_to_string(i64 #{part_ref})"
+              when "i1"
+                emit "%#{base_name}.conv#{idx} = call ptr @__crystal_v2_bool_to_string(i1 #{part_ref})"
+              when "ptr"
+                string_parts << part_ref
+                next
+              else
+                # Fallback: treat as ptr
+                string_parts << part_ref
+                next
+              end
+              string_parts << "%#{base_name}.conv#{idx}"
+              next
+            end
             emit "%#{base_name}.union_ptr#{idx} = alloca #{part_llvm_type}, align 8"
             emit "store #{part_llvm_type} #{normalize_union_value(part_ref, part_llvm_type)}, ptr %#{base_name}.union_ptr#{idx}"
             emit "%#{base_name}.tid_ptr#{idx} = getelementptr #{part_llvm_type}, ptr %#{base_name}.union_ptr#{idx}, i32 0, i32 0"
@@ -11721,9 +12010,19 @@ module Crystal::MIR
         # If the condition comes from a cross-block slot, prefer the slot's LLVM type.
         slot_llvm_type = @cross_block_slot_types[term.condition]?
 
+        # Check the actual emitted type of cond — value_ref may have already extracted
+        # a ptr from a union slot (when @value_types differs from slot type).
+        # In that case, use the emitted type, not the slot type.
+        actual_cond_type = @emitted_value_types[cond]?
+
         # Check if condition is a union type - need to extract type_id and compare
         # Also verify LLVM type is actually a union struct (not just ptr)
-        union_llvm_type = slot_llvm_type || (cond_type ? @type_mapper.llvm_type(cond_type) : nil)
+        union_llvm_type = if actual_cond_type
+                            # value_ref already cast the value — use the actual emitted type
+                            actual_cond_type.includes?(".union") ? actual_cond_type : nil
+                          else
+                            slot_llvm_type || (cond_type ? @type_mapper.llvm_type(cond_type) : nil)
+                          end
         if union_llvm_type && union_llvm_type.includes?(".union")
           # Union layout: { i32 type_id, [N x i8] payload }
           # Extract type_id and compare with 0 (nil variant)
@@ -11736,7 +12035,8 @@ module Crystal::MIR
           # type_id 0 = nil (falsy), type_id 1+ = non-nil (truthy)
           emit "%cond#{c}.is_not_nil = icmp ne i32 %cond#{c}.type_id, 0"
           emit "br i1 %cond#{c}.is_not_nil, label %#{then_block}, label %#{else_block}"
-        elsif cond_type && @type_mapper.llvm_type(cond_type) == "ptr" && (slot_llvm_type.nil? || slot_llvm_type == "ptr")
+        elsif (actual_cond_type == "ptr") ||
+              (cond_type && @type_mapper.llvm_type(cond_type) == "ptr" && (slot_llvm_type.nil? || slot_llvm_type == "ptr"))
           # Pointer type: compare against null
           c = @cond_counter
           @cond_counter += 1
@@ -11756,6 +12056,8 @@ module Crystal::MIR
             @cond_counter += 1
             if cond_llvm_type == "double" || cond_llvm_type == "float"
               emit "%cond#{c}.not_zero = fcmp one #{cond_llvm_type} #{cond}, 0.0"
+            elsif cond_llvm_type == "ptr"
+              emit "%cond#{c}.not_zero = icmp ne ptr #{cond}, null"
             else
               emit "%cond#{c}.not_zero = icmp ne #{cond_llvm_type} #{cond}, 0"
             end
@@ -11773,7 +12075,12 @@ module Crystal::MIR
         val_llvm_type = @type_mapper.llvm_type(val_type)
         emit "switch #{val_llvm_type} #{val}, label %#{default} ["
         @indent += 1
+        # Deduplicate case values — LLVM requires unique switch case values.
+        # MIR may produce duplicates when multiple subtypes share the same type_id.
+        seen_cases = Set(Int64).new
         term.cases.each do |(case_val, block)|
+          next if seen_cases.includes?(case_val)
+          seen_cases << case_val
           emit "#{val_llvm_type} #{case_val}, label %#{@block_names[block]}"
         end
         @indent -= 1

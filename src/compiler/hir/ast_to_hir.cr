@@ -2661,7 +2661,8 @@ module Crystal::HIR
       node = @arena[default_expr_id]
       case node
       when CrystalV2::Compiler::Frontend::NumberNode
-        String.new(node.value)
+        # Strip Crystal numeric suffixes (e.g., "0_u64" → "0", "8_u32" → "8")
+        strip_numeric_suffix(String.new(node.value))
       when CrystalV2::Compiler::Frontend::BoolNode
         node.value ? "true" : "false"
       when CrystalV2::Compiler::Frontend::StringNode
