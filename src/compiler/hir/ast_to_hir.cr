@@ -9167,6 +9167,28 @@ module Crystal::HIR
         if types.any?
           return merge_return_types(types)
         end
+      when CrystalV2::Compiler::Frontend::CaseNode
+        types = [] of TypeRef
+        expr_node.when_branches.each do |branch|
+          if inferred = infer_type_from_branch(branch.body, self_type_name)
+            types << inferred
+          end
+        end
+        if else_branch = expr_node.else_branch
+          if inferred = infer_type_from_branch(else_branch, self_type_name)
+            types << inferred
+          end
+        end
+        if in_branches = expr_node.in_branches
+          in_branches.each do |branch|
+            if inferred = infer_type_from_branch(branch.body, self_type_name)
+              types << inferred
+            end
+          end
+        end
+        if types.any?
+          return merge_return_types(types)
+        end
       when CrystalV2::Compiler::Frontend::TernaryNode
         true_type = infer_type_from_expr(expr_node.true_branch, self_type_name)
         false_type = infer_type_from_expr(expr_node.false_branch, self_type_name)
