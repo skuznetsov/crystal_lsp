@@ -33254,7 +33254,24 @@ module Crystal::HIR
         return ne_check.id
       end
 
-      # Non-nilable, non-bool types are always truthy.
+      # Reference types stored as pointers may be null at runtime
+      # (e.g., uninitialized Proc ivars set via &@ivar : T -> patterns).
+      # Emit ptr != null check for user types that aren't inline primitives.
+      if value_type.id >= TypeRef::FIRST_USER_TYPE
+        type_desc = @module.get_type_descriptor(value_type)
+        is_inline = type_desc && type_desc.kind.primitive?
+        unless is_inline
+          nil_val = Literal.new(ctx.next_id, TypeRef::POINTER, 0_i64)
+          ctx.emit(nil_val)
+          ctx.register_type(nil_val.id, TypeRef::POINTER)
+          ne_check = BinaryOperation.new(ctx.next_id, TypeRef::BOOL, BinaryOp::Ne, value_id, nil_val.id)
+          ctx.emit(ne_check)
+          ctx.register_type(ne_check.id, TypeRef::BOOL)
+          return ne_check.id
+        end
+      end
+
+      # Non-nilable, non-bool primitive types are always truthy.
       lit = Literal.new(ctx.next_id, TypeRef::BOOL, true)
       ctx.emit(lit)
       lit.id
