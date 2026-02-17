@@ -1115,7 +1115,11 @@ module Crystal::MIR
       unless @assume_dominates
         timed_cp_phase("apply_build_dominators") do
           def_blocks, def_index = build_def_maps
-          dominators = compute_dominators
+          if can_skip_dominators_for_local_replacements?(replacements, affected_block_ids, def_blocks)
+            dominators = {} of BlockId => Set(BlockId)
+          else
+            dominators = compute_dominators
+          end
         end
       end
       block_sizes = timed_cp_phase("apply_build_block_sizes") do
@@ -1160,6 +1164,23 @@ module Crystal::MIR
       result = yield
       self.class.record_cp_phase_timing(phase_name, (Time.instant - started_at).total_milliseconds)
       result
+    end
+
+    private def can_skip_dominators_for_local_replacements?(
+      replacements : Hash(ValueId, ValueId),
+      affected_block_ids : Set(BlockId),
+      def_blocks : Hash(ValueId, BlockId)
+    ) : Bool
+      return false unless affected_block_ids.size == 1
+      only_block = affected_block_ids.first
+
+      replacements.each do |source_id, target_id|
+        source_block = def_blocks[source_id]?
+        target_block = def_blocks[target_id]?
+        return false unless source_block == only_block && target_block == only_block
+      end
+
+      true
     end
 
     private def block_uses_replacements?(block : BasicBlock, replacement_keys : Set(ValueId)) : Bool

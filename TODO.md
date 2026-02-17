@@ -4729,3 +4729,37 @@ crystal build -Ddebug_hooks src/crystal_v2.cr -o bin/crystal_v2 --no-debug
         - `apply_build_dominators=47919.7ms/1524/31.4434ms`
   - Insight:
     - dominant cost is dominator construction during `apply_replacements` (not replacement discovery/rewrite loops), so next performance work should focus on dominator reuse/caching strategy.
+
+### 8.70 CopyPropagation: skip dominator build for single-block local replacement sets (2026-02-17)
+
+- [x] Add a safe fast-path to avoid `compute_dominators` when all replacements and all their uses are confined to one block.
+  - Root cause:
+    - telemetry from `8.69` showed `apply_build_dominators` as the dominant internal cost in `CopyPropagationPass#apply_replacements`.
+    - many replacement batches are purely local and do not need cross-block dominance checks.
+  - Code fix:
+    - file: `src/compiler/mir/optimizations.cr`
+      - in `apply_replacements`, after `build_def_maps`, detect local-only case via:
+        - `can_skip_dominators_for_local_replacements?(replacements, affected_block_ids, def_blocks)`
+      - when true, skip `compute_dominators` and keep `dominators` empty.
+      - added helper:
+        - requires exactly one `affected_block_id`;
+        - verifies both source and target defs for every replacement are in that same block.
+  - DoD / evidence:
+    - correctness:
+      - `scripts/build.sh release` => `EXIT 0`
+      - `timeout 240 crystal spec spec/hir/return_type_inference_spec.cr` => `13 examples, 0 failures`
+      - `timeout 240 crystal spec spec/mir/llvm_backend_spec.cr` => `59 examples, 0 failures`
+      - `regression_tests/run_all.sh bin/crystal_v2` => `41 passed, 0 failed`
+      - `CRYSTAL_V2_PIPELINE_CACHE=0 bin/crystal_v2 examples/bootstrap_array.cr -o /tmp/bootstrap_array_cp_single_block && scripts/run_safe.sh /tmp/bootstrap_array_cp_single_block 10 768` => `EXIT 0`
+    - perf (strict A/B with identical flags and caches disabled):
+      - baseline log: `/tmp/self_pass_timing_cp_single_block_baseline.log`
+      - experiment log: `/tmp/self_pass_timing_cp_single_block_experiment.log`
+      - command:
+        - `CRYSTAL_V2_AST_CACHE=0 CRYSTAL_V2_PIPELINE_CACHE=0 CRYSTAL_V2_LLVM_CACHE=0 CRYSTAL_V2_MIR_PASS_TIMING=1 CRYSTAL_V2_CP_PHASE_TIMING=1 CRYSTAL_V2_STOP_AFTER_MIR=1 bin/crystal_v2 --stats --release src/compiler/driver.cr ...`
+      - delta (experiment vs baseline):
+        - `apply_build_dominators`: `45679.2ms -> 45386.8ms` (`-0.64%`)
+        - `copy_propagation`: `46058.7ms -> 45470.8ms` (`-1.28%`)
+        - `mir_opt`: `48047.7ms -> 47543.4ms` (`-1.05%`)
+        - `total`: `104262.0ms -> 103958.5ms` (`-0.29%`)
+  - Insight:
+    - improvement is modest but consistent under controlled A/B and safely reduces hot-path dominance overhead without changing semantics.
