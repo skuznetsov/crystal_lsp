@@ -4922,3 +4922,42 @@ crystal build -Ddebug_hooks src/crystal_v2.cr -o bin/crystal_v2 --no-debug
       - source: `/tmp/fib_run.cr`
       - output matched (`9227465` for both),
       - no runtime regression observed in this probe (`/tmp/fib_run_baseline` vs `/tmp/fib_run_experiment`).
+
+### 8.75 LLVM backend: ABI/emitted-type reconciliation in unions/phi/extern/global paths (2026-02-17)
+
+- [x] Stabilize first-stage self-host compile by fixing a chain of LLVM IR type mismatches.
+  - Root cause pattern:
+    - call/phi/store lowering frequently trusted `@value_types` even when emitted SSA type differed after ABI-preserving adaptations.
+    - this produced invalid IR (`union A` used where `union B` expected, late undefined `%rN.u2p.B`, ptr/int mismatches on stores, invalid extern casts).
+  - Code fixes:
+    - file: `src/compiler/mir/llvm_backend.cr`
+      - prepass/phi:
+        - strengthened union-source inference in `prepass_collect_phi_union_to_ptr_extracts` (fallback through defining instruction).
+        - removed late `u2p` creation from phi emission paths; switched to prepass-only lookup with `null` fallback.
+      - union ops:
+        - added `coerce_union_value_for_type` and applied it in `emit_union_type_id_get` / `emit_union_is`.
+        - hardened `emit_union_unwrap` for mismatched emitted union types.
+      - calls:
+        - kept callee ABI return type for known callees; moved adaptation post-call.
+        - used emitted arg/return type in union coercion paths.
+        - added union mismatch guard inside `expected == actual` fast path.
+      - extern calls:
+        - `arg_entries` now prefer emitted SSA type.
+        - added union-to-union cast support in `cast_fixed_arg`.
+        - coerced non-vararg extern calls to `matching_func.params` types.
+        - normalized `void` arg expectations to `ptr`; fixed ptr<->float/double cast paths.
+      - stores:
+        - `value_ref` now records emitted type for from-slot loads.
+        - `emit_binary_op` now records emitted type for compare/arithmetic/ptr-wrap/union-wrap results.
+        - `emit_global_store` now reconciles with emitted SSA type (including int<->ptr casts and union reinterpret).
+      - returns:
+        - `emit_terminator(Return)` now prefers emitted SSA type for `ret` type selection.
+  - DoD / evidence:
+    - full self-host compile (stage1 compiler as driver):
+      - `CRYSTAL_V2_PIPELINE_CACHE=0 /tmp/crystal_v2_dbg_fix17 src/compiler/driver.cr -o /tmp/crystal_v2_self_full_fix17`
+      - result: `EXIT 0`, produced `/tmp/crystal_v2_self_full_fix17` (log: `/tmp/self_full_fix17.log`, empty/no llc errors).
+    - smoke compile comparison:
+      - `/tmp/crystal_v2_dbg_fix17 examples/bench_fib42.cr -o /tmp/bench_fib42_dbg_fix17` => `EXIT 0`
+      - `/tmp/crystal_v2_self_full_fix17 examples/bench_fib42.cr -o /tmp/bench_fib42_fix17` => `EXIT 139` (no stderr)
+  - Insight:
+    - first-stage self-host compile is now passing again; remaining blocker shifted from LLVM IR invalidity to stage2 runtime segfault during compile execution.
