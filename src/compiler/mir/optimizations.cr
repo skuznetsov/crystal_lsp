@@ -1054,6 +1054,17 @@ module Crystal::MIR
         STDERR.puts "[MIR_CP] replacements=#{replacements}"
       end
 
+      replacement_keys = replacements.keys.to_set
+      affected_block_ids = Set(BlockId).new
+      @function.blocks.each do |block|
+        if block_uses_replacements?(block, replacement_keys)
+          affected_block_ids << block.id
+        end
+      end
+
+      # Nothing reads replaced values, so rewriting is a guaranteed no-op.
+      return 0 if affected_block_ids.empty?
+
       def_blocks, def_index = build_def_maps
       dominators = compute_dominators
       block_sizes = {} of BlockId => Int32
@@ -1062,6 +1073,8 @@ module Crystal::MIR
       end
 
       @function.blocks.each do |block|
+        next unless affected_block_ids.includes?(block.id)
+
         new_instructions = [] of Value
         block.instructions.each_with_index do |inst, idx|
           new_instructions << rewrite_instruction(inst, replacements, block.id, idx, def_blocks, def_index, dominators, block_sizes)
@@ -1075,6 +1088,27 @@ module Crystal::MIR
       end
 
       @propagated
+    end
+
+    private def block_uses_replacements?(block : BasicBlock, replacement_keys : Set(ValueId)) : Bool
+      block.instructions.each do |inst|
+        inst.operands.each do |operand|
+          return true if replacement_keys.includes?(operand)
+        end
+      end
+
+      case term = block.terminator
+      when Branch
+        return true if replacement_keys.includes?(term.condition)
+      when Switch
+        return true if replacement_keys.includes?(term.value)
+      when Return
+        if value = term.value
+          return true if replacement_keys.includes?(value)
+        end
+      end
+
+      false
     end
 
     private def canonical(id : ValueId, replacements : Hash(ValueId, ValueId)) : ValueId

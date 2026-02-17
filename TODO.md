@@ -4413,3 +4413,52 @@ crystal build -Ddebug_hooks src/crystal_v2.cr -o bin/crystal_v2 --no-debug
       - `peephole`: `+307.5ms` (`+0.69%`, small regression)
   - Notes:
     - net `mir_opt`/`total` improvement is positive; next micro-step should target `peephole` specifically.
+
+### 8.57 Skip full-block MIR rewrites when replacement keys are unused (2026-02-17)
+
+- [x] Add fast-path in copy-propagation replacement apply phase to avoid rewriting unaffected blocks.
+  - Root cause:
+    - `CopyPropagationPass#apply_replacements` rewrote every instruction in every block whenever `replacements` was non-empty.
+    - this path is called from:
+      - `CopyPropagationPass#run`,
+      - `LocalCSEPass` (after CSE replacements),
+      - `PeepholePass` (after cast/phi simplifications).
+    - for many functions, replacements are sparse and used in only a subset of blocks, so full rewrite was mostly wasted work.
+  - Code fix:
+    - file: `src/compiler/mir/optimizations.cr`
+    - in `CopyPropagationPass#apply_replacements`:
+      - build `replacement_keys = replacements.keys.to_set`;
+      - detect `affected_block_ids` via new helper `block_uses_replacements?`;
+      - return early if no blocks reference replaced ids;
+      - rewrite only affected blocks (skip all others).
+    - helper checks both instruction operands and terminator operands (`Branch`, `Switch`, `Return`).
+  - DoD / evidence:
+    - `scripts/build.sh release` => `EXIT 0`
+    - `regression_tests/run_all.sh bin/crystal_v2` => `41 passed, 0 failed`
+    - bootstrap smoke:
+      - `CRYSTAL_V2_PIPELINE_CACHE=0 CRYSTAL_V2_LLVM_CACHE=0 bin/crystal_v2 examples/bootstrap_array.cr -o /tmp/bootstrap_array_cp_fastpath && scripts/run_safe.sh /tmp/bootstrap_array_cp_fastpath 10 768`
+      - result: `EXIT 0`
+    - self-host (`STOP_AFTER_MIR`, release, MIR pass timing on):
+      - previous stable avg (from `8.56`):
+        - `/tmp/self_pass_timing_noalloc.log`
+        - `/tmp/self_pass_timing_noalloc_r2.log`
+      - new:
+        - `/tmp/self_pass_timing_cp_fastpath.log`
+        - `/tmp/self_pass_timing_cp_fastpath_r2.log`
+      - average stage delta (new vs previous stable avg):
+        - `mir_opt`: `145046.6ms -> 100814.1ms` (`-30.50%`)
+        - `total`: `205870.9ms -> 161645.6ms` (`-21.48%`)
+        - `real`: `205.91s -> 161.68s` (`-21.48%`)
+      - pass-level avg deltas:
+        - `peephole`: `45096.9ms -> 297.0ms` (`-99.34%`)
+        - `local_cse`: slight improvement (`-0.25%`)
+        - `copy_propagation`: slight regression (`+1.11%`) but dominated by peephole gain.
+    - full self-host (end-to-end, release):
+      - baseline: `/tmp/full_after_465fde9_stats.log`
+      - new: `/tmp/full_after_cp_fastpath.log`
+      - delta:
+        - `mir_opt`: `146853.6ms -> 100303.5ms` (`-31.70%`)
+        - `total`: `297558.0ms -> 276561.3ms` (`-7.06%`)
+        - `real`: `297.59s -> 276.63s` (`-7.04%`)
+  - Notes:
+    - this was the first high-leverage optimization directly discovered via pass telemetry from `8.55`.
