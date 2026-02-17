@@ -1003,10 +1003,12 @@ module Crystal::HIR
     @function_def_overloads : Hash(String, Array(String))
     @function_defs_cache_size : Int32
     @function_defs_processed_for_overloads : Int32 = 0
+    @pending_function_def_keys : Array(String)
     @function_param_stats : Hash(String, DefParamStats)
     @function_type_keys_by_base : Hash(String, Array(String))
     @function_type_keys_by_base_size : Int32
     @function_types_processed_for_keys : Int32 = 0
+    @pending_function_type_keys : Array(String)
     @function_type_keys_processed : Set(String)
 
     # ═══════════════════════════════════════════════════════════════════════════
@@ -1514,6 +1516,20 @@ module Crystal::HIR
     # METHOD INDEX HELPERS (Option D optimization)
     # ═══════════════════════════════════════════════════════════════════════════
 
+    # Centralized write path so overload indexes can process only newly-added defs.
+    private def set_function_def_entry(name : String, def_node : CrystalV2::Compiler::Frontend::DefNode) : Nil
+      is_new = !@function_defs.has_key?(name)
+      @function_defs[name] = def_node
+      @pending_function_def_keys << name if is_new
+    end
+
+    # Centralized write path so type-key indexes can process only newly-added keys.
+    private def set_function_type_entry(name : String, return_type : TypeRef) : Nil
+      is_new = !@function_types.has_key?(name)
+      @function_types[name] = return_type
+      @pending_function_type_keys << name if is_new
+    end
+
     # Register a function def and update the method index for fast parent lookups.
     # Call this instead of directly assigning to @function_defs.
     private def register_function_def(
@@ -1521,7 +1537,7 @@ module Crystal::HIR
       def_node : CrystalV2::Compiler::Frontend::DefNode,
       arena : CrystalV2::Compiler::Frontend::ArenaLike,
     )
-      @function_defs[full_name] = def_node
+      set_function_def_entry(full_name, def_node)
       set_function_def_arena(full_name, arena)
       base_name = strip_type_suffix(full_name)
       @function_lookup_base_epoch[base_name] = (@function_lookup_base_epoch[base_name]? || 0) + 1
@@ -2196,9 +2212,11 @@ module Crystal::HIR
       @function_def_arenas = Hash(String, CrystalV2::Compiler::Frontend::ArenaLike).new(initial_capacity: 32768)
       @function_def_overloads = Hash(String, Array(String)).new(initial_capacity: 8192)
       @function_defs_cache_size = 0
+      @pending_function_def_keys = [] of String
       @function_param_stats = {} of String => DefParamStats
       @function_type_keys_by_base = Hash(String, Array(String)).new(initial_capacity: 8192)
       @function_type_keys_by_base_size = 0
+      @pending_function_type_keys = [] of String
       @function_type_keys_processed = Set(String).new(initial_capacity: 16384)
       @function_def_overloads_cache = {} of String => Array(String)
       @function_def_overloads_cache_size = 0
@@ -2738,7 +2756,7 @@ module Crystal::HIR
           end
         end
       end
-      @function_types[full_name] = return_type
+      set_function_type_entry(full_name, return_type)
       # Extract base name (without $ type suffix) for fast lookups
       base_name = strip_type_suffix(full_name)
       @function_base_names.add(base_name)
@@ -6935,14 +6953,14 @@ module Crystal::HIR
                       end
                     end
                     register_function_type(full_name, return_type)
-                    @function_defs[full_name] = member
+                    set_function_def_entry(full_name, member)
                     set_function_def_arena(full_name, @arena)
                     if env_get("DEBUG_ARENA_WRITE") && (class_name.includes?("Slice") && method_name == "hash")
                       arena_path = source_path_for(@arena) || "(unknown)"
                       STDERR.puts "[ARENA_WRITE_MOD_INST] full=#{full_name} arena=#{arena_path}:#{@arena.size} module=#{module_full_name}"
                     end
                     if should_register_base_name?(full_name, base_name, member, has_block)
-                      @function_defs[base_name] = member
+                      set_function_def_entry(base_name, member)
                       set_function_def_arena(base_name, @arena)
                     end
 
@@ -6958,10 +6976,10 @@ module Crystal::HIR
                         end
                         debug_hook("yield.register", full_name)
                         if !has_block && !@function_defs.has_key?(base_name)
-                          @function_defs[base_name] = member
+                          set_function_def_entry(base_name, member)
                           set_function_def_arena(base_name, @arena)
                         end
-                        @function_defs[full_name] = member
+                        set_function_def_entry(full_name, member)
                         set_function_def_arena(full_name, @arena)
                       end
                     end
@@ -7149,7 +7167,7 @@ module Crystal::HIR
                       end
                     end
                     register_function_type(full_name, return_type)
-                    @function_defs[full_name] = member
+                    set_function_def_entry(full_name, member)
                     set_function_def_arena(full_name, @arena)
                   end
                 end
@@ -7303,7 +7321,7 @@ module Crystal::HIR
                         unless defined_full_names.includes?(full_name) || @module.has_function?(full_name) || @function_defs.has_key?(full_name)
                           register_function_type(full_name, return_type)
                           register_pending_method_effects(full_name, param_types.size)
-                          @function_defs[full_name] = member
+                          set_function_def_entry(full_name, member)
                           set_function_def_arena(full_name, @arena)
                         end
                       end
@@ -8992,7 +9010,7 @@ module Crystal::HIR
                     if def_node
                       inferred = infer_return_type_from_callsite(def_node, owner, expr_node.args, expr_node.named_args, self_type_name)
                       if inferred && inferred != TypeRef::VOID && inferred != TypeRef::NIL
-                        @function_types[instance_method] = inferred
+                        set_function_type_entry(instance_method, inferred)
                         @function_base_return_types[def_base] = inferred
                         return inferred
                       end
@@ -9014,7 +9032,7 @@ module Crystal::HIR
                     if def_node
                       inferred = infer_return_type_from_callsite(def_node, owner, expr_node.args, expr_node.named_args, self_type_name)
                       if inferred && inferred != TypeRef::VOID && inferred != TypeRef::NIL
-                        @function_types[def_name] = inferred
+                        set_function_type_entry(def_name, inferred)
                         @function_base_return_types[def_base] = inferred
                         return inferred
                       end
@@ -9055,7 +9073,7 @@ module Crystal::HIR
                 if def_node
                   inferred = infer_return_type_from_callsite(def_node, self_type_name, expr_node.args, expr_node.named_args, self_type_name)
                   if inferred && inferred != TypeRef::VOID && inferred != TypeRef::NIL
-                    @function_types[base] = inferred
+                    set_function_type_entry(base, inferred)
                     @function_base_return_types[def_base] = inferred
                     return inferred
                   end
@@ -9076,7 +9094,7 @@ module Crystal::HIR
                 if def_node
                   inferred = infer_return_type_from_callsite(def_node, self_type_name, expr_node.args, expr_node.named_args, self_type_name)
                   if inferred && inferred != TypeRef::VOID && inferred != TypeRef::NIL
-                    @function_types[base] = inferred
+                    set_function_type_entry(base, inferred)
                     @function_base_return_types[def_base] = inferred
                     return inferred
                   end
@@ -10112,10 +10130,10 @@ module Crystal::HIR
                 end
                 full_name = function_full_name_for_def(base_name, param_types, member.params, has_block)
                 register_function_type(full_name, return_type)
-                @function_defs[full_name] = member
+                set_function_def_entry(full_name, member)
                 set_function_def_arena(full_name, @arena)
                 if should_register_base_name?(full_name, base_name, member, has_block)
-                  @function_defs[base_name] = member
+                  set_function_def_entry(base_name, member)
                   set_function_def_arena(base_name, @arena)
                 end
 
@@ -10124,10 +10142,10 @@ module Crystal::HIR
                   @yield_functions.add(full_name)
                   debug_hook("yield.register", full_name)
                   if !has_block && !@function_defs.has_key?(base_name)
-                    @function_defs[base_name] = member
+                    set_function_def_entry(base_name, member)
                     set_function_def_arena(base_name, @arena)
                   end
-                  @function_defs[full_name] = member
+                  set_function_def_entry(full_name, member)
                   set_function_def_arena(full_name, @arena)
                 end
               else
@@ -10892,14 +10910,14 @@ module Crystal::HIR
           return
         end
         register_function_type(full_name, return_type)
-        @function_defs[full_name] = member
+        set_function_def_entry(full_name, member)
         set_function_def_arena(full_name, @arena)
         if env_get("DEBUG_ARENA_WRITE") && (module_name.includes?("Slice") || full_name.includes?("Slice")) && method_name == "hash"
           arena_path = source_path_for(@arena) || "(unknown)"
           STDERR.puts "[ARENA_WRITE_MOD_METHOD] full=#{full_name} base=#{base_name} module=#{module_name} arena=#{arena_path}:#{@arena.size}"
         end
         if should_register_base_name?(full_name, base_name, member, has_block)
-          @function_defs[base_name] = member
+          set_function_def_entry(base_name, member)
           set_function_def_arena(base_name, @arena)
         elsif !has_block
           prefer_non_yield_base_name(base_name, member, @arena)
@@ -10911,10 +10929,10 @@ module Crystal::HIR
           @yield_functions.add(full_name)
           debug_hook("yield.register", full_name)
           if !has_block && !@function_defs.has_key?(base_name)
-            @function_defs[base_name] = member
+            set_function_def_entry(base_name, member)
             set_function_def_arena(base_name, @arena)
           end
-          @function_defs[full_name] = member
+          set_function_def_entry(full_name, member)
           set_function_def_arena(full_name, @arena)
         end
       ensure
@@ -11323,7 +11341,7 @@ module Crystal::HIR
         if prev_return = @function_types[full_name]?
           register_function_type(previous_full, prev_return)
         end
-        @function_defs[previous_full] = existing_def
+        set_function_def_entry(previous_full, existing_def)
         if prev_arena = @function_def_arenas[full_name]?
           set_function_def_arena(previous_full, prev_arena)
         else
@@ -11335,7 +11353,7 @@ module Crystal::HIR
         end
       end
       register_function_type(full_name, return_type)
-      @function_defs[full_name] = member
+      set_function_def_entry(full_name, member)
       set_function_def_arena(full_name, @arena)
       if env_get("DEBUG_ARENA_WRITE_TYPE") && (type_name.includes?("Slice") || full_name.includes?("Slice")) && method_name == "hash"
         arena_path = source_path_for(@arena) || "(unknown)"
@@ -11352,14 +11370,14 @@ module Crystal::HIR
       end
       if alias_full_name
         register_function_type(alias_full_name, return_type) unless @function_types.has_key?(alias_full_name)
-        @function_defs[alias_full_name] = member
+        set_function_def_entry(alias_full_name, member)
         set_function_def_arena(alias_full_name, @arena)
         unless @type_param_map.empty?
           store_function_type_param_map(alias_full_name, strip_type_suffix(alias_full_name), @type_param_map)
         end
       end
       if should_register_base_name?(full_name, base_name, member, has_block)
-        @function_defs[base_name] = member
+        set_function_def_entry(base_name, member)
         set_function_def_arena(base_name, @arena)
       elsif !has_block
         prefer_non_yield_base_name(base_name, member, @arena)
@@ -11373,10 +11391,10 @@ module Crystal::HIR
           # Don't let yield-based block overloads claim the bare base name.
           # This avoids routing no-block calls to block-only defs.
           if !has_block && !@function_defs.has_key?(base_name)
-            @function_defs[base_name] = member
+            set_function_def_entry(base_name, member)
             set_function_def_arena(base_name, @arena)
           end
-          @function_defs[full_name] = member
+          set_function_def_entry(full_name, member)
           set_function_def_arena(full_name, @arena)
         end
       end
@@ -12234,10 +12252,10 @@ module Crystal::HIR
               end
               full_method_name = function_full_name_for_def(base_name, param_types, member.params, has_block)
               register_function_type(full_method_name, return_type)
-              @function_defs[full_method_name] = member
+              set_function_def_entry(full_method_name, member)
               set_function_def_arena(full_method_name, @arena)
               if should_register_base_name?(full_method_name, base_name, member, has_block)
-                @function_defs[base_name] = member
+                set_function_def_entry(base_name, member)
                 set_function_def_arena(base_name, @arena)
               end
 
@@ -12246,10 +12264,10 @@ module Crystal::HIR
                 @yield_functions.add(full_method_name)
                 debug_hook("yield.register", full_method_name)
                 unless @function_defs.has_key?(base_name)
-                  @function_defs[base_name] = member
+                  set_function_def_entry(base_name, member)
                   set_function_def_arena(base_name, @arena)
                 end
-                @function_defs[full_method_name] = member
+                set_function_def_entry(full_method_name, member)
                 set_function_def_arena(full_method_name, @arena)
               end
             when CrystalV2::Compiler::Frontend::ClassNode
@@ -13713,7 +13731,7 @@ module Crystal::HIR
                 STDERR.puts "[DEBUG_METHOD_REG] #{class_name}: #{method_name} -> #{full_name} (class_method=#{is_class_method})"
               end
               register_function_type(full_name, return_type)
-              @function_defs[full_name] = member
+              set_function_def_entry(full_name, member)
               # Resolve correct arena for the def node to avoid cross-file contamination.
               # When registering methods from a monomorphized generic class, @arena may point
               # to a different file than where the method was actually defined.
@@ -13734,7 +13752,7 @@ module Crystal::HIR
               end
               if alias_full_name
                 register_function_type(alias_full_name, return_type) unless @function_types.has_key?(alias_full_name)
-                @function_defs[alias_full_name] = member
+                set_function_def_entry(alias_full_name, member)
                 set_function_def_arena(alias_full_name, member_arena)
                 unless @type_param_map.empty?
                   alias_base_name = strip_type_suffix(alias_full_name)
@@ -13742,7 +13760,7 @@ module Crystal::HIR
                 end
               end
               if should_register_base_name?(full_name, base_name, member, has_block)
-                @function_defs[base_name] = member
+                set_function_def_entry(base_name, member)
                 set_function_def_arena(base_name, member_arena)
               elsif !has_block
                 prefer_non_yield_base_name(base_name, member, member_arena)
@@ -13757,19 +13775,19 @@ module Crystal::HIR
                 @yield_functions.add(full_name)
                 debug_hook("yield.register", full_name)
                 if !has_block && !@function_defs.has_key?(base_name)
-                  @function_defs[base_name] = member
+                  set_function_def_entry(base_name, member)
                   set_function_def_arena(base_name, member_arena)
                 end
-                @function_defs[full_name] = member
+                set_function_def_entry(full_name, member)
                 set_function_def_arena(full_name, member_arena)
                 if alias_full_name
                   @yield_functions.add(alias_full_name)
                   debug_hook("yield.register", alias_full_name)
                   if alias_base && !has_block && !@function_defs.has_key?(alias_base)
-                    @function_defs[alias_base] = member
+                    set_function_def_entry(alias_base, member)
                     set_function_def_arena(alias_base, member_arena)
                   end
-                  @function_defs[alias_full_name] = member
+                  set_function_def_entry(alias_full_name, member)
                   set_function_def_arena(alias_full_name, member_arena)
                 end
               end
@@ -14073,7 +14091,7 @@ module Crystal::HIR
                 end
               end
               next if has_typed
-              @function_defs[base_name] = member
+              set_function_def_entry(base_name, member)
               set_function_def_arena(base_name, @arena)
             end
           end
@@ -14820,7 +14838,7 @@ module Crystal::HIR
             next if @function_types.has_key?(full_name)
 
             register_function_type(full_name, return_type)
-            @function_defs[full_name] = member
+            set_function_def_entry(full_name, member)
             set_function_def_arena(full_name, @arena)
 
             # CRITICAL: Store type param map so lowering can resolve type param calls
@@ -18391,7 +18409,7 @@ module Crystal::HIR
       existing_arena = @function_def_arenas[base_name]? || member_arena
       return unless def_contains_yield?(existing, existing_arena)
       return if def_contains_yield?(member, member_arena)
-      @function_defs[base_name] = member
+      set_function_def_entry(base_name, member)
       set_function_def_arena(base_name, member_arena)
     end
 
@@ -18404,7 +18422,7 @@ module Crystal::HIR
       existing_params = count_non_block_params(existing)
       member_params = count_non_block_params(member)
       return unless member_params < existing_params
-      @function_defs[base_name] = member
+      set_function_def_entry(base_name, member)
       set_function_def_arena(base_name, member_arena)
     end
 
@@ -19382,105 +19400,113 @@ module Crystal::HIR
     end
 
     private def rebuild_function_def_overloads
-      # Incremental: only process new entries since last rebuild
-      count = 0
-      @function_defs.each do |key, def_node|
-        count += 1
-        next if count <= @function_defs_processed_for_overloads
-        base = if idx = key.index('$')
-                 key[0, idx]
-               else
-                 key
-               end
-        list = @function_def_overloads[base]?
-        if list
-          list << key
-        else
-          @function_def_overloads[base] = [key]
-        end
-        if key.includes?("_double_splat")
-          @function_def_has_double_splat[base] = true
-        elsif key.includes?("_splat")
-          @function_def_has_splat[base] = true
-        end
-        @function_def_overloads_cache[base] = @function_def_overloads[base]
-        stripped_base = base
-        if base.includes?('#') || base.includes?('.')
-          parts = parse_method_name_compact(base)
-          if parts.separator && parts.method
-            owner_base = strip_generic_args(parts.owner)
-            stripped_base = parts.separator == '#' ? "#{owner_base}##{parts.method.not_nil!}" : "#{owner_base}.#{parts.method.not_nil!}"
-          end
-        end
-        if stripped_base != base && !@function_def_overloads_stripped_by_base.has_key?(base)
-          @function_def_overloads_stripped_by_base[base] = stripped_base
-        end
-        stripped_list = @function_def_overloads_stripped_index[stripped_base]?
-        if stripped_list
-          stripped_list << key
-        else
-          @function_def_overloads_stripped_index[stripped_base] = [key]
-        end
-        if stripped_base != base
-          if key.includes?("_double_splat")
-            @function_def_has_double_splat[stripped_base] = true
-          elsif key.includes?("_splat")
-            @function_def_has_splat[stripped_base] = true
-          end
-        end
-        @function_def_overloads_cache[stripped_base] = @function_def_overloads_stripped_index[stripped_base]
-        if @function_def_overloads_stripped_cache.has_key?(stripped_base)
-          @function_def_overloads_stripped_cache[stripped_base] = @function_def_overloads_stripped_index[stripped_base]
-        end
-        @function_param_stats[key] = build_param_stats(def_node) unless @function_param_stats.has_key?(key)
-      end
-      @function_defs_processed_for_overloads = count
-
-      # Incremental for function_type_keys_by_base
-      type_count = 0
-      @function_types.each_key do |key|
-        type_count += 1
-        next if type_count <= @function_types_processed_for_keys
-        base = if idx = key.index('$')
-                 key[0, idx]
-               else
-                 key
-               end
-        list = @function_type_keys_by_base[base]?
-        if list
-          list << key unless list.includes?(key)
-        else
-          @function_type_keys_by_base[base] = [key]
+      # Safety fallback for any direct map writes not routed through helpers.
+      if @pending_function_def_keys.empty? && @function_defs_cache_size != @function_defs.size
+        @function_defs.each_key do |key|
+          @pending_function_def_keys << key unless @function_param_stats.has_key?(key)
         end
       end
-      @function_types_processed_for_keys = type_count
 
-      @function_type_keys_by_base_size = @function_types.size
-      @function_defs_cache_size = @function_defs.size
-      @function_def_overloads_cache_size = @function_defs_cache_size
-    end
+      @pending_function_def_keys.each do |key|
+        next unless def_node = @function_defs[key]?
+        index_function_def_overload_entry(key, def_node)
+      end
+      @pending_function_def_keys.clear
 
-    private def function_type_keys_for_base(base_name : String) : Array(String)
-      rebuild_function_def_overloads if @function_defs_cache_size != @function_defs.size
-      if @function_type_keys_by_base_size != @function_types.size
-        type_count = 0
+      # Safety fallback for direct function type writes that bypass helper routing.
+      if @pending_function_type_keys.empty? && @function_type_keys_by_base_size != @function_types.size
         @function_types.each_key do |key|
-          type_count += 1
-          next if type_count <= @function_types_processed_for_keys
           base = if idx = key.index('$')
                    key[0, idx]
                  else
                    key
                  end
           list = @function_type_keys_by_base[base]?
-          if list
-            list << key unless list.includes?(key)
-          else
-            @function_type_keys_by_base[base] = [key]
-          end
+          next if list && list.includes?(key)
+          @pending_function_type_keys << key
         end
-        @function_types_processed_for_keys = type_count
-        @function_type_keys_by_base_size = @function_types.size
+      end
+
+      @pending_function_type_keys.each do |key|
+        index_function_type_key_entry(key)
+      end
+      @pending_function_type_keys.clear
+
+      @function_defs_processed_for_overloads = @function_defs.size
+      @function_types_processed_for_keys = @function_types.size
+      @function_type_keys_by_base_size = @function_types.size
+      @function_defs_cache_size = @function_defs.size
+      @function_def_overloads_cache_size = @function_defs_cache_size
+    end
+
+    private def index_function_def_overload_entry(key : String, def_node : CrystalV2::Compiler::Frontend::DefNode) : Nil
+      base = if idx = key.index('$')
+               key[0, idx]
+             else
+               key
+             end
+      list = @function_def_overloads[base]?
+      if list
+        list << key unless list.includes?(key)
+      else
+        @function_def_overloads[base] = [key]
+      end
+      if key.includes?("_double_splat")
+        @function_def_has_double_splat[base] = true
+      elsif key.includes?("_splat")
+        @function_def_has_splat[base] = true
+      end
+      @function_def_overloads_cache[base] = @function_def_overloads[base]
+
+      stripped_base = base
+      if base.includes?('#') || base.includes?('.')
+        parts = parse_method_name_compact(base)
+        if parts.separator && parts.method
+          owner_base = strip_generic_args(parts.owner)
+          stripped_base = parts.separator == '#' ? "#{owner_base}##{parts.method.not_nil!}" : "#{owner_base}.#{parts.method.not_nil!}"
+        end
+      end
+      if stripped_base != base && !@function_def_overloads_stripped_by_base.has_key?(base)
+        @function_def_overloads_stripped_by_base[base] = stripped_base
+      end
+      stripped_list = @function_def_overloads_stripped_index[stripped_base]?
+      if stripped_list
+        stripped_list << key unless stripped_list.includes?(key)
+      else
+        @function_def_overloads_stripped_index[stripped_base] = [key]
+      end
+      if stripped_base != base
+        if key.includes?("_double_splat")
+          @function_def_has_double_splat[stripped_base] = true
+        elsif key.includes?("_splat")
+          @function_def_has_splat[stripped_base] = true
+        end
+      end
+      @function_def_overloads_cache[stripped_base] = @function_def_overloads_stripped_index[stripped_base]
+      if @function_def_overloads_stripped_cache.has_key?(stripped_base)
+        @function_def_overloads_stripped_cache[stripped_base] = @function_def_overloads_stripped_index[stripped_base]
+      end
+      @function_param_stats[key] = build_param_stats(def_node) unless @function_param_stats.has_key?(key)
+    end
+
+    private def index_function_type_key_entry(key : String) : Nil
+      base = if idx = key.index('$')
+               key[0, idx]
+             else
+               key
+             end
+      list = @function_type_keys_by_base[base]?
+      if list
+        list << key unless list.includes?(key)
+      else
+        @function_type_keys_by_base[base] = [key]
+      end
+    end
+
+    private def function_type_keys_for_base(base_name : String) : Array(String)
+      rebuild_function_def_overloads if @function_defs_cache_size != @function_defs.size
+      if @function_type_keys_by_base_size != @function_types.size || !@pending_function_type_keys.empty?
+        rebuild_function_def_overloads
       end
       @function_type_keys_by_base[base_name]? || [] of String
     end
@@ -20819,12 +20845,12 @@ module Crystal::HIR
       register_function_type(full_name, return_type)
 
       # Store AST for potential inline expansion (use mangled name)
-      @function_defs[full_name] = node
+      set_function_def_entry(full_name, node)
       set_function_def_arena(full_name, @arena)
       if should_register_base_name?(full_name, base_name, node, has_block)
         register_function_type(base_name, return_type)
         unless @function_defs.has_key?(base_name)
-          @function_defs[base_name] = node
+          set_function_def_entry(base_name, node)
           set_function_def_arena(base_name, @arena)
         end
       end
@@ -22320,7 +22346,7 @@ module Crystal::HIR
           if def_node.return_type
             if resolved = resolve_return_type_from_def(name, base_name, nil)
               if resolved != TypeRef::VOID && resolved != existing_type
-                @function_types[name] = resolved
+                set_function_type_entry(name, resolved)
                 @function_base_return_types[base_name] = resolved unless base_name.includes?('$')
                 existing_type = resolved
               end
@@ -22332,14 +22358,14 @@ module Crystal::HIR
         # Check base_name cache early (before AST-walk / force_lower).
         if base_rt = @function_base_return_types[base_name]?
           if base_rt != TypeRef::VOID
-            @function_types[name] = base_rt
+            set_function_type_entry(name, base_rt)
             existing_type = base_rt
           end
         end
         # Check well-known method return types (to_s→String, hash→UInt64, ==→Bool, etc.)
         if existing_type == TypeRef::VOID
           if wk_rt = well_known_method_return_type(base_name)
-            @function_types[name] = wk_rt
+            set_function_type_entry(name, wk_rt)
             @function_base_return_types[base_name] = wk_rt unless base_name.includes?('$')
             existing_type = wk_rt
           end
@@ -22350,7 +22376,7 @@ module Crystal::HIR
             owner_name = function_context_from_name(base_name)
             if inferred = infer_return_type_from_body_without_callsite(def_node, owner_name)
               if inferred != TypeRef::VOID
-                @function_types[name] = inferred
+                set_function_type_entry(name, inferred)
                 @function_base_return_types[base_name] = inferred unless base_name.includes?('$')
                 existing_type = inferred
               end
@@ -22368,7 +22394,7 @@ module Crystal::HIR
               if func = @module.function_by_name(name)
                 func_rt = func.return_type
                 if func_rt != TypeRef::VOID
-                  @function_types[name] = func_rt
+                  set_function_type_entry(name, func_rt)
                   @function_base_return_types[base_name] = func_rt unless base_name.includes?('$')
                   existing_type = func_rt
                 end
@@ -22382,13 +22408,13 @@ module Crystal::HIR
         # Check base_name cache early.
         if base_rt = @function_base_return_types[base_name]?
           if base_rt != TypeRef::VOID
-            @function_types[name] = base_rt
+            set_function_type_entry(name, base_rt)
             return base_rt
           end
         end
         # Check well-known method return types.
         if wk_rt = well_known_method_return_type(base_name)
-          @function_types[name] = wk_rt
+          set_function_type_entry(name, wk_rt)
           @function_base_return_types[base_name] = wk_rt unless base_name.includes?('$')
           return wk_rt
         end
@@ -22402,7 +22428,7 @@ module Crystal::HIR
           owner_name = function_context_from_name(base_name)
           if inferred = infer_return_type_from_body_without_callsite(def_node, owner_name)
             if inferred != TypeRef::VOID
-              @function_types[name] = inferred
+              set_function_type_entry(name, inferred)
               @function_base_return_types[base_name] = inferred unless base_name.includes?('$')
               return inferred
             end
@@ -22418,7 +22444,7 @@ module Crystal::HIR
             if func = @module.function_by_name(name)
               func_rt = func.return_type
               if func_rt != TypeRef::VOID
-                @function_types[name] = func_rt
+                set_function_type_entry(name, func_rt)
                 @function_base_return_types[base_name] = func_rt unless base_name.includes?('$')
                 return func_rt
               end
@@ -22454,12 +22480,12 @@ module Crystal::HIR
                 if inferred != TypeRef::VOID
                   inferred_desc = @module.get_type_descriptor(inferred)
                   if inferred_desc.nil? || inferred_desc.kind != TypeKind::Union
-                    @function_types[base_name] = inferred
+                    set_function_type_entry(base_name, inferred)
                     @function_base_return_types[base_name] = inferred unless base_name.includes?('$')
                   elsif inferred_desc && inferred_desc.kind == TypeKind::Union
                     current_union_name = base_desc ? base_desc.name : get_type_name_from_ref(base_type)
                     if prefer_inferred_union_type?(current_union_name, inferred_desc.name)
-                      @function_types[base_name] = inferred
+                      set_function_type_entry(base_name, inferred)
                       @function_base_return_types[base_name] = inferred unless base_name.includes?('$')
                     end
                   end
@@ -22475,7 +22501,7 @@ module Crystal::HIR
           func_rt = func.return_type
           if func_rt != TypeRef::VOID
             if unresolved_generic_return_type?(type) && !unresolved_generic_return_type?(func_rt)
-              @function_types[name] = func_rt
+              set_function_type_entry(name, func_rt)
               type = func_rt
             end
             # Prefer concrete lowered return types over overly broad unions.
@@ -22484,7 +22510,7 @@ module Crystal::HIR
             if type != func_rt
               if type_desc = @module.get_type_descriptor(type)
                 if type_desc.kind == TypeKind::Union
-                  @function_types[name] = func_rt
+                  set_function_type_entry(name, func_rt)
                   type = func_rt
                 end
               end
@@ -22516,13 +22542,13 @@ module Crystal::HIR
               if inferred != TypeRef::VOID
                 inferred_desc = @module.get_type_descriptor(inferred)
                 if inferred_desc.nil? || inferred_desc.kind != TypeKind::Union
-                  @function_types[name] = inferred
+                  set_function_type_entry(name, inferred)
                   @function_base_return_types[base_name] = inferred unless base_name.includes?('$')
                   type = inferred
                 elsif inferred_desc && inferred_desc.kind == TypeKind::Union
                   current_union_name = type_desc ? type_desc.name : get_type_name_from_ref(type)
                   if prefer_inferred_union_type?(current_union_name, inferred_desc.name)
-                    @function_types[name] = inferred
+                    set_function_type_entry(name, inferred)
                     @function_base_return_types[base_name] = inferred unless base_name.includes?('$')
                     type = inferred
                   end
@@ -22546,7 +22572,7 @@ module Crystal::HIR
             end
             if inferred = infer_return_type_from_body_without_callsite(def_node, owner_name)
               if inferred != TypeRef::VOID
-                @function_types[name] = inferred
+                set_function_type_entry(name, inferred)
                 @function_base_return_types[base_name] = inferred unless base_name.includes?('$')
                 type = inferred
               end
@@ -22578,7 +22604,7 @@ module Crystal::HIR
             if inferred = infer_return_type_from_body_without_callsite(def_node, owner_name)
               if inferred != TypeRef::VOID
                 @function_base_return_types[base_name] = inferred
-                @function_types[base_name] = inferred
+                set_function_type_entry(base_name, inferred)
                 return inferred
               end
             end
@@ -22606,7 +22632,7 @@ module Crystal::HIR
             if inferred = infer_return_type_from_body_without_callsite(def_node, owner_name)
               if inferred != TypeRef::VOID
                 @function_base_return_types[name] = inferred unless name.includes?('$')
-                @function_types[name] = inferred
+                set_function_type_entry(name, inferred)
                 return inferred
               end
             end
@@ -27205,11 +27231,11 @@ module Crystal::HIR
 
         # Keep AST around for signatureHelp/named args and for yield inlining.
         unless @function_defs.has_key?(base_name)
-          @function_defs[base_name] = node
+          set_function_def_entry(base_name, node)
           set_function_def_arena(base_name, @arena)
         end
       end
-      @function_defs[full_name] = node
+      set_function_def_entry(full_name, node)
       set_function_def_arena(full_name, @arena)
 
       func = @module.create_function(full_name, return_type)
@@ -30836,10 +30862,10 @@ module Crystal::HIR
       register_function_type(full_name, return_type) unless @function_types[full_name]?
       register_function_type(method_name, return_type) unless @function_types[method_name]?
 
-      @function_defs[full_name] = node
+      set_function_def_entry(full_name, node)
       set_function_def_arena(full_name, @arena)
       unless @function_defs.has_key?(method_name)
-        @function_defs[method_name] = node
+        set_function_def_entry(method_name, node)
         set_function_def_arena(method_name, @arena)
       end
 

@@ -3448,3 +3448,32 @@ crystal build -Ddebug_hooks src/crystal_v2.cr -o bin/crystal_v2 --no-debug
         - `record_module_inclusion` (both arities combined): `58`
         - `resolve_module_alias_for_include`: `45`
         - `Module#register_module_includer`: not present in top extracted counters for this slice.
+
+### 8.21 Incremental overload/type-key indexing via pending-key queues (2026-02-17)
+
+- [x] Remove repeated full-hash scans in `rebuild_function_def_overloads`.
+  - Root cause:
+    - even after earlier incremental work, rebuild still iterated all `@function_defs` / `@function_types` on each size change and skipped processed prefix via counters;
+    - during active lowering this caused frequent O(N) scans, visible in sample as a persistent hotspot.
+  - Code fix:
+    - file: `src/compiler/hir/ast_to_hir.cr`
+    - added centralized write helpers:
+      - `set_function_def_entry(name, def_node)`
+      - `set_function_type_entry(name, return_type)`
+    - routed all direct `@function_defs[...] = ...` / `@function_types[...] = ...` writes through these helpers;
+    - added pending queues:
+      - `@pending_function_def_keys : Array(String)`
+      - `@pending_function_type_keys : Array(String)`
+    - rewired `rebuild_function_def_overloads` to process only pending keys via:
+      - `index_function_def_overload_entry(...)`
+      - `index_function_type_key_entry(...)`
+    - retained safety fallback:
+      - if queue is empty but map sizes diverged (unexpected direct writes), perform one sync pass to enqueue missing keys.
+  - DoD / evidence:
+    - `scripts/build.sh release` => `EXIT 0`
+    - `regression_tests/run_all.sh bin/crystal_v2` => `41 passed, 0 failed`
+    - `CRYSTAL_V2_PIPELINE_CACHE=0 CRYSTAL_V2_LLVM_CACHE=0 bin/crystal_v2 examples/bootstrap_array.cr -o /tmp/bootstrap_array_after_overload_queue && scripts/run_safe.sh /tmp/bootstrap_array_after_overload_queue 10 768` => `EXIT 0`
+    - self-host 5s sample comparison:
+      - baseline `/tmp/self_profile_after4.sample.txt`: `rebuild_function_def_overloads` = `269`
+      - after `/tmp/self_profile_after5.sample.txt`: `rebuild_function_def_overloads` = `187`
+      - related frame `strip_generic_receiver_for_lookup` also decreased (`501 -> 437`) in same window.
