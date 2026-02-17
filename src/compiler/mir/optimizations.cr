@@ -1614,8 +1614,7 @@ module Crystal::MIR
       @function.compute_predecessors
 
       block_ids = @function.blocks.map(&.id)
-      all_blocks = Set(BlockId).new
-      block_ids.each { |id| all_blocks << id }
+      all_blocks = Set(BlockId).new(block_ids)
 
       dom = {} of BlockId => Set(BlockId)
       entry = @function.entry_block
@@ -1637,13 +1636,11 @@ module Crystal::MIR
 
           if preds.empty?
             new_dom << block.id
+          elsif preds.size == 1
+            new_dom = dom[preds.first].dup
+            new_dom << block.id
           else
-            intersection = dom[preds.first].dup
-            preds.each_with_index do |pred, idx|
-              next if idx == 0
-              intersection = intersection & dom[pred]
-            end
-            new_dom = intersection
+            new_dom = intersect_predecessor_dominators(preds, dom)
             new_dom << block.id
           end
 
@@ -1655,6 +1652,32 @@ module Crystal::MIR
       end
 
       dom
+    end
+
+    private def intersect_predecessor_dominators(
+      preds : Array(BlockId),
+      dom : Hash(BlockId, Set(BlockId))
+    ) : Set(BlockId)
+      seed = preds.first
+      seed_size = dom[seed].size
+      preds.each_with_index do |pred, idx|
+        next if idx == 0
+        pred_size = dom[pred].size
+        if pred_size < seed_size
+          seed = pred
+          seed_size = pred_size
+        end
+      end
+
+      intersection = dom[seed].dup
+      preds.each do |pred|
+        next if pred == seed
+        pred_dom = dom[pred]
+        intersection.select! { |block_id| pred_dom.includes?(block_id) }
+        break if intersection.empty?
+      end
+
+      intersection
     end
   end
 

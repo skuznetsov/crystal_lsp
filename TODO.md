@@ -4804,3 +4804,44 @@ crystal build -Ddebug_hooks src/crystal_v2.cr -o bin/crystal_v2 --no-debug
         - `total`: `109111.7ms -> 108303.6ms` (`-0.74%`)
   - Insight:
     - broadening the locality criterion gives a materially larger win than the single-block-only skip while keeping functional checks green.
+
+### 8.72 CopyPropagation: reduce dominator-set intersection allocations (2026-02-17)
+
+- [x] Rework `compute_dominators` intersection path to avoid transient `Set` allocations on each predecessor merge.
+  - Root cause:
+    - after `8.71`, `apply_build_dominators` still dominated CP phase time.
+    - previous implementation repeatedly allocated new sets via `intersection = intersection & dom[pred]`.
+  - Code fix:
+    - file: `src/compiler/mir/optimizations.cr`
+      - use `Set.new(block_ids)` for initial all-block set creation.
+      - optimize dominator recomputation loop:
+        - fast-path for single predecessor (`dom[pred].dup`),
+        - new helper `intersect_predecessor_dominators(preds, dom)`:
+          - pick smallest predecessor dominator set as seed,
+          - intersect in-place via `select!` instead of allocating a new set per predecessor.
+  - DoD / evidence:
+    - correctness:
+      - `scripts/build.sh release` => `EXIT 0`
+      - `timeout 240 crystal spec spec/hir/return_type_inference_spec.cr` => `13 examples, 0 failures`
+      - `timeout 240 crystal spec spec/mir/llvm_backend_spec.cr` => `59 examples, 0 failures`
+      - `regression_tests/run_all.sh bin/crystal_v2` => `41 passed, 0 failed`
+      - `CRYSTAL_V2_PIPELINE_CACHE=0 bin/crystal_v2 examples/bootstrap_array.cr -o /tmp/bootstrap_array_dom_intersect && scripts/run_safe.sh /tmp/bootstrap_array_dom_intersect 10 768` => `EXIT 0`
+    - perf (strict binary A/B with identical flags and caches disabled):
+      - baseline binary: `/tmp/crystal_v2_dom_intersect_baseline_bin`
+      - experiment binary: `/tmp/crystal_v2_dom_intersect_experiment_bin`
+      - run1 logs:
+        - baseline: `/tmp/self_pass_timing_dom_intersect_baseline.log`
+        - experiment: `/tmp/self_pass_timing_dom_intersect_experiment.log`
+        - delta:
+          - `apply_build_dominators`: `-6.56%`
+          - `copy_propagation`: `-7.16%`
+          - `mir_opt`: `-5.10%`
+      - run2 logs (reversed order):
+        - baseline: `/tmp/self_pass_timing_dom_intersect_baseline_r2.log`
+        - experiment: `/tmp/self_pass_timing_dom_intersect_experiment_r2.log`
+        - delta:
+          - `apply_build_dominators`: `-30.42%`
+          - `copy_propagation`: `-30.83%`
+          - `mir_opt`: `-29.17%`
+  - Insight:
+    - CP/MIR improvement is consistent across both runs; `total` remains noisy due unrelated phase variance, so follow-up benchmarking should use median of 3-5 runs.
