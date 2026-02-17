@@ -5018,3 +5018,26 @@ crystal build -Ddebug_hooks src/crystal_v2.cr -o bin/crystal_v2 --no-debug
       - next blocker is later union-store type mismatch (`%r68.fromslot.15`), indicating this cast class is fixed and compile advanced.
     - backend specs:
       - `timeout 240 crystal spec spec/mir/llvm_backend_spec.cr` => `59 examples, 0 failures`.
+
+### 8.78 LLVM backend phi union->ptr extraction: handle scalar fromslot values without invalid union store (2026-02-17)
+
+- [x] Fix invalid LLVM store in phi pre-extraction path (`store union %rN.fromslot.i32`) when incoming value is already scalar, not union.
+  - Root cause:
+    - `emit_phi_union_to_ptr_extracts` assumed incoming `value_ref` was union-typed unless already `ptr`.
+    - after fromslot/adaptation passes, some incomings are emitted as scalar (`i32`), and backend generated:
+      - `store <union> %r68.fromslot.15, ptr %...alloca` (type mismatch), causing `opt` failure.
+  - Code fix:
+    - file: `src/compiler/mir/llvm_backend.cr`
+      - in `emit_phi_union_to_ptr_extracts`:
+        - added scalar fast-path for non-union emitted values:
+          - integer -> `inttoptr`,
+          - double/float -> bitcast-to-bits + `inttoptr`,
+          - then use resulting `ptr` directly.
+        - preserved existing union alloca/GEP extraction path for true union values.
+  - DoD / evidence:
+    - bench compile unblock:
+      - `CRYSTAL_V2_PIPELINE_CACHE=0 /tmp/crystal_v2_dbg_unionptrfix examples/bench_fib42.cr -o /tmp/bench_fib42_dbg_unionptrfix` => `EXIT 0`
+      - `scripts/run_safe.sh /tmp/bench_fib42_dbg_unionptrfix 10 768` => `EXIT 0`
+    - regression suite:
+      - `./regression_tests/run_all.sh /tmp/crystal_v2_dbg_unionptrfix` => `41 passed, 0 failed`
+    - previously failing signatures (`%r68.fromslot.15` union-store mismatch) no longer reproduce in these runs.

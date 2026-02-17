@@ -6248,6 +6248,26 @@ module Crystal::MIR
           emit "%#{extract_name} = bitcast ptr #{val_ref_str} to ptr"
           next
         end
+        if emitted_type && !emitted_type.includes?(".union")
+          if emitted_type.starts_with?('i')
+            if val_ref_str == "0"
+              emit "%#{extract_name} = inttoptr i64 0 to ptr"
+            else
+              emit "%#{extract_name}.itp = inttoptr #{emitted_type} #{val_ref_str} to ptr"
+              emit "%#{extract_name} = bitcast ptr %#{extract_name}.itp to ptr"
+            end
+            next
+          elsif emitted_type == "double"
+            emit "%#{extract_name}.bits = bitcast double #{val_ref_str} to i64"
+            emit "%#{extract_name} = inttoptr i64 %#{extract_name}.bits to ptr"
+            next
+          elsif emitted_type == "float"
+            emit "%#{extract_name}.bits = bitcast float #{val_ref_str} to i32"
+            emit "%#{extract_name}.ext = zext i32 %#{extract_name}.bits to i64"
+            emit "%#{extract_name} = inttoptr i64 %#{extract_name}.ext to ptr"
+            next
+          end
+        end
 
         # Extract ptr from union: alloca → store → GEP to payload → load ptr
         emit "%#{extract_name}.alloca = alloca #{union_type}, align 8"
