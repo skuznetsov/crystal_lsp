@@ -54961,10 +54961,21 @@ module Crystal::HIR
 
       absolute_name = lookup_name.starts_with?("::")
       if pre_resolved_lookup_name.nil? && !absolute_name && !lookup_name.includes?('|')
-        old_lookup = lookup_name
-        lookup_name = resolve_type_name_in_context(lookup_name)
-        if env_get("DEBUG_WUINT128") && old_lookup == "UInt128"
-          STDERR.puts "[DEBUG_WUINT128] type_ref_for_name: UInt128 resolved to #{lookup_name}, current=#{@current_class || "(nil)"}"
+        should_resolve_in_context = true
+        if lookup_name.includes?("::")
+          head = first_namespace_component(lookup_name)
+          anchored_namespace = head == "Crystal" ||
+                               @top_level_type_names.includes?(head) ||
+                               @top_level_class_kinds.has_key?(head) ||
+                               BUILTIN_TYPE_NAMES.includes?(head)
+          should_resolve_in_context = !anchored_namespace
+        end
+        if should_resolve_in_context
+          old_lookup = lookup_name
+          lookup_name = resolve_type_name_in_context(lookup_name)
+          if env_get("DEBUG_WUINT128") && old_lookup == "UInt128"
+            STDERR.puts "[DEBUG_WUINT128] type_ref_for_name: UInt128 resolved to #{lookup_name}, current=#{@current_class || "(nil)"}"
+          end
         end
       end
 

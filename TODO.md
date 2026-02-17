@@ -3788,3 +3788,27 @@ crystal build -Ddebug_hooks src/crystal_v2.cr -o bin/crystal_v2 --no-debug
       - stable function-level reduction:
         - `resolve_type_alias_chain`: `101 -> 39 / 39`
       - adjacent hot functions stayed within expected sample noise band.
+
+### 8.35 Skip context resolve for anchored qualified type names (2026-02-17)
+
+- [x] Add fast-path in `type_ref_for_name` to avoid unnecessary `resolve_type_name_in_context` calls.
+  - Root cause:
+    - qualified names already anchored at top-level namespace head were still routed through context resolver path.
+    - this adds avoidable name-resolution work in a hot type lookup path.
+  - Code fix:
+    - file: `src/compiler/hir/ast_to_hir.cr`
+    - in `type_ref_for_name` context-resolution step:
+      - for names containing `::`, compute head namespace;
+      - if head is anchored (`Crystal`, top-level type/class, or builtin type name), skip `resolve_type_name_in_context`;
+      - keep existing behavior for non-anchored names (still resolve in context).
+  - DoD / evidence:
+    - `scripts/build.sh release` => `EXIT 0`
+    - `regression_tests/run_all.sh bin/crystal_v2` => `41 passed, 0 failed`
+    - `CRYSTAL_V2_PIPELINE_CACHE=0 CRYSTAL_V2_LLVM_CACHE=0 bin/crystal_v2 examples/bootstrap_array.cr -o /tmp/bootstrap_array_after_context_resolve_anchor && scripts/run_safe.sh /tmp/bootstrap_array_after_context_resolve_anchor 10 768` => `EXIT 0`
+    - self-host 5s samples:
+      - baseline `/tmp/self_profile_after836b.sample.txt`
+      - after `/tmp/self_profile_after837.sample.txt`, `/tmp/self_profile_after837b.sample.txt`
+      - targeted line hit removed in both after-runs:
+        - `ast_to_hir.cr:55031`: `8 -> 0 / 0`
+      - directional aggregates (sampling-noise aware):
+        - `resolve_type_name_in_context`: `310 -> 282 / 238`
