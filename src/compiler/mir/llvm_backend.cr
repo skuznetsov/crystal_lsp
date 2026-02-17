@@ -6432,8 +6432,13 @@ module Crystal::MIR
         if slot_llvm_type.includes?(".union") && llvm_type.includes?(".union")
           # Union-to-union reinterpretation: both are unions but different named types.
           # Use alloca + store + load to reinterpret through memory.
-          emit "%#{base}.u2u.slot.alloca = alloca #{slot_llvm_type}, align 8"
-          emit "store #{llvm_type} #{name}, ptr %#{base}.u2u.slot.alloca"
+          # Check actual emitted type — the value may have a different union type than
+          # what the type mapper reports (e.g., from a fromslot cast).
+          actual_llvm_type = @emitted_value_types[name]? || llvm_type
+          actual_llvm_type = llvm_type unless actual_llvm_type.includes?(".union")
+          # Alloca with source type so store matches, then load as slot type
+          emit "%#{base}.u2u.slot.alloca = alloca #{actual_llvm_type}, align 8"
+          emit "store #{actual_llvm_type} #{name}, ptr %#{base}.u2u.slot.alloca"
           emit "%#{base}.u2u.slot.val = load #{slot_llvm_type}, ptr %#{base}.u2u.slot.alloca"
           store_val = "%#{base}.u2u.slot.val"
           store_type = slot_llvm_type
