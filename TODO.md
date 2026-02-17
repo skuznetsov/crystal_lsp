@@ -4995,3 +4995,26 @@ crystal build -Ddebug_hooks src/crystal_v2.cr -o bin/crystal_v2 --no-debug
     - parser sanity on `src/compiler/driver.cr`:
       - top-level def leakage removed (`top_defs=0`),
       - class body no longer truncated (`class_body=65`).
+
+### 8.77 LLVM backend cast guard: avoid invalid `fptosi i64` when MIR cast kind is stale (2026-02-17)
+
+- [x] Harden LLVM cast emission against stale MIR cast kinds (`fp_to_si/ui` with integer LLVM source).
+  - Root cause:
+    - MIR may carry cast kind `fp_to_si` from earlier inferred return type, while the actually emitted source SSA value is already integer.
+    - backend emitted invalid LLVM (`fptosi i64 ... to i32`), causing `opt` failure on `examples/bench_fib42.cr`.
+  - Code fix:
+    - file: `src/compiler/mir/llvm_backend.cr`
+      - in `emit_cast`, added guard:
+        - if op is `fptosi/fptoui` but source LLVM type is non-float:
+          - int->int: switch to `trunc`/`sext`/`zext` by bit width/sign,
+          - ptr->int: switch to `ptrtoint`.
+  - DoD / evidence:
+    - regression baseline (before fix):
+      - `/tmp/crystal_v2_dbg_minretfix examples/bench_fib42.cr` failed with:
+        - `error: invalid cast opcode for cast from 'i64' to 'i32'`
+        - line around `%r8 = fptosi i64 %r7 to i32`.
+    - after fix:
+      - same compile path no longer fails on `fptosi i64` and proceeds further;
+      - next blocker is later union-store type mismatch (`%r68.fromslot.15`), indicating this cast class is fixed and compile advanced.
+    - backend specs:
+      - `timeout 240 crystal spec spec/mir/llvm_backend_spec.cr` => `59 examples, 0 failures`.

@@ -8089,6 +8089,29 @@ module Crystal::MIR
       # Guard: trunc/bitcast can't be used for float-to-int - use fptosi/fptoui instead
       is_src_float = src_type == "float" || src_type == "double"
       is_dst_float = dst_type == "float" || dst_type == "double"
+      # Guard: MIR cast kind may request fp_to_si/fp_to_ui while the actually emitted
+      # source value is already integer/pointer (stale type metadata). Emit a valid
+      # integer-domain cast from real LLVM source type instead of invalid `fptosi i64`.
+      if (op == "fptosi" || op == "fptoui") && !is_src_float
+        if is_src_int && is_dst_int && src_type != dst_type
+          src_bits = src_type[1..].to_i?
+          dst_bits = dst_type[1..].to_i?
+          if src_bits && dst_bits
+            if dst_bits < src_bits
+              op = "trunc"
+            elsif dst_bits > src_bits
+              signed_src = @module.type_registry.get(src_type_ref).try(&.kind).try(&.signed_integer?) || false
+              op = signed_src ? "sext" : "zext"
+            else
+              op = "bitcast"
+            end
+          else
+            op = "bitcast"
+          end
+        elsif src_type == "ptr" && is_dst_int
+          op = "ptrtoint"
+        end
+      end
       if (op == "trunc" || op == "bitcast") && is_src_float && is_dst_int
         # Check if destination is unsigned type to choose fptoui vs fptosi
         dst_kind = @module.type_registry.get(inst.type).try(&.kind)
