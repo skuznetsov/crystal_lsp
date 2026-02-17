@@ -4065,3 +4065,27 @@ crystal build -Ddebug_hooks src/crystal_v2.cr -o bin/crystal_v2 --no-debug
       - targeted line reduced:
         - `ast_to_hir.cr:2771`: `71 -> 3 / 13`
       - overall top-stack remained in same lowering stages with slightly lower aggregate counts in this window.
+
+### 8.46 Early lazy-guard in include DefNode registration (2026-02-17)
+
+- [x] Skip eager method-name materialization when lazy module-method mode is active.
+  - Root cause:
+    - include `DefNode` branch built `method_name` (`String.new`) and `base_name` (`join_owner_method_name`) before checking `@lazy_module_methods`.
+    - during monomorphization `@lazy_module_methods=true`, so these allocations were immediately discarded in a hot path.
+  - Code fix:
+    - file: `src/compiler/hir/ast_to_hir.cr`
+    - moved `next if @lazy_module_methods` in include `DefNode` path to run before `method_name/base_name` creation.
+    - kept existing semantics (lazy mode still skips eager DefNode registration and resolves on demand).
+  - DoD / evidence:
+    - `scripts/build.sh release` => `EXIT 0`
+    - `regression_tests/run_all.sh bin/crystal_v2` => `41 passed, 0 failed`
+    - `CRYSTAL_V2_PIPELINE_CACHE=0 CRYSTAL_V2_LLVM_CACHE=0 bin/crystal_v2 examples/bootstrap_array.cr -o /tmp/bootstrap_array_lazy_guard_early && scripts/run_safe.sh /tmp/bootstrap_array_lazy_guard_early 10 768` => `EXIT 0`
+    - self-host 5s sample comparison:
+      - baseline `/tmp/self_profile_after850b.sample.txt`
+      - after `/tmp/self_profile_after857.sample.txt`
+      - targeted hotspot removal:
+        - `ast_to_hir.cr:6881`: `84 -> 0`
+        - `join_owner_method_name<...>`: `99 -> 0`
+      - directional aggregate drop in same area:
+        - `register_module_instance_methods_for<...>`: `395 -> 342`
+      - note: full self-host compile still ends with existing `opt` error (`store ptr %fallback` type mismatch), unrelated to this micro-change.

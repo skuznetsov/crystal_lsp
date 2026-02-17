@@ -6877,17 +6877,18 @@ module Crystal::HIR
                     next if (recv = member.receiver) && String.new(recv) == "self"
                     next if member.is_abstract
 
+                    # In lazy module-method mode we intentionally skip eager DefNode
+                    # registration during monomorphization and resolve methods on demand.
+                    # Keep this guard before name materialization to avoid hot-path
+                    # String allocations for methods that will be skipped anyway.
+                    next if @lazy_module_methods
+
                     method_name = String.new(member.name)
                     base_name = join_owner_method_name(class_name, '#', method_name)
 
                     # Early skip: if the class already defines this method (base_name), skip
                     # the expensive type resolution below. The class's own def takes priority.
                     next if defined_full_names.includes?(base_name)
-
-                    # Lazy mode: skip DefNode registration entirely (will be resolved on demand)
-                    # via the deferred module lookup path. This prevents the monomorphization
-                    # cascade caused by type_ref_for_name in param type resolution.
-                    next if @lazy_module_methods
 
                     # NOTE: We intentionally do NOT write @function_def_arenas[base_name] here.
                     # The early arena write was causing bugs when included module methods should
