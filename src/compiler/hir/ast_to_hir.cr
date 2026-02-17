@@ -1155,6 +1155,7 @@ module Crystal::HIR
     @block_lookup_cache_size : Int32 = 0
     # Cache method-short fallback for block lookups (shared across owners).
     @block_fallback_lookup_cache : Hash(BlockLookupKey, Tuple(String, CrystalV2::Compiler::Frontend::DefNode)?) = {} of BlockLookupKey => Tuple(String, CrystalV2::Compiler::Frontend::DefNode)?
+    @block_fallback_method_candidates : Hash(String, Array(String)) = {} of String => Array(String)
     # Cache function def lookup by callsite shape.
     @function_lookup_cache : Hash(FunctionLookupKey, FunctionLookupEntry) = Hash(FunctionLookupKey, FunctionLookupEntry).new(initial_capacity: 16384)
     @function_lookup_cache_size : Int32 = 0
@@ -45291,6 +45292,7 @@ module Crystal::HIR
         @block_lookup_cache.clear
         @block_lookup_cache_size = @function_defs.size
         @block_fallback_lookup_cache.clear
+        @block_fallback_method_candidates.clear
       end
       args_hash = 0_u64
       if arg_types
@@ -45378,13 +45380,11 @@ module Crystal::HIR
           @block_lookup_cache[cache_key] = result
           return result
         end
-        instance_suffix = "##{method_short}"
-        class_suffix = ".#{method_short}"
-        @function_defs.each do |name, def_node|
-          candidate_base = strip_type_suffix_uncached(name)
-          next unless candidate_base.ends_with?(instance_suffix) || candidate_base.ends_with?(class_suffix)
+        block_fallback_candidates_for_method(method_short).each do |name|
+          def_node = @function_defs[name]?
+          next unless def_node
           if receiver_base
-            owner = method_owner_from_name(candidate_base)
+            owner = method_owner_from_name(name)
             owner_base = strip_generic_args(owner)
             next unless receiver_allows_yield_owner?(receiver_base, owner_base)
           end
@@ -45431,6 +45431,22 @@ module Crystal::HIR
       end
       @block_lookup_cache[cache_key] = nil
       nil
+    end
+
+    private def block_fallback_candidates_for_method(method_short : String) : Array(String)
+      if cached = @block_fallback_method_candidates[method_short]?
+        return cached
+      end
+
+      ensure_method_index_built
+      candidates = [] of String
+      @method_index.each_value do |owner_methods|
+        if names = owner_methods[method_short]?
+          names.each { |name| candidates << name }
+        end
+      end
+      @block_fallback_method_candidates[method_short] = candidates
+      candidates
     end
 
     private def underscore_lower(name : String) : String

@@ -4013,3 +4013,32 @@ crystal build -Ddebug_hooks src/crystal_v2.cr -o bin/crystal_v2 --no-debug
         - `ast_to_hir.cr:3049`: `79 -> 9 / 6`
       - new helper activity present:
         - `unique_enum_match_by_suffix`: `23 / 29`
+
+### 8.44 Cache method-short fallback candidates for block lookup (2026-02-17)
+
+- [x] Eliminate full `@function_defs` fallback scans in `lookup_block_function_def_for_call`.
+  - Root cause:
+    - when direct block overload lookup missed, fallback path iterated every `@function_defs` entry and performed suffix filtering (`strip_type_suffix_uncached` + `ends_with?`) per candidate.
+    - this path appeared repeatedly in self-host sample around `lookup_block_function_def_for_call` / fallback section.
+  - Code fix:
+    - file: `src/compiler/hir/ast_to_hir.cr`
+    - added cache:
+      - `@block_fallback_method_candidates : Hash(String, Array(String))`
+    - new helper:
+      - `block_fallback_candidates_for_method(method_short)` builds candidate full names from `@method_index` once per short method name.
+    - in fallback block lookup:
+      - replaced `@function_defs.each` + per-entry suffix checks with iteration over cached candidates.
+    - cache invalidation:
+      - cleared with `@block_lookup_cache` / `@block_fallback_lookup_cache` when `@function_defs.size` changes.
+  - DoD / evidence:
+    - `scripts/build.sh release` => `EXIT 0`
+    - `regression_tests/run_all.sh bin/crystal_v2` => `41 passed, 0 failed`
+    - `CRYSTAL_V2_PIPELINE_CACHE=0 CRYSTAL_V2_LLVM_CACHE=0 bin/crystal_v2 examples/bootstrap_array.cr -o /tmp/bootstrap_array_block_fallback_index && scripts/run_safe.sh /tmp/bootstrap_array_block_fallback_index 10 768` => `EXIT 0`
+    - self-host 5s sample comparison:
+      - baseline `/tmp/self_profile_after847b.sample.txt`
+      - after `/tmp/self_profile_after849.sample.txt`, `/tmp/self_profile_after849b.sample.txt`
+      - fallback hotspot collapsed:
+        - `ast_to_hir.cr:45384`: `88 -> 2 / 2`
+      - fallback helper now active:
+        - `block_fallback_candidates_for_method`: `4 / 7`
+      - high-level stage remained comparable (same leading `lower_body/lower_assign/lower_call` stacks).
