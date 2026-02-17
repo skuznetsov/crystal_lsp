@@ -40249,14 +40249,7 @@ module Crystal::HIR
               if @class_info.has_key?(full_path)
                 class_name_str = full_path
               elsif @type_aliases.has_key?(full_path) || LIBC_TYPE_ALIASES.has_key?(full_path)
-                # Resolve type alias with chain resolution
-                resolved = @type_aliases[full_path]? || LIBC_TYPE_ALIASES[full_path]? || full_path
-                # Chain resolve if needed (e.g., LibCrypto::ULong -> LibC::ULong -> UInt64) - max 10 iterations
-                depth = 0
-                while (next_resolved = @type_aliases[resolved]? || LIBC_TYPE_ALIASES[resolved]?) && next_resolved != resolved && depth < 10
-                  resolved = next_resolved
-                  depth += 1
-                end
+                resolved = resolve_type_alias_chain(full_path)
                 class_name_str = substitute_type_params_in_type_name(resolved)
               else
                 # Even if not in class_info, treat path as class name for class method calls
@@ -50333,14 +50326,7 @@ module Crystal::HIR
           if env_get("DEBUG_IVAR_ACCESS")
             STDERR.puts "[IVAR_ACCESS] local_missing name=#{name} member=#{member_name}"
           end
-          # Resolve type alias if exists (check both @type_aliases and LIBC_TYPE_ALIASES)
-          resolved_name = @type_aliases[name]? || LIBC_TYPE_ALIASES[name]? || name
-          # Chain resolve if needed - max 10 iterations
-          depth = 0
-          while (next_resolved = @type_aliases[resolved_name]? || LIBC_TYPE_ALIASES[resolved_name]?) && next_resolved != resolved_name && depth < 10
-            resolved_name = next_resolved
-            depth += 1
-          end
+          resolved_name = resolve_type_alias_chain(name)
           if resolved_name[0].uppercase?
             resolved_name = resolve_class_name_in_context(resolved_name)
             if @module.is_lib?(resolved_name) ||

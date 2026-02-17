@@ -3837,3 +3837,26 @@ crystal build -Ddebug_hooks src/crystal_v2.cr -o bin/crystal_v2 --no-debug
       - directional aggregate deltas:
         - `resolve_type_name_in_context`: `238 -> 229 / 205`
         - `lower_call`: `4476 -> 3729 / 3866`
+
+### 8.37 Route duplicate alias-chain logic through cached helper (2026-02-17)
+
+- [x] Replace manual alias-chain loops with `resolve_type_alias_chain` in hot member-access paths.
+  - Root cause:
+    - two `lower_member_access` branches had hand-rolled alias-chain loops (`@type_aliases`/`LIBC_TYPE_ALIASES`) that bypassed the new alias-cache helper.
+    - this duplicated logic and missed cache hits in call-heavy code paths.
+  - Code fix:
+    - file: `src/compiler/hir/ast_to_hir.cr`
+    - replaced manual loop in constant-path type-alias branch with:
+      - `resolved = resolve_type_alias_chain(full_path)`
+    - replaced manual loop in identifier-path alias resolution with:
+      - `resolved_name = resolve_type_alias_chain(name)`
+  - DoD / evidence:
+    - `scripts/build.sh release` => `EXIT 0`
+    - `regression_tests/run_all.sh bin/crystal_v2` => `41 passed, 0 failed`
+    - `CRYSTAL_V2_PIPELINE_CACHE=0 CRYSTAL_V2_LLVM_CACHE=0 bin/crystal_v2 examples/bootstrap_array.cr -o /tmp/bootstrap_array_after_alias_chain_helper_unify && scripts/run_safe.sh /tmp/bootstrap_array_after_alias_chain_helper_unify 10 768` => `EXIT 0`
+    - self-host 5s sample comparison:
+      - baseline `/tmp/self_profile_after839b.sample.txt`
+      - after `/tmp/self_profile_after840.sample.txt`, `/tmp/self_profile_after840b.sample.txt`
+      - directional aggregates:
+        - `resolve_type_alias_chain`: `39 -> 22 / 32`
+        - `lower_call`: `3866 -> 3228 / 3525`
