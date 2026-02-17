@@ -19447,7 +19447,7 @@ module Crystal::HIR
              end
       list = @function_def_overloads[base]?
       if list
-        list << key unless list.includes?(key)
+        list << key
       else
         @function_def_overloads[base] = [key]
       end
@@ -19471,7 +19471,7 @@ module Crystal::HIR
       end
       stripped_list = @function_def_overloads_stripped_index[stripped_base]?
       if stripped_list
-        stripped_list << key unless stripped_list.includes?(key)
+        stripped_list << key
       else
         @function_def_overloads_stripped_index[stripped_base] = [key]
       end
@@ -19497,7 +19497,7 @@ module Crystal::HIR
              end
       list = @function_type_keys_by_base[base]?
       if list
-        list << key unless list.includes?(key)
+        list << key
       else
         @function_type_keys_by_base[base] = [key]
       end
@@ -24796,10 +24796,32 @@ module Crystal::HIR
 
     # Hot-path variant for overload lookup: avoid cache hash cost.
     private def strip_generic_receiver_for_lookup(method_name : String) : String
-      if method_name.includes?('#') || method_name.includes?('.')
-        return strip_generic_receiver_from_base_name(method_name)
+      bytesize = method_name.bytesize
+      ptr = method_name.to_unsafe
+      sep_idx : Int32? = nil
+      paren_idx : Int32? = nil
+
+      i = 0
+      while i < bytesize
+        byte = ptr[i]
+        if byte == '('.ord
+          paren_idx ||= i
+        elsif byte == '#'.ord || byte == '.'.ord
+          sep_idx = i
+          break
+        end
+        i += 1
       end
-      method_name
+
+      return method_name unless sep_idx
+      return method_name unless paren_idx && paren_idx < sep_idx
+
+      generic_start = paren_idx.not_nil!
+      total = bytesize - (sep_idx - generic_start)
+      String.build(total) do |io|
+        io.write Slice.new(ptr, generic_start)
+        io.write Slice.new(ptr + sep_idx, bytesize - sep_idx)
+      end
     end
 
     private def strip_generic_receiver_uncached(method_name : String) : String
@@ -54740,6 +54762,7 @@ module Crystal::HIR
       return TypeRef::VOID if name == "_"
 
       raw_name = name
+      pre_resolved_lookup_name : String? = nil
       has_union = false
       has_comma = false
       has_paren = false
@@ -54791,6 +54814,7 @@ module Crystal::HIR
           lookup_name = lookup_name[2..] if absolute_name
           lookup_name = resolve_type_name_in_context(lookup_name) unless absolute_name
           cache_key_name = absolute_name ? "::#{lookup_name}" : lookup_name
+          pre_resolved_lookup_name = cache_key_name
           cache_key = type_cache_key(cache_key_name)
           if cached = @type_cache[cache_key]?
             return cached unless nested_shadowed_type_name?(lookup_name)
@@ -54850,8 +54874,15 @@ module Crystal::HIR
         end
       end
 
+      if pre_lookup = pre_resolved_lookup_name
+        lookup_name = pre_lookup
+        if lookup_name == "Bytes"
+          lookup_name = "Slice(UInt8)"
+        end
+      end
+
       absolute_name = lookup_name.starts_with?("::")
-      if !absolute_name && !lookup_name.includes?('|')
+      if pre_resolved_lookup_name.nil? && !absolute_name && !lookup_name.includes?('|')
         old_lookup = lookup_name
         lookup_name = resolve_type_name_in_context(lookup_name)
         if env_get("DEBUG_WUINT128") && old_lookup == "UInt128"
