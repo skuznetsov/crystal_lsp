@@ -4462,3 +4462,52 @@ crystal build -Ddebug_hooks src/crystal_v2.cr -o bin/crystal_v2 --no-debug
         - `real`: `297.59s -> 276.63s` (`-7.04%`)
   - Notes:
     - this was the first high-leverage optimization directly discovered via pass telemetry from `8.55`.
+
+### 8.58 LocalCSE fast apply path: skip dominance proofs for same-block substitutions (2026-02-17)
+
+- [x] Speed up `LocalCSE` replacement application by using a dominance-assumed mode for substitutions proven same-block by construction.
+  - Root cause:
+    - after `8.57`, `local_cse` was still expensive due invoking `CopyPropagationPass#apply_replacements`, which rebuilt def/dominator structures and ran dominance checks on every resolved operand.
+    - however, `LocalCSEPass` only emits replacements discovered inside one block (`seen` tables are reset per block), so replacement target is an earlier instruction in the same block.
+  - Code fix:
+    - file: `src/compiler/mir/optimizations.cr`
+    - changed `LocalCSEPass` call:
+      - `apply_replacements(replacements, assume_dominates: true)`
+    - extended `CopyPropagationPass#apply_replacements` with keyword:
+      - `assume_dominates : Bool = false`
+    - when enabled:
+      - skip `build_def_maps` and `compute_dominators`,
+      - allow `resolve` chain traversal without calling `dominates_use?`.
+    - implemented with pass-local flag `@assume_dominates`.
+  - DoD / evidence:
+    - `scripts/build.sh release` => `EXIT 0`
+    - `regression_tests/run_all.sh bin/crystal_v2` => `41 passed, 0 failed`
+    - bootstrap smoke:
+      - `CRYSTAL_V2_PIPELINE_CACHE=0 CRYSTAL_V2_LLVM_CACHE=0 bin/crystal_v2 examples/bootstrap_array.cr -o /tmp/bootstrap_array_lcse_dom && scripts/run_safe.sh /tmp/bootstrap_array_lcse_dom 10 768`
+      - result: `EXIT 0`
+    - self-host (`STOP_AFTER_MIR`, release, pass timing):
+      - previous avg (`8.57`):
+        - `/tmp/self_pass_timing_cp_fastpath.log`
+        - `/tmp/self_pass_timing_cp_fastpath_r2.log`
+      - new:
+        - `/tmp/self_pass_timing_lcse_assume_dom.log`
+      - delta (new vs previous avg):
+        - `mir_opt`: `100814.1ms -> 54799.7ms` (`-45.64%`)
+        - `total`: `161645.6ms -> 123782.8ms` (`-23.42%`)
+        - `real`: `161.68s -> 123.83s` (`-23.41%`)
+      - pass shift:
+        - `local_cse`: `50752.3ms -> 100.9ms` (`-99.80%`)
+        - `copy_propagation`: `+7.67%` (higher, now dominant)
+    - full self-host (`--release --stats`) vs `8.57` baseline:
+      - baseline: `/tmp/full_after_cp_fastpath.log`
+      - new:
+        - `/tmp/full_after_lcse_dom.log`
+        - `/tmp/full_after_lcse_dom_r2.log`
+      - average delta (new runs avg vs baseline):
+        - `mir_opt`: `100303.5ms -> 55790.0ms` (`-44.38%`)
+        - `llvm`: `82414.4ms -> 103977.4ms` (`+26.16%`)
+        - `total`: `276561.3ms -> 263397.9ms` (`-4.76%`)
+        - `real`: `276.63s -> 263.47s` (`-4.76%`)
+  - Notes:
+    - Tradeoff observed: major MIR optimization speedup, but slower LLVM stage on averaged full runs.
+    - Net full compile is still faster; next step should target LLVM-time inflation (IR shape/size diff inspection).

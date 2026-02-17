@@ -835,7 +835,7 @@ module Crystal::MIR
       end
 
       @eliminated = replacements.size
-      CopyPropagationPass.new(@function).apply_replacements(replacements)
+      CopyPropagationPass.new(@function).apply_replacements(replacements, assume_dominates: true)
       @eliminated
     end
 
@@ -864,6 +864,7 @@ module Crystal::MIR
   class CopyPropagationPass
     getter function : Function
     getter propagated : Int32 = 0
+    @assume_dominates : Bool = false
 
     def initialize(@function : Function)
     end
@@ -1046,10 +1047,11 @@ module Crystal::MIR
       apply_replacements(replacements)
     end
 
-    def apply_replacements(replacements : Hash(ValueId, ValueId)) : Int32
+    def apply_replacements(replacements : Hash(ValueId, ValueId), *, assume_dominates : Bool = false) : Int32
       return 0 if replacements.empty?
 
       @propagated = replacements.size
+      @assume_dominates = assume_dominates
       if ENV["MIR_CP_DEBUG"]?
         STDERR.puts "[MIR_CP] replacements=#{replacements}"
       end
@@ -1065,8 +1067,13 @@ module Crystal::MIR
       # Nothing reads replaced values, so rewriting is a guaranteed no-op.
       return 0 if affected_block_ids.empty?
 
-      def_blocks, def_index = build_def_maps
-      dominators = compute_dominators
+      def_blocks = {} of ValueId => BlockId
+      def_index = {} of ValueId => Int32
+      dominators = {} of BlockId => Set(BlockId)
+      unless @assume_dominates
+        def_blocks, def_index = build_def_maps
+        dominators = compute_dominators
+      end
       block_sizes = {} of BlockId => Int32
       @function.blocks.each do |block|
         block_sizes[block.id] = block.instructions.size
@@ -1415,7 +1422,7 @@ module Crystal::MIR
       while next_id = replacements[current]?
         break if next_id == current
         break if hops >= 64
-        break unless dominates_use?(next_id, use_block, use_index, def_blocks, def_index, dominators)
+        break unless @assume_dominates || dominates_use?(next_id, use_block, use_index, def_blocks, def_index, dominators)
         current = next_id
         hops += 1
       end
