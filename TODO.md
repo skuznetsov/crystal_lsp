@@ -4659,3 +4659,20 @@ crystal build -Ddebug_hooks src/crystal_v2.cr -o bin/crystal_v2 --no-debug
       - `total=127581.4ms` (`+8.84%`)
   - Decision:
     - fully reverted.
+
+### 8.67 Refuted branch: sparse metadata build in CopyPropagationPass#run (2026-02-17)
+
+- [x] Hypothesis tested and rejected.
+  - Hypothesis:
+    - pre-scan each function and skip filling `value_types/value_nodes/constants`
+      maps unless corresponding patterns (`Cast`, `Phi`, `Select/Binary`) are present.
+  - Result (comparable run, same `ast_cache=272 hit/63 miss`):
+    - baseline (`/tmp/self_pass_timing_cp_inplace.log`):
+      - `hir=44294.1ms`, `copy_propagation=49903.8ms`, `mir_opt=51731.3ms`, `total=117216.0ms`
+    - experiment (`/tmp/self_pass_timing_cp_mapsparse.log`):
+      - `hir=48196.9ms` (`+8.81%`)
+      - `copy_propagation=54439.5ms` (`+9.09%`)
+      - `mir_opt=56201.1ms` (`+8.64%`)
+      - `total=126650.3ms` (`+8.05%`)
+  - Decision:
+    - fully reverted.
