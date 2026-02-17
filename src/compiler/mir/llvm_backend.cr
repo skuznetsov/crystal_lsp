@@ -6230,9 +6230,13 @@ module Crystal::MIR
             emit "store #{emitted_type} #{val_ref_str}, ptr %#{convert_name}.pay_ptr, align 4"
             emit "%#{convert_name} = load #{dst_union_type}, ptr %#{convert_name}.alloca"
           else
-            # Reinterpret union: alloca source type → store → load as destination type
-            emit "%#{convert_name}.alloca = alloca #{src_union_type}, align 8"
-            emit "store #{src_union_type} #{val_ref_str}, ptr %#{convert_name}.alloca"
+            # Reinterpret union: alloca source type → store → load as destination type.
+            # value_ref may have returned a fromslot.cast with a different actual type
+            # than what the prepass recorded, so use the actual emitted type for the store.
+            actual_src = @emitted_value_types[val_ref_str]? || src_union_type
+            actual_src = src_union_type unless actual_src.includes?(".union")
+            emit "%#{convert_name}.alloca = alloca #{actual_src}, align 8"
+            emit "store #{actual_src} #{val_ref_str}, ptr %#{convert_name}.alloca"
             emit "%#{convert_name} = load #{dst_union_type}, ptr %#{convert_name}.alloca"
           end
         end
@@ -8508,6 +8512,8 @@ module Crystal::MIR
           next true if val_type_str == "void"
           # Check for ptr type in int phi
           next true if val_type_str == "ptr"
+          # Check for float/double type in int phi
+          next true if val_type_str == "float" || val_type_str == "double"
           next false unless val_type_str.starts_with?('i') && !val_type_str.includes?(".union")
           val_bits = val_type_str[1..-1].to_i? || 32
           val_bits != phi_bits
@@ -8545,6 +8551,9 @@ module Crystal::MIR
                 ref = "0" if ref == "null"
                 "[#{ref}, %#{block_name.call(block)}]"
               end
+            elsif val_type_str == "float" || val_type_str == "double"
+              # Float/double value flowing into int phi - use 0 as fallback
+              "[0, %#{block_name.call(block)}]"
             elsif val_type_str.nil? || val_type_str == "void" || val_type_str == "ptr"
               # No type, void, or ptr value flowing into int phi - use 0
               "[0, %#{block_name.call(block)}]"
@@ -8800,7 +8809,28 @@ module Crystal::MIR
           end
         elsif is_forward_ref
           # Forward reference from loop back-edge - use %r#{val} which will be defined later
-          "[%r#{val}, %#{block_name.call(block)}]"
+          # BUT: verify type compatibility first. If the forward-referenced value has a
+          # different type than the phi, we can't use it directly (LLVM will reject the
+          # type mismatch). Fall through to type mismatch handling instead.
+          fwd_val_type = @value_types[val]?
+          fwd_val_type_str = fwd_val_type ? @type_mapper.llvm_type(fwd_val_type) : nil
+          if fwd_val_type_str && fwd_val_type_str != phi_type &&
+             !(fwd_val_type_str == "ptr" && phi_type == "ptr")
+            # Type mismatch — use safe default
+            if is_union_type
+              "[zeroinitializer, %#{block_name.call(block)}]"
+            elsif is_ptr_type
+              "[null, %#{block_name.call(block)}]"
+            elsif is_int_type || is_bool_type
+              "[0, %#{block_name.call(block)}]"
+            elsif is_float_type
+              "[0.0, %#{block_name.call(block)}]"
+            else
+              "[null, %#{block_name.call(block)}]"
+            end
+          else
+            "[%r#{val}, %#{block_name.call(block)}]"
+          end
         elsif const_val == "null" && is_union_type
           # null constant in union phi - use zeroinitializer
           "[zeroinitializer, %#{block_name.call(block)}]"
