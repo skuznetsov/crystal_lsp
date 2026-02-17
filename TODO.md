@@ -3882,3 +3882,28 @@ crystal build -Ddebug_hooks src/crystal_v2.cr -o bin/crystal_v2 --no-debug
       - after `/tmp/self_profile_after841.sample.txt`, `/tmp/self_profile_after841b.sample.txt`
       - targeted line reduced:
         - `ast_to_hir.cr:54972`: `76 -> 60 / 69`
+
+### 8.39 Cache typed-overload checks in mixin re-assert pass (2026-02-17)
+
+- [x] Avoid repeated `function_def_overloads` scans for the same base name inside class re-assert loop.
+  - Root cause:
+    - in `register_concrete_class`, the post-include re-assert pass recomputed `has_typed` by calling `function_def_overloads(base_name)` for each untyped def occurrence.
+    - overloaded methods with same base name caused repeated identical scans.
+  - Code fix:
+    - file: `src/compiler/hir/ast_to_hir.cr`
+    - added local `typed_overload_cache : Hash(String, Bool)` in the re-assert loop.
+    - `has_typed` now:
+      - reuses cached value per `base_name` when available;
+      - computes once and stores on first encounter.
+  - DoD / evidence:
+    - `scripts/build.sh release` => `EXIT 0`
+    - `regression_tests/run_all.sh bin/crystal_v2` => `41 passed, 0 failed`
+    - `CRYSTAL_V2_PIPELINE_CACHE=0 CRYSTAL_V2_LLVM_CACHE=0 bin/crystal_v2 examples/bootstrap_array.cr -o /tmp/bootstrap_array_after_reassert_typed_cache && scripts/run_safe.sh /tmp/bootstrap_array_after_reassert_typed_cache 10 768` => `EXIT 0`
+    - self-host 5s sample comparison:
+      - baseline `/tmp/self_profile_after841b.sample.txt`
+      - after `/tmp/self_profile_after842.sample.txt`, `/tmp/self_profile_after842b.sample.txt`
+      - directional aggregates:
+        - `register_concrete_class`: `2394 -> 2169 / 2464`
+        - `function_def_overloads`: `168 -> 141 / 155`
+      - targeted hotspot collapse in re-assert section:
+        - `ast_to_hir.cr:14097`: `88 -> 1 / 0`

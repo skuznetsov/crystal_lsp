@@ -14084,6 +14084,7 @@ module Crystal::HIR
           # Re-assert class-defined untyped base methods after mixins so they
           # don't get shadowed by included module defs (e.g., Tuple#hash).
           if !class_body.empty?
+            typed_overload_cache = {} of String => Bool
             class_body.each do |expr_id|
               member = unwrap_visibility_member(@arena[expr_id])
               next unless member.is_a?(CrystalV2::Compiler::Frontend::DefNode)
@@ -14094,14 +14095,20 @@ module Crystal::HIR
               next unless def_params_untyped?(member)
               method_name = String.new(member.name)
               base_name = "#{class_name}##{method_name}"
-              overloads = function_def_overloads(base_name)
-              has_typed = overloads.any? do |name|
-                if def_node = @function_defs[name]?
-                  !def_params_untyped?(def_node)
-                else
-                  false
-                end
-              end
+              has_typed = if cached = typed_overload_cache[base_name]?
+                            cached
+                          else
+                            overloads = function_def_overloads(base_name)
+                            value = overloads.any? do |name|
+                              if def_node = @function_defs[name]?
+                                !def_params_untyped?(def_node)
+                              else
+                                false
+                              end
+                            end
+                            typed_overload_cache[base_name] = value
+                            value
+                          end
               next if has_typed
               set_function_def_entry(base_name, member)
               set_function_def_arena(base_name, @arena)
