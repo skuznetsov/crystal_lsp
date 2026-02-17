@@ -4145,3 +4145,32 @@ crystal build -Ddebug_hooks src/crystal_v2.cr -o bin/crystal_v2 --no-debug
       - broader lowering stack in same window also decreased:
         - `lower_function_if_needed_impl`: `8728 -> 7961`
         - `process_pending_lower_functions`: `7594 -> 7251`
+
+### 8.49 Specialize `function_type_param_map_for` hot arities (2026-02-17)
+
+- [x] Reduce splat-path overhead for frequent 1/2/3-name lookups in type-param map retrieval.
+  - Root cause:
+    - most call sites use 2 names (sometimes 3), but old implementation routed all calls through `function_type_param_map_for(*names)` varargs path.
+  - Experiment notes:
+    - attempted content-match fast path in `store_function_type_param_map` (`params.dup` skip when maps matched);
+    - reverted before commit: sample showed extra `Hash(String, String)#[]?`/hasher churn with no reliable gain.
+  - Code fix:
+    - file: `src/compiler/hir/ast_to_hir.cr`
+    - restored simple snapshot write in `store_function_type_param_map` (`stored = params.dup`).
+    - added helper `function_type_param_map_for_name(name)` and debug helper `debug_type_param_lookup_name?`.
+    - added specialized overloads:
+      - `function_type_param_map_for(name : String)`
+      - `function_type_param_map_for(name1 : String, name2 : String)`
+      - `function_type_param_map_for(name1 : String, name2 : String, name3 : String)`
+      - kept varargs fallback for wider arities.
+  - DoD / evidence:
+    - `scripts/build.sh release` => `EXIT 0`
+    - `regression_tests/run_all.sh bin/crystal_v2` => `41 passed, 0 failed`
+    - `CRYSTAL_V2_PIPELINE_CACHE=0 CRYSTAL_V2_LLVM_CACHE=0 bin/crystal_v2 examples/bootstrap_array.cr -o /tmp/bootstrap_array_tpmap_overloads && scripts/run_safe.sh /tmp/bootstrap_array_tpmap_overloads 10 768` => `EXIT 0`
+    - self-host sample A/B with rebuild on both sides (`sleep 15`, `sample 10s`):
+      - baseline: `/tmp/self_tpmap_overload_baseline_s15.sample.txt`
+      - after: `/tmp/self_tpmap_overload_patch_s15.sample.txt`
+      - directional counters (flat-to-slightly-better, no clear large delta):
+        - `process_pending_lower_functions`: `7197 -> 7202` (flat/noise)
+        - `Hash(String, String)#[]?`: `135 -> 128`
+        - `Crystal::Hasher#bytes<Slice(UInt8)>`: `230 -> 223`

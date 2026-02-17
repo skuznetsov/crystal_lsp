@@ -6179,17 +6179,71 @@ module Crystal::HIR
       @function_type_param_maps[base_name] = stored unless @function_type_param_maps.has_key?(base_name)
     end
 
+    private def debug_type_param_lookup_name?(name : String) : Bool
+      name.includes?("Slice") && name.includes?("hash")
+    end
+
+    private def function_type_param_map_for_name(name : String) : Hash(String, String)?
+      return nil if name.empty?
+      if map = @function_type_param_maps[name]?
+        if env_get("DEBUG_TYPE_PARAM_RETRIEVE") && debug_type_param_lookup_name?(name)
+          STDERR.puts "[TYPE_PARAM_RETRIEVE] found name=#{name} map=#{map}"
+        end
+        return map
+      end
+      nil
+    end
+
+    private def function_type_param_map_for(name : String) : Hash(String, String)?
+      if map = function_type_param_map_for_name(name)
+        return map
+      end
+      if env_get("DEBUG_TYPE_PARAM_RETRIEVE") && debug_type_param_lookup_name?(name)
+        STDERR.puts "[TYPE_PARAM_RETRIEVE] NOT_FOUND names=#{name}"
+      end
+      nil
+    end
+
+    private def function_type_param_map_for(name1 : String, name2 : String) : Hash(String, String)?
+      if map = function_type_param_map_for_name(name1)
+        return map
+      end
+      if map = function_type_param_map_for_name(name2)
+        return map
+      end
+      if env_get("DEBUG_TYPE_PARAM_RETRIEVE") &&
+         (debug_type_param_lookup_name?(name1) || debug_type_param_lookup_name?(name2))
+        STDERR.puts "[TYPE_PARAM_RETRIEVE] NOT_FOUND names=#{name1}, #{name2}"
+      end
+      nil
+    end
+
+    private def function_type_param_map_for(name1 : String, name2 : String, name3 : String) : Hash(String, String)?
+      if map = function_type_param_map_for_name(name1)
+        return map
+      end
+      if map = function_type_param_map_for_name(name2)
+        return map
+      end
+      if map = function_type_param_map_for_name(name3)
+        return map
+      end
+      if env_get("DEBUG_TYPE_PARAM_RETRIEVE") &&
+         (debug_type_param_lookup_name?(name1) ||
+          debug_type_param_lookup_name?(name2) ||
+          debug_type_param_lookup_name?(name3))
+        STDERR.puts "[TYPE_PARAM_RETRIEVE] NOT_FOUND names=#{name1}, #{name2}, #{name3}"
+      end
+      nil
+    end
+
     private def function_type_param_map_for(*names : String) : Hash(String, String)?
       names.each do |name|
-        next if name.empty?
-        if map = @function_type_param_maps[name]?
-          if env_get("DEBUG_TYPE_PARAM_RETRIEVE") && (name.includes?("Slice") && name.includes?("hash"))
-            STDERR.puts "[TYPE_PARAM_RETRIEVE] found name=#{name} map=#{map}"
-          end
+        if map = function_type_param_map_for_name(name)
           return map
         end
       end
-      if env_get("DEBUG_TYPE_PARAM_RETRIEVE") && names.any? { |n| n.includes?("Slice") && n.includes?("hash") }
+      if env_get("DEBUG_TYPE_PARAM_RETRIEVE") && names.any? { |name| debug_type_param_lookup_name?(name) }
         STDERR.puts "[TYPE_PARAM_RETRIEVE] NOT_FOUND names=#{names.to_a.join(", ")}"
       end
       nil
