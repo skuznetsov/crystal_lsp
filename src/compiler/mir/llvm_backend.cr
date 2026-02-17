@@ -6406,6 +6406,11 @@ module Crystal::MIR
       return unless val_type
       llvm_type = @type_mapper.llvm_type(val_type)
       llvm_type = "ptr" if llvm_type == "void"
+      # Check actual emitted type — the value may have been cast to a different union
+      # type by fromslot code, so the type mapper result may not match reality.
+      if actual = @emitted_value_types[name]?
+        llvm_type = actual if actual.includes?(".union") && llvm_type.includes?(".union") && actual != llvm_type
+      end
       slot_llvm_type = @cross_block_slot_types[inst_id]?
       # Guard: if MIR reuses value IDs, skip store when types are completely incompatible
       if slot_llvm_type && slot_llvm_type != llvm_type &&
