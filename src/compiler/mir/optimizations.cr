@@ -1082,15 +1082,23 @@ module Crystal::MIR
       @function.blocks.each do |block|
         next unless affected_block_ids.includes?(block.id)
 
-        new_instructions = [] of Value
+        block_changed = false
         block.instructions.each_with_index do |inst, idx|
-          new_instructions << rewrite_instruction(inst, replacements, block.id, idx, def_blocks, def_index, dominators, block_sizes)
+          rewritten = rewrite_instruction(inst, replacements, block.id, idx, def_blocks, def_index, dominators, block_sizes)
+          next if rewritten == inst
+
+          block.instructions[idx] = rewritten
+          block_changed = true
         end
-        block.instructions.clear
-        new_instructions.each { |i| block.add(i) }
-        block.terminator = rewrite_terminator(block.terminator, replacements, block.id, block.instructions.size, def_blocks, def_index, dominators)
+
+        rewritten_term = rewrite_terminator(block.terminator, replacements, block.id, block.instructions.size, def_blocks, def_index, dominators)
+        if rewritten_term != block.terminator
+          block.terminator = rewritten_term
+          block_changed = true
+        end
+
         if ENV["MIR_CP_DEBUG"]?
-          STDERR.puts "[MIR_CP] block=#{block.id} terminator=#{block.terminator}"
+          STDERR.puts "[MIR_CP] block=#{block.id} changed=#{block_changed} terminator=#{block.terminator}"
         end
       end
 

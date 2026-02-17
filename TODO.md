@@ -4528,3 +4528,50 @@ crystal build -Ddebug_hooks src/crystal_v2.cr -o bin/crystal_v2 --no-debug
   - Decision:
     - branch fully reverted;
     - keep `assume_dominates` only for `LocalCSEPass` path from `8.58`, where substitutions are constrained to same-block CSE construction.
+
+### 8.60 CopyPropagation in-place rewrite (avoid block array rebuild churn) (2026-02-17)
+
+- [x] Reduce allocation/mutation overhead in `CopyPropagationPass#apply_replacements`.
+  - Root cause:
+    - even after `8.57`, each affected block still rebuilt instruction arrays:
+      - allocate `new_instructions`,
+      - push rewritten instructions,
+      - `clear` + re-`add` all values back.
+    - in self-host this adds avoidable churn in the hottest pass (`copy_propagation`).
+  - Code fix:
+    - file: `src/compiler/mir/optimizations.cr`
+    - changed `CopyPropagationPass#apply_replacements` block rewrite loop to:
+      - rewrite instructions in-place (`block.instructions[idx] = rewritten`) only when changed;
+      - keep unchanged instructions untouched (no full-array rebuild);
+      - rewrite terminator only on actual change.
+    - kept dominance logic and replacement semantics unchanged.
+  - DoD / evidence:
+    - `scripts/build.sh release` => `EXIT 0`
+    - `timeout 240 crystal spec spec/hir/return_type_inference_spec.cr` => `13 examples, 0 failures`
+    - `timeout 240 crystal spec spec/mir/llvm_backend_spec.cr` => `59 examples, 0 failures`
+    - `regression_tests/run_all.sh bin/crystal_v2` => `41 passed, 0 failed`
+    - `CRYSTAL_V2_PIPELINE_CACHE=0 bin/crystal_v2 examples/bootstrap_array.cr -o /tmp/bootstrap_array_cp_inplace && scripts/run_safe.sh /tmp/bootstrap_array_cp_inplace 10 768` => `EXIT 0`
+  - Perf evidence (self-host, `CRYSTAL_V2_MIR_PASS_TIMING=1`, `CRYSTAL_V2_STOP_AFTER_MIR=1`):
+    - comparable baseline (same `ast_cache=272 hit/63 miss`):
+      - `/tmp/self_pass_timing_lcse_assume_dom.log`
+    - new:
+      - `/tmp/self_pass_timing_cp_inplace.log`
+    - delta:
+      - `copy_propagation`: `52385.9ms -> 49903.8ms` (`-2482.1ms`, `-4.74%`)
+      - `mir_opt`: `54799.7ms -> 51731.3ms` (`-3068.4ms`, `-5.60%`)
+      - `total`: `123782.8ms -> 117216.0ms` (`-6566.8ms`, `-5.31%`)
+    - note:
+      - second run `/tmp/self_pass_timing_cp_inplace_r2.log` had different AST cache profile (`334 hit/1 miss`) and is not used for A/B.
+
+### 8.61 Refuted branch: dominance-partitioned CopyPropagation replacements (2026-02-17)
+
+- [x] Hypothesis tested and rejected.
+  - Hypothesis:
+    - partition replacements into dominance-safe/unsafe buckets and run safe bucket with `assume_dominates: true`.
+  - Result:
+    - regressed in comparable run (`/tmp/self_pass_timing_cp_partition.log`):
+      - `copy_propagation`: `52385.9ms -> 53679.3ms` (`+2.47%`)
+      - `mir_opt`: `54799.7ms -> 55336.8ms` (`+0.98%`)
+      - `total`: `123782.8ms -> 124591.7ms` (`+0.65%`)
+  - Decision:
+    - reverted completely; kept only `8.60` in-place rewrite.
