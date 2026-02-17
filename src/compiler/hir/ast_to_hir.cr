@@ -13647,12 +13647,12 @@ module Crystal::HIR
                               inferred = module_like_type_name?(rt_name) ? infer_concrete_return_type_from_body(member, class_name) : nil
                               resolved = inferred || type_ref_for_name(rt_name)
                               if resolved == TypeRef::VOID && method_name.ends_with?('?')
-                                self_type = type_ref_for_name(class_name)
+                                self_type = type_ref
                                 resolved = infer_unannotated_query_return_type(method_name, self_type) || resolved
                               end
                               resolved
                             elsif method_name.ends_with?('?')
-                              self_type = type_ref_for_name(class_name)
+                              self_type = type_ref
                               inferred = infer_unannotated_query_return_type(method_name, self_type)
                               inferred ||= infer_concrete_return_type_from_body(member, class_name)
                               inferred || fallback_query_return_type(method_name)
@@ -13660,7 +13660,7 @@ module Crystal::HIR
                               # Try to infer return type from getter-style methods (single ivar access).
                               inferred = infer_getter_return_type(member, ivars)
                               inferred = infer_concrete_return_type_from_body(member, class_name) if inferred.nil?
-                              inferred ||= infer_unannotated_search_return_type(method_name, type_ref_for_name(class_name))
+                              inferred ||= infer_unannotated_search_return_type(method_name, type_ref)
                               inferred || TypeRef::VOID
                             end
               if type_literal_name
@@ -13698,9 +13698,11 @@ module Crystal::HIR
                              else
                                resolve_arena_for_def(member, @arena)
                              end
-              if !has_block
-                has_block = def_contains_yield?(member, member_arena)
-              end
+              contains_yield = if has_block
+                                 def_contains_yield?(member, member_arena)
+                               else
+                                 has_block = def_contains_yield?(member, member_arena)
+                               end
               full_name = function_full_name_for_def(base_name, method_param_types, member.params, has_block)
               alias_full_name = nil
               alias_base = nil
@@ -13778,7 +13780,7 @@ module Crystal::HIR
               # Note: MIR lowering removes yield-containing functions (inline-only), so we must inline
               # them at call sites. We key by both base and mangled names so resolution can find them.
               yield_start = mono_debug ? Time.instant : nil
-              if def_contains_yield?(member, member_arena)
+              if contains_yield
                 @yield_functions.add(full_name)
                 debug_hook("yield.register", full_name)
                 if !has_block && !@function_defs.has_key?(base_name)

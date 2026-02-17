@@ -3665,3 +3665,27 @@ crystal build -Ddebug_hooks src/crystal_v2.cr -o bin/crystal_v2 --no-debug
     - self-host 5s sample slice (`/tmp/self_profile_after828.sample.txt` -> `/tmp/self_profile_after831.sample.txt`):
       - `def_contains_yield_uncached?`: `202 -> 137`
       - `register_concrete_class`: `943 -> 915`
+
+### 8.30 Reuse class type ref and avoid duplicate yield check in method registration (2026-02-17)
+
+- [x] Trim repeated work inside `register_concrete_class` method loop.
+  - Root cause:
+    - method registration path repeatedly called `type_ref_for_name(class_name)` even though class `type_ref` is already available.
+    - `def_contains_yield?` was queried twice for the same `DefNode` in the same iteration (block detection + yield-function registration).
+  - Code fix:
+    - file: `src/compiler/hir/ast_to_hir.cr`
+    - in method return-type inference branch:
+      - replaced repeated `type_ref_for_name(class_name)` with existing `type_ref`.
+    - in method registration loop:
+      - compute `contains_yield` once and reuse it for both `has_block` and yield-function registration.
+  - DoD / evidence:
+    - `scripts/build.sh release` => `EXIT 0`
+    - `regression_tests/run_all.sh bin/crystal_v2` => `41 passed, 0 failed`
+    - `CRYSTAL_V2_PIPELINE_CACHE=0 CRYSTAL_V2_LLVM_CACHE=0 bin/crystal_v2 examples/bootstrap_array.cr -o /tmp/bootstrap_array_after_register_concrete_micro && scripts/run_safe.sh /tmp/bootstrap_array_after_register_concrete_micro 10 768` => `EXIT 0`
+    - self-host 5s samples:
+      - baseline `/tmp/self_profile_after831.sample.txt`
+      - after `/tmp/self_profile_after832.sample.txt` and `/tmp/self_profile_after832b.sample.txt`
+      - stable deltas vs baseline:
+        - `register_concrete_class`: `915 -> 835/854`
+        - `def_contains_yield_uncached?`: `137 -> 97/96`
+        - `type_ref_for_name`: `724 -> 534/579`
