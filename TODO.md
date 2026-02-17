@@ -4375,3 +4375,41 @@ crystal build -Ddebug_hooks src/crystal_v2.cr -o bin/crystal_v2 --no-debug
       - log: `/tmp/self_pass_timing_hints2.log`
       - `mir_opt=148478.2ms`, `total=209699.6ms`, `real=209.74`
     - That experiment was reverted; keep baseline telemetry and optimize heavy passes directly next.
+
+### 8.56 Remove per-call `Set` allocations from hot MIR alias/canonical chains (2026-02-17)
+
+- [x] Reduce allocator pressure in MIR hotspots (`local_cse`, `copy_propagation`, `peephole`) by eliminating transient `Set` allocations in chain walking.
+  - Root cause:
+    - pass telemetry (`8.55`) identified dominant costs:
+      - `local_cse`, `copy_propagation`, `peephole`.
+    - each of these repeatedly called `canonical/resolve` helpers that allocated:
+      - `seen = Set(ValueId).new` per call.
+    - in self-host this creates high churn in tight loops.
+  - Code fix:
+    - file: `src/compiler/mir/optimizations.cr`
+    - replaced per-call cycle-detection sets with bounded hop traversal (`<= 64`) in:
+      - `LocalCSEPass#canonical`
+      - `CopyPropagationPass#canonical`
+      - `CopyPropagationPass#resolve`
+      - `PeepholePass#canonical`
+      - `LTPEngine#canonical_ptr`
+    - semantics preserved:
+      - still stops on self-edge;
+      - still prevents pathological infinite alias loops via bounded chain depth.
+  - DoD / evidence:
+    - `scripts/build.sh release` => `EXIT 0`
+    - `regression_tests/run_all.sh bin/crystal_v2` => `41 passed, 0 failed`
+    - self-host telemetry runs (`CRYSTAL_V2_MIR_PASS_TIMING=1`, `CRYSTAL_V2_STOP_AFTER_MIR=1`, caches off for LLVM/pipeline):
+      - baseline: `/tmp/self_pass_timing.log`
+      - run1: `/tmp/self_pass_timing_noalloc.log`
+      - run2: `/tmp/self_pass_timing_noalloc_r2.log`
+    - average delta vs baseline (`run1/run2` mean):
+      - `mir_opt`: `146577.7ms -> 145046.6ms` (`-1531.1ms`, `-1.04%`)
+      - `total`: `207796.0ms -> 205870.9ms` (`-1925.2ms`, `-0.93%`)
+      - `real`: `207.84s -> 205.91s` (`-1.94s`, `-0.93%`)
+    - pass-level average deltas:
+      - `local_cse`: `-1123.5ms` (`-2.16%`)
+      - `copy_propagation`: `-551.0ms` (`-1.13%`)
+      - `peephole`: `+307.5ms` (`+0.69%`, small regression)
+  - Notes:
+    - net `mir_opt`/`total` improvement is positive; next micro-step should target `peephole` specifically.

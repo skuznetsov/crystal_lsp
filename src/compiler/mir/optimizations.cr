@@ -841,13 +841,13 @@ module Crystal::MIR
 
     private def canonical(id : ValueId, replacements : Hash(ValueId, ValueId)) : ValueId
       current = id
-      seen = Set(ValueId).new
+      hops = 0
 
       while next_id = replacements[current]?
         break if next_id == current
-        return current if seen.includes?(current)
-        seen << current
         current = next_id
+        hops += 1
+        break if hops >= 64
       end
 
       replacements[id] = current if current != id
@@ -1079,13 +1079,13 @@ module Crystal::MIR
 
     private def canonical(id : ValueId, replacements : Hash(ValueId, ValueId)) : ValueId
       current = id
-      seen = Set(ValueId).new
+      hops = 0
 
       while next_id = replacements[current]?
         break if next_id == current
-        return current if seen.includes?(current)
-        seen << current
         current = next_id
+        hops += 1
+        break if hops >= 64
       end
 
       replacements[id] = current if current != id
@@ -1376,14 +1376,14 @@ module Crystal::MIR
       dominators : Hash(BlockId, Set(BlockId))
     ) : ValueId
       current = id
-      seen = Set(ValueId).new
+      hops = 0
 
       while next_id = replacements[current]?
         break if next_id == current
-        return current if seen.includes?(current)
+        break if hops >= 64
         break unless dominates_use?(next_id, use_block, use_index, def_blocks, def_index, dominators)
-        seen << current
         current = next_id
+        hops += 1
       end
 
       current
@@ -1563,13 +1563,13 @@ module Crystal::MIR
 
     private def canonical(id : ValueId, replacements : Hash(ValueId, ValueId)) : ValueId
       current = id
-      seen = Set(ValueId).new
+      hops = 0
 
       while next_id = replacements[current]?
         break if next_id == current
-        return current if seen.includes?(current)
-        seen << current
         current = next_id
+        hops += 1
+        break if hops >= 64
       end
 
       replacements[id] = current if current != id
@@ -2580,11 +2580,13 @@ module Crystal::MIR
 
     private def canonical_ptr(ptr : ValueId) : ValueId
       current = ptr
-      seen = Set(ValueId).new
+      hops = 0
 
-      while (aliased = @alias_map[current]?) && !seen.includes?(current)
-        seen << current
+      while aliased = @alias_map[current]?
+        break if aliased == current
         current = aliased
+        hops += 1
+        break if hops >= 64
       end
 
       current
