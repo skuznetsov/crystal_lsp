@@ -1094,6 +1094,7 @@ module Crystal::HIR
     @function_def_overloads_stripped_cache : Hash(String, Array(String)) = {} of String => Array(String)
     # Incremental index: stripped base → overload list (avoid full scan per lookup)
     @function_def_overloads_stripped_index : Hash(String, Array(String)) = {} of String => Array(String)
+    @function_def_overloads_stripped_index_complete : Bool = false
     # Cache for function_def_overloads results by base_name (cleared on rebuild)
     @function_def_overloads_cache : Hash(String, Array(String)) = {} of String => Array(String)
     @function_def_overloads_cache_size : Int32 = 0
@@ -19272,6 +19273,41 @@ module Crystal::HIR
 
     # Resolve a single overload when argument types are unknown (all VOID).
     # Uses arity + block presence to avoid calling an unmangled base name.
+    private def overload_stripped_base_name(base : String) : String
+      return base unless base.includes?('#') || base.includes?('.')
+      parts = parse_method_name_compact(base)
+      return base unless parts.separator && parts.method
+      owner_base = strip_generic_args(parts.owner)
+      method_name = parts.method.not_nil!
+      if parts.separator == '#'
+        "#{owner_base}##{method_name}"
+      else
+        "#{owner_base}.#{method_name}"
+      end
+    end
+
+    private def ensure_full_stripped_overload_index : Nil
+      return if @function_def_overloads_stripped_index_complete
+
+      rebuilt_index = Hash(String, Array(String)).new(initial_capacity: @function_def_overloads.size)
+      rebuilt_by_base = Hash(String, String).new(initial_capacity: @function_def_overloads.size)
+
+      @function_def_overloads.each do |base, keys|
+        stripped_base = overload_stripped_base_name(base)
+        rebuilt_by_base[base] = stripped_base if stripped_base != base
+        if list = rebuilt_index[stripped_base]?
+          keys.each { |key| list << key }
+        else
+          rebuilt_index[stripped_base] = keys.dup
+        end
+      end
+
+      @function_def_overloads_stripped_index = rebuilt_index
+      @function_def_overloads_stripped_by_base = rebuilt_by_base
+      @function_def_overloads_stripped_cache.clear
+      @function_def_overloads_stripped_index_complete = true
+    end
+
     private def function_def_overloads(base_name : String, stripped_base : String? = nil) : Array(String)
       rebuild_function_def_overloads if @function_defs_cache_size != @function_defs.size
       if cached = @function_def_overloads_cache[base_name]?
@@ -19328,7 +19364,14 @@ module Crystal::HIR
           return list
         end
 
-        # Last-resort: scan bases that match after stripping generics.
+        ensure_full_stripped_overload_index
+        if indexed = @function_def_overloads_stripped_index[stripped]?
+          @function_def_overloads_cache[base_name] = indexed
+          return indexed
+        end
+
+        # Last-resort compatibility fallback: scan bases after stripping generics.
+        # This should be cold once the full stripped index is built.
         matches = [] of String
         seen = Set(String).new
         @function_def_overloads.each do |base, keys|
@@ -19347,6 +19390,7 @@ module Crystal::HIR
           return empty
         end
         @function_def_overloads_stripped_cache[stripped] = matches
+        @function_def_overloads_stripped_index[stripped] = matches
         @function_def_overloads_cache[base_name] = matches
         return matches
       end
@@ -19475,14 +19519,7 @@ module Crystal::HIR
       end
       @function_def_overloads_cache[base] = @function_def_overloads[base]
 
-      stripped_base = base
-      if base.includes?('#') || base.includes?('.')
-        parts = parse_method_name_compact(base)
-        if parts.separator && parts.method
-          owner_base = strip_generic_args(parts.owner)
-          stripped_base = parts.separator == '#' ? "#{owner_base}##{parts.method.not_nil!}" : "#{owner_base}.#{parts.method.not_nil!}"
-        end
-      end
+      stripped_base = overload_stripped_base_name(base)
       if stripped_base != base && !@function_def_overloads_stripped_by_base.has_key?(base)
         @function_def_overloads_stripped_by_base[base] = stripped_base
       end

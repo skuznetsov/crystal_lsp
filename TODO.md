@@ -3619,3 +3619,29 @@ crystal build -Ddebug_hooks src/crystal_v2.cr -o bin/crystal_v2 --no-debug
       - `monomorphize_generic_class`: `345 -> 327`
       - `register_concrete_class`: `1014 -> 978`
       - `function_def_overloads`: `230 -> 219`
+
+### 8.28 Build stripped overload index on first miss (2026-02-17)
+
+- [x] Remove repeated fallback scans in `function_def_overloads` by materializing stripped index once.
+  - Root cause:
+    - even with incremental indexing, some miss paths still hit compatibility fallback scan (`@function_def_overloads.each ... strip_generic_receiver_for_lookup`) in hot lookups.
+    - sampled hotspot line moved to the fallback loop body (`ast_to_hir.cr:19335`).
+  - Code fix:
+    - file: `src/compiler/hir/ast_to_hir.cr`
+    - added:
+      - `@function_def_overloads_stripped_index_complete : Bool`
+      - `overload_stripped_base_name(base)`
+      - `ensure_full_stripped_overload_index`
+    - `function_def_overloads` now:
+      - attempts incremental/indexed lookups as before;
+      - if still missing, builds complete stripped index once, retries O(1) lookup;
+      - keeps compatibility scan only as cold last-resort path.
+    - unified stripped-base derivation in `index_function_def_overload_entry` via `overload_stripped_base_name`.
+  - DoD / evidence:
+    - `scripts/build.sh release` => `EXIT 0`
+    - `regression_tests/run_all.sh bin/crystal_v2` => `41 passed, 0 failed`
+    - `CRYSTAL_V2_PIPELINE_CACHE=0 CRYSTAL_V2_LLVM_CACHE=0 bin/crystal_v2 examples/bootstrap_array.cr -o /tmp/bootstrap_array_after_full_stripped_index && scripts/run_safe.sh /tmp/bootstrap_array_after_full_stripped_index 10 768` => `EXIT 0`
+    - self-host 5s sample slice (`/tmp/self_profile_after827.sample.txt` -> `/tmp/self_profile_after828.sample.txt`):
+      - fallback scan marker `ast_to_hir.cr:19335`: `152 -> 0`
+      - `function_def_overloads`: `219 -> 218` (stable while removing fallback scan work)
+      - `register_concrete_class`: `978 -> 943`
