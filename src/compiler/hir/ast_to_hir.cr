@@ -1893,6 +1893,7 @@ module Crystal::HIR
 
     # Pending monomorphizations (deferred until after all templates are registered)
     @pending_monomorphizations : Array({String, Array(String), String})
+    @pending_monomorphization_names : Set(String)
     @defer_monomorphization : Bool
     # Suppress monomorphization while scanning specialized class bodies.
     @suppress_monomorphization : Bool
@@ -2244,6 +2245,7 @@ module Crystal::HIR
       @generic_reopenings = {} of String => Array(GenericClassTemplate)
       @monomorphized = Set(String).new(initial_capacity: 32768)
       @pending_monomorphizations = [] of {String, Array(String), String}
+      @pending_monomorphization_names = Set(String).new(initial_capacity: 32768)
       @defer_monomorphization = true # Start in deferred mode
       @suppress_monomorphization = false
       @eager_monomorphization = env_has?("CRYSTAL_V2_EAGER_MONO")
@@ -13431,7 +13433,7 @@ module Crystal::HIR
                 specialized_nested = "#{full_nested_name}(#{type_args.join(", ")})"
                 unless @monomorphized.includes?(specialized_nested)
                   if @defer_monomorphization
-                    @pending_monomorphizations << {full_nested_name, type_args, specialized_nested}
+                    enqueue_pending_monomorphization(full_nested_name, type_args, specialized_nested)
                   else
                     monomorphize_generic_class(full_nested_name, type_args, specialized_nested)
                   end
@@ -14202,10 +14204,18 @@ module Crystal::HIR
     end
 
     # Flush all pending monomorphizations (call after all templates are registered)
+    private def enqueue_pending_monomorphization(base_name : String, type_args : Array(String), specialized_name : String) : Nil
+      return if @monomorphized.includes?(specialized_name)
+      return if @pending_monomorphization_names.includes?(specialized_name)
+      @pending_monomorphization_names << specialized_name
+      @pending_monomorphizations << {base_name, type_args, specialized_name}
+    end
+
     def flush_pending_monomorphizations
       @defer_monomorphization = false
       pending = @pending_monomorphizations.dup
       @pending_monomorphizations.clear
+      @pending_monomorphization_names.clear
       return unless @eager_monomorphization
 
       if env_has?("DEBUG_MONO")
@@ -14566,7 +14576,7 @@ module Crystal::HIR
           specialized_part = "#{base_name}(#{part})"
           unless @monomorphized.includes?(specialized_part)
             if @defer_monomorphization
-              @pending_monomorphizations << {base_name, [part], specialized_part}
+              enqueue_pending_monomorphization(base_name, [part], specialized_part)
             else
               monomorphize_generic_class(base_name, [part], specialized_part)
             end
@@ -14683,6 +14693,7 @@ module Crystal::HIR
         while !@pending_monomorphizations.empty?
           batch = @pending_monomorphizations.dup
           @pending_monomorphizations.clear
+          @pending_monomorphization_names.clear
           batch.each do |(pending_base, pending_args, pending_name)|
             next if @monomorphized.includes?(pending_name)
             next unless concrete_type_args?(pending_args)
@@ -55302,7 +55313,7 @@ module Crystal::HIR
               # Skip eager monomorphization while scanning specialized bodies.
             elsif @defer_monomorphization
               # Queue for later - templates may not be fully registered yet
-              @pending_monomorphizations << {base_name, substituted_params, substituted_name}
+              enqueue_pending_monomorphization(base_name, substituted_params, substituted_name)
             else
               monomorphize_generic_class(base_name, substituted_params, substituted_name)
             end

@@ -3596,3 +3596,26 @@ crystal build -Ddebug_hooks src/crystal_v2.cr -o bin/crystal_v2 --no-debug
     - `CRYSTAL_V2_PIPELINE_CACHE=0 CRYSTAL_V2_LLVM_CACHE=0 bin/crystal_v2 examples/bootstrap_array.cr -o /tmp/bootstrap_array_after_overload_processed_set && scripts/run_safe.sh /tmp/bootstrap_array_after_overload_processed_set 10 768` => `EXIT 0`
     - self-host sample slice comparison (`/tmp/self_profile_after825.sample.txt` -> `/tmp/self_profile_after826.sample.txt`):
       - expensive fallback scan marker `ast_to_hir.cr:19322` dropped from `150 -> 0` in sampled window.
+
+### 8.27 Deduplicate pending monomorphization queue by specialization name (2026-02-17)
+
+- [x] Prevent duplicate pending monomorphization entries from inflating iterative mono passes.
+  - Root cause:
+    - pending queue accepted repeated `{base,args,name}` entries for the same `specialized_name`.
+    - duplicates were filtered late (`@monomorphized.includes?`) during batch processing, so queue churn still consumed time.
+  - Code fix:
+    - file: `src/compiler/hir/ast_to_hir.cr`
+    - added:
+      - `@pending_monomorphization_names : Set(String)`
+      - `enqueue_pending_monomorphization(base_name, type_args, specialized_name)`
+    - helper enforces dedupe before queue append.
+    - replaced direct pushes to `@pending_monomorphizations` in all enqueue callsites.
+    - clear dedupe set when draining queue batches (`flush_pending_monomorphizations` and iterative mono loop).
+  - DoD / evidence:
+    - `scripts/build.sh release` => `EXIT 0`
+    - `regression_tests/run_all.sh bin/crystal_v2` => `41 passed, 0 failed`
+    - `CRYSTAL_V2_PIPELINE_CACHE=0 CRYSTAL_V2_LLVM_CACHE=0 bin/crystal_v2 examples/bootstrap_array.cr -o /tmp/bootstrap_array_after_pending_mono_dedupe && scripts/run_safe.sh /tmp/bootstrap_array_after_pending_mono_dedupe 10 768` => `EXIT 0`
+    - self-host 5s sample slice (`/tmp/self_profile_after826.sample.txt` -> `/tmp/self_profile_after827.sample.txt`):
+      - `monomorphize_generic_class`: `345 -> 327`
+      - `register_concrete_class`: `1014 -> 978`
+      - `function_def_overloads`: `230 -> 219`
