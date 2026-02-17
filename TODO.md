@@ -3764,3 +3764,27 @@ crystal build -Ddebug_hooks src/crystal_v2.cr -o bin/crystal_v2 --no-debug
       - directional aggregate counters:
         - `function_def_overloads`: `335 -> 137 / 178`
         - `lookup_function_def_for_call`: `385 -> 317 / 332`
+
+### 8.34 Cache resolved type-alias chains (2026-02-17)
+
+- [x] Add memoization for `resolve_type_alias_chain` and invalidate on alias updates.
+  - Root cause:
+    - `resolve_type_alias_chain` is called broadly in lowering and type resolution hot paths.
+    - each call re-walked `@type_aliases`/`LIBC_TYPE_ALIASES` chains even for stable names.
+  - Code fix:
+    - file: `src/compiler/hir/ast_to_hir.cr`
+    - added `@resolved_type_alias_cache : Hash(String, String)` with init capacity.
+    - `resolve_type_alias_chain` now:
+      - returns cached value on hit;
+      - caches both queried name and intermediate chain entries to final target.
+    - `register_type_alias` now clears alias-chain cache to keep correctness after alias mutations.
+  - DoD / evidence:
+    - `scripts/build.sh release` => `EXIT 0`
+    - `regression_tests/run_all.sh bin/crystal_v2` => `41 passed, 0 failed`
+    - `CRYSTAL_V2_PIPELINE_CACHE=0 CRYSTAL_V2_LLVM_CACHE=0 bin/crystal_v2 examples/bootstrap_array.cr -o /tmp/bootstrap_array_after_alias_chain_cache && scripts/run_safe.sh /tmp/bootstrap_array_after_alias_chain_cache 10 768` => `EXIT 0`
+    - self-host 5s sample comparison:
+      - baseline `/tmp/self_profile_after835b.sample.txt`
+      - after `/tmp/self_profile_after836.sample.txt`, `/tmp/self_profile_after836b.sample.txt`
+      - stable function-level reduction:
+        - `resolve_type_alias_chain`: `101 -> 39 / 39`
+      - adjacent hot functions stayed within expected sample noise band.

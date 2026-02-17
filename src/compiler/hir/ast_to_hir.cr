@@ -1975,6 +1975,7 @@ module Crystal::HIR
 
     # Type aliases (alias_name -> target_type_name)
     @type_aliases : Hash(String, String)
+    @resolved_type_alias_cache : Hash(String, String)
 
     # Track which allocators have been generated (to avoid duplicates for reopened classes)
     @generated_allocators : Set(String)
@@ -2292,6 +2293,7 @@ module Crystal::HIR
       @instance_method_names_cache = {} of String => Array(String)
       @instance_method_names_cache_version = 0
       @type_aliases = {} of String => String
+      @resolved_type_alias_cache = Hash(String, String).new(initial_capacity: 4096)
       @generated_allocators = Set(String).new
       @deferred_allocators = Set(String).new
       @type_cache = {} of String => TypeRef
@@ -3865,6 +3867,7 @@ module Crystal::HIR
         end
       end
       @type_aliases[alias_name] = target_name
+      @resolved_type_alias_cache.clear
       @module_include_alias_cache.clear
       @type_cache.delete(alias_name)
       invalidate_type_cache_for_namespace(alias_name)
@@ -24073,12 +24076,21 @@ module Crystal::HIR
     end
 
     private def resolve_type_alias_chain(name : String) : String
+      if cached = @resolved_type_alias_cache[name]?
+        return cached
+      end
+
+      chain = [] of String
       resolved = @type_aliases[name]? || LIBC_TYPE_ALIASES[name]? || name
+      chain << name if resolved != name
       depth = 0
       while (next_resolved = @type_aliases[resolved]? || LIBC_TYPE_ALIASES[resolved]?) && next_resolved != resolved && depth < 10
+        chain << resolved
         resolved = next_resolved
         depth += 1
       end
+      chain.each { |entry| @resolved_type_alias_cache[entry] = resolved }
+      @resolved_type_alias_cache[name] = resolved
       resolved
     end
 
