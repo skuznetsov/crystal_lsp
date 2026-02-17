@@ -4575,3 +4575,36 @@ crystal build -Ddebug_hooks src/crystal_v2.cr -o bin/crystal_v2 --no-debug
       - `total`: `123782.8ms -> 124591.7ms` (`+0.65%`)
   - Decision:
     - reverted completely; kept only `8.60` in-place rewrite.
+
+### 8.62 Refuted branch: lazy operand-array rewrite in CopyPropagation (2026-02-17)
+
+- [x] Hypothesis tested and rejected.
+  - Hypothesis:
+    - replacing eager `Array#map` rewrites with lazy array materialization in
+      `rewrite_instruction` (`Call/ExternCall/IndirectCall/ArrayLiteral/StringInterpolation/Phi`)
+      should reduce allocation pressure.
+  - Result (comparable run, same `ast_cache=272 hit/63 miss`):
+    - baseline (`/tmp/self_pass_timing_cp_inplace.log`):
+      - `copy_propagation=49903.8ms`, `mir_opt=51731.3ms`, `total=117216.0ms`
+    - experiment (`/tmp/self_pass_timing_cp_lazyargs.log`):
+      - `copy_propagation=54601.5ms` (`+9.41%`)
+      - `mir_opt=57036.7ms` (`+10.25%`)
+      - `total=126645.3ms` (`+8.04%`)
+  - Decision:
+    - fully reverted.
+
+### 8.63 Refuted branch: precomputed always-dominating replacement cache (2026-02-17)
+
+- [x] Hypothesis tested and rejected.
+  - Hypothesis:
+    - precomputing `source -> target` pairs where `target` dominates `source`
+      and skipping per-use `dominates_use?` for those pairs would speed up resolve.
+  - Result (comparable run, same `ast_cache=272 hit/63 miss`):
+    - baseline (`/tmp/self_pass_timing_cp_inplace.log`):
+      - `copy_propagation=49903.8ms`, `mir_opt=51731.3ms`, `total=117216.0ms`
+    - experiment (`/tmp/self_pass_timing_cp_safecache.log`):
+      - `copy_propagation=55463.8ms` (`+11.14%`)
+      - `mir_opt=57088.0ms` (`+10.35%`)
+      - `total=126529.7ms` (`+7.95%`)
+  - Decision:
+    - fully reverted; keep the simpler stable path from `8.60`.
