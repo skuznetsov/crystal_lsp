@@ -3417,3 +3417,34 @@ crystal build -Ddebug_hooks src/crystal_v2.cr -o bin/crystal_v2 --no-debug
     - self-host sample (`/tmp/self_profile_after3.sample.txt`):
       - `register_module_instance_methods_for` branch in sampled path reduced further (`15 * ...` vs `19 * ...` in `/tmp/self_profile_after2.sample.txt`);
       - deferred-context helper activity remains low-single-digit per sample slice (`record_deferred_module_context` lines `8/3/2/...`), confirming lookup no longer depends on full-list scans in common case.
+
+### 8.20 Module-inclusion bookkeeping fast path (2026-02-17)
+
+- [x] Reduce repeated include bookkeeping work in hot mixin path.
+  - Root cause:
+    - `record_module_inclusion` did redundant work on repeated includes:
+      - re-ran alias resolution even when caller already resolved module name;
+      - called `@module.register_module_includer` even when `{module,class}` pair was already recorded;
+      - re-populated suffix index on every includer (although suffix keys depend only on module name);
+      - used `Array#includes?` for `@class_included_modules` membership checks in hot loops.
+  - Code fix:
+    - file: `src/compiler/hir/ast_to_hir.cr`
+    - `record_module_inclusion` now accepts `already_resolved : Bool = false`.
+    - hot callers that already resolve aliases pass `already_resolved: true` (instance/class/lower module include paths).
+    - bookkeeping optimizations:
+      - call `@module.register_module_includer` only for newly-seen includer pairs;
+      - build `@module_includer_keys_by_suffix` only once per module key;
+      - added `@class_included_module_seen : Hash(String, Set(String))` to make class-module membership checks O(1) while preserving existing ordered arrays.
+  - DoD / evidence:
+    - `scripts/build.sh release` => `EXIT 0`
+    - `regression_tests/run_all.sh bin/crystal_v2` => `41 passed, 0 failed`
+    - `CRYSTAL_V2_PIPELINE_CACHE=0 CRYSTAL_V2_LLVM_CACHE=0 bin/crystal_v2 examples/bootstrap_array.cr -o /tmp/bootstrap_array_after_include_fastpath && scripts/run_safe.sh /tmp/bootstrap_array_after_include_fastpath 10 768` => `EXIT 0`
+    - self-host sample comparison:
+      - baseline `/tmp/self_profile_after3.sample.txt`:
+        - `record_module_inclusion`: `201`
+        - `resolve_module_alias_for_include`: `188`
+        - `Module#register_module_includer`: `78`
+      - after `/tmp/self_profile_after4.sample.txt`:
+        - `record_module_inclusion` (both arities combined): `58`
+        - `resolve_module_alias_for_include`: `45`
+        - `Module#register_module_includer`: not present in top extracted counters for this slice.

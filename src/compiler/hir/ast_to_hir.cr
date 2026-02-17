@@ -1932,6 +1932,8 @@ module Crystal::HIR
     @module_includers_version : Int32
     # Reverse mapping: track which modules each class includes (for method lookup)
     @class_included_modules : Hash(String, Array(String))
+    # Fast membership index for class/module inclusion lists (avoids Array#includes? scans).
+    @class_included_module_seen : Hash(String, Set(String))
     @union_type_cache : Hash(UInt32, Bool)
     @debug_cache_histo : Bool
     @debug_cache_stats : Hash(String, Tuple(Int32, Int32))
@@ -2249,6 +2251,7 @@ module Crystal::HIR
       @module_includer_keys_by_suffix = {} of String => Set(String)
       @module_includers_version = 0
       @class_included_modules = {} of String => Array(String)
+      @class_included_module_seen = {} of String => Set(String)
       @union_type_cache = {} of UInt32 => Bool
       @debug_cache_histo = !env_get("DEBUG_CACHE_HISTO").nil?
       @debug_cache_stats = {} of String => Tuple(Int32, Int32)
@@ -2551,51 +2554,76 @@ module Crystal::HIR
       true
     end
 
-    private def record_module_inclusion(module_name : String, class_name : String) : Nil
+    private def record_module_inclusion(module_name : String, class_name : String, already_resolved : Bool = false) : Nil
       # Resolve type aliases in the module name (e.g., Engine::MatchData -> PCRE2::MatchData)
-      resolved_module_name = resolve_module_alias_for_include(module_name)
+      resolved_module_name = already_resolved ? module_name : resolve_module_alias_for_include(module_name)
       if debug_env_filter_match?("DEBUG_MODULE_INCLUDE", module_name, class_name, resolved_module_name)
         STDERR.puts "[DEBUG_MODULE_INCLUDE] #{class_name} <= #{module_name} (resolved: #{resolved_module_name})"
       end
       cache_bump = false
-      set = @module_includers[resolved_module_name]? || begin
-        new_set = Set(String).new
-        @module_includers[resolved_module_name] = new_set
-        new_set
+      set = @module_includers[resolved_module_name]?
+      new_module_entry = false
+      unless set
+        set = Set(String).new
+        @module_includers[resolved_module_name] = set
+        new_module_entry = true
       end
+      new_includer = false
       unless set.includes?(class_name)
         set.add(class_name)
         cache_bump = true
+        new_includer = true
       end
-      @module.register_module_includer(resolved_module_name, class_name)
+      @module.register_module_includer(resolved_module_name, class_name) if new_includer
       module_base = strip_generic_args(resolved_module_name)
-      suffix_start = 0
-      loop do
-        suffix = module_base[suffix_start..]
-        break unless suffix
-        (@module_includer_keys_by_suffix[suffix] ||= Set(String).new) << resolved_module_name
+      # Suffix index is keyed only by module name, so populate it once per module.
+      if new_module_entry
+        suffix_start = 0
+        loop do
+          suffix = module_base[suffix_start..]
+          break unless suffix
+          (@module_includer_keys_by_suffix[suffix] ||= Set(String).new) << resolved_module_name
 
-        next_sep = module_base.index("::", suffix_start)
-        break unless next_sep
-        suffix_start = next_sep + 2
+          next_sep = module_base.index("::", suffix_start)
+          break unless next_sep
+          suffix_start = next_sep + 2
+        end
       end
       # Also record reverse mapping (class -> modules it includes)
-      class_set = @class_included_modules[class_name]? || begin
+      class_list = @class_included_modules[class_name]? || begin
         new_list = [] of String
         @class_included_modules[class_name] = new_list
         new_list
       end
-      cache_bump = true if push_unique_module_name(class_set, resolved_module_name)
+      class_seen = @class_included_module_seen[class_name]? || begin
+        new_seen = Set(String).new
+        @class_included_module_seen[class_name] = new_seen
+        new_seen
+      end
+      unless class_seen.includes?(resolved_module_name)
+        class_seen.add(resolved_module_name)
+        class_list << resolved_module_name
+        cache_bump = true
+      end
       # Also record includes on the base class name (Array(T) -> Array) so
       # generic instantiations can resolve module methods via base lookup.
       class_base = strip_generic_args(class_name)
       if class_base != class_name && !class_base.empty?
-        base_set = @class_included_modules[class_base]? || begin
+        base_list = @class_included_modules[class_base]? || begin
           new_list = [] of String
           @class_included_modules[class_base] = new_list
           new_list
         end
-        cache_bump = true if push_unique_module_name(base_set, resolved_module_name)
+        base_seen = @class_included_module_seen[class_base]? || begin
+          new_seen = Set(String).new
+          @class_included_module_seen[class_base] = new_seen
+          new_seen
+        end
+        unless base_seen.includes?(resolved_module_name)
+          base_seen.add(resolved_module_name)
+          base_list << resolved_module_name
+          cache_bump = true
+        end
       end
       @module_includers_version += 1 if cache_bump
       debug_hook("module.include", "#{class_name} <= #{resolved_module_name}")
@@ -6660,7 +6688,7 @@ module Crystal::HIR
       end
 
       module_full_name = resolve_module_alias_for_include(module_full_name)
-      record_module_inclusion(module_full_name, class_name)
+      record_module_inclusion(module_full_name, class_name, already_resolved: true)
       return offset if visited.includes?(module_full_name)
       visited << module_full_name
 
@@ -7038,7 +7066,7 @@ module Crystal::HIR
         module_full_name = nested_name if @module_defs.has_key?(nested_name)
       end
       module_full_name = resolve_module_alias_for_include(module_full_name)
-      record_module_inclusion(module_full_name, class_name)
+      record_module_inclusion(module_full_name, class_name, already_resolved: true)
       return if visited.includes?(module_full_name)
       visited << module_full_name
 
@@ -7148,7 +7176,7 @@ module Crystal::HIR
         module_full_name = nested_name if @module_defs.has_key?(nested_name)
       end
       module_full_name = resolve_module_alias_for_include(module_full_name)
-      record_module_inclusion(module_full_name, class_name)
+      record_module_inclusion(module_full_name, class_name, already_resolved: true)
       return if visited.includes?(module_full_name)
       visited << module_full_name
 
