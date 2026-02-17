@@ -2774,12 +2774,14 @@ module Crystal::HIR
           @function_base_return_types[base_name] = return_type
         end
       end
-      # Debug hook: extract class and method from base_name (Class#method or Class.method)
-      parts = parse_method_name_compact(base_name)
-      if method_name = parts.method
-        debug_hook_method_register(full_name, parts.owner, method_name)
-      else
-        debug_hook_method_register(full_name, "", base_name)
+      # Debug hooks are compile-time disabled in normal builds; avoid method-name parsing overhead.
+      if DebugHooks::ENABLED
+        parts = parse_method_name_compact(base_name)
+        if method_name = parts.method
+          debug_hook_method_register(full_name, parts.owner, method_name)
+        else
+          debug_hook_method_register(full_name, "", base_name)
+        end
       end
       if debug_env_filter_match?("DEBUG_METHOD_RETURN", full_name, base_name)
         debug_hook("method.return", "name=#{full_name} type=#{get_type_name_from_ref(return_type)}")

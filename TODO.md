@@ -3504,3 +3504,22 @@ crystal build -Ddebug_hooks src/crystal_v2.cr -o bin/crystal_v2 --no-debug
       - `strip_generic_receiver_for_lookup`: `581 -> 472`
       - `resolve_type_name_in_context`: `480 -> 379`
       - `rebuild_function_def_overloads`: `202 -> 153`
+
+### 8.23 Skip debug-only method parsing in register_function_type (2026-02-17)
+
+- [x] Remove unnecessary `parse_method_name_compact` overhead in non-debug builds.
+  - Root cause:
+    - `register_function_type` always parsed base method names for `debug_hook_method_register`, even when `debug_hooks` macro hooks are compile-time disabled.
+    - this put `register_function_type` itself on the hot path during self-host compile.
+  - Code fix:
+    - file: `src/compiler/hir/ast_to_hir.cr`
+    - wrapped debug-hook method-name parsing and hook call in:
+      - `if DebugHooks::ENABLED ... end`
+    - normal builds now skip parsing entirely for this debug-only path.
+  - DoD / evidence:
+    - `scripts/build.sh release` => `EXIT 0`
+    - `regression_tests/run_all.sh bin/crystal_v2` => `41 passed, 0 failed`
+    - `CRYSTAL_V2_PIPELINE_CACHE=0 CRYSTAL_V2_LLVM_CACHE=0 bin/crystal_v2 examples/bootstrap_array.cr -o /tmp/bootstrap_array_after_register_hook_guard && scripts/run_safe.sh /tmp/bootstrap_array_after_register_hook_guard 10 768` => `EXIT 0`
+    - self-host 5s sample (`/tmp/self_profile_after7.sample.txt` -> `/tmp/self_profile_after8.sample.txt`):
+      - `register_function_type`: `312 -> 182`
+      - no regression in bootstrap/regression correctness signals.
