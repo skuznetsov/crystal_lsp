@@ -24797,7 +24797,24 @@ module Crystal::HIR
     end
 
     # Hot-path variant for overload lookup: avoid cache hash cost.
+    @[AlwaysInline]
     private def strip_generic_receiver_for_lookup(method_name : String) : String
+      method_id = method_name.object_id.to_u64
+      if method_id == @strip_generic_receiver_last_id
+        if cached = @strip_generic_receiver_last
+          return cached
+        end
+      end
+
+      slot = (method_id & @strip_generic_receiver_table_mask).to_i
+      if @strip_generic_receiver_table_keys[slot] == method_id
+        if cached = @strip_generic_receiver_table_vals[slot]
+          @strip_generic_receiver_last_id = method_id
+          @strip_generic_receiver_last = cached
+          return cached
+        end
+      end
+
       bytesize = method_name.bytesize
       ptr = method_name.to_unsafe
       sep_idx : Int32? = nil
@@ -24815,15 +24832,26 @@ module Crystal::HIR
         i += 1
       end
 
-      return method_name unless sep_idx
-      return method_name unless paren_idx && paren_idx < sep_idx
+      unless sep_idx && paren_idx && paren_idx < sep_idx
+        @strip_generic_receiver_last_id = method_id
+        @strip_generic_receiver_last = method_name
+        @strip_generic_receiver_table_keys[slot] = method_id
+        @strip_generic_receiver_table_vals[slot] = method_name
+        return method_name
+      end
 
       generic_start = paren_idx.not_nil!
       total = bytesize - (sep_idx - generic_start)
-      String.build(total) do |io|
+      result = String.build(total) do |io|
         io.write Slice.new(ptr, generic_start)
         io.write Slice.new(ptr + sep_idx, bytesize - sep_idx)
       end
+
+      @strip_generic_receiver_last_id = method_id
+      @strip_generic_receiver_last = result
+      @strip_generic_receiver_table_keys[slot] = method_id
+      @strip_generic_receiver_table_vals[slot] = result
+      result
     end
 
     private def strip_generic_receiver_uncached(method_name : String) : String

@@ -3523,3 +3523,27 @@ crystal build -Ddebug_hooks src/crystal_v2.cr -o bin/crystal_v2 --no-debug
     - self-host 5s sample (`/tmp/self_profile_after7.sample.txt` -> `/tmp/self_profile_after8.sample.txt`):
       - `register_function_type`: `312 -> 182`
       - no regression in bootstrap/regression correctness signals.
+
+### 8.24 Reuse direct-mapped strip cache in lookup hot path (2026-02-17)
+
+- [x] Remove repeated generic-receiver scans in `strip_generic_receiver_for_lookup`.
+  - Root cause:
+    - `strip_generic_receiver_for_lookup` still scanned/rewrote method names on each call even when the same method-name object was seen repeatedly.
+    - the sibling helper `strip_generic_receiver_from_method_name` already had a cheap last-hit + direct-mapped cache, but lookup path bypassed it.
+  - Code fix:
+    - file: `src/compiler/hir/ast_to_hir.cr`
+    - updated `strip_generic_receiver_for_lookup` to:
+      - check existing last-hit cache (`@strip_generic_receiver_last_id/@strip_generic_receiver_last`);
+      - check existing direct-mapped table (`@strip_generic_receiver_table_keys/vals`);
+      - cache both transformed and unchanged (`no generic receiver`) results back into that table.
+    - marked the function `@[AlwaysInline]` to keep call overhead out of hot lookup loops.
+  - DoD / evidence:
+    - `scripts/build.sh release` => `EXIT 0`
+    - `regression_tests/run_all.sh bin/crystal_v2` => `41 passed, 0 failed`
+    - `CRYSTAL_V2_PIPELINE_CACHE=0 CRYSTAL_V2_LLVM_CACHE=0 bin/crystal_v2 examples/bootstrap_array.cr -o /tmp/bootstrap_array_after_strip_lookup_cache2 && scripts/run_safe.sh /tmp/bootstrap_array_after_strip_lookup_cache2 10 768` => `EXIT 0`
+    - self-host 5s sample window comparison (`/tmp/self_profile_before824.sample.txt` -> `/tmp/self_profile_after824b.sample.txt`):
+      - `rebuild_function_def_overloads`: `60 -> 51`
+      - `type_ref_for_name`: `779 -> 743`
+      - `resolve_type_name_in_context`: `228 -> 212`
+      - `register_function_type`: `133 -> 93`
+      - no correctness regressions observed in regression/bootstrap DoD checks.
