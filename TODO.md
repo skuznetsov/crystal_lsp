@@ -4878,3 +4878,47 @@ crystal build -Ddebug_hooks src/crystal_v2.cr -o bin/crystal_v2 --no-debug
         - `total`: `96607.7ms -> 95832.4ms` (`-0.80%`)
   - Insight:
     - small CFG bookkeeping cleanup yields measurable end-to-end gains because dominator construction remains the dominant CP subphase.
+
+### 8.74 CopyPropagation: switch dominance checks to idom intervals (2026-02-17)
+
+- [x] Replace per-function full dominator-set construction with immediate-dominator tree + DFS intervals.
+  - Root cause:
+    - even after 8.72/8.73, `apply_build_dominators` remained the primary CP hotspot.
+    - building `Hash(BlockId => Set(BlockId))` per function was still allocation-heavy and expensive for frequent dominance queries in `resolve`.
+  - Code fix:
+    - file: `src/compiler/mir/optimizations.cr`
+      - replaced `compute_dominators` set-based algorithm with `compute_dominance_info`:
+        - computes reverse postorder,
+        - computes immediate dominators (`idom`) via iterative intersect,
+        - builds dominator-tree DFS entry/exit intervals.
+      - added `DominanceInfo` and switched cross-block dominance checks to interval containment:
+        - `def` dominates `use` iff `in(def) <= in(use)` and `out(def) >= out(use)`.
+      - updated `apply_replacements`/`rewrite_*`/`resolve` signatures to pass `DominanceInfo?` instead of dominator sets.
+  - DoD / evidence:
+    - correctness:
+      - `scripts/build.sh release` => `EXIT 0`
+      - `timeout 240 crystal spec spec/hir/return_type_inference_spec.cr` => `13 examples, 0 failures`
+      - `timeout 240 crystal spec spec/mir/llvm_backend_spec.cr` => `59 examples, 0 failures`
+      - `timeout 240 crystal spec spec/mir/optimizations_spec.cr` => `45 examples, 0 failures`
+      - `regression_tests/run_all.sh bin/crystal_v2` => `41 passed, 0 failed`
+      - `CRYSTAL_V2_PIPELINE_CACHE=0 bin/crystal_v2 examples/bootstrap_array.cr -o /tmp/bootstrap_array_idom && scripts/run_safe.sh /tmp/bootstrap_array_idom 10 768` => `EXIT 0`
+    - perf (strict binary A/B, identical flags, caches disabled):
+      - baseline binary: `/tmp/crystal_v2_idom_baseline_bin`
+      - experiment binary: `/tmp/crystal_v2_idom_experiment_bin`
+      - run1 logs:
+        - baseline: `/tmp/self_pass_timing_idom_baseline.log`
+        - experiment: `/tmp/self_pass_timing_idom_experiment.log`
+      - run2 logs (reversed order):
+        - baseline: `/tmp/self_pass_timing_idom_baseline_r2.log`
+        - experiment: `/tmp/self_pass_timing_idom_experiment_r2.log`
+      - averaged delta (run1+run2):
+        - `apply_build_dominators`: `-99.93%`
+        - `copy_propagation`: `-99.30%`
+        - `run_apply_replacements`: `-99.89%`
+        - `mir_opt`: `-94.46%`
+        - `total`: `-35.30%`
+  - Adversary check:
+    - compiled and ran identical runtime program with both compilers:
+      - source: `/tmp/fib_run.cr`
+      - output matched (`9227465` for both),
+      - no runtime regression observed in this probe (`/tmp/fib_run_baseline` vs `/tmp/fib_run_experiment`).

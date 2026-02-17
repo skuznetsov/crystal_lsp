@@ -1111,14 +1111,14 @@ module Crystal::MIR
 
       def_blocks = {} of ValueId => BlockId
       def_index = {} of ValueId => Int32
-      dominators = {} of BlockId => Set(BlockId)
+      dominance_info : DominanceInfo? = nil
       unless @assume_dominates
         timed_cp_phase("apply_build_dominators") do
           def_blocks, def_index = build_def_maps
           if can_skip_dominators_for_local_replacements?(replacements, replacement_keys, affected_block_ids, def_blocks, def_index)
-            dominators = {} of BlockId => Set(BlockId)
+            dominance_info = nil
           else
-            dominators = compute_dominators
+            dominance_info = compute_dominance_info
           end
         end
       end
@@ -1136,14 +1136,14 @@ module Crystal::MIR
 
           block_changed = false
           block.instructions.each_with_index do |inst, idx|
-            rewritten = rewrite_instruction(inst, replacements, block.id, idx, def_blocks, def_index, dominators, block_sizes)
+            rewritten = rewrite_instruction(inst, replacements, block.id, idx, def_blocks, def_index, dominance_info, block_sizes)
             next if rewritten == inst
 
             block.instructions[idx] = rewritten
             block_changed = true
           end
 
-          rewritten_term = rewrite_terminator(block.terminator, replacements, block.id, block.instructions.size, def_blocks, def_index, dominators)
+          rewritten_term = rewrite_terminator(block.terminator, replacements, block.id, block.instructions.size, def_blocks, def_index, dominance_info)
           if rewritten_term != block.terminator
             block.terminator = rewritten_term
             block_changed = true
@@ -1325,98 +1325,98 @@ module Crystal::MIR
       inst_index : Int32,
       def_blocks : Hash(ValueId, BlockId),
       def_index : Hash(ValueId, Int32),
-      dominators : Hash(BlockId, Set(BlockId)),
+      dominance_info : DominanceInfo?,
       block_sizes : Hash(BlockId, Int32)
     ) : Value
       case inst
       when Free
-        ptr = resolve(inst.ptr, replacements, block_id, inst_index, def_blocks, def_index, dominators)
+        ptr = resolve(inst.ptr, replacements, block_id, inst_index, def_blocks, def_index, dominance_info)
         return inst if ptr == inst.ptr
         Free.new(inst.id, ptr, inst.strategy)
       when RCIncrement
-        ptr = resolve(inst.ptr, replacements, block_id, inst_index, def_blocks, def_index, dominators)
+        ptr = resolve(inst.ptr, replacements, block_id, inst_index, def_blocks, def_index, dominance_info)
         return inst if ptr == inst.ptr
         RCIncrement.new(inst.id, ptr, inst.atomic)
       when RCDecrement
-        ptr = resolve(inst.ptr, replacements, block_id, inst_index, def_blocks, def_index, dominators)
+        ptr = resolve(inst.ptr, replacements, block_id, inst_index, def_blocks, def_index, dominance_info)
         return inst if ptr == inst.ptr
         RCDecrement.new(inst.id, ptr, inst.atomic, inst.destructor)
       when AtomicLoad
-        ptr = resolve(inst.ptr, replacements, block_id, inst_index, def_blocks, def_index, dominators)
+        ptr = resolve(inst.ptr, replacements, block_id, inst_index, def_blocks, def_index, dominance_info)
         return inst if ptr == inst.ptr
         AtomicLoad.new(inst.id, inst.type, ptr, inst.ordering)
       when AtomicStore
-        ptr = resolve(inst.ptr, replacements, block_id, inst_index, def_blocks, def_index, dominators)
-        val = resolve(inst.value, replacements, block_id, inst_index, def_blocks, def_index, dominators)
+        ptr = resolve(inst.ptr, replacements, block_id, inst_index, def_blocks, def_index, dominance_info)
+        val = resolve(inst.value, replacements, block_id, inst_index, def_blocks, def_index, dominance_info)
         return inst if ptr == inst.ptr && val == inst.value
         AtomicStore.new(inst.id, ptr, val, inst.ordering)
       when AtomicCAS
-        ptr = resolve(inst.ptr, replacements, block_id, inst_index, def_blocks, def_index, dominators)
-        expected = resolve(inst.expected, replacements, block_id, inst_index, def_blocks, def_index, dominators)
-        desired = resolve(inst.desired, replacements, block_id, inst_index, def_blocks, def_index, dominators)
+        ptr = resolve(inst.ptr, replacements, block_id, inst_index, def_blocks, def_index, dominance_info)
+        expected = resolve(inst.expected, replacements, block_id, inst_index, def_blocks, def_index, dominance_info)
+        desired = resolve(inst.desired, replacements, block_id, inst_index, def_blocks, def_index, dominance_info)
         return inst if ptr == inst.ptr && expected == inst.expected && desired == inst.desired
         AtomicCAS.new(inst.id, inst.type, ptr, expected, desired, inst.success_ordering, inst.failure_ordering)
       when AtomicRMW
-        ptr = resolve(inst.ptr, replacements, block_id, inst_index, def_blocks, def_index, dominators)
-        val = resolve(inst.value, replacements, block_id, inst_index, def_blocks, def_index, dominators)
+        ptr = resolve(inst.ptr, replacements, block_id, inst_index, def_blocks, def_index, dominance_info)
+        val = resolve(inst.value, replacements, block_id, inst_index, def_blocks, def_index, dominance_info)
         return inst if ptr == inst.ptr && val == inst.value
         AtomicRMW.new(inst.id, inst.type, inst.op, ptr, val, inst.ordering)
       when MutexLock
-        ptr = resolve(inst.mutex_ptr, replacements, block_id, inst_index, def_blocks, def_index, dominators)
+        ptr = resolve(inst.mutex_ptr, replacements, block_id, inst_index, def_blocks, def_index, dominance_info)
         return inst if ptr == inst.mutex_ptr
         MutexLock.new(inst.id, ptr)
       when MutexUnlock
-        ptr = resolve(inst.mutex_ptr, replacements, block_id, inst_index, def_blocks, def_index, dominators)
+        ptr = resolve(inst.mutex_ptr, replacements, block_id, inst_index, def_blocks, def_index, dominance_info)
         return inst if ptr == inst.mutex_ptr
         MutexUnlock.new(inst.id, ptr)
       when MutexTryLock
-        ptr = resolve(inst.mutex_ptr, replacements, block_id, inst_index, def_blocks, def_index, dominators)
+        ptr = resolve(inst.mutex_ptr, replacements, block_id, inst_index, def_blocks, def_index, dominance_info)
         return inst if ptr == inst.mutex_ptr
         MutexTryLock.new(inst.id, ptr)
       when ChannelSend
-        chan = resolve(inst.channel_ptr, replacements, block_id, inst_index, def_blocks, def_index, dominators)
-        val = resolve(inst.value, replacements, block_id, inst_index, def_blocks, def_index, dominators)
+        chan = resolve(inst.channel_ptr, replacements, block_id, inst_index, def_blocks, def_index, dominance_info)
+        val = resolve(inst.value, replacements, block_id, inst_index, def_blocks, def_index, dominance_info)
         return inst if chan == inst.channel_ptr && val == inst.value
         ChannelSend.new(inst.id, chan, val)
       when ChannelReceive
-        chan = resolve(inst.channel_ptr, replacements, block_id, inst_index, def_blocks, def_index, dominators)
+        chan = resolve(inst.channel_ptr, replacements, block_id, inst_index, def_blocks, def_index, dominance_info)
         return inst if chan == inst.channel_ptr
         ChannelReceive.new(inst.id, inst.type, chan)
       when ChannelClose
-        chan = resolve(inst.channel_ptr, replacements, block_id, inst_index, def_blocks, def_index, dominators)
+        chan = resolve(inst.channel_ptr, replacements, block_id, inst_index, def_blocks, def_index, dominance_info)
         return inst if chan == inst.channel_ptr
         ChannelClose.new(inst.id, chan)
       when Load
-        ptr = resolve(inst.ptr, replacements, block_id, inst_index, def_blocks, def_index, dominators)
+        ptr = resolve(inst.ptr, replacements, block_id, inst_index, def_blocks, def_index, dominance_info)
         return inst if ptr == inst.ptr
         new_inst = Load.new(inst.id, inst.type, ptr)
         new_inst.no_alias = inst.no_alias
         new_inst
       when Store
-        ptr = resolve(inst.ptr, replacements, block_id, inst_index, def_blocks, def_index, dominators)
-        val = resolve(inst.value, replacements, block_id, inst_index, def_blocks, def_index, dominators)
+        ptr = resolve(inst.ptr, replacements, block_id, inst_index, def_blocks, def_index, dominance_info)
+        val = resolve(inst.value, replacements, block_id, inst_index, def_blocks, def_index, dominance_info)
         return inst if ptr == inst.ptr && val == inst.value
         Store.new(inst.id, ptr, val)
       when GetElementPtr
-        base = resolve(inst.base, replacements, block_id, inst_index, def_blocks, def_index, dominators)
+        base = resolve(inst.base, replacements, block_id, inst_index, def_blocks, def_index, dominance_info)
         return inst if base == inst.base
         GetElementPtr.new(inst.id, inst.type, base, inst.indices, inst.base_type)
       when GetElementPtrDynamic
-        base = resolve(inst.base, replacements, block_id, inst_index, def_blocks, def_index, dominators)
-        index = resolve(inst.index, replacements, block_id, inst_index, def_blocks, def_index, dominators)
+        base = resolve(inst.base, replacements, block_id, inst_index, def_blocks, def_index, dominance_info)
+        index = resolve(inst.index, replacements, block_id, inst_index, def_blocks, def_index, dominance_info)
         return inst if base == inst.base && index == inst.index
         GetElementPtrDynamic.new(inst.id, inst.type, base, index, inst.element_type)
       when BinaryOp
-        left = resolve(inst.left, replacements, block_id, inst_index, def_blocks, def_index, dominators)
-        right = resolve(inst.right, replacements, block_id, inst_index, def_blocks, def_index, dominators)
+        left = resolve(inst.left, replacements, block_id, inst_index, def_blocks, def_index, dominance_info)
+        right = resolve(inst.right, replacements, block_id, inst_index, def_blocks, def_index, dominance_info)
         return inst if left == inst.left && right == inst.right
         BinaryOp.new(inst.id, inst.type, inst.op, left, right)
       when UnaryOp
-        operand = resolve(inst.operand, replacements, block_id, inst_index, def_blocks, def_index, dominators)
+        operand = resolve(inst.operand, replacements, block_id, inst_index, def_blocks, def_index, dominance_info)
         return inst if operand == inst.operand
         UnaryOp.new(inst.id, inst.type, inst.op, operand)
       when Cast
-        value = resolve(inst.value, replacements, block_id, inst_index, def_blocks, def_index, dominators)
+        value = resolve(inst.value, replacements, block_id, inst_index, def_blocks, def_index, dominance_info)
         return inst if value == inst.value
         Cast.new(inst.id, inst.type, inst.kind, value)
       when Phi
@@ -1424,85 +1424,85 @@ module Crystal::MIR
         phi = Phi.new(inst.id, inst.type)
         inst.incoming.each do |block_id, val|
           use_index = block_sizes[block_id]? || 0
-          new_val = resolve(val, replacements, block_id, use_index, def_blocks, def_index, dominators)
+          new_val = resolve(val, replacements, block_id, use_index, def_blocks, def_index, dominance_info)
           changed ||= new_val != val
           phi.add_incoming(from: block_id, value: new_val)
         end
         return inst unless changed
         phi
       when Select
-        cond = resolve(inst.condition, replacements, block_id, inst_index, def_blocks, def_index, dominators)
-        then_val = resolve(inst.then_value, replacements, block_id, inst_index, def_blocks, def_index, dominators)
-        else_val = resolve(inst.else_value, replacements, block_id, inst_index, def_blocks, def_index, dominators)
+        cond = resolve(inst.condition, replacements, block_id, inst_index, def_blocks, def_index, dominance_info)
+        then_val = resolve(inst.then_value, replacements, block_id, inst_index, def_blocks, def_index, dominance_info)
+        else_val = resolve(inst.else_value, replacements, block_id, inst_index, def_blocks, def_index, dominance_info)
         return inst if cond == inst.condition && then_val == inst.then_value && else_val == inst.else_value
         Select.new(inst.id, inst.type, cond, then_val, else_val)
       when UnionWrap
-        val = resolve(inst.value, replacements, block_id, inst_index, def_blocks, def_index, dominators)
+        val = resolve(inst.value, replacements, block_id, inst_index, def_blocks, def_index, dominance_info)
         return inst if val == inst.value
         UnionWrap.new(inst.id, inst.type, val, inst.variant_type_id, inst.union_type)
       when UnionUnwrap
-        val = resolve(inst.union_value, replacements, block_id, inst_index, def_blocks, def_index, dominators)
+        val = resolve(inst.union_value, replacements, block_id, inst_index, def_blocks, def_index, dominance_info)
         return inst if val == inst.union_value
         UnionUnwrap.new(inst.id, inst.type, val, inst.variant_type_id, inst.safe)
       when UnionTypeIdGet
-        val = resolve(inst.union_value, replacements, block_id, inst_index, def_blocks, def_index, dominators)
+        val = resolve(inst.union_value, replacements, block_id, inst_index, def_blocks, def_index, dominance_info)
         return inst if val == inst.union_value
         UnionTypeIdGet.new(inst.id, val)
       when UnionIs
-        val = resolve(inst.union_value, replacements, block_id, inst_index, def_blocks, def_index, dominators)
+        val = resolve(inst.union_value, replacements, block_id, inst_index, def_blocks, def_index, dominance_info)
         return inst if val == inst.union_value
         UnionIs.new(inst.id, val, inst.variant_type_id)
       when ArrayLiteral
-        new_elements = inst.elements.map { |e| resolve(e, replacements, block_id, inst_index, def_blocks, def_index, dominators) }
+        new_elements = inst.elements.map { |e| resolve(e, replacements, block_id, inst_index, def_blocks, def_index, dominance_info) }
         return inst if new_elements == inst.elements
         ArrayLiteral.new(inst.id, inst.element_type, new_elements)
       when ArraySize
-        array_val = resolve(inst.array_value, replacements, block_id, inst_index, def_blocks, def_index, dominators)
+        array_val = resolve(inst.array_value, replacements, block_id, inst_index, def_blocks, def_index, dominance_info)
         return inst if array_val == inst.array_value
         ArraySize.new(inst.id, array_val)
       when ArrayGet
-        array_val = resolve(inst.array_value, replacements, block_id, inst_index, def_blocks, def_index, dominators)
-        index_val = resolve(inst.index_value, replacements, block_id, inst_index, def_blocks, def_index, dominators)
+        array_val = resolve(inst.array_value, replacements, block_id, inst_index, def_blocks, def_index, dominance_info)
+        index_val = resolve(inst.index_value, replacements, block_id, inst_index, def_blocks, def_index, dominance_info)
         return inst if array_val == inst.array_value && index_val == inst.index_value
         ArrayGet.new(inst.id, inst.element_type, array_val, index_val)
       when ArraySet
-        array_val = resolve(inst.array_value, replacements, block_id, inst_index, def_blocks, def_index, dominators)
-        index_val = resolve(inst.index_value, replacements, block_id, inst_index, def_blocks, def_index, dominators)
-        value_id = resolve(inst.value_id, replacements, block_id, inst_index, def_blocks, def_index, dominators)
+        array_val = resolve(inst.array_value, replacements, block_id, inst_index, def_blocks, def_index, dominance_info)
+        index_val = resolve(inst.index_value, replacements, block_id, inst_index, def_blocks, def_index, dominance_info)
+        value_id = resolve(inst.value_id, replacements, block_id, inst_index, def_blocks, def_index, dominance_info)
         return inst if array_val == inst.array_value && index_val == inst.index_value && value_id == inst.value_id
         ArraySet.new(inst.id, inst.element_type, array_val, index_val, value_id)
       when ArraySetSize
-        array_val = resolve(inst.array_value, replacements, block_id, inst_index, def_blocks, def_index, dominators)
-        size_val = resolve(inst.size_value, replacements, block_id, inst_index, def_blocks, def_index, dominators)
+        array_val = resolve(inst.array_value, replacements, block_id, inst_index, def_blocks, def_index, dominance_info)
+        size_val = resolve(inst.size_value, replacements, block_id, inst_index, def_blocks, def_index, dominance_info)
         return inst if array_val == inst.array_value && size_val == inst.size_value
         ArraySetSize.new(inst.id, array_val, size_val)
       when ArrayNew
-        cap_val = resolve(inst.capacity_value, replacements, block_id, inst_index, def_blocks, def_index, dominators)
+        cap_val = resolve(inst.capacity_value, replacements, block_id, inst_index, def_blocks, def_index, dominance_info)
         return inst if cap_val == inst.capacity_value
         ArrayNew.new(inst.id, inst.element_type_ref, cap_val)
       when StringInterpolation
-        new_parts = inst.parts.map { |p| resolve(p, replacements, block_id, inst_index, def_blocks, def_index, dominators) }
+        new_parts = inst.parts.map { |p| resolve(p, replacements, block_id, inst_index, def_blocks, def_index, dominance_info) }
         return inst if new_parts == inst.parts
         StringInterpolation.new(inst.id, new_parts)
       when GlobalStore
-        value = resolve(inst.value, replacements, block_id, inst_index, def_blocks, def_index, dominators)
+        value = resolve(inst.value, replacements, block_id, inst_index, def_blocks, def_index, dominance_info)
         return inst if value == inst.value
         GlobalStore.new(inst.id, inst.type, inst.global_name, value)
       when Call
-        new_args = inst.args.map { |a| resolve(a, replacements, block_id, inst_index, def_blocks, def_index, dominators) }
+        new_args = inst.args.map { |a| resolve(a, replacements, block_id, inst_index, def_blocks, def_index, dominance_info) }
         return inst if new_args == inst.args
         Call.new(inst.id, inst.type, inst.callee, new_args)
       when ExternCall
-        new_args = inst.args.map { |a| resolve(a, replacements, block_id, inst_index, def_blocks, def_index, dominators) }
+        new_args = inst.args.map { |a| resolve(a, replacements, block_id, inst_index, def_blocks, def_index, dominance_info) }
         return inst if new_args == inst.args
         ExternCall.new(inst.id, inst.type, inst.extern_name, new_args)
       when AddressOf
-        operand = resolve(inst.operand, replacements, block_id, inst_index, def_blocks, def_index, dominators)
+        operand = resolve(inst.operand, replacements, block_id, inst_index, def_blocks, def_index, dominance_info)
         return inst if operand == inst.operand
         AddressOf.new(inst.id, inst.type, operand)
       when IndirectCall
-        callee_ptr = resolve(inst.callee_ptr, replacements, block_id, inst_index, def_blocks, def_index, dominators)
-        new_args = inst.args.map { |a| resolve(a, replacements, block_id, inst_index, def_blocks, def_index, dominators) }
+        callee_ptr = resolve(inst.callee_ptr, replacements, block_id, inst_index, def_blocks, def_index, dominance_info)
+        new_args = inst.args.map { |a| resolve(a, replacements, block_id, inst_index, def_blocks, def_index, dominance_info) }
         return inst if callee_ptr == inst.callee_ptr && new_args == inst.args
         IndirectCall.new(inst.id, inst.type, callee_ptr, new_args)
       else
@@ -1517,12 +1517,12 @@ module Crystal::MIR
       use_index : Int32,
       def_blocks : Hash(ValueId, BlockId),
       def_index : Hash(ValueId, Int32),
-      dominators : Hash(BlockId, Set(BlockId))
+      dominance_info : DominanceInfo?
     ) : Terminator
       case term
       when Return
         if value = term.value
-          new_value = resolve(value, replacements, block_id, use_index, def_blocks, def_index, dominators)
+          new_value = resolve(value, replacements, block_id, use_index, def_blocks, def_index, dominance_info)
           if ENV["MIR_CP_DEBUG"]?
             STDERR.puts "[MIR_CP] ret value=#{value} new_value=#{new_value}"
           end
@@ -1531,11 +1531,11 @@ module Crystal::MIR
         end
         term
       when Branch
-        cond = resolve(term.condition, replacements, block_id, use_index, def_blocks, def_index, dominators)
+        cond = resolve(term.condition, replacements, block_id, use_index, def_blocks, def_index, dominance_info)
         return term if cond == term.condition
         Branch.new(cond, term.then_block, term.else_block)
       when Switch
-        value = resolve(term.value, replacements, block_id, use_index, def_blocks, def_index, dominators)
+        value = resolve(term.value, replacements, block_id, use_index, def_blocks, def_index, dominance_info)
         return term if value == term.value
         Switch.new(value, term.cases, term.default_block)
       else
@@ -1550,7 +1550,7 @@ module Crystal::MIR
       use_index : Int32,
       def_blocks : Hash(ValueId, BlockId),
       def_index : Hash(ValueId, Int32),
-      dominators : Hash(BlockId, Set(BlockId))
+      dominance_info : DominanceInfo?
     ) : ValueId
       current = id
       hops = 0
@@ -1558,12 +1558,34 @@ module Crystal::MIR
       while next_id = replacements[current]?
         break if next_id == current
         break if hops >= 64
-        break unless @assume_dominates || dominates_use?(next_id, use_block, use_index, def_blocks, def_index, dominators)
+        break unless @assume_dominates || dominates_use?(next_id, use_block, use_index, def_blocks, def_index, dominance_info)
         current = next_id
         hops += 1
       end
 
       current
+    end
+
+    private struct DominanceInfo
+      getter in_time : Array(Int32)
+      getter out_time : Array(Int32)
+
+      def initialize(@in_time : Array(Int32), @out_time : Array(Int32))
+      end
+
+      def dominates?(def_block : BlockId, use_block : BlockId) : Bool
+        def_idx = def_block.to_i
+        use_idx = use_block.to_i
+        return false if def_idx >= @in_time.size || use_idx >= @in_time.size
+
+        def_in = @in_time[def_idx]
+        use_in = @in_time[use_idx]
+        return false if def_in < 0 || use_in < 0
+
+        def_out = @out_time[def_idx]
+        use_out = @out_time[use_idx]
+        def_in <= use_in && def_out >= use_out
+      end
     end
 
     private def dominates_use?(
@@ -1572,7 +1594,7 @@ module Crystal::MIR
       use_index : Int32,
       def_blocks : Hash(ValueId, BlockId),
       def_index : Hash(ValueId, Int32),
-      dominators : Hash(BlockId, Set(BlockId))
+      dominance_info : DominanceInfo?
     ) : Bool
       def_block = def_blocks[def_id]?
       return false unless def_block
@@ -1583,11 +1605,8 @@ module Crystal::MIR
         return idx < use_index
       end
 
-      if dom_set = dominators[use_block]?
-        dom_set.includes?(def_block)
-      else
-        false
-      end
+      return false unless info = dominance_info
+      info.dominates?(def_block, use_block)
     end
 
     private def build_def_maps : Tuple(Hash(ValueId, BlockId), Hash(ValueId, Int32))
@@ -1610,74 +1629,143 @@ module Crystal::MIR
       {def_blocks, def_index}
     end
 
-    private def compute_dominators : Hash(BlockId, Set(BlockId))
+    private def compute_dominance_info : DominanceInfo
       @function.compute_predecessors
 
-      block_ids = @function.blocks.map(&.id)
-      all_blocks = Set(BlockId).new(block_ids)
-
-      dom = {} of BlockId => Set(BlockId)
       entry = @function.entry_block
-      block_ids.each do |id|
-        if id == entry
-          dom[id] = Set(BlockId).new([id])
-        else
-          dom[id] = all_blocks.dup
-        end
+      rpo = compute_reverse_postorder(entry)
+      max_block_id = @function.blocks.max_of(&.id).to_i
+      size = max_block_id + 1
+
+      rpo_index = Array.new(size, -1)
+      rpo.each_with_index do |block_id, idx|
+        rpo_index[block_id.to_i] = idx
       end
+
+      entry_idx = entry.to_i
+      idom = Array(Int32?).new(size, nil)
+      idom[entry_idx] = entry_idx
 
       changed = true
       while changed
         changed = false
-        @function.blocks.each do |block|
-          next if block.id == entry
-          preds = block.predecessors
-          new_dom = Set(BlockId).new
+        rpo.each_with_index do |block_id, pos|
+          next if pos == 0
+          block = @function.get_block(block_id)
 
-          if preds.empty?
-            new_dom << block.id
-          elsif preds.size == 1
-            new_dom = dom[preds.first].dup
-            new_dom << block.id
-          else
-            new_dom = intersect_predecessor_dominators(preds, dom)
-            new_dom << block.id
+          new_idom : Int32? = nil
+          block.predecessors.each do |pred_id|
+            pred_idx = pred_id.to_i
+            next if pred_idx >= size
+            next unless idom[pred_idx]
+
+            if existing = new_idom
+              new_idom = intersect_idoms(existing, pred_idx, idom, rpo_index)
+            else
+              new_idom = pred_idx
+            end
           end
 
-          if new_dom != dom[block.id]
-            dom[block.id] = new_dom
+          next unless new_idom
+          block_idx = block_id.to_i
+          if idom[block_idx] != new_idom
+            idom[block_idx] = new_idom
             changed = true
           end
         end
       end
 
-      dom
-    end
+      children = Array.new(size) { [] of Int32 }
+      rpo.each do |block_id|
+        block_idx = block_id.to_i
+        next if block_idx == entry_idx
+        parent = idom[block_idx]
+        next unless parent
+        children[parent] << block_idx
+      end
 
-    private def intersect_predecessor_dominators(
-      preds : Array(BlockId),
-      dom : Hash(BlockId, Set(BlockId))
-    ) : Set(BlockId)
-      seed = preds.first
-      seed_size = dom[seed].size
-      preds.each_with_index do |pred, idx|
-        next if idx == 0
-        pred_size = dom[pred].size
-        if pred_size < seed_size
-          seed = pred
-          seed_size = pred_size
+      in_time = Array.new(size, -1)
+      out_time = Array.new(size, -1)
+      time = 0
+      stack = [{entry_idx, false}] of Tuple(Int32, Bool)
+      while frame = stack.pop?
+        block_idx, exiting = frame
+        if exiting
+          out_time[block_idx] = time
+          time += 1
+          next
+        end
+
+        in_time[block_idx] = time
+        time += 1
+        stack << {block_idx, true}
+        kids = children[block_idx]
+        i = kids.size - 1
+        while i >= 0
+          stack << {kids[i], false}
+          i -= 1
         end
       end
 
-      intersection = dom[seed].dup
-      preds.each do |pred|
-        next if pred == seed
-        pred_dom = dom[pred]
-        intersection.select! { |block_id| pred_dom.includes?(block_id) }
-        break if intersection.empty?
+      DominanceInfo.new(in_time, out_time)
+    end
+
+    private def intersect_idoms(
+      a_idx : Int32,
+      b_idx : Int32,
+      idom : Array(Int32?),
+      rpo_index : Array(Int32)
+    ) : Int32
+      finger1 = a_idx
+      finger2 = b_idx
+
+      while finger1 != finger2
+        while rpo_index[finger1] > rpo_index[finger2]
+          parent = idom[finger1]
+          return finger1 unless parent
+          finger1 = parent
+        end
+
+        while rpo_index[finger2] > rpo_index[finger1]
+          parent = idom[finger2]
+          return finger2 unless parent
+          finger2 = parent
+        end
       end
 
-      intersection
+      finger1
+    end
+
+    private def compute_reverse_postorder(entry : BlockId) : Array(BlockId)
+      visited = Set(BlockId).new
+      postorder = [] of BlockId
+      stack = [{entry, false}] of Tuple(BlockId, Bool)
+
+      while frame = stack.pop?
+        block_id, exiting = frame
+        if exiting
+          postorder << block_id
+          next
+        end
+
+        next if visited.includes?(block_id)
+        visited << block_id
+        stack << {block_id, true}
+
+        block = @function.get_block?(block_id)
+        next unless block
+
+        succs = block.terminator.successors
+        i = succs.size - 1
+        while i >= 0
+          succ_id = succs[i]
+          stack << {succ_id, false} unless visited.includes?(succ_id)
+          i -= 1
+        end
+      end
+
+      postorder.reverse!
+      postorder
     end
   end
 
