@@ -4676,3 +4676,22 @@ crystal build -Ddebug_hooks src/crystal_v2.cr -o bin/crystal_v2 --no-debug
       - `total=126650.3ms` (`+8.05%`)
   - Decision:
     - fully reverted.
+
+### 8.68 Refuted branch: allocation trim in sanitize_type_name* (no cache) (2026-02-17)
+
+- [x] Hypothesis tested and rejected.
+  - Hypothesis:
+    - reduce allocations in `sanitize_type_name` / `sanitize_type_name_part` by:
+      - replacing `map + join` with `String::Builder`,
+      - using one-pass paren counting,
+      - removing unused builder in reverse-unbalance branch.
+  - Result (comparable run, same `ast_cache=272 hit/63 miss`):
+    - baseline (`/tmp/self_pass_timing_cp_inplace.log`):
+      - `hir=44294.1ms`, `copy_propagation=49903.8ms`, `mir_opt=51731.3ms`, `total=117216.0ms`
+    - experiment (`/tmp/self_pass_timing_sanitize_alloctrim.log`):
+      - `hir=47977.6ms` (`+8.32%`)
+      - `copy_propagation=54992.6ms` (`+10.20%`)
+      - `mir_opt=56693.9ms` (`+9.59%`)
+      - `total=126871.1ms` (`+8.24%`)
+  - Decision:
+    - fully reverted.
