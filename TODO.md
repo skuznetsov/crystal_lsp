@@ -4269,3 +4269,32 @@ crystal build -Ddebug_hooks src/crystal_v2.cr -o bin/crystal_v2 --no-debug
         - `String#index<String, Int32>`: `92 -> 75`
   - Notes:
     - broader frames (`type_ref_for_name`, `process_pending_lower_functions`) stayed noisy across runs; this is a targeted hot-helper optimization.
+
+### 8.53 Cache cyclic-type detection in `TaintAnalyzer` across functions (2026-02-17)
+
+- [x] Eliminate repeated full cycle-graph DFS per function during memory strategy assignment.
+  - Root cause:
+    - `CLI`/`driver` creates `MemoryStrategyAssigner` per function.
+    - each `MemoryStrategyAssigner#assign` creates `TaintAnalyzer.new(...)`.
+    - `TaintAnalyzer#initialize` recomputed `detect_cyclic_types(type_info)` every time.
+    - on self-host (`src/crystal_v2.cr`) this dominated Step 3 (`escape`), observed in late-stage sample:
+      - stack centered at `MemoryStrategyAssigner#assign -> TaintAnalyzer.new -> detect_cyclic_types -> ClassInfoTypeProvider#instance_var_types`.
+  - Code fix:
+    - file: `src/compiler/hir/taint_analysis.cr`
+    - added class-level cache:
+      - `@@cyclic_types_cache = {} of UInt64 => Set(String)`
+    - in `TaintAnalyzer#initialize(function, type_info, effect_provider)`:
+      - key by `type_info.object_id`;
+      - reuse cached cyclic set if present;
+      - run `detect_cyclic_types` only on first use for a given provider and cache it.
+  - DoD / evidence:
+    - `scripts/build.sh release` => `EXIT 0`
+    - `regression_tests/run_all.sh bin/crystal_v2` => `41 passed, 0 failed`
+    - `CRYSTAL_V2_PIPELINE_CACHE=0 CRYSTAL_V2_LLVM_CACHE=0 bin/crystal_v2 examples/bootstrap_array.cr -o /tmp/bootstrap_array_taint_cache && scripts/run_safe.sh /tmp/bootstrap_array_taint_cache 10 768` => `EXIT 0`
+    - self-host timings with `CRYSTAL_V2_STOP_AFTER_MIR=1 ... --stats`:
+      - baseline: `/tmp/stop_after_mir_baseline.log`
+      - patch: `/tmp/stop_after_mir_patch.log`
+      - key deltas:
+        - `escape`: `92009.9ms -> 660.8ms` (~`-99.3%`)
+        - `total`: `316090.2ms -> 213670.8ms` (~`-32.4%`)
+        - `mir_opt`: `158499.8ms -> 151466.2ms` (secondary improvement, likely reduced pressure).

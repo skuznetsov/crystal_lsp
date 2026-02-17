@@ -28,6 +28,9 @@ module Crystal::HIR
 
   # Taint analyzer using worklist algorithm
   class TaintAnalyzer
+    # Cache cyclic-type detection per type provider instance.
+    # This avoids O(functions * type_graph) recomputation during memory strategy assignment.
+    @@cyclic_types_cache = {} of UInt64 => Set(String)
 
     # Known FFI methods that expose values to C
     FFI_METHODS = Set{
@@ -69,7 +72,13 @@ module Crystal::HIR
 
       # Pre-compute cyclic types if we have type info
       if ti = @type_info
-        detect_cyclic_types(ti)
+        cache_key = ti.object_id
+        if cached = @@cyclic_types_cache[cache_key]?
+          @cyclic_types = cached
+        else
+          detect_cyclic_types(ti)
+          @@cyclic_types_cache[cache_key] = @cyclic_types
+        end
       end
     end
 
