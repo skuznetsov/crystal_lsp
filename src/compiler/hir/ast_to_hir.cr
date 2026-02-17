@@ -1004,6 +1004,7 @@ module Crystal::HIR
     @function_defs_cache_size : Int32
     @function_defs_processed_for_overloads : Int32 = 0
     @pending_function_def_keys : Array(String)
+    @function_def_keys_processed : Set(String)
     @function_param_stats : Hash(String, DefParamStats)
     @function_type_keys_by_base : Hash(String, Array(String))
     @function_type_keys_by_base_size : Int32
@@ -2213,6 +2214,7 @@ module Crystal::HIR
       @function_def_overloads = Hash(String, Array(String)).new(initial_capacity: 8192)
       @function_defs_cache_size = 0
       @pending_function_def_keys = [] of String
+      @function_def_keys_processed = Set(String).new(initial_capacity: 32768)
       @function_param_stats = {} of String => DefParamStats
       @function_type_keys_by_base = Hash(String, Array(String)).new(initial_capacity: 8192)
       @function_type_keys_by_base_size = 0
@@ -19405,7 +19407,7 @@ module Crystal::HIR
       # Safety fallback for any direct map writes not routed through helpers.
       if @pending_function_def_keys.empty? && @function_defs_cache_size != @function_defs.size
         @function_defs.each_key do |key|
-          @pending_function_def_keys << key unless @function_param_stats.has_key?(key)
+          @pending_function_def_keys << key unless @function_def_keys_processed.includes?(key)
         end
       end
 
@@ -19442,6 +19444,8 @@ module Crystal::HIR
     end
 
     private def index_function_def_overload_entry(key : String, def_node : CrystalV2::Compiler::Frontend::DefNode) : Nil
+      return if @function_def_keys_processed.includes?(key)
+
       base = if idx = key.index('$')
                key[0, idx]
              else
@@ -19489,6 +19493,7 @@ module Crystal::HIR
         @function_def_overloads_stripped_cache[stripped_base] = @function_def_overloads_stripped_index[stripped_base]
       end
       @function_param_stats[key] = build_param_stats(def_node) unless @function_param_stats.has_key?(key)
+      @function_def_keys_processed << key
     end
 
     private def index_function_type_key_entry(key : String) : Nil

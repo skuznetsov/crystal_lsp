@@ -3575,3 +3575,24 @@ crystal build -Ddebug_hooks src/crystal_v2.cr -o bin/crystal_v2 --no-debug
       - broader counters stayed stable/improved in the same window:
         - `rebuild_function_def_overloads`: `51 -> 47`
         - `type_ref_for_name`: `743 -> 734`
+
+### 8.26 Track processed overload keys explicitly (2026-02-17)
+
+- [x] Make incremental overload-index rebuild independent from param-stats side effects.
+  - Root cause:
+    - fallback enqueue logic in `rebuild_function_def_overloads` used `@function_param_stats.has_key?(key)` as “already indexed” signal.
+    - `@function_param_stats` can be populated outside overload indexing, so keys could be skipped from overload index maintenance and fall into expensive fallback scans.
+  - Code fix:
+    - file: `src/compiler/hir/ast_to_hir.cr`
+    - added dedicated processed set:
+      - `@function_def_keys_processed : Set(String)`
+    - `index_function_def_overload_entry` now:
+      - returns early for already processed keys;
+      - marks key as processed after successful indexing.
+    - `rebuild_function_def_overloads` fallback now checks `@function_def_keys_processed` (not `@function_param_stats`) when deciding which keys to enqueue.
+  - DoD / evidence:
+    - `scripts/build.sh release` => `EXIT 0`
+    - `regression_tests/run_all.sh bin/crystal_v2` => `41 passed, 0 failed`
+    - `CRYSTAL_V2_PIPELINE_CACHE=0 CRYSTAL_V2_LLVM_CACHE=0 bin/crystal_v2 examples/bootstrap_array.cr -o /tmp/bootstrap_array_after_overload_processed_set && scripts/run_safe.sh /tmp/bootstrap_array_after_overload_processed_set 10 768` => `EXIT 0`
+    - self-host sample slice comparison (`/tmp/self_profile_after825.sample.txt` -> `/tmp/self_profile_after826.sample.txt`):
+      - expensive fallback scan marker `ast_to_hir.cr:19322` dropped from `150 -> 0` in sampled window.
