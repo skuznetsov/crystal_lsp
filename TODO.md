@@ -4608,3 +4608,19 @@ crystal build -Ddebug_hooks src/crystal_v2.cr -o bin/crystal_v2 --no-debug
       - `total=126529.7ms` (`+7.95%`)
   - Decision:
     - fully reverted; keep the simpler stable path from `8.60`.
+
+### 8.64 Refuted branch: Hash-membership block scan + lazy block_sizes in apply_replacements (2026-02-17)
+
+- [x] Hypothesis tested and rejected.
+  - Hypothesis:
+    - avoid `replacements.keys.to_set` by using `Hash#has_key?` directly in block-use scan,
+      and build `block_sizes` only when affected blocks contain `Phi`.
+  - Result (comparable run, same `ast_cache=272 hit/63 miss`):
+    - baseline (`/tmp/self_pass_timing_cp_inplace.log`):
+      - `copy_propagation=49903.8ms`, `mir_opt=51731.3ms`, `total=117216.0ms`
+    - experiment (`/tmp/self_pass_timing_cp_blockscan.log`):
+      - `copy_propagation=54904.2ms` (`+10.02%`)
+      - `mir_opt=57022.6ms` (`+10.23%`)
+      - `total=127777.6ms` (`+9.01%`)
+  - Decision:
+    - fully reverted.
