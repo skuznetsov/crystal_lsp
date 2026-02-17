@@ -358,6 +358,7 @@ module Crystal::MIR
     @emitted_functions : Set(String) = Set(String).new  # Track emitted function names to avoid duplicates
     @emitted_function_return_types : Hash(String, String) = {} of String => String  # Track emitted function return types for call-site consistency
     @undefined_externs : Hash(String, String) = {} of String => String  # Track undefined extern calls (name => return_type)
+    @called_crystal_functions : Hash(String, String) = {} of String => String  # Track called Crystal functions (name => return_type) for missing declaration generation
     @global_name_mapping : Hash(String, String) = {} of String => String  # Map original global names to renamed names
     @alloc_element_types : Hash(ValueId, TypeRef)  # For GEP element type lookup
     @array_info : Hash(ValueId, {String, Int32})  # Array element_type and size
@@ -700,6 +701,11 @@ module Crystal::MIR
       STDERR.puts "  [LLVM] emit_undefined_extern_declarations..." if @progress
       emit_undefined_extern_declarations
 
+      # Emit stubs for any Crystal functions called but not defined.
+      # This catches functions that exist in MIR but were skipped during emission
+      # (e.g., due to unresolved type patterns or transitive skip propagation).
+      emit_missing_crystal_function_stubs
+
       if @emit_type_metadata
         STDERR.puts "  [LLVM] emit_type_metadata_globals..." if @progress
         emit_type_metadata_globals
@@ -876,6 +882,21 @@ module Crystal::MIR
           emit_raw "}\n"
         else
           # Declare with varargs to accept any arguments
+          emit_raw "declare #{return_type} @#{name}(...)\n"
+        end
+      end
+    end
+
+    private def emit_missing_crystal_function_stubs
+      missing = @called_crystal_functions.reject { |name, _| @emitted_functions.includes?(name) || @undefined_externs.has_key?(name) }
+      return if missing.empty?
+      emit_raw "\n; Forward declarations for Crystal functions called but not defined\n"
+      missing.each do |name, return_type|
+        # Emit a stub function that returns a zero/null value.
+        # These are functions the RTA missed or that were skipped during emission.
+        if stub = emit_dead_code_stub(name, return_type)
+          emit_raw stub
+        else
           emit_raw "declare #{return_type} @#{name}(...)\n"
         end
       end
@@ -9747,6 +9768,8 @@ module Crystal::MIR
           end
         end
       end
+      # Track called function for forward declaration if missing at end of IR gen
+      @called_crystal_functions[callee_name] ||= (return_type == "void" ? "ptr" : return_type)
     end
 
     private def emit_indirect_call(inst : IndirectCall, name : String)
@@ -10462,6 +10485,11 @@ module Crystal::MIR
         emit "#{zext_name} = zext i#{from_bits} #{name} to i#{to_bits}"
         @zext_value_names[inst.id] = zext_name
       end
+
+      # Track called function for forward declaration if missing at end of IR gen.
+      # This catches ExternCall targets that exist in @module.functions (so NOT added
+      # to @undefined_externs) but whose bodies were never emitted by RTA.
+      @called_crystal_functions[mangled_extern_name] ||= (return_type == "void" ? "ptr" : return_type)
     end
 
     private def emit_address_of(inst : AddressOf, name : String)
