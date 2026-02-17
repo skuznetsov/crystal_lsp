@@ -1095,8 +1095,8 @@ module Crystal::MIR
         STDERR.puts "[MIR_CP] replacements=#{replacements}"
       end
 
+      replacement_keys = replacements.keys.to_set
       affected_block_ids = timed_cp_phase("apply_collect_affected_blocks") do
-        replacement_keys = replacements.keys.to_set
         affected = Set(BlockId).new
         @function.blocks.each do |block|
           if block_uses_replacements?(block, replacement_keys)
@@ -1115,7 +1115,7 @@ module Crystal::MIR
       unless @assume_dominates
         timed_cp_phase("apply_build_dominators") do
           def_blocks, def_index = build_def_maps
-          if can_skip_dominators_for_local_replacements?(replacements, affected_block_ids, def_blocks)
+          if can_skip_dominators_for_local_replacements?(replacements, replacement_keys, affected_block_ids, def_blocks, def_index)
             dominators = {} of BlockId => Set(BlockId)
           else
             dominators = compute_dominators
@@ -1168,16 +1168,66 @@ module Crystal::MIR
 
     private def can_skip_dominators_for_local_replacements?(
       replacements : Hash(ValueId, ValueId),
+      replacement_keys : Set(ValueId),
       affected_block_ids : Set(BlockId),
-      def_blocks : Hash(ValueId, BlockId)
+      def_blocks : Hash(ValueId, BlockId),
+      def_index : Hash(ValueId, Int32)
     ) : Bool
-      return false unless affected_block_ids.size == 1
-      only_block = affected_block_ids.first
+      return false unless affected_blocks_use_only_local_replacements?(affected_block_ids, replacement_keys, def_blocks)
 
       replacements.each do |source_id, target_id|
         source_block = def_blocks[source_id]?
         target_block = def_blocks[target_id]?
-        return false unless source_block == only_block && target_block == only_block
+        return false unless source_block && target_block && source_block == target_block
+
+        source_pos = def_index[source_id]?
+        target_pos = def_index[target_id]?
+        return false unless source_pos && target_pos && target_pos <= source_pos
+      end
+
+      true
+    end
+
+    private def affected_blocks_use_only_local_replacements?(
+      affected_block_ids : Set(BlockId),
+      replacement_keys : Set(ValueId),
+      def_blocks : Hash(ValueId, BlockId)
+    ) : Bool
+      @function.blocks.each do |block|
+        next unless affected_block_ids.includes?(block.id)
+        return false unless block_uses_only_local_replacements?(block, replacement_keys, def_blocks)
+      end
+
+      true
+    end
+
+    private def block_uses_only_local_replacements?(
+      block : BasicBlock,
+      replacement_keys : Set(ValueId),
+      def_blocks : Hash(ValueId, BlockId)
+    ) : Bool
+      block.instructions.each do |inst|
+        inst.operands.each do |operand|
+          next unless replacement_keys.includes?(operand)
+          return false unless def_blocks[operand]? == block.id
+        end
+      end
+
+      case term = block.terminator
+      when Branch
+        if replacement_keys.includes?(term.condition)
+          return false unless def_blocks[term.condition]? == block.id
+        end
+      when Switch
+        if replacement_keys.includes?(term.value)
+          return false unless def_blocks[term.value]? == block.id
+        end
+      when Return
+        if value = term.value
+          if replacement_keys.includes?(value)
+            return false unless def_blocks[value]? == block.id
+          end
+        end
       end
 
       true
@@ -1533,7 +1583,11 @@ module Crystal::MIR
         return idx < use_index
       end
 
-      dominators[use_block].includes?(def_block)
+      if dom_set = dominators[use_block]?
+        dom_set.includes?(def_block)
+      else
+        false
+      end
     end
 
     private def build_def_maps : Tuple(Hash(ValueId, BlockId), Hash(ValueId, Int32))

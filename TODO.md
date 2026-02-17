@@ -4765,3 +4765,42 @@ crystal build -Ddebug_hooks src/crystal_v2.cr -o bin/crystal_v2 --no-debug
         - `total`: `103810.9ms -> 103899.7ms` (`+0.09%`)
   - Insight:
     - targeted hotspot reduction is confirmed (`copy_propagation`/`apply_build_dominators`), while end-to-end total is neutral in this single-run A/B due variance in other MIR passes.
+
+### 8.71 CopyPropagation: broaden dominator skip to local-use multi-block workloads (2026-02-17)
+
+- [x] Extend the dominator-skip condition beyond `affected_block_ids.size == 1`.
+  - Root cause:
+    - after `8.70`, many replacement batches still paid full `compute_dominators` cost even when every replacement use was local to its defining block.
+  - Code fix:
+    - file: `src/compiler/mir/optimizations.cr`
+      - moved `replacement_keys` set construction outside the affected-block timing closure to reuse it in skip analysis.
+      - expanded `can_skip_dominators_for_local_replacements?` condition:
+        - all uses of replacement keys in affected blocks must remain local to each block (`affected_blocks_use_only_local_replacements?`),
+        - each replacement pair must be same-block (`source_block == target_block`),
+        - `target` definition index must be `<= source` index (`target_pos <= source_pos`).
+      - added helpers:
+        - `affected_blocks_use_only_local_replacements?`
+        - `block_uses_only_local_replacements?`
+      - hardened `dominates_use?` with safe map access (`dominators[use_block]?`) to avoid crashes in unexpected empty-dominator states.
+  - DoD / evidence:
+    - correctness:
+      - `scripts/build.sh release` => `EXIT 0`
+      - `timeout 240 crystal spec spec/hir/return_type_inference_spec.cr` => `13 examples, 0 failures`
+      - `timeout 240 crystal spec spec/mir/llvm_backend_spec.cr` => `59 examples, 0 failures`
+      - `regression_tests/run_all.sh bin/crystal_v2` => `41 passed, 0 failed`
+      - `CRYSTAL_V2_PIPELINE_CACHE=0 bin/crystal_v2 examples/bootstrap_array.cr -o /tmp/bootstrap_array_cp_locality && scripts/run_safe.sh /tmp/bootstrap_array_cp_locality 10 768` => `EXIT 0`
+    - perf (strict binary A/B with identical flags and caches disabled):
+      - baseline binary: `/tmp/crystal_v2_cp_locality_baseline_bin`
+      - experiment binary: `/tmp/crystal_v2_cp_locality_experiment_bin`
+      - baseline log: `/tmp/self_pass_timing_cp_locality_baseline.log`
+      - experiment log: `/tmp/self_pass_timing_cp_locality_experiment.log`
+      - command:
+        - `CRYSTAL_V2_AST_CACHE=0 CRYSTAL_V2_PIPELINE_CACHE=0 CRYSTAL_V2_LLVM_CACHE=0 CRYSTAL_V2_MIR_PASS_TIMING=1 CRYSTAL_V2_CP_PHASE_TIMING=1 CRYSTAL_V2_STOP_AFTER_MIR=1 <binary> --stats --release src/compiler/driver.cr ...`
+      - delta (experiment vs baseline):
+        - `apply_build_dominators`: `48412.5ms -> 47102.5ms` (`-2.71%`)
+        - `copy_propagation`: `48516.6ms -> 46870.9ms` (`-3.39%`)
+        - `run_apply_replacements`: `48321.5ms -> 46681.1ms` (`-3.39%`)
+        - `mir_opt`: `50392.6ms -> 48740.4ms` (`-3.28%`)
+        - `total`: `109111.7ms -> 108303.6ms` (`-0.74%`)
+  - Insight:
+    - broadening the locality criterion gives a materially larger win than the single-block-only skip while keeping functional checks green.
