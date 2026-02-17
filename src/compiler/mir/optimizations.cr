@@ -865,8 +865,41 @@ module Crystal::MIR
     getter function : Function
     getter propagated : Int32 = 0
     @assume_dominates : Bool = false
+    @@cp_phase_timing_enabled : Bool = ENV["CRYSTAL_V2_CP_PHASE_TIMING"]? == "1"
+    @@cp_phase_time_totals : Hash(String, Float64) = Hash(String, Float64).new(0.0)
+    @@cp_phase_call_counts : Hash(String, Int32) = Hash(String, Int32).new(0)
+    @@cp_phase_timing_lock : Mutex = Mutex.new
 
     def initialize(@function : Function)
+    end
+
+    def self.cp_phase_timing_enabled? : Bool
+      @@cp_phase_timing_enabled
+    end
+
+    def self.reset_cp_phase_timing : Nil
+      return unless @@cp_phase_timing_enabled
+      @@cp_phase_timing_lock.synchronize do
+        @@cp_phase_time_totals.clear
+        @@cp_phase_call_counts.clear
+      end
+    end
+
+    def self.cp_phase_timing_snapshot : Array(Tuple(String, Float64, Int32))
+      return [] of Tuple(String, Float64, Int32) unless @@cp_phase_timing_enabled
+      @@cp_phase_timing_lock.synchronize do
+        @@cp_phase_time_totals.map do |phase_name, total_ms|
+          {phase_name, total_ms, @@cp_phase_call_counts[phase_name]}
+        end
+      end
+    end
+
+    def self.record_cp_phase_timing(phase_name : String, elapsed_ms : Float64) : Nil
+      return unless @@cp_phase_timing_enabled
+      @@cp_phase_timing_lock.synchronize do
+        @@cp_phase_time_totals[phase_name] += elapsed_ms
+        @@cp_phase_call_counts[phase_name] += 1
+      end
     end
 
     def run : Int32
@@ -877,33 +910,36 @@ module Crystal::MIR
       alloc_site = {} of ValueId => ValueId
       no_alias_sites = Set(ValueId).new
 
-      @function.params.each do |param|
-        value_types[param.index] = param.type
-      end
+      timed_cp_phase("run_collect_state") do
+        @function.params.each do |param|
+          value_types[param.index] = param.type
+        end
 
-      @function.blocks.each do |block|
-        block.instructions.each do |inst|
-          value_types[inst.id] = inst.type
-          value_nodes[inst.id] = inst
-          if inst.is_a?(Constant)
-            case v = inst.value
-            when Int64, UInt64, Float64, Bool, Nil
-              constants[inst.id] = v
+        @function.blocks.each do |block|
+          block.instructions.each do |inst|
+            value_types[inst.id] = inst.type
+            value_nodes[inst.id] = inst
+            if inst.is_a?(Constant)
+              case v = inst.value
+              when Int64, UInt64, Float64, Bool, Nil
+                constants[inst.id] = v
+              end
             end
-          end
-          if inst.is_a?(Alloc) && inst.no_alias
-            no_alias_sites << inst.id
-            alloc_site[inst.id] = inst.id
+            if inst.is_a?(Alloc) && inst.no_alias
+              no_alias_sites << inst.id
+              alloc_site[inst.id] = inst.id
+            end
           end
         end
       end
 
       replacements = {} of ValueId => ValueId
 
-      @function.blocks.each do |block|
-        last_store = {} of ValueId => ValueId
-        block.instructions.each do |inst|
-          case inst
+      timed_cp_phase("run_find_replacements") do
+        @function.blocks.each do |block|
+          last_store = {} of ValueId => ValueId
+          block.instructions.each do |inst|
+            case inst
           when Alloc
             if inst.no_alias
               no_alias_sites << inst.id
@@ -1043,8 +1079,11 @@ module Crystal::MIR
           end
         end
       end
+      end
 
-      apply_replacements(replacements)
+      timed_cp_phase("run_apply_replacements") do
+        apply_replacements(replacements)
+      end
     end
 
     def apply_replacements(replacements : Hash(ValueId, ValueId), *, assume_dominates : Bool = false) : Int32
@@ -1056,12 +1095,15 @@ module Crystal::MIR
         STDERR.puts "[MIR_CP] replacements=#{replacements}"
       end
 
-      replacement_keys = replacements.keys.to_set
-      affected_block_ids = Set(BlockId).new
-      @function.blocks.each do |block|
-        if block_uses_replacements?(block, replacement_keys)
-          affected_block_ids << block.id
+      affected_block_ids = timed_cp_phase("apply_collect_affected_blocks") do
+        replacement_keys = replacements.keys.to_set
+        affected = Set(BlockId).new
+        @function.blocks.each do |block|
+          if block_uses_replacements?(block, replacement_keys)
+            affected << block.id
+          end
         end
+        affected
       end
 
       # Nothing reads replaced values, so rewriting is a guaranteed no-op.
@@ -1071,38 +1113,53 @@ module Crystal::MIR
       def_index = {} of ValueId => Int32
       dominators = {} of BlockId => Set(BlockId)
       unless @assume_dominates
-        def_blocks, def_index = build_def_maps
-        dominators = compute_dominators
-      end
-      block_sizes = {} of BlockId => Int32
-      @function.blocks.each do |block|
-        block_sizes[block.id] = block.instructions.size
-      end
-
-      @function.blocks.each do |block|
-        next unless affected_block_ids.includes?(block.id)
-
-        block_changed = false
-        block.instructions.each_with_index do |inst, idx|
-          rewritten = rewrite_instruction(inst, replacements, block.id, idx, def_blocks, def_index, dominators, block_sizes)
-          next if rewritten == inst
-
-          block.instructions[idx] = rewritten
-          block_changed = true
+        timed_cp_phase("apply_build_dominators") do
+          def_blocks, def_index = build_def_maps
+          dominators = compute_dominators
         end
-
-        rewritten_term = rewrite_terminator(block.terminator, replacements, block.id, block.instructions.size, def_blocks, def_index, dominators)
-        if rewritten_term != block.terminator
-          block.terminator = rewritten_term
-          block_changed = true
+      end
+      block_sizes = timed_cp_phase("apply_build_block_sizes") do
+        sizes = {} of BlockId => Int32
+        @function.blocks.each do |block|
+          sizes[block.id] = block.instructions.size
         end
+        sizes
+      end
 
-        if ENV["MIR_CP_DEBUG"]?
-          STDERR.puts "[MIR_CP] block=#{block.id} changed=#{block_changed} terminator=#{block.terminator}"
+      timed_cp_phase("apply_rewrite_blocks") do
+        @function.blocks.each do |block|
+          next unless affected_block_ids.includes?(block.id)
+
+          block_changed = false
+          block.instructions.each_with_index do |inst, idx|
+            rewritten = rewrite_instruction(inst, replacements, block.id, idx, def_blocks, def_index, dominators, block_sizes)
+            next if rewritten == inst
+
+            block.instructions[idx] = rewritten
+            block_changed = true
+          end
+
+          rewritten_term = rewrite_terminator(block.terminator, replacements, block.id, block.instructions.size, def_blocks, def_index, dominators)
+          if rewritten_term != block.terminator
+            block.terminator = rewritten_term
+            block_changed = true
+          end
+
+          if ENV["MIR_CP_DEBUG"]?
+            STDERR.puts "[MIR_CP] block=#{block.id} changed=#{block_changed} terminator=#{block.terminator}"
+          end
         end
       end
 
       @propagated
+    end
+
+    private def timed_cp_phase(phase_name : String, &)
+      return yield unless self.class.cp_phase_timing_enabled?
+      started_at = Time.instant
+      result = yield
+      self.class.record_cp_phase_timing(phase_name, (Time.instant - started_at).total_milliseconds)
+      result
     end
 
     private def block_uses_replacements?(block : BasicBlock, replacement_keys : Set(ValueId)) : Bool

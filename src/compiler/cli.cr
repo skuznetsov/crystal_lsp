@@ -860,6 +860,9 @@ module CrystalV2
           if options.stats && MIR::OptimizationPipeline.pass_timing_enabled?
             MIR::OptimizationPipeline.reset_pass_timing
           end
+          if options.stats && MIR::CopyPropagationPass.cp_phase_timing_enabled?
+            MIR::CopyPropagationPass.reset_cp_phase_timing
+          end
           mir_module.functions.each_with_index do |func, idx|
             begin
               STDERR.puts "  Optimizing #{idx + 1}/#{mir_module.functions.size}: #{func.name}..." if options.progress
@@ -2937,6 +2940,16 @@ module CrystalV2
               "#{pass_name}=#{total_ms.round(1)}ms/#{calls}/#{avg_ms.round(4)}ms"
             end
           out_io.puts "MIR pass timing: #{pass_details.join(" ")}" unless pass_details.empty?
+        end
+
+        if MIR::CopyPropagationPass.cp_phase_timing_enabled?
+          cp_phase_details = MIR::CopyPropagationPass.cp_phase_timing_snapshot
+            .sort_by { |(_, total_ms, _)| -total_ms }
+            .map do |phase_name, total_ms, calls|
+              avg_ms = calls > 0 ? total_ms / calls : 0.0
+              "#{phase_name}=#{total_ms.round(1)}ms/#{calls}/#{avg_ms.round(4)}ms"
+            end
+          out_io.puts "CopyPropagation phase timing: #{cp_phase_details.join(" ")}" unless cp_phase_details.empty?
         end
       end
 

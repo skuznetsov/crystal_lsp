@@ -4695,3 +4695,37 @@ crystal build -Ddebug_hooks src/crystal_v2.cr -o bin/crystal_v2 --no-debug
       - `total=126871.1ms` (`+8.24%`)
   - Decision:
     - fully reverted.
+
+### 8.69 CopyPropagation sub-phase telemetry (2026-02-17)
+
+- [x] Add optional phase-level timing for `CopyPropagationPass` to target the dominant sub-step with hard data.
+  - Root cause:
+    - aggregate MIR pass timing showed `copy_propagation` as the main bottleneck, but there was no visibility into which internal sub-phase dominated.
+  - Code fix:
+    - file: `src/compiler/mir/optimizations.cr`
+      - added opt-in telemetry controlled by `CRYSTAL_V2_CP_PHASE_TIMING=1`
+      - aggregated phase timers + counters:
+        - `run_collect_state`
+        - `run_find_replacements`
+        - `run_apply_replacements`
+        - `apply_collect_affected_blocks`
+        - `apply_build_dominators`
+        - `apply_build_block_sizes`
+        - `apply_rewrite_blocks`
+    - file: `src/compiler/cli.cr`
+      - reset CP phase timing before MIR optimization when stats are enabled
+      - print snapshot line:
+        - `CopyPropagation phase timing: ...`
+  - DoD / evidence:
+    - `scripts/build.sh release` => `EXIT 0`
+    - `timeout 240 crystal spec spec/hir/return_type_inference_spec.cr` => `13 examples, 0 failures`
+    - `timeout 240 crystal spec spec/mir/llvm_backend_spec.cr` => `59 examples, 0 failures`
+    - `regression_tests/run_all.sh bin/crystal_v2` => `41 passed, 0 failed`
+    - `CRYSTAL_V2_PIPELINE_CACHE=0 bin/crystal_v2 examples/bootstrap_array.cr -o /tmp/bootstrap_array_cp_phase_feature && scripts/run_safe.sh /tmp/bootstrap_array_cp_phase_feature 10 768` => `EXIT 0`
+    - self-host proof (`CRYSTAL_V2_MIR_PASS_TIMING=1 CRYSTAL_V2_CP_PHASE_TIMING=1 CRYSTAL_V2_STOP_AFTER_MIR=1 ...`):
+      - log: `/tmp/self_pass_timing_cp_phase_feature.log`
+      - includes new line: `CopyPropagation phase timing: ...`
+      - top phase in this run:
+        - `apply_build_dominators=47919.7ms/1524/31.4434ms`
+  - Insight:
+    - dominant cost is dominator construction during `apply_replacements` (not replacement discovery/rewrite loops), so next performance work should focus on dominator reuse/caching strategy.
