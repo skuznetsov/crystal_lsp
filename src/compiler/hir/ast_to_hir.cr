@@ -304,6 +304,7 @@ module Crystal::HIR
     alias ExprId = CrystalV2::Compiler::Frontend::ExprId
     alias GenericOwnerInfo = NamedTuple(base: String, owner: String, args: Array(String), map: Hash(String, String))
     private alias DeferredModuleContextKey = {String, UInt64, UInt64, String?}
+    private alias DeferredModuleLookupKey = {String, String}
 
     private struct CallSignature
       getter base_name : String
@@ -1941,6 +1942,7 @@ module Crystal::HIR
     # Maps class_name → list of deferred module contexts for on-demand resolution.
     @deferred_module_contexts : Hash(String, Array(DeferredModuleContext))
     @deferred_module_context_seen : Hash(String, Set(DeferredModuleContextKey))
+    @deferred_module_context_first_lookup : Hash(DeferredModuleLookupKey, DeferredModuleContext)
     @lazy_module_methods : Bool
     @module_defs_cache_version : Int32
     @module_include_alias_cache : Hash({String, String?, Int32, Int32}, String)
@@ -2254,6 +2256,7 @@ module Crystal::HIR
       @module_extend_self = Set(String).new
       @deferred_module_contexts = {} of String => Array(DeferredModuleContext)
       @deferred_module_context_seen = {} of String => Set(DeferredModuleContextKey)
+      @deferred_module_context_first_lookup = {} of DeferredModuleLookupKey => DeferredModuleContext
       @lazy_module_methods = false
       @module_defs_cache_version = 0
       @module_include_alias_cache = {} of {String, String?, Int32, Int32} => String
@@ -5946,21 +5949,19 @@ module Crystal::HIR
     # Called when the deferred module lookup finds a method, to provide the module's
     # type param mapping (e.g., Enumerable's T → Tuple(K, V) for Hash includes).
     private def register_deferred_module_type_params(owner : String, module_name : String, full_name : String, base_name : String) : Nil
+      if cached = @deferred_module_context_first_lookup[{owner, module_name}]?
+        apply_deferred_module_context(cached, full_name, base_name)
+        return
+      end
+
       contexts = @deferred_module_contexts[owner]?
       return unless contexts
       contexts.each do |ctx|
         base_ctx_module = strip_generic_args(ctx.module_full_name)
         next unless base_ctx_module == module_name || ctx.module_full_name == module_name
-        # Store the deferred type param snapshot so lower_method can set up correct context
-        store_function_type_param_map(full_name, base_name, ctx.type_param_snapshot)
-        # Also store the namespace override if present
-        if ns = ctx.namespace_override
-          store_function_namespace_override(full_name, base_name, ns)
-        end
-        # Store the arena so the method body can be found
-        set_function_def_arena_if_missing(full_name, ctx.mod_arena)
-        set_function_def_arena_if_missing(base_name, ctx.mod_arena)
-        break
+        @deferred_module_context_first_lookup[{owner, module_name}] = ctx
+        apply_deferred_module_context(ctx, full_name, base_name)
+        return
       end
     end
 
@@ -5990,13 +5991,42 @@ module Crystal::HIR
       seen_set.add(context_key)
 
       snapshot = @type_param_map.empty? ? EMPTY_DEFERRED_TYPE_PARAM_SNAPSHOT : @type_param_map.dup
-      context_list << DeferredModuleContext.new(
+      context = DeferredModuleContext.new(
         module_full_name: module_full_name,
         type_param_snapshot: snapshot,
         mod_arena: mod_arena,
         namespace_override: namespace_override,
         type_param_generation: generation
       )
+      context_list << context
+      cache_deferred_module_context_lookup(class_name, context)
+    end
+
+    private def apply_deferred_module_context(ctx : DeferredModuleContext, full_name : String, base_name : String) : Nil
+      # Store the deferred type param snapshot so lower_method can set up correct context
+      store_function_type_param_map(full_name, base_name, ctx.type_param_snapshot)
+      # Also store the namespace override if present
+      if ns = ctx.namespace_override
+        store_function_namespace_override(full_name, base_name, ns)
+      end
+      # Store the arena so the method body can be found
+      set_function_def_arena_if_missing(full_name, ctx.mod_arena)
+      set_function_def_arena_if_missing(base_name, ctx.mod_arena)
+    end
+
+    private def cache_deferred_module_context_lookup(owner : String, ctx : DeferredModuleContext) : Nil
+      full_key = {owner, ctx.module_full_name}
+      unless @deferred_module_context_first_lookup.has_key?(full_key)
+        @deferred_module_context_first_lookup[full_key] = ctx
+      end
+
+      base_module = strip_generic_args(ctx.module_full_name)
+      if base_module != ctx.module_full_name
+        base_key = {owner, base_module}
+        unless @deferred_module_context_first_lookup.has_key?(base_key)
+          @deferred_module_context_first_lookup[base_key] = ctx
+        end
+      end
     end
 
     private def store_function_type_param_map(full_name : String, base_name : String, params : Hash(String, String)) : Nil

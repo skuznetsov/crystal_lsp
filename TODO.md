@@ -3397,3 +3397,23 @@ crystal build -Ddebug_hooks src/crystal_v2.cr -o bin/crystal_v2 --no-debug
     - self-host hotspot sample delta:
       - previous (`/tmp/self_profile_after.sample.txt`): in `register_module_instance_methods_for` tree, prominent branch `89 * ...` around deferred-context path.
       - new (`/tmp/self_profile_after2.sample.txt`): same area reduced to `19 * ...`, with `record_deferred_module_context` subcalls at single-digit counts (`7/5/...`), and no high-count `Hash(String,String)#dup` spikes (all observed entries `1 * ...`).
+
+### 8.19 Deferred module-context fast lookup by owner/module (2026-02-17)
+
+- [x] Speed up `register_deferred_module_type_params` by avoiding repeated linear scans.
+  - Root cause:
+    - Even after deferred-context dedup, lookup path still iterated `@deferred_module_contexts[owner]` to find first matching module (`module_name` vs stripped full name).
+    - On self-host this sits inside a very hot stack (`process_pending_lower_functions` -> `register_module_instance_methods_for`).
+  - Code fix:
+    - file: `src/compiler/hir/ast_to_hir.cr`
+    - added `@deferred_module_context_first_lookup : Hash({String, String}, DeferredModuleContext)`:
+      - caches first context for `{owner, full_module_name}` and `{owner, strip_generic_args(full_module_name)}`;
+      - `register_deferred_module_type_params` now checks this map first (O(1)); falls back to scan only on cache miss, then memoizes.
+    - extracted `apply_deferred_module_context(...)` and `cache_deferred_module_context_lookup(...)` helpers to keep semantics consistent.
+  - DoD / evidence:
+    - `scripts/build.sh release` => `EXIT 0`
+    - `regression_tests/run_all.sh bin/crystal_v2` => `41 passed, 0 failed`
+    - `CRYSTAL_V2_PIPELINE_CACHE=0 CRYSTAL_V2_LLVM_CACHE=0 bin/crystal_v2 examples/bootstrap_array.cr -o /tmp/bootstrap_array_after_deferred_lookup && scripts/run_safe.sh /tmp/bootstrap_array_after_deferred_lookup 10 768` => `EXIT 0`
+    - self-host sample (`/tmp/self_profile_after3.sample.txt`):
+      - `register_module_instance_methods_for` branch in sampled path reduced further (`15 * ...` vs `19 * ...` in `/tmp/self_profile_after2.sample.txt`);
+      - deferred-context helper activity remains low-single-digit per sample slice (`record_deferred_module_context` lines `8/3/2/...`), confirming lookup no longer depends on full-list scans in common case.
