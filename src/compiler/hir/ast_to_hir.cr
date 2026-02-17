@@ -20988,16 +20988,20 @@ module Crystal::HIR
 
       # Fallback: scan source spans for "yield" tokens when AST misses it (macro/recovery paths).
       if source = @sources_by_arena[resolved_arena]?
+        scan_body_source = true
         if snippet = slice_source_for_span(node.span, source)
           has_macro = snippet.includes?("{%") || snippet.includes?("{{")
           if has_macro && macro_text_contains_yield?(snippet)
             return true
           end
+          scan_body_source = has_macro
         end
-        body.each do |expr_id|
-          snippet = slice_source_for_expr_in_arena(expr_id, resolved_arena, source)
-          next unless snippet
-          return true if macro_text_contains_yield?(snippet)
+        if scan_body_source
+          body.each do |expr_id|
+            snippet = slice_source_for_expr_in_arena(expr_id, resolved_arena, source)
+            next unless snippet
+            return true if macro_text_contains_yield?(snippet)
+          end
         end
       end
       false
