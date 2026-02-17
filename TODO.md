@@ -4042,3 +4042,26 @@ crystal build -Ddebug_hooks src/crystal_v2.cr -o bin/crystal_v2 --no-debug
       - fallback helper now active:
         - `block_fallback_candidates_for_method`: `4 / 7`
       - high-level stage remained comparable (same leading `lower_body/lower_assign/lower_call` stacks).
+
+### 8.45 Use uncached suffix strip in `register_function_type` hot path (2026-02-17)
+
+- [x] Remove compact-name parse dependency for base extraction during function-type registration.
+  - Root cause:
+    - `register_function_type` used `strip_type_suffix` (compact parser/cache path) even though it only needed truncation at first `$`.
+    - this path is hit very frequently while registering/lowering methods.
+  - Code fix:
+    - file: `src/compiler/hir/ast_to_hir.cr`
+    - in `register_function_type`:
+      - compute `base_name` once with `strip_type_suffix_uncached(full_name)`;
+      - reuse `base_name` for old-type guard and indexes;
+      - use `method_owner_from_name(base_name)` instead of `method_owner(strip_type_suffix(full_name))`.
+  - DoD / evidence:
+    - `scripts/build.sh release` => `EXIT 0`
+    - `regression_tests/run_all.sh bin/crystal_v2` => `41 passed, 0 failed`
+    - `CRYSTAL_V2_PIPELINE_CACHE=0 CRYSTAL_V2_LLVM_CACHE=0 bin/crystal_v2 examples/bootstrap_array.cr -o /tmp/bootstrap_array_register_function_type_strip && scripts/run_safe.sh /tmp/bootstrap_array_register_function_type_strip 10 768` => `EXIT 0`
+    - self-host 5s sample comparison:
+      - baseline `/tmp/self_profile_after849b.sample.txt`
+      - after `/tmp/self_profile_after850.sample.txt`, `/tmp/self_profile_after850b.sample.txt`
+      - targeted line reduced:
+        - `ast_to_hir.cr:2771`: `71 -> 3 / 13`
+      - overall top-stack remained in same lowering stages with slightly lower aggregate counts in this window.

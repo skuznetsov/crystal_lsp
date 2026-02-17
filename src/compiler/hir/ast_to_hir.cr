@@ -2745,6 +2745,7 @@ module Crystal::HIR
 
     # Register a function type and maintain the base name index
     private def register_function_type(full_name : String, return_type : TypeRef)
+      base_name = strip_type_suffix_uncached(full_name)
       # Fix: Don't overwrite a concrete, nilable return type with an unrelated type.
       # This prevents pollution from inline context leaking into Hash/Array method types.
       # The bug: when Unicode.upcase is inlined into Char#upcase(io, options), the Hash#[]?
@@ -2756,7 +2757,7 @@ module Crystal::HIR
         # that doesn't match the container type, keep the existing type.
         if old_name.includes?(" | ") && !new_name.includes?(" | ")
           # Extract owner from full_name (e.g., "Hash(...)" from "Hash(...)#method$args")
-          owner = method_owner(strip_type_suffix(full_name))
+          owner = method_owner_from_name(base_name)
           # If the new type is unrelated to the owner (e.g., IO for Hash method), skip update
           if !new_name.includes?(strip_generic_args(owner)) &&
              !old_name.includes?(new_name) &&
@@ -2767,8 +2768,6 @@ module Crystal::HIR
         end
       end
       set_function_type_entry(full_name, return_type)
-      # Extract base name (without $ type suffix) for fast lookups
-      base_name = strip_type_suffix(full_name)
       @function_base_names.add(base_name)
       if hash_idx = base_name.rindex('#')
         owner = base_name[0, hash_idx]
