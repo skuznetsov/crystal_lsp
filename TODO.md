@@ -4641,3 +4641,21 @@ crystal build -Ddebug_hooks src/crystal_v2.cr -o bin/crystal_v2 --no-debug
       - `total=129166.4ms` (`+10.20%`)
   - Decision:
     - fully reverted.
+
+### 8.66 Refuted branch: sanitize_type_name generation-cache + union builder (2026-02-17)
+
+- [x] Hypothesis tested and rejected.
+  - Hypothesis:
+    - add generation-aware caches for `sanitize_type_name`/`sanitize_type_name_part`
+      (keyed by `@subst_cache_gen`) and replace union `map + join` with `String::Builder`
+      to reduce GC churn in HIR hot path.
+  - Result (comparable run, same `ast_cache=272 hit/63 miss`):
+    - baseline (`/tmp/self_pass_timing_cp_inplace.log`):
+      - `hir=44294.1ms`, `copy_propagation=49903.8ms`, `mir_opt=51731.3ms`, `total=117216.0ms`
+    - experiment (`/tmp/self_pass_timing_sanitize_cache.log`):
+      - `hir=48324.6ms` (`+9.10%`)
+      - `copy_propagation=54590.4ms` (`+9.39%`)
+      - `mir_opt=57122.4ms` (`+10.42%`)
+      - `total=127581.4ms` (`+8.84%`)
+  - Decision:
+    - fully reverted.
