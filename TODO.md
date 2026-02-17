@@ -3934,3 +3934,28 @@ crystal build -Ddebug_hooks src/crystal_v2.cr -o bin/crystal_v2 --no-debug
       - directional deltas:
         - `def_contains_yield_uncached?`: `176 -> 89 / 113`
         - `ast_to_hir.cr:20978`: `113 -> 66 / 82`
+
+### 8.41 Single-pass macro-marker scan in yield fallback (2026-02-17)
+
+- [x] Replace two `includes?` scans (`"{%"`, `"{{"`) with one byte scan for macro markers.
+  - Root cause:
+    - fallback path in `def_contains_yield_uncached?` and source-level marker caching performed two full substring scans per check.
+    - this path is hot during registration/lowering and repeatedly hits `String#index` internals.
+  - Code fix:
+    - file: `src/compiler/hir/ast_to_hir.cr`
+    - added helper:
+      - `contains_macro_marker_tokens?(text : String) : Bool`
+      - scans bytes once and returns true on `{%` or `{{`.
+    - switched both callsites to helper:
+      - `source_has_macro_markers?`
+      - method-span snippet check in `def_contains_yield_uncached?`
+  - DoD / evidence:
+    - `scripts/build.sh release` => `EXIT 0`
+    - `regression_tests/run_all.sh bin/crystal_v2` => `41 passed, 0 failed`
+    - `CRYSTAL_V2_PIPELINE_CACHE=0 CRYSTAL_V2_LLVM_CACHE=0 bin/crystal_v2 examples/bootstrap_array.cr -o /tmp/bootstrap_array_macro_scan_singlepass && scripts/run_safe.sh /tmp/bootstrap_array_macro_scan_singlepass 10 768` => `EXIT 0`
+    - self-host 5s sample comparison (directional):
+      - baseline `/tmp/self_profile_after844b.sample.txt`
+      - after `/tmp/self_profile_after845.sample.txt`, `/tmp/self_profile_after845b.sample.txt`
+      - targeted fallback marker line reduced:
+        - `ast_to_hir.cr:20978`: `82 -> 50 / 49`
+      - note: run stage shifted deeper (`lower_call` appears in after-runs), so this is treated as directional hotspot reduction, not isolated wall-clock proof.

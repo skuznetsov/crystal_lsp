@@ -20978,7 +20978,7 @@ module Crystal::HIR
         return false unless source_has_macro_markers?(source)
         scan_body_source = true
         if snippet = slice_source_for_span(node.span, source)
-          has_macro = snippet.includes?("{%") || snippet.includes?("{{")
+          has_macro = contains_macro_marker_tokens?(snippet)
           if has_macro && macro_text_contains_yield?(snippet)
             return true
           end
@@ -20995,12 +20995,28 @@ module Crystal::HIR
       false
     end
 
+    private def contains_macro_marker_tokens?(text : String) : Bool
+      bytes = text.to_slice
+      return false if bytes.size < 2
+
+      i = 0
+      limit = bytes.size - 1
+      while i < limit
+        if bytes.unsafe_fetch(i) == '{'.ord.to_u8
+          next_byte = bytes.unsafe_fetch(i + 1)
+          return true if next_byte == '{'.ord.to_u8 || next_byte == '%'.ord.to_u8
+        end
+        i += 1
+      end
+      false
+    end
+
     private def source_has_macro_markers?(source : String) : Bool
       source_id = source.object_id
       if cached = @source_macro_marker_cache[source_id]?
         return cached
       end
-      has_markers = source.includes?("{%") || source.includes?("{{")
+      has_markers = contains_macro_marker_tokens?(source)
       @source_macro_marker_cache[source_id] = has_markers
       has_markers
     end
