@@ -3355,3 +3355,24 @@ crystal build -Ddebug_hooks src/crystal_v2.cr -o bin/crystal_v2 --no-debug
     - closure cells are currently shared per lexical capture name/cell in a function.
     - multiple escaping closures from one factory are not yet isolated (`make_counter` gives `1,2,3` instead of `1,2,1`).
     - proper fix requires full Proc closure-data ABI (per-instance environment object).
+
+### 8.17 Lazy include deferred-context dedup in HIR hot path (2026-02-17)
+
+- [x] Reduce GC-heavy `Hash(String, String)#dup` churn in `register_module_instance_methods_for` lazy mode.
+  - Root cause:
+    - In lazy module-method mode, every include pass appended a new `DeferredModuleContext` with unconditional `@type_param_map.dup`.
+    - Self-host `sample` showed this in the hottest stack (`process_pending_lower_functions` -> `register_module_instance_methods_for`), with a top frame `146 *Hash(String, String)#dup`.
+  - Code fix:
+    - file: `src/compiler/hir/ast_to_hir.cr`
+    - added `type_param_generation : UInt64` to `DeferredModuleContext`.
+    - added `record_deferred_module_context` + `deferred_module_context_exists?`:
+      - dedupe contexts by `(module_full_name, arena object_id, namespace_override, subst_cache_gen)`;
+      - avoid `dup` for empty maps by reusing shared immutable empty snapshot constant (`EMPTY_DEFERRED_TYPE_PARAM_SNAPSHOT`).
+    - replaced inline context push in `register_module_instance_methods_for` with `record_deferred_module_context(...)`.
+  - DoD / evidence:
+    - `scripts/build.sh release` => `EXIT 0`
+    - `regression_tests/run_all.sh bin/crystal_v2` => `41 passed, 0 failed`
+    - `CRYSTAL_V2_PIPELINE_CACHE=0 CRYSTAL_V2_LLVM_CACHE=0 bin/crystal_v2 examples/bootstrap_array.cr -o /tmp/bootstrap_array_after_deferred_ctx && scripts/run_safe.sh /tmp/bootstrap_array_after_deferred_ctx 10 768` => `EXIT 0`
+    - self-host hotspot check via `sample`:
+      - before (`/tmp/self_profile.sample.txt`): `146 *Hash(String, String)@Hash(K, V)#dup`
+      - after (`/tmp/self_profile_after.sample.txt`): top `Hash(String, String)#dup` entries reduced to `1 * ...` (no large `dup` spike in the same stack).
