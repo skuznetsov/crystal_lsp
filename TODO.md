@@ -3740,3 +3740,27 @@ crystal build -Ddebug_hooks src/crystal_v2.cr -o bin/crystal_v2 --no-debug
     - note:
       - full self-host compile used for sampling ended with existing backend issue unrelated to this change:
         - `opt: ... error: null must be a pointer type`
+
+### 8.33 Remove redundant stripped-overload fallback scan (2026-02-17)
+
+- [x] Drop compatibility scan in `function_def_overloads` after full stripped index build.
+  - Root cause:
+    - hotspot line `ast_to_hir.cr:19372` still scanned all overload bases (`@function_def_overloads.each`) on miss, even after `ensure_full_stripped_overload_index`.
+    - after index canonicalization, this fallback became redundant: a post-build miss means “no match”.
+  - Code fix:
+    - file: `src/compiler/hir/ast_to_hir.cr`
+    - in `function_def_overloads`:
+      - removed last-resort loop over all bases (`strip_generic_receiver_for_lookup(base) == stripped`);
+      - on post-index miss, now cache and return empty result immediately.
+  - DoD / evidence:
+    - `scripts/build.sh release` => `EXIT 0`
+    - `regression_tests/run_all.sh bin/crystal_v2` => `41 passed, 0 failed`
+    - `CRYSTAL_V2_PIPELINE_CACHE=0 CRYSTAL_V2_LLVM_CACHE=0 bin/crystal_v2 examples/bootstrap_array.cr -o /tmp/bootstrap_array_after_no_fallback_scan && scripts/run_safe.sh /tmp/bootstrap_array_after_no_fallback_scan 10 768` => `EXIT 0`
+    - self-host 5s sample delta:
+      - baseline `/tmp/self_profile_after834.sample.txt`
+      - after `/tmp/self_profile_after835.sample.txt`, `/tmp/self_profile_after835b.sample.txt`
+      - fallback scan line removed:
+        - `ast_to_hir.cr:19372`: `124 -> 0 / 0`
+      - directional aggregate counters:
+        - `function_def_overloads`: `335 -> 137 / 178`
+        - `lookup_function_def_for_call`: `385 -> 317 / 332`

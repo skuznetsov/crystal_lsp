@@ -19364,29 +19364,10 @@ module Crystal::HIR
           return indexed
         end
 
-        # Last-resort compatibility fallback: scan bases after stripping generics.
-        # This should be cold once the full stripped index is built.
-        matches = [] of String
-        seen = Set(String).new
-        @function_def_overloads.each do |base, keys|
-          next unless strip_generic_receiver_for_lookup(base) == stripped
-          keys.each do |key|
-            unless seen.includes?(key)
-              seen << key
-              matches << key
-            end
-          end
-        end
-        if matches.empty?
-          empty = [] of String
-          @function_def_overloads_stripped_cache[stripped] = empty
-          @function_def_overloads_cache[base_name] = empty
-          return empty
-        end
-        @function_def_overloads_stripped_cache[stripped] = matches
-        @function_def_overloads_stripped_index[stripped] = matches
-        @function_def_overloads_cache[base_name] = matches
-        return matches
+        empty = [] of String
+        @function_def_overloads_stripped_cache[stripped] = empty
+        @function_def_overloads_cache[base_name] = empty
+        return empty
       end
 
       empty = [] of String
