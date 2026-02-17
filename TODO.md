@@ -3860,3 +3860,25 @@ crystal build -Ddebug_hooks src/crystal_v2.cr -o bin/crystal_v2 --no-debug
       - directional aggregates:
         - `resolve_type_alias_chain`: `39 -> 22 / 32`
         - `lower_call`: `3866 -> 3228 / 3525`
+
+### 8.38 Guard builtin shadow lookup by nested-type presence (2026-02-17)
+
+- [x] Skip expensive builtin shadow resolution when current context cannot shadow the builtin name.
+  - Root cause:
+    - in `type_ref_for_name`, builtin lookup always attempted `resolve_nested_builtin_shadow` whenever class/namespace context existed.
+    - most contexts do not define nested types with builtin names, so this path performed avoidable work.
+  - Code fix:
+    - file: `src/compiler/hir/ast_to_hir.cr`
+    - in builtin branch, tightened condition from:
+      - `if has_builtin_shadow_context`
+      - to `if has_builtin_shadow_context && current_or_override_has_nested_type?(lookup_name)`
+    - this keeps shadow behavior where nested types actually exist, while avoiding deep checks elsewhere.
+  - DoD / evidence:
+    - `scripts/build.sh release` => `EXIT 0`
+    - `regression_tests/run_all.sh bin/crystal_v2` => `41 passed, 0 failed`
+    - `CRYSTAL_V2_PIPELINE_CACHE=0 CRYSTAL_V2_LLVM_CACHE=0 bin/crystal_v2 examples/bootstrap_array.cr -o /tmp/bootstrap_array_after_builtin_shadow_guard && scripts/run_safe.sh /tmp/bootstrap_array_after_builtin_shadow_guard 10 768` => `EXIT 0`
+    - self-host 5s sample comparison:
+      - baseline `/tmp/self_profile_after840b.sample.txt`
+      - after `/tmp/self_profile_after841.sample.txt`, `/tmp/self_profile_after841b.sample.txt`
+      - targeted line reduced:
+        - `ast_to_hir.cr:54972`: `76 -> 60 / 69`
