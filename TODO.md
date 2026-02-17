@@ -4511,3 +4511,20 @@ crystal build -Ddebug_hooks src/crystal_v2.cr -o bin/crystal_v2 --no-debug
   - Notes:
     - Tradeoff observed: major MIR optimization speedup, but slower LLVM stage on averaged full runs.
     - Net full compile is still faster; next step should target LLVM-time inflation (IR shape/size diff inspection).
+
+### 8.59 Refuted branch: enabling `assume_dominates` for generic `CopyPropagation`/`Peephole` (2026-02-17)
+
+- [x] Hypothesis tested and rejected.
+  - Hypothesis:
+    - if `CopyPropagationPass#run` and `PeepholePass` call `apply_replacements(..., assume_dominates: true)`, dominator checks become unnecessary and MIR optimize time drops significantly.
+  - Immediate measured effect (misleading):
+    - `STOP_AFTER_MIR` became dramatically faster:
+      - `mir_opt` near `~2.1s` (`/tmp/self_pass_timing_cp_assume.log`, `/tmp/self_pass_timing_cp_assume_r2.log`).
+  - Adversary result (critical):
+    - self-hosted compiler built with this branch is invalid:
+      - `/tmp/self_cp_assume_full examples/hello.cr -o ...` => non-zero (`EXIT 133`)
+      - `regression_tests/run_all.sh /tmp/self_cp_assume_full` => `0 passed, 41 failed (compile failures)`
+    - therefore optimization is unsound (breaks IR correctness / replacement safety).
+  - Decision:
+    - branch fully reverted;
+    - keep `assume_dominates` only for `LocalCSEPass` path from `8.58`, where substitutions are constrained to same-block CSE construction.
