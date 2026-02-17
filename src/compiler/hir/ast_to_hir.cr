@@ -54444,8 +54444,9 @@ module Crystal::HIR
 
     private def type_cache_key(name : String) : String
       return name if name.empty?
-      return name if name.starts_with?("::")
-      return name if name.includes?("::")
+      ns_idx = namespace_separator_index(name)
+      return name if ns_idx == 0
+      return name if ns_idx
       return name if @top_level_type_names.includes?(name)
       return name if builtin_alias_target?(name) || LIBC_TYPE_ALIASES.has_key?(name)
       return name if BUILTIN_TYPE_NAMES.includes?(name)
@@ -54552,8 +54553,22 @@ module Crystal::HIR
     end
 
     @[AlwaysInline]
+    private def namespace_separator_index(name : String) : Int32?
+      i = 0
+      last = name.bytesize - 1
+      bytes = name.to_unsafe
+      while i < last
+        if bytes[i] == ':'.ord && bytes[i + 1] == ':'.ord
+          return i
+        end
+        i += 1
+      end
+      nil
+    end
+
+    @[AlwaysInline]
     private def namespace_bucket_for(name : String) : String
-      if idx = name.index("::")
+      if idx = namespace_separator_index(name)
         name[0, idx]
       else
         name
@@ -54562,7 +54577,7 @@ module Crystal::HIR
 
     @[AlwaysInline]
     private def first_namespace_component(name : String) : String
-      if idx = name.index("::")
+      if idx = namespace_separator_index(name)
         name[0, idx]
       else
         name
@@ -55112,10 +55127,11 @@ module Crystal::HIR
       end
 
       absolute_name = lookup_name.starts_with?("::")
-      if pre_resolved_lookup_name.nil? && !absolute_name && !lookup_name.includes?('|')
+      lookup_ns_idx0 = namespace_separator_index(lookup_name)
+      if pre_resolved_lookup_name.nil? && !absolute_name && !has_union
         should_resolve_in_context = true
-        if lookup_name.includes?("::")
-          head = first_namespace_component(lookup_name)
+        if idx = lookup_ns_idx0
+          head = lookup_name[0, idx]
           anchored_namespace = head == "Crystal" ||
                                @top_level_type_names.includes?(head) ||
                                @top_level_class_kinds.has_key?(head) ||
@@ -55194,8 +55210,10 @@ module Crystal::HIR
       resolved_alias = resolve_type_alias_chain(lookup_name)
       lookup_name = resolved_alias if resolved_alias != lookup_name
       lookup_name = normalize_missing_generic_parens(lookup_name)
+      lookup_has_generic = lookup_name.includes?('(')
+      lookup_has_ns = !!namespace_separator_index(lookup_name)
       cache_key_name = absolute_name ? "::#{lookup_name}" : lookup_name
-      if !@type_param_map.empty? && !lookup_name.includes?('(') && lookup_name.includes?("::")
+      if !@type_param_map.empty? && !lookup_has_generic && lookup_has_ns
         if current = @current_class
           current_base = if info = split_generic_base_and_args(current)
                            info[:base]
@@ -55251,9 +55269,9 @@ module Crystal::HIR
         if cached.nil?
           # Fall through to recompute after cache invalidation.
         end
-        if !lookup_name.empty? && !lookup_name.includes?('(')
+        if !lookup_name.empty? && !lookup_has_generic
           module_name = lookup_name
-          if !@module_defs.has_key?(module_name) && !module_name.starts_with?("Crystal::") && module_name.includes?("::")
+          if !@module_defs.has_key?(module_name) && !module_name.starts_with?("Crystal::") && lookup_has_ns
             crystal_prefixed = "Crystal::#{module_name}"
             module_name = crystal_prefixed if @module_defs.has_key?(crystal_prefixed)
           end
@@ -55316,7 +55334,7 @@ module Crystal::HIR
         end
       end
 
-      if !lookup_name.empty? && !lookup_name.includes?("::")
+      if !lookup_name.empty? && !lookup_has_ns
         if current = @current_class
           current_base = if info = split_generic_base_and_args(current)
                            info[:base]

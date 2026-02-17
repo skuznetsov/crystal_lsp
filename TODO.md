@@ -4206,3 +4206,35 @@ crystal build -Ddebug_hooks src/crystal_v2.cr -o bin/crystal_v2 --no-debug
         - `Crystal::Hasher#bytes<Slice(UInt8)>`: `246 -> 205`
       - global frame remained stable:
         - `process_pending_lower_functions`: `7192 -> 7202` (flat/noise)
+
+### 8.51 Reduce namespace-separator string scans in type lookup hot paths (2026-02-17)
+
+- [x] Replace repeated `String#index/includes?("::")` checks with a lightweight helper in hot type-lookup paths.
+  - Root cause:
+    - `type_ref_for_name` and related helpers repeatedly scanned for namespace separators (`"::"`), contributing to `String#includes?<String>` hotspot pressure.
+  - Code fix:
+    - file: `src/compiler/hir/ast_to_hir.cr`
+    - added helper `namespace_separator_index(name : String)` (single-pass byte scan).
+    - switched to helper in:
+      - `namespace_bucket_for`
+      - `first_namespace_component`
+      - `type_cache_key`
+      - targeted branches in `type_ref_for_name` where `lookup_name` namespace checks were repeated.
+  - DoD / evidence:
+    - `scripts/build.sh release` => `EXIT 0`
+    - `regression_tests/run_all.sh bin/crystal_v2` => `41 passed, 0 failed`
+    - `CRYSTAL_V2_PIPELINE_CACHE=0 CRYSTAL_V2_LLVM_CACHE=0 bin/crystal_v2 examples/bootstrap_array.cr -o /tmp/bootstrap_array_ns_sep_helper && scripts/run_safe.sh /tmp/bootstrap_array_ns_sep_helper 10 768` => `EXIT 0`
+    - self-host sample A/B with rebuild on both sides (`sleep 15`, `sample 10s`), two independent runs:
+      - run1:
+        - `String#includes?<String>`: `351 -> 263`
+        - `String#index<String, Int32>`: `88 -> 89`
+        - `type_ref_for_name<String>`: `114 -> 112`
+      - run2:
+        - `String#includes?<String>`: `366 -> 253`
+        - `String#index<String, Int32>`: `93 -> 77`
+        - `type_ref_for_name<String>`: `103 -> 116` (noise)
+      - aggregate string-scan pressure (`includes + index`) improved in both runs:
+        - run1: `439 -> 352`
+        - run2: `459 -> 330`
+  - Notes:
+    - `process_pending_lower_functions`/`Hasher#bytes` remained noisy across runs; treat this as a targeted string-scan micro-optimization, not a broad wall-time claim.
