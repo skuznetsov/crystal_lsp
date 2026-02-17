@@ -4089,3 +4089,29 @@ crystal build -Ddebug_hooks src/crystal_v2.cr -o bin/crystal_v2 --no-debug
       - directional aggregate drop in same area:
         - `register_module_instance_methods_for<...>`: `395 -> 342`
       - note: full self-host compile still ends with existing `opt` error (`store ptr %fallback` type mismatch), unrelated to this micro-change.
+
+### 8.47 Unblock self-host `opt` by removing closure-heavy arena/filter paths (2026-02-17)
+
+- [x] Fix `opt` IR breakages (`store ptr %fallback/%arena` type mismatch, then phi-dominance in closure classvars) that blocked full self-host compile.
+  - Root cause:
+    - closure-lowered blocks in arena-resolution/filter code produced unstable union/phi interactions in generated LLVM IR.
+    - concrete crashes progressed through:
+      - `store ptr %fallback` to closure cell expecting `ptr` with `ArenaLike` union payload;
+      - `store ptr %arena` with `Nil|Void` union payload;
+      - `Instruction does not dominate all uses` for `%r143` stored to closure classvar.
+  - Code fix:
+    - file: `src/compiler/hir/ast_to_hir.cr`
+    - rewrote arena-candidate scans in:
+      - `resolve_arena_for_def_uncached`
+      - `resolve_arena_for_block`
+      to explicit indexed loops (no block/yield closures in these paths).
+    - switched `compute_ast_reachable_functions` to conservative mode:
+      - returns full reachable defs/method metadata from registered defs;
+      - preserves correctness and avoids closure-heavy BFS lowering path that generated broken IR.
+  - DoD / evidence:
+    - `scripts/build.sh release` => `EXIT 0`
+    - `CRYSTAL_V2_PIPELINE_CACHE=0 CRYSTAL_V2_LLVM_CACHE=0 bin/crystal_v2 src/crystal_v2.cr -o /tmp/crystal_v2_self_after861` => `EXIT 0`
+    - `regression_tests/run_all.sh bin/crystal_v2` => `41 passed, 0 failed`
+    - `CRYSTAL_V2_PIPELINE_CACHE=0 CRYSTAL_V2_LLVM_CACHE=0 bin/crystal_v2 examples/bootstrap_array.cr -o /tmp/bootstrap_array_after_ast_filter_conservative && scripts/run_safe.sh /tmp/bootstrap_array_after_ast_filter_conservative 10 768` => `EXIT 0`
+  - Follow-up:
+    - [ ] Reintroduce precise AST reachability BFS once closure/phi lowering for captured unions is fully stable (keep conservative mode as safety fallback).

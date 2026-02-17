@@ -5836,20 +5836,6 @@ module Crystal::HIR
       @function_def_arenas_last_refresh_size = @function_def_arenas.size
     end
 
-    private def each_def_arena_candidate(
-      fallback : CrystalV2::Compiler::Frontend::ArenaLike,
-      &block : CrystalV2::Compiler::Frontend::ArenaLike -> Nil
-    ) : Nil
-      refresh_unique_def_arenas!
-      @unique_def_arenas_list.each { |arena| yield arena }
-      if arenas = @inline_arenas
-        arenas.each { |arena| yield arena }
-      end
-      unless @unique_def_arenas.has_key?(fallback.object_id)
-        yield fallback
-      end
-    end
-
     private def resolve_arena_for_def_uncached(
       func_def : CrystalV2::Compiler::Frontend::DefNode,
       fallback : CrystalV2::Compiler::Frontend::ArenaLike,
@@ -5857,56 +5843,105 @@ module Crystal::HIR
       max_index = body_max_index_for_def(func_def)
       fallback_path = source_path_for(fallback)
 
-      best = nil
+      best : CrystalV2::Compiler::Frontend::ArenaLike? = nil
       best_size = Int32::MAX
       if fallback_path
         refresh_unique_def_arenas!
         if arenas = @unique_def_arenas_by_path[fallback_path]?
-          arenas.each do |arena|
-            next if max_index >= 0 && max_index >= arena.size
-            next unless span_fits_source?(arena, func_def.span)
-            size = arena.size
-            if size < best_size
-              best = arena
-              best_size = size
+          i = 0
+          while i < arenas.size
+            arena = arenas.unsafe_fetch(i)
+            if (max_index < 0 || max_index < arena.size) &&
+               span_fits_source?(arena, func_def.span)
+              size = arena.size
+              if size < best_size
+                best = arena
+                best_size = size
+              end
             end
+            i += 1
           end
         end
         if arenas = @inline_arenas
-          arenas.each do |arena|
-            next unless source_path_for(arena) == fallback_path
-            next if max_index >= 0 && max_index >= arena.size
-            next unless span_fits_source?(arena, func_def.span)
-            size = arena.size
-            if size < best_size
-              best = arena
-              best_size = size
+          i = 0
+          while i < arenas.size
+            arena = arenas.unsafe_fetch(i)
+            if source_path_for(arena) == fallback_path &&
+               (max_index < 0 || max_index < arena.size) &&
+               span_fits_source?(arena, func_def.span)
+              size = arena.size
+              if size < best_size
+                best = arena
+                best_size = size
+              end
             end
+            i += 1
           end
         end
         unless best
-          each_def_arena_candidate(fallback) do |arena|
-            next if max_index >= 0 && max_index >= arena.size
-            next unless span_fits_source?(arena, func_def.span)
-            path = source_path_for(arena)
-            next unless path == fallback_path
-            size = arena.size
-            if size < best_size
-              best = arena
-              best_size = size
+          i = 0
+          while i < @unique_def_arenas_list.size
+            arena = @unique_def_arenas_list.unsafe_fetch(i)
+            if (max_index < 0 || max_index < arena.size) &&
+               span_fits_source?(arena, func_def.span) &&
+               source_path_for(arena) == fallback_path
+              size = arena.size
+              if size < best_size
+                best = arena
+                best_size = size
+              end
+            end
+            i += 1
+          end
+
+          if arenas = @inline_arenas
+            i = 0
+            while i < arenas.size
+              arena = arenas.unsafe_fetch(i)
+              if (max_index < 0 || max_index < arena.size) &&
+                 span_fits_source?(arena, func_def.span) &&
+                 source_path_for(arena) == fallback_path
+                size = arena.size
+                if size < best_size
+                  best = arena
+                  best_size = size
+                end
+              end
+              i += 1
             end
           end
         end
       end
 
       unless best
-        each_def_arena_candidate(fallback) do |arena|
-          next if max_index >= 0 && max_index >= arena.size
-          next unless span_fits_source?(arena, func_def.span)
-          size = arena.size
-          if size < best_size
-            best = arena
-            best_size = size
+        refresh_unique_def_arenas!
+        i = 0
+        while i < @unique_def_arenas_list.size
+          arena = @unique_def_arenas_list.unsafe_fetch(i)
+          if (max_index < 0 || max_index < arena.size) &&
+             span_fits_source?(arena, func_def.span)
+            size = arena.size
+            if size < best_size
+              best = arena
+              best_size = size
+            end
+          end
+          i += 1
+        end
+
+        if arenas = @inline_arenas
+          i = 0
+          while i < arenas.size
+            arena = arenas.unsafe_fetch(i)
+            if (max_index < 0 || max_index < arena.size) &&
+               span_fits_source?(arena, func_def.span)
+              size = arena.size
+              if size < best_size
+                best = arena
+                best_size = size
+              end
+            end
+            i += 1
           end
         end
       end
@@ -5933,11 +5968,37 @@ module Crystal::HIR
       end
 
       max_index = block.body.empty? ? -1 : block.body.max_of(&.index)
-      each_def_arena_candidate(fallback) do |arena|
-        next if max_index >= 0 && max_index >= arena.size
-        next unless span_fits_source?(arena, block.span)
-        store_block_arena(block_id, arena)
-        return arena
+      refresh_unique_def_arenas!
+
+      i = 0
+      while i < @unique_def_arenas_list.size
+        arena = @unique_def_arenas_list.unsafe_fetch(i)
+        if (max_index < 0 || max_index < arena.size) &&
+           span_fits_source?(arena, block.span)
+          store_block_arena(block_id, arena)
+          return arena
+        end
+        i += 1
+      end
+
+      if arenas = @inline_arenas
+        i = 0
+        while i < arenas.size
+          arena = arenas.unsafe_fetch(i)
+          if (max_index < 0 || max_index < arena.size) &&
+             span_fits_source?(arena, block.span)
+            store_block_arena(block_id, arena)
+            return arena
+          end
+          i += 1
+        end
+      end
+
+      if !@unique_def_arenas.has_key?(fallback.object_id) &&
+         (max_index < 0 || max_index < fallback.size) &&
+         span_fits_source?(fallback, block.span)
+        store_block_arena(block_id, fallback)
+        return fallback
       end
 
       nil
@@ -22075,139 +22136,64 @@ module Crystal::HIR
 
     # Compute set of function def names and method names reachable from main expressions via BFS
     def compute_ast_reachable_functions(main_exprs : Array(Tuple(CrystalV2::Compiler::Frontend::ExprId, CrystalV2::Compiler::Frontend::ArenaLike))) : NamedTuple(defs: Set(String), method_names: Set(String), owner_types: Set(String), method_bases: Set(String))
+      _ = main_exprs # conservative mode: keep API stable, skip AST BFS prepass
       t0 = Time.instant
       log_filter = ENV.has_key?("CRYSTAL_V2_AST_FILTER_LOG")
 
-      # Step 1: Build reverse index (method name → function def keys)
-      reverse_index = build_method_reverse_index
+      # Conservative fallback: keep all known defs reachable.
+      # This preserves correctness and avoids brittle closure-heavy BFS lowering paths.
+      reachable = Set(String).new(initial_capacity: @function_defs.size)
+      method_names = Set(String).new(initial_capacity: @function_defs.size)
+      owner_types = Set(String).new(initial_capacity: @function_defs.size * 2 + ALWAYS_REACHABLE_TYPES.size)
+      method_bases = Set(String).new(initial_capacity: @function_defs.size * 2)
 
-      # Step 2: Scan main body to get initial method names + type constructors
-      # main_exprs is Array({ExprId, ArenaLike}) — scan each with its own arena
-      main_info = ASTCallInfo.new
-      main_exprs.each do |expr_id, arena|
-        scan_ast_calls_iterative([expr_id], arena, main_info)
+      always_reachable = ALWAYS_REACHABLE_TYPES.to_a
+      i = 0
+      while i < always_reachable.size
+        owner_types << always_reachable.unsafe_fetch(i)
+        i += 1
       end
 
-      # Step 3: Seed constructed types with always-reachable types
-      constructed_types = Set(String).new(ALWAYS_REACHABLE_TYPES)
-      main_info.type_constructors.each { |t| constructed_types << t }
+      keys = @function_defs.keys
+      i = 0
+      while i < keys.size
+        full_name = keys.unsafe_fetch(i)
+        reachable << full_name
 
-      # Also add types from monomorphized set (already instantiated generics)
-      @monomorphized.each do |specialized|
-        # Extract base type: "Array(String)" → "Array"
-        if paren = specialized.index('(')
-          constructed_types << specialized[0, paren]
+        if method = method_short_from_name(full_name)
+          method_names << method
         end
-        constructed_types << specialized
-      end
 
-      # Step 4: BFS over function defs
-      reachable = Set(String).new(initial_capacity: 4096)
-      visited_methods = Set(String).new(initial_capacity: 2048)
-      method_queue = Deque(String).new
-      owner_included_cache = Set(String).new(initial_capacity: 1024)
-      owner_excluded_cache = Set(String).new(initial_capacity: 1024)
-
-      # Seed BFS with method names from main body
-      main_info.method_names.each { |m| method_queue << m }
-
-      # Also seed with special entry points
-      method_queue << "initialize"
-      method_queue << "new"
-      method_queue << "finalize"
-      method_queue << "to_s"
-      method_queue << "hash"
-      method_queue << "=="
-
-      while (method_name = method_queue.shift?)
-        next if visited_methods.includes?(method_name)
-        visited_methods << method_name
-
-        # Find all function_defs matching this method name
-        candidates = reverse_index[method_name]?
-        next unless candidates
-
-        candidates.each do |full_name|
-          next if reachable.includes?(full_name)
-
-          # Check if owner type is reachable
+        if has_method_separator?(full_name)
           owner = method_owner_from_name(full_name)
-          owner_base = if paren = owner.index('(')
-                         owner[0, paren]
-                       else
-                         owner
-                       end
-
-          # Accept if owner is always-reachable or constructed
-          include_owner = if owner_included_cache.includes?(owner)
-                            true
-                          elsif owner_excluded_cache.includes?(owner)
-                            false
-                          else
-                            included = should_include_owner?(owner, owner_base, constructed_types)
-                            if included
-                              owner_included_cache << owner
-                            else
-                              owner_excluded_cache << owner
-                            end
-                            included
-                          end
-
-          unless include_owner
-            STDERR.puts "[AST_FILTER] skip #{full_name} (owner #{owner} not constructed)" if log_filter
-            next
+          unless owner.empty?
+            owner_types << owner
+            owner_base = strip_generic_args(owner)
+            owner_types << owner_base unless owner_base.empty?
           end
 
-          reachable << full_name
-
-          # Scan this def's body for more method names + type constructors
-          if call_info = scan_def_body(full_name)
-            call_info.method_names.each do |m|
-              method_queue << m unless visited_methods.includes?(m)
-            end
-            call_info.type_constructors.each do |t|
-              unless constructed_types.includes?(t)
-                constructed_types << t
-                # constructed_types growth can turn previous negatives into positives
-                owner_excluded_cache.clear
-                # New type constructed → re-check previously skipped methods
-                # by re-adding all visited method names to queue
-                # (only newly-matching owners will pass the filter)
-                visited_methods.each { |vm| method_queue << vm }
-                visited_methods.clear
-              end
+          parts = parse_method_name_compact(full_name)
+          method = parts.method
+          sep = parts.separator
+          if method && sep
+            key = "#{parts.owner}#{sep}#{method}"
+            method_bases << key
+            owner_base = strip_generic_args(parts.owner)
+            if owner_base != parts.owner
+              method_bases << "#{owner_base}#{sep}#{method}"
             end
           end
         end
+
+        i += 1
       end
 
-      elapsed = (Time.instant - t0).total_milliseconds
-      STDERR.puts "[AST_FILTER] BFS: #{reachable.size} reachable / #{@function_defs.size} total defs, #{constructed_types.size} types, #{visited_methods.size} methods scanned in #{elapsed.round(1)}ms" if ENV.has_key?("CRYSTAL_V2_PHASE_STATS") || log_filter
-
-      owner_types = Set(String).new(initial_capacity: constructed_types.size + reachable.size)
-      constructed_types.each { |t| owner_types << t }
-      reachable.each do |full_name|
-        owner = method_owner_from_name(full_name)
-        owner_types << owner unless owner.empty?
-        owner_base = strip_generic_args(owner)
-        owner_types << owner_base unless owner_base.empty?
+      if ENV.has_key?("CRYSTAL_V2_PHASE_STATS") || log_filter
+        elapsed = (Time.instant - t0).total_milliseconds
+        STDERR.puts "[AST_FILTER] conservative: #{reachable.size} reachable / #{@function_defs.size} total defs in #{elapsed.round(1)}ms"
       end
 
-      method_bases = Set(String).new(initial_capacity: reachable.size * 2)
-      reachable.each do |full_name|
-        parts = parse_method_name_compact(full_name)
-        method = parts.method
-        sep = parts.separator
-        next unless method && sep
-        owner = parts.owner
-        method_bases << "#{owner}#{sep}#{method}"
-        owner_base = strip_generic_args(owner)
-        if owner_base != owner
-          method_bases << "#{owner_base}#{sep}#{method}"
-        end
-      end
-
-      {defs: reachable, method_names: visited_methods, owner_types: owner_types, method_bases: method_bases}
+      {defs: reachable, method_names: method_names, owner_types: owner_types, method_bases: method_bases}
     end
 
     # Check if an owner type should be included based on constructed types
