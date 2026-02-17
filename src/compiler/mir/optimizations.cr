@@ -1616,9 +1616,42 @@ module Crystal::MIR
 
     getter function : Function
     getter stats : OptimizationStats
+    @@pass_timing_enabled : Bool = ENV["CRYSTAL_V2_MIR_PASS_TIMING"]? == "1"
+    @@pass_time_totals : Hash(String, Float64) = Hash(String, Float64).new(0.0)
+    @@pass_call_counts : Hash(String, Int32) = Hash(String, Int32).new(0)
+    @@pass_timing_lock : Mutex = Mutex.new
 
     def initialize(@function : Function)
       @stats = OptimizationStats.new
+    end
+
+    def self.pass_timing_enabled? : Bool
+      @@pass_timing_enabled
+    end
+
+    def self.reset_pass_timing : Nil
+      return unless @@pass_timing_enabled
+      @@pass_timing_lock.synchronize do
+        @@pass_time_totals.clear
+        @@pass_call_counts.clear
+      end
+    end
+
+    def self.pass_timing_snapshot : Array(Tuple(String, Float64, Int32))
+      return [] of Tuple(String, Float64, Int32) unless @@pass_timing_enabled
+      @@pass_timing_lock.synchronize do
+        @@pass_time_totals.map do |pass_name, total_ms|
+          {pass_name, total_ms, @@pass_call_counts[pass_name]}
+        end
+      end
+    end
+
+    def self.record_pass_timing(pass_name : String, elapsed_ms : Float64) : Nil
+      return unless @@pass_timing_enabled
+      @@pass_timing_lock.synchronize do
+        @@pass_time_totals[pass_name] += elapsed_ms
+        @@pass_call_counts[pass_name] += 1
+      end
     end
 
     # Run all optimization passes
@@ -1627,50 +1660,66 @@ module Crystal::MIR
 
       # Pass 1: Constant folding (enables more DCE)
       if hints.has_binary
-        cf = ConstantFoldingPass.new(@function)
-        @stats.constants_folded = cf.run
+        @stats.constants_folded = timed_pass("constant_folding") do
+          ConstantFoldingPass.new(@function).run
+        end
       end
 
       # Pass 1.5: Local CSE for pure ops within blocks
       if hints.has_cse_candidate
-        cse = LocalCSEPass.new(@function)
-        @stats.cse_eliminated = cse.run
+        @stats.cse_eliminated = timed_pass("local_cse") do
+          LocalCSEPass.new(@function).run
+        end
       end
 
       # Pass 2: RC elision (Crystal-specific)
       if hints.has_rc_ops
-        rc = RCElisionPass.new(@function)
-        @stats.rc_eliminated = rc.run
+        @stats.rc_eliminated = timed_pass("rc_elision") do
+          RCElisionPass.new(@function).run
+        end
       end
 
       # Pass 2.5: Copy propagation (light)
       if hints.has_cp_candidate
-        cp = CopyPropagationPass.new(@function)
-        @stats.copies_propagated = cp.run
+        @stats.copies_propagated = timed_pass("copy_propagation") do
+          CopyPropagationPass.new(@function).run
+        end
       end
 
       # Pass 2.75: Peephole simplifications
-      ph = PeepholePass.new(@function)
-      @stats.peephole_simplified = ph.run
+      @stats.peephole_simplified = timed_pass("peephole") do
+        PeepholePass.new(@function).run
+      end
 
       # Pass 3: Lock elision (thread-safety optimization)
       if hints.has_lock_ops
-        le = LockElisionPass.new(@function)
-        @stats.locks_elided = le.run
+        @stats.locks_elided = timed_pass("lock_elision") do
+          LockElisionPass.new(@function).run
+        end
       end
 
       # Pass 4: Dead code elimination
-      dce = DeadCodeEliminationPass.new(@function)
-      @stats.dead_eliminated = dce.run
+      @stats.dead_eliminated = timed_pass("dce") do
+        DeadCodeEliminationPass.new(@function).run
+      end
 
       # Pass 5: DCE again only when the first pass changed the block graph.
       # If pass 4 removed nothing, pass 5 is guaranteed to be a no-op.
       if @stats.dead_eliminated > 0
-        dce2 = DeadCodeEliminationPass.new(@function)
-        @stats.dead_eliminated += dce2.run
+        @stats.dead_eliminated += timed_pass("dce_2") do
+          DeadCodeEliminationPass.new(@function).run
+        end
       end
 
       @stats
+    end
+
+    private def timed_pass(pass_name : String, & : -> Int32) : Int32
+      return yield unless @@pass_timing_enabled
+      started_at = Time.instant
+      result = yield
+      self.class.record_pass_timing(pass_name, (Time.instant - started_at).total_milliseconds)
+      result
     end
 
     private def collect_hints : OptimizationHints

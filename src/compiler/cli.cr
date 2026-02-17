@@ -857,6 +857,9 @@ module CrystalV2
         if options.mir_opt
           log(options, out_io, "  Optimizing MIR...")
           mir_opt_start = Time.instant
+          if options.stats && MIR::OptimizationPipeline.pass_timing_enabled?
+            MIR::OptimizationPipeline.reset_pass_timing
+          end
           mir_module.functions.each_with_index do |func, idx|
             begin
               STDERR.puts "  Optimizing #{idx + 1}/#{mir_module.functions.size}: #{func.name}..." if options.progress
@@ -2925,6 +2928,16 @@ module CrystalV2
         parts << "llvm_cache=#{@llvm_cache_hits} hit/#{@llvm_cache_misses} miss" if options.llvm_cache
         parts << "pipeline_cache=#{@pipeline_cache_hits} hit/#{@pipeline_cache_misses} miss" if options.pipeline_cache
         out_io.puts "Timing (ms): #{parts.join(" ")}"
+
+        if MIR::OptimizationPipeline.pass_timing_enabled?
+          pass_details = MIR::OptimizationPipeline.pass_timing_snapshot
+            .sort_by { |(_, total_ms, _)| -total_ms }
+            .map do |pass_name, total_ms, calls|
+              avg_ms = calls > 0 ? total_ms / calls : 0.0
+              "#{pass_name}=#{total_ms.round(1)}ms/#{calls}/#{avg_ms.round(4)}ms"
+            end
+          out_io.puts "MIR pass timing: #{pass_details.join(" ")}" unless pass_details.empty?
+        end
       end
 
       private def dump_symbols(program, table, out_io, indent = 0)

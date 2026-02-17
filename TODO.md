@@ -4328,3 +4328,50 @@ crystal build -Ddebug_hooks src/crystal_v2.cr -o bin/crystal_v2 --no-debug
       - before (`/tmp/stop_after_mir_patch.log`): `mir_opt=151466.2ms`, `total=213670.8ms`
       - after (`/tmp/stop_after_mir_hints.log`): `mir_opt=145992.7ms`, `total=206960.9ms`
       - delta: `mir_opt -5473.5ms` (~`-3.6%`), `total -6709.9ms` (~`-3.1%`).
+
+### 8.55 Add optional MIR per-pass timing telemetry (2026-02-17)
+
+- [x] Add low-overhead pass timing instrumentation for MIR optimization to expose real hotspots.
+  - Root cause:
+    - `mir_opt` remained the largest stage (~`146s`) but only aggregate timing existed.
+    - without per-pass data, optimization attempts were guess-driven and often regressed.
+  - Code fix:
+    - file: `src/compiler/mir/optimizations.cr`
+    - added optional telemetry controlled by env:
+      - `CRYSTAL_V2_MIR_PASS_TIMING=1`
+    - implementation details:
+      - class-level accumulators:
+        - `@@pass_time_totals : Hash(String, Float64)`
+        - `@@pass_call_counts : Hash(String, Int32)`
+      - API:
+        - `OptimizationPipeline.pass_timing_enabled?`
+        - `OptimizationPipeline.reset_pass_timing`
+        - `OptimizationPipeline.pass_timing_snapshot`
+      - wrapped each pass call with `timed_pass(...)`:
+        - `constant_folding`, `local_cse`, `rc_elision`, `copy_propagation`, `peephole`, `lock_elision`, `dce`, `dce_2`.
+    - file: `src/compiler/cli.cr`
+      - before MIR optimize loop:
+        - reset pass timing when `--stats` and telemetry enabled.
+      - in `emit_timings`:
+        - print one-line summary:
+          - `MIR pass timing: <pass>=<total_ms>/<calls>/<avg_ms> ...`
+  - DoD / evidence:
+    - `scripts/build.sh release` => `EXIT 0`
+    - `regression_tests/run_all.sh bin/crystal_v2` => `41 passed, 0 failed`
+    - smoke (`hello`, stop-after-mir):
+      - `env CRYSTAL_V2_MIR_PASS_TIMING=1 CRYSTAL_V2_STOP_AFTER_MIR=1 bin/crystal_v2 examples/hello.cr -o /tmp/hello_pass_timing --stats`
+      - output includes both:
+        - `Timing (ms): ...`
+        - `MIR pass timing: ...`
+    - self-host baseline with telemetry:
+      - log: `/tmp/self_pass_timing.log`
+      - stage: `mir_opt=146577.7ms`, `total=207796.0ms`, `real=207.84`
+      - top pass totals:
+        - `local_cse=52003.4ms`
+        - `copy_propagation=48670.4ms`
+        - `peephole=44789.4ms`
+  - Notes:
+    - Tried stricter hint gating for `local_cse/copy_propagation/peephole`; it regressed:
+      - log: `/tmp/self_pass_timing_hints2.log`
+      - `mir_opt=148478.2ms`, `total=209699.6ms`, `real=209.74`
+    - That experiment was reverted; keep baseline telemetry and optimize heavy passes directly next.
