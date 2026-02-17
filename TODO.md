@@ -4959,5 +4959,10 @@ crystal build -Ddebug_hooks src/crystal_v2.cr -o bin/crystal_v2 --no-debug
     - smoke compile comparison:
       - `/tmp/crystal_v2_dbg_fix17 examples/bench_fib42.cr -o /tmp/bench_fib42_dbg_fix17` => `EXIT 0`
       - `/tmp/crystal_v2_self_full_fix17 examples/bench_fib42.cr -o /tmp/bench_fib42_fix17` => `EXIT 139` (no stderr)
+    - follow-up (fix18):
+      - `CRYSTAL_V2_PIPELINE_CACHE=0 /tmp/crystal_v2_dbg_fix18 src/compiler/driver.cr -o /tmp/crystal_v2_self_full_fix18` => `EXIT 0`
+      - `/tmp/crystal_v2_self_full_fix18 examples/bench_fib42.cr -o /tmp/bench_fib42_self18` => `EXIT 139`
+      - `lldb` backtrace (`/tmp/self18_lldb_bt.log`):
+        - crash point remains `trace_driver$$String` (`EXC_BAD_ACCESS`, null deref), called from `__crystal_main`.
   - Insight:
     - first-stage self-host compile is now passing again; remaining blocker shifted from LLVM IR invalidity to stage2 runtime segfault during compile execution.

@@ -587,6 +587,16 @@ module Crystal::MIR
       end
     end
 
+    @[AlwaysInline]
+    private def pointer_sized_int_llvm_type : String
+      # Most currently supported targets are 64-bit. Keep 32-bit fallback explicit.
+      if @target_triple.includes?("i386") || @target_triple.includes?("armv7") || @target_triple.includes?("wasm32")
+        "i32"
+      else
+        "i64"
+      end
+    end
+
     def generate : String
       STDERR.puts "  [LLVM] emit_header..." if @progress
       emit_header
@@ -7346,6 +7356,9 @@ module Crystal::MIR
                        "i64"
                      end
                    end
+        if operand_type_str == "ptr" || right_type_str == "ptr"
+          int_type = pointer_sized_int_llvm_type
+        end
         if operand_type_str == "ptr"
           # Convert 0 to null for ptr type
           left_ptr = left == "0" ? "null" : left
