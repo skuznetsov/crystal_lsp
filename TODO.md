@@ -4624,3 +4624,20 @@ crystal build -Ddebug_hooks src/crystal_v2.cr -o bin/crystal_v2 --no-debug
       - `total=127777.6ms` (`+9.01%`)
   - Decision:
     - fully reverted.
+
+### 8.65 Refuted branch: stricter `has_cp_candidate` gating in MIR collect_hints (2026-02-17)
+
+- [x] Hypothesis tested and rejected.
+  - Hypothesis:
+    - run `copy_propagation` only for functions with stronger structural signals
+      (cast/phi/select/load+store/binary+constant) to cut pass invocations.
+  - Result (comparable run, same `ast_cache=272 hit/63 miss`):
+    - baseline (`/tmp/self_pass_timing_cp_inplace.log`):
+      - `copy_propagation=49903.8ms/28449` (avg `1.7542ms`)
+      - `mir_opt=51731.3ms`, `total=117216.0ms`
+    - experiment (`/tmp/self_pass_timing_cp_hintgate.log`):
+      - `copy_propagation=55995.4ms/22053` (avg `2.5391ms`)
+      - `mir_opt=58502.9ms` (`+13.09%`)
+      - `total=129166.4ms` (`+10.20%`)
+  - Decision:
+    - fully reverted.
