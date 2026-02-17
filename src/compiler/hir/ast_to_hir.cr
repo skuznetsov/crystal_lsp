@@ -1135,6 +1135,9 @@ module Crystal::HIR
     @split_generic_args_cache : Hash(String, Array(String)) = {} of String => Array(String)
     @split_generic_args_last_input : String? = nil
     @split_generic_args_last_output : Array(String)? = nil
+    # Cache for split_generic_base_and_args (pure function of input string).
+    @generic_split_last_input : String? = nil
+    @generic_split_last_output : NamedTuple(base: String, args: String)? = nil
     # Recursion guard for unresolved_generic_type_arg? to avoid cyclic alias/union loops.
     @unresolved_generic_arg_stack : Set(String) = Set(String).new
     @unresolved_generic_arg_depth : Int32 = 0
@@ -24391,7 +24394,15 @@ module Crystal::HIR
     # Split a full generic type name into base and args, handling nested parens in the base.
     # Example: "Foo(Bar, Baz)::Entry(Qux)" -> base="Foo(Bar, Baz)::Entry", args="Qux"
     private def split_generic_base_and_args(name : String) : NamedTuple(base: String, args: String)?
+      if last_input = @generic_split_last_input
+        if last_input == name
+          return @generic_split_last_output
+        end
+      end
+
       if cached = @generic_split_cache[name]?
+        @generic_split_last_input = name
+        @generic_split_last_output = cached
         return cached
       end
 
@@ -24404,6 +24415,8 @@ module Crystal::HIR
       if parse_name != name
         if cached = @generic_split_cache[parse_name]?
           @generic_split_cache[name] = cached
+          @generic_split_last_input = name
+          @generic_split_last_output = cached
           return cached
         end
       end
@@ -24411,6 +24424,8 @@ module Crystal::HIR
       unless parse_name.ends_with?(')')
         @generic_split_cache[name] = nil
         @generic_split_cache[parse_name] = nil unless parse_name == name
+        @generic_split_last_input = name
+        @generic_split_last_output = nil
         return nil
       end
 
@@ -24429,6 +24444,8 @@ module Crystal::HIR
             result = {base: base, args: args}
             @generic_split_cache[parse_name] = result
             @generic_split_cache[name] = result unless parse_name == name
+            @generic_split_last_input = name
+            @generic_split_last_output = result
             return result
           end
         end
@@ -24437,6 +24454,8 @@ module Crystal::HIR
 
       @generic_split_cache[parse_name] = nil
       @generic_split_cache[name] = nil unless parse_name == name
+      @generic_split_last_input = name
+      @generic_split_last_output = nil
       nil
     end
 

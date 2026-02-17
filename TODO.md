@@ -4174,3 +4174,35 @@ crystal build -Ddebug_hooks src/crystal_v2.cr -o bin/crystal_v2 --no-debug
         - `process_pending_lower_functions`: `7197 -> 7202` (flat/noise)
         - `Hash(String, String)#[]?`: `135 -> 128`
         - `Crystal::Hasher#bytes<Slice(UInt8)>`: `230 -> 223`
+
+### 8.50 Add last-hit fast path for `split_generic_base_and_args` cache (2026-02-17)
+
+- [x] Cut repeated hash lookups for consecutive generic base/args parsing on identical inputs.
+  - Root cause:
+    - `split_generic_base_and_args` used only hash cache (`@generic_split_cache`) and still paid hash/key lookup on repeated same `name`.
+    - sample showed this path hot together with `Hash(String, NamedTuple(...))#[]?` and `#find_entry_with_index`.
+  - Code fix:
+    - file: `src/compiler/hir/ast_to_hir.cr`
+    - added last-hit fields:
+      - `@generic_split_last_input : String?`
+      - `@generic_split_last_output : NamedTuple(base: String, args: String)?`
+    - in `split_generic_base_and_args`:
+      - fast-return when `name == @generic_split_last_input`;
+      - update last-hit on hash-cache hits and on newly computed results;
+      - update last-hit for nil results too (miss/invalid cases), preserving semantics.
+  - DoD / evidence:
+    - `scripts/build.sh release` => `EXIT 0`
+    - `regression_tests/run_all.sh bin/crystal_v2` => `41 passed, 0 failed`
+    - `CRYSTAL_V2_PIPELINE_CACHE=0 CRYSTAL_V2_LLVM_CACHE=0 bin/crystal_v2 examples/bootstrap_array.cr -o /tmp/bootstrap_array_generic_split_last_hit && scripts/run_safe.sh /tmp/bootstrap_array_generic_split_last_hit 10 768` => `EXIT 0`
+    - self-host sample A/B with rebuild on both sides (`sleep 15`, `sample 10s`):
+      - baseline: `/tmp/self_generic_split_last_baseline_s15.sample.txt`
+      - after: `/tmp/self_generic_split_last_patch_s15.sample.txt`
+      - key counters:
+        - `split_generic_base_and_args`: `111 -> 37`
+        - `Hash(String, NamedTuple(...))#[]?`: `108 -> 37`
+        - `Hash(String, NamedTuple(...))#find_entry_with_index`: `78 -> 30`
+        - `String#index<String, Int32>`: `110 -> 100`
+        - `type_ref_for_name<String>`: `114 -> 108`
+        - `Crystal::Hasher#bytes<Slice(UInt8)>`: `246 -> 205`
+      - global frame remained stable:
+        - `process_pending_lower_functions`: `7192 -> 7202` (flat/noise)
