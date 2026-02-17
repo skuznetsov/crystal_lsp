@@ -4698,7 +4698,17 @@ module Crystal::MIR
     end
 
     private def emit_function(func : Function)
-      return if emit_builtin_override(func)
+      if emit_builtin_override(func)
+        # Builtin overrides emit raw LLVM directly and can return before the regular
+        # emission path marks the function as emitted. Keep the bookkeeping in sync,
+        # otherwise the final "missing function stubs" pass may emit a duplicate
+        # definition for an already-defined function.
+        mangled_name = mangle_function_name(func.name)
+        return_type = @type_mapper.llvm_type(func.return_type)
+        @emitted_functions << mangled_name
+        @emitted_function_return_types[mangled_name] = return_type
+        return
+      end
 
       reset_value_names(func)
       @emitted_allocas.clear

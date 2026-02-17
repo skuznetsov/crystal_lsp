@@ -3311,3 +3311,25 @@ crystal build -Ddebug_hooks src/crystal_v2.cr -o bin/crystal_v2 --no-debug
       - pointer arg -> float callee uses `ptrtoint + uitofp` (no accidental dereference);
       - union arg -> float callee payload extraction uses `align 4` load (`%union_to_fp.*.payload_ptr`);
     - verification: `crystal spec spec/mir/llvm_backend_spec.cr` => `55 examples, 0 failures`.
+
+### 8.15 LLVM duplicate-definition fix for builtin overrides (2026-02-17)
+
+- [x] Fix invalid LLVM redefinition caused by missing-stub pass after builtin overrides.
+  - Root cause:
+    - `emit_function` returned early on `emit_builtin_override(func)` before marking the function as emitted.
+    - Final pass `emit_missing_crystal_function_stubs` treated those real definitions as missing and emitted dead-code stubs with the same names.
+    - Repro error:
+      - `opt: ... error: invalid redefinition of function 'String$Dnew$$Pointer$LUInt8$R_Int32_Int32'`
+  - Code fix:
+    - file: `src/compiler/mir/llvm_backend.cr`
+    - in `emit_function`, after successful `emit_builtin_override(func)`:
+      - register `mangled_name` in `@emitted_functions`
+      - register return type in `@emitted_function_return_types`
+      - return.
+  - DoD / evidence:
+    - `scripts/build.sh debug` => `EXIT 0`
+    - `bin/crystal_v2 regression_tests/test_closure_ref.cr -o /tmp/test_closure_ref_fix` => compile succeeds
+    - `scripts/run_safe.sh /tmp/test_closure_ref_fix 10 768` => stdout `42`, `EXIT 0`
+    - `scripts/build.sh release` => `EXIT 0`
+    - `regression_tests/run_all.sh bin/crystal_v2` (release binary) => `41 passed, 0 failed`
+    - `CRYSTAL_V2_PIPELINE_CACHE=0 CRYSTAL_V2_LLVM_CACHE=0 bin/crystal_v2 examples/bootstrap_array.cr -o /tmp/bootstrap_array_release_check` + `scripts/run_safe.sh /tmp/bootstrap_array_release_check 10 768` => `EXIT 0`
