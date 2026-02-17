@@ -3376,3 +3376,24 @@ crystal build -Ddebug_hooks src/crystal_v2.cr -o bin/crystal_v2 --no-debug
     - self-host hotspot check via `sample`:
       - before (`/tmp/self_profile.sample.txt`): `146 *Hash(String, String)@Hash(K, V)#dup`
       - after (`/tmp/self_profile_after.sample.txt`): top `Hash(String, String)#dup` entries reduced to `1 * ...` (no large `dup` spike in the same stack).
+
+### 8.18 Deferred-context membership index (O(1) dedup) (2026-02-17)
+
+- [x] Remove linear `contexts.any?` scan in deferred include context dedup.
+  - Root cause:
+    - After 8.17, lazy include path still spent time in `record_deferred_module_context` scanning `Array(DeferredModuleContext)` on every insertion attempt.
+    - `sample` still showed this branch inside `register_module_instance_methods_for` as a visible hotspot.
+  - Code fix:
+    - file: `src/compiler/hir/ast_to_hir.cr`
+    - added `DeferredModuleContextKey` and index map:
+      - `@deferred_module_context_seen : Hash(String, Set(DeferredModuleContextKey))`
+      - key shape: `{module_full_name, arena.object_id, subst_cache_gen, namespace_override}`
+    - `record_deferred_module_context` now does O(1) `Set#includes?` / `Set#add` instead of linear `Array#any?`.
+    - removed now-unneeded `deferred_module_context_exists?`.
+  - DoD / evidence:
+    - `scripts/build.sh release` => `EXIT 0`
+    - `regression_tests/run_all.sh bin/crystal_v2` => `41 passed, 0 failed`
+    - `CRYSTAL_V2_PIPELINE_CACHE=0 CRYSTAL_V2_LLVM_CACHE=0 bin/crystal_v2 examples/bootstrap_array.cr -o /tmp/bootstrap_array_after_deferred_seen && scripts/run_safe.sh /tmp/bootstrap_array_after_deferred_seen 10 768` => `EXIT 0`
+    - self-host hotspot sample delta:
+      - previous (`/tmp/self_profile_after.sample.txt`): in `register_module_instance_methods_for` tree, prominent branch `89 * ...` around deferred-context path.
+      - new (`/tmp/self_profile_after2.sample.txt`): same area reduced to `19 * ...`, with `record_deferred_module_context` subcalls at single-digit counts (`7/5/...`), and no high-count `Hash(String,String)#dup` spikes (all observed entries `1 * ...`).

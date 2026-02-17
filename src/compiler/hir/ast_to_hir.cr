@@ -303,6 +303,7 @@ module Crystal::HIR
     alias AstNode = CrystalV2::Compiler::Frontend::Node
     alias ExprId = CrystalV2::Compiler::Frontend::ExprId
     alias GenericOwnerInfo = NamedTuple(base: String, owner: String, args: Array(String), map: Hash(String, String))
+    private alias DeferredModuleContextKey = {String, UInt64, UInt64, String?}
 
     private struct CallSignature
       getter base_name : String
@@ -1939,6 +1940,7 @@ module Crystal::HIR
     # Lazy module method registration: defer DefNode processing during monomorphization.
     # Maps class_name → list of deferred module contexts for on-demand resolution.
     @deferred_module_contexts : Hash(String, Array(DeferredModuleContext))
+    @deferred_module_context_seen : Hash(String, Set(DeferredModuleContextKey))
     @lazy_module_methods : Bool
     @module_defs_cache_version : Int32
     @module_include_alias_cache : Hash({String, String?, Int32, Int32}, String)
@@ -2251,6 +2253,7 @@ module Crystal::HIR
       @debug_cache_last = @debug_cache_histo ? Time.instant : nil
       @module_extend_self = Set(String).new
       @deferred_module_contexts = {} of String => Array(DeferredModuleContext)
+      @deferred_module_context_seen = {} of String => Set(DeferredModuleContextKey)
       @lazy_module_methods = false
       @module_defs_cache_version = 0
       @module_include_alias_cache = {} of {String, String?, Int32, Int32} => String
@@ -5966,47 +5969,34 @@ module Crystal::HIR
       module_full_name : String,
       mod_arena : CrystalV2::Compiler::Frontend::ArenaLike,
     ) : Nil
-      list = @deferred_module_contexts[class_name]?
-      unless list
-        list = [] of DeferredModuleContext
-        @deferred_module_contexts[class_name] = list
+      contexts = @deferred_module_contexts[class_name]?
+      unless contexts
+        contexts = [] of DeferredModuleContext
+        @deferred_module_contexts[class_name] = contexts
       end
+      context_list = contexts.not_nil!
+
+      seen = @deferred_module_context_seen[class_name]?
+      unless seen
+        seen = Set(DeferredModuleContextKey).new
+        @deferred_module_context_seen[class_name] = seen
+      end
+      seen_set = seen.not_nil!
 
       namespace_override = @current_namespace_override
       generation = @subst_cache_gen
-      contexts = list.not_nil!
-      return if deferred_module_context_exists?(
-                  contexts,
-                  module_full_name,
-                  mod_arena,
-                  namespace_override,
-                  generation
-                )
+      context_key = {module_full_name, mod_arena.object_id, generation, namespace_override}
+      return if seen_set.includes?(context_key)
+      seen_set.add(context_key)
 
       snapshot = @type_param_map.empty? ? EMPTY_DEFERRED_TYPE_PARAM_SNAPSHOT : @type_param_map.dup
-      contexts << DeferredModuleContext.new(
+      context_list << DeferredModuleContext.new(
         module_full_name: module_full_name,
         type_param_snapshot: snapshot,
         mod_arena: mod_arena,
         namespace_override: namespace_override,
         type_param_generation: generation
       )
-    end
-
-    private def deferred_module_context_exists?(
-      contexts : Array(DeferredModuleContext),
-      module_full_name : String,
-      mod_arena : CrystalV2::Compiler::Frontend::ArenaLike,
-      namespace_override : String?,
-      generation : UInt64,
-    ) : Bool
-      arena_id = mod_arena.object_id
-      contexts.any? do |ctx|
-        ctx.module_full_name == module_full_name &&
-          ctx.namespace_override == namespace_override &&
-          ctx.type_param_generation == generation &&
-          ctx.mod_arena.object_id == arena_id
-      end
     end
 
     private def store_function_type_param_map(full_name : String, base_name : String, params : Hash(String, String)) : Nil
