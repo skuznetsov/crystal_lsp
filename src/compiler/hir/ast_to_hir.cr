@@ -53122,6 +53122,32 @@ module Crystal::HIR
         end
       end
 
+      # Proc literals that escape their defining function currently lose hidden
+      # capture args at call-sites (ABI mismatch: function expects captures but
+      # Proc#call invokes with runtime args only). Until full closure-data ABI is
+      # implemented, route captured locals through closure cells so proc bodies
+      # have stable access without hidden parameters.
+      captures.each do |cap_name, parent_vid, cap_type|
+        if existing = @closure_ref_cells[cap_name]?
+          # Reuse existing alias cell for this local if already established.
+          # This keeps multiple procs over the same local consistent.
+          existing_type = existing[2]
+          if existing_type != cap_type
+            # Type mismatch is unexpected for one lexical local name, but keep
+            # lowering resilient by overriding to the latest observed type.
+            @closure_ref_cells[cap_name] = {existing[0], existing[1], cap_type}
+          end
+        else
+          cell_name = "__closure_cell_#{@closure_cell_counter}"
+          @closure_cell_counter += 1
+          class_name = "__closure"
+          set = ClassVarSet.new(ctx.next_id, cap_type, class_name, cell_name, parent_vid)
+          ctx.emit(set)
+          ctx.register_type(set.id, cap_type)
+          @closure_ref_cells[cap_name] = {class_name, cell_name, cap_type}
+        end
+      end
+
       # Add parameters to the standalone function
       if params = node.params
         params.each_with_index do |param, idx|
@@ -53137,13 +53163,6 @@ module Crystal::HIR
             end
           end
         end
-      end
-
-      # Add captured variables as hidden extra parameters
-      captures.each do |cap_name, _parent_vid, cap_type|
-        hir_param = proc_func.add_param("__capture_#{cap_name}", cap_type)
-        proc_ctx.register_local(cap_name, hir_param.id)
-        proc_ctx.register_type(hir_param.id, cap_type)
       end
 
       # Save and lower body into the standalone function
@@ -53214,12 +53233,6 @@ module Crystal::HIR
       fp = FuncPointer.new(ctx.next_id, proc_type, proc_func_name)
       ctx.emit(fp)
       ctx.register_type(fp.id, proc_type)
-
-      # Store capture parent value IDs for use at call site
-      if !captures.empty?
-        capture_parent_ids = captures.map { |_, parent_vid, _| parent_vid }
-        @proc_captures_by_value[fp.id] = capture_parent_ids
-      end
 
       fp.id
     end

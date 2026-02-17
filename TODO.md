@@ -3333,3 +3333,25 @@ crystal build -Ddebug_hooks src/crystal_v2.cr -o bin/crystal_v2 --no-debug
     - `scripts/build.sh release` => `EXIT 0`
     - `regression_tests/run_all.sh bin/crystal_v2` (release binary) => `41 passed, 0 failed`
     - `CRYSTAL_V2_PIPELINE_CACHE=0 CRYSTAL_V2_LLVM_CACHE=0 bin/crystal_v2 examples/bootstrap_array.cr -o /tmp/bootstrap_array_release_check` + `scripts/run_safe.sh /tmp/bootstrap_array_release_check 10 768` => `EXIT 0`
+
+### 8.16 Proc capture ABI stabilization (2026-02-17)
+
+- [x] Remove UB for escaping proc literals with captures (`-> { ... }` returned from functions).
+  - Root cause:
+    - `lower_proc_literal` encoded captures as hidden function params.
+    - For escaping proc values (e.g., returned from `make_counter`), call sites invoked function pointers without hidden captures.
+    - Result: ABI mismatch (`call i32 %proc_ptr()`) and garbage output.
+  - Code fix:
+    - file: `src/compiler/hir/ast_to_hir.cr`
+    - `lower_proc_literal` now routes captured locals through closure cells (`ClassVarSet/Get`) instead of hidden proc parameters.
+    - removed hidden capture params and removed `@proc_captures_by_value` attachment for proc literals.
+  - DoD / evidence:
+    - `scripts/build.sh release` => `EXIT 0`
+    - `bin/crystal_v2 /tmp/closure_isolation.cr -o /tmp/closure_isolation_fix` + `scripts/run_safe.sh /tmp/closure_isolation_fix 10 768` => deterministic output (`1`, `2`, `3`) and `EXIT 0` (UB removed).
+    - `bin/crystal_v2 regression_tests/test_closure_ref.cr -o /tmp/test_closure_ref_after` + `scripts/run_safe.sh /tmp/test_closure_ref_after 10 768` => stdout `42`, `EXIT 0`
+    - `regression_tests/run_all.sh bin/crystal_v2` (release binary) => `41 passed, 0 failed`
+    - `CRYSTAL_V2_PIPELINE_CACHE=0 CRYSTAL_V2_LLVM_CACHE=0 bin/crystal_v2 examples/bootstrap_array.cr -o /tmp/bootstrap_array_release_check2` + `scripts/run_safe.sh /tmp/bootstrap_array_release_check2 10 768` => `EXIT 0`
+  - Remaining limitation (open):
+    - closure cells are currently shared per lexical capture name/cell in a function.
+    - multiple escaping closures from one factory are not yet isolated (`make_counter` gives `1,2,3` instead of `1,2,1`).
+    - proper fix requires full Proc closure-data ABI (per-instance environment object).
