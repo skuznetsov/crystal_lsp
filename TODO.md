@@ -4115,3 +4115,33 @@ crystal build -Ddebug_hooks src/crystal_v2.cr -o bin/crystal_v2 --no-debug
     - `CRYSTAL_V2_PIPELINE_CACHE=0 CRYSTAL_V2_LLVM_CACHE=0 bin/crystal_v2 examples/bootstrap_array.cr -o /tmp/bootstrap_array_after_ast_filter_conservative && scripts/run_safe.sh /tmp/bootstrap_array_after_ast_filter_conservative 10 768` => `EXIT 0`
   - Follow-up:
     - [ ] Reintroduce precise AST reachability BFS once closure/phi lowering for captured unions is fully stable (keep conservative mode as safety fallback).
+
+### 8.48 Add last-hit fast path for `split_generic_type_args` cache (2026-02-17)
+
+- [x] Reduce hash lookup overhead for repeated generic-arg list parsing.
+  - Root cause:
+    - `split_generic_type_args` already cached by `Hash(String, Array(String))`, but hot paths repeatedly query the same `params_str` back-to-back.
+    - each call still paid hash/key lookup before hitting cache.
+  - Code fix:
+    - file: `src/compiler/hir/ast_to_hir.cr`
+    - added last-hit fields:
+      - `@split_generic_args_last_input : String?`
+      - `@split_generic_args_last_output : Array(String)?`
+    - in `split_generic_type_args`:
+      - fast-return when current `params_str` equals last input;
+      - update last-hit pair on hash-cache hits and on freshly computed results.
+  - DoD / evidence:
+    - `scripts/build.sh release` => `EXIT 0`
+    - `regression_tests/run_all.sh bin/crystal_v2` => `41 passed, 0 failed`
+    - `CRYSTAL_V2_PIPELINE_CACHE=0 CRYSTAL_V2_LLVM_CACHE=0 bin/crystal_v2 examples/bootstrap_array.cr -o /tmp/bootstrap_array_split_last_hit_s15 && scripts/run_safe.sh /tmp/bootstrap_array_split_last_hit_s15 10 768` => `EXIT 0`
+    - self-host sample A/B with stable window (`sleep 15`, `sample 10s`):
+      - baseline: `/tmp/self_profile_baseline_s15.sample.txt`
+      - after: `/tmp/self_profile_patch_s15.sample.txt`
+      - key counters:
+        - `split_generic_type_args`: `21 -> 14`
+        - `type_ref_for_name`: `2837 -> 2774`
+        - `Hash(String, ... )`: `5352 -> 5324`
+        - `Crystal::Hasher#bytes<Slice(UInt8)>`: `1640 -> 1523`
+      - broader lowering stack in same window also decreased:
+        - `lower_function_if_needed_impl`: `8728 -> 7961`
+        - `process_pending_lower_functions`: `7594 -> 7251`

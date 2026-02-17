@@ -1133,6 +1133,8 @@ module Crystal::HIR
     @generic_owner_info_cache_gen : UInt64 = 0_u64
     # Cache for split_generic_type_args (pure function of input string).
     @split_generic_args_cache : Hash(String, Array(String)) = {} of String => Array(String)
+    @split_generic_args_last_input : String? = nil
+    @split_generic_args_last_output : Array(String)? = nil
     # Recursion guard for unresolved_generic_type_arg? to avoid cyclic alias/union loops.
     @unresolved_generic_arg_stack : Set(String) = Set(String).new
     @unresolved_generic_arg_depth : Int32 = 0
@@ -24173,7 +24175,17 @@ module Crystal::HIR
     # Split a generic type argument list like "String, Array(Int32), Hash(K, V)"
     # into top-level arguments, respecting nested parentheses and proc type arrows.
     private def split_generic_type_args(params_str : String) : Array(String)
+      if last_input = @split_generic_args_last_input
+        if last_input == params_str
+          if last_output = @split_generic_args_last_output
+            return last_output
+          end
+        end
+      end
+
       if cached = @split_generic_args_cache[params_str]?
+        @split_generic_args_last_input = params_str
+        @split_generic_args_last_output = cached
         return cached
       end
       args = [] of String
@@ -24220,6 +24232,8 @@ module Crystal::HIR
       tail = params_str[start, params_str.size - start].strip
       args << tail unless tail.empty?
       @split_generic_args_cache[params_str] = args
+      @split_generic_args_last_input = params_str
+      @split_generic_args_last_output = args
       args
     end
 
