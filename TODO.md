@@ -3812,3 +3812,28 @@ crystal build -Ddebug_hooks src/crystal_v2.cr -o bin/crystal_v2 --no-debug
         - `ast_to_hir.cr:55031`: `8 -> 0 / 0`
       - directional aggregates (sampling-noise aware):
         - `resolve_type_name_in_context`: `310 -> 282 / 238`
+
+### 8.36 Fast-path anchored qualified names inside `resolve_type_name_in_context` (2026-02-17)
+
+- [x] Return early for already anchored `A::B` type names before deeper resolution logic.
+  - Root cause:
+    - `resolve_type_name_in_context` still walked multiple normalization/namespace branches for many already-qualified names with anchored heads.
+    - these paths are hot during self-host lowering and add repeated map/lookups for no-op resolutions.
+  - Code fix:
+    - file: `src/compiler/hir/ast_to_hir.cr`
+    - in `resolve_type_name_in_context`:
+      - after cache/value-literal checks, added early return for names containing `::` when head namespace is anchored:
+        - `Crystal`
+        - top-level known type/class head
+        - builtin type head
+      - stores the cached resolved name and returns without deeper context resolution.
+  - DoD / evidence:
+    - `scripts/build.sh release` => `EXIT 0`
+    - `regression_tests/run_all.sh bin/crystal_v2` => `41 passed, 0 failed`
+    - `CRYSTAL_V2_PIPELINE_CACHE=0 CRYSTAL_V2_LLVM_CACHE=0 bin/crystal_v2 examples/bootstrap_array.cr -o /tmp/bootstrap_array_after_resolve_context_anchor && scripts/run_safe.sh /tmp/bootstrap_array_after_resolve_context_anchor 10 768` => `EXIT 0`
+    - self-host 5s sample comparison:
+      - baseline `/tmp/self_profile_after837b.sample.txt`
+      - after `/tmp/self_profile_after839.sample.txt`, `/tmp/self_profile_after839b.sample.txt`
+      - directional aggregate deltas:
+        - `resolve_type_name_in_context`: `238 -> 229 / 205`
+        - `lower_call`: `4476 -> 3729 / 3866`

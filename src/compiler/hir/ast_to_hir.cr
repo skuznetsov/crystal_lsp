@@ -23134,6 +23134,17 @@ module Crystal::HIR
         resolved_type_name_cache_set(name, name)
         return name
       end
+      if name.includes?("::")
+        head = first_namespace_component(name)
+        anchored_namespace = head == "Crystal" ||
+                             @top_level_type_names.includes?(head) ||
+                             @top_level_class_kinds.has_key?(head) ||
+                             BUILTIN_TYPE_NAMES.includes?(head)
+        if anchored_namespace
+          resolved_type_name_cache_set(name, name)
+          return name
+        end
+      end
       if name.includes?('|')
         parts = split_union_type_name(name)
         if parts.size > 1
