@@ -3043,12 +3043,34 @@ module Crystal::HIR
       short_name = last_namespace_component(name)
       return short_name if short_name != name && enum_info.has_key?(short_name)
       if short_name != name
-        matches = enum_info.keys.select { |key| key.ends_with?("::#{short_name}") }
-        return matches.first if matches.size == 1
+        if match = unique_enum_match_by_suffix(enum_info, namespaced_suffix(short_name))
+          return match
+        end
       end
-      matches = enum_info.keys.select { |key| key.ends_with?("::#{name}") }
-      return matches.first if matches.size == 1
+      if match = unique_enum_match_by_suffix(enum_info, namespaced_suffix(name))
+        return match
+      end
       nil
+    end
+
+    private def namespaced_suffix(name : String) : String
+      String.build(name.bytesize + 2) do |io|
+        io << "::"
+        io << name
+      end
+    end
+
+    private def unique_enum_match_by_suffix(
+      enum_info : Hash(String, Hash(String, Int64)),
+      suffix : String,
+    ) : String?
+      match : String? = nil
+      enum_info.each_key do |key|
+        next unless key.ends_with?(suffix)
+        return nil if match
+        match = key
+      end
+      match
     end
 
     # Track a value as an enum type if the type name is a known enum

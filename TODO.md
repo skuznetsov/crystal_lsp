@@ -3986,3 +3986,30 @@ crystal build -Ddebug_hooks src/crystal_v2.cr -o bin/crystal_v2 --no-debug
         - `register_module_instance_methods_for<`: `311 -> 308 / 341` (same area still active)
       - helper usage visible:
         - `join_owner_method_name`: `75 / 75`
+
+### 8.43 Remove per-key interpolation/array alloc in enum name resolve (2026-02-17)
+
+- [x] Replace `select + interpolation` scans in `resolve_enum_name` with unique-match suffix scan.
+  - Root cause:
+    - `resolve_enum_name` used:
+      - `enum_info.keys.select { |k| k.ends_with?("::#{short}") }`
+      - `enum_info.keys.select { |k| k.ends_with?("::#{name}") }`
+    - this allocated interpolation strings and arrays in a hot path (visible on `ast_to_hir.cr:3049`).
+  - Code fix:
+    - file: `src/compiler/hir/ast_to_hir.cr`
+    - `resolve_enum_name` now uses:
+      - `unique_enum_match_by_suffix(enum_info, namespaced_suffix(...))`
+    - added helpers:
+      - `namespaced_suffix(name)` (single suffix build per lookup)
+      - `unique_enum_match_by_suffix(...)` (single pass over keys, no `select` array)
+  - DoD / evidence:
+    - `scripts/build.sh release` => `EXIT 0`
+    - `regression_tests/run_all.sh bin/crystal_v2` => `41 passed, 0 failed`
+    - `CRYSTAL_V2_PIPELINE_CACHE=0 CRYSTAL_V2_LLVM_CACHE=0 bin/crystal_v2 examples/bootstrap_array.cr -o /tmp/bootstrap_array_enum_suffix_match && scripts/run_safe.sh /tmp/bootstrap_array_enum_suffix_match 10 768` => `EXIT 0`
+    - self-host 5s sample comparison (same stage shape):
+      - baseline `/tmp/self_profile_after846b.sample.txt`
+      - after `/tmp/self_profile_after847.sample.txt`, `/tmp/self_profile_after847b.sample.txt`
+      - top-line hotspot removed:
+        - `ast_to_hir.cr:3049`: `79 -> 9 / 6`
+      - new helper activity present:
+        - `unique_enum_match_by_suffix`: `23 / 29`
