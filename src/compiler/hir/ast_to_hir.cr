@@ -24703,6 +24703,19 @@ module Crystal::HIR
         byte == '_'.ord || byte == ':'.ord
     end
 
+    @[AlwaysInline]
+    private def ascii_upper_alpha?(byte : UInt8) : Bool
+      byte >= 'A'.ord && byte <= 'Z'.ord
+    end
+
+    @[AlwaysInline]
+    private def ascii_alnum_or_underscore?(byte : UInt8) : Bool
+      (byte >= 'A'.ord && byte <= 'Z'.ord) ||
+        (byte >= 'a'.ord && byte <= 'z'.ord) ||
+        (byte >= '0'.ord && byte <= '9'.ord) ||
+        byte == '_'.ord
+    end
+
     private def type_param_map_debug_string : String
       return "" if @type_param_map.empty?
       @type_param_map.map { |param, actual| "#{param}=#{actual}" }.join(",")
@@ -24710,10 +24723,12 @@ module Crystal::HIR
 
     private def short_type_param_name?(name : String) : Bool
       return false if name.empty?
-      if name.size == 1
-        return name[0].uppercase?
+      bytes = name.to_unsafe
+      size = name.bytesize
+      if size == 1
+        return ascii_upper_alpha?(bytes[0])
       end
-      return name.size == 2 && name[0].uppercase? && name[1].ascii_number?
+      return size == 2 && ascii_upper_alpha?(bytes[0]) && (bytes[1] >= '0'.ord && bytes[1] <= '9'.ord)
     end
 
     private def value_literal_name?(name : String) : Bool
@@ -24723,8 +24738,20 @@ module Crystal::HIR
 
     private def type_param_like?(name : String) : Bool
       return false if name.empty?
-      return false if name.includes?("::")
-      return false unless name.matches?(/\A[A-Z][A-Za-z0-9_]*\z/)
+      bytesize = name.bytesize
+      bytes = name.to_unsafe
+      return false unless ascii_upper_alpha?(bytes[0])
+      i = 1
+      while i < bytesize
+        byte = bytes[i]
+        if byte == ':'.ord
+          # "Foo::Bar" is never a type parameter.
+          return false if i + 1 < bytesize && bytes[i + 1] == ':'.ord
+          return false
+        end
+        return false unless ascii_alnum_or_underscore?(byte)
+        i += 1
+      end
       return false if primitive_self_type(name)
       return false if builtin_alias_target?(name)
       return false if @class_info.has_key?(name)
@@ -24790,7 +24817,6 @@ module Crystal::HIR
 
     private def type_name_includes_param?(type_name : String, param_name : String) : Bool
       return false if param_name.empty?
-      return false unless type_name.includes?(param_name)
       # Fast word-boundary check without Regex allocation
       search_from = 0
       while (idx = type_name.index(param_name, search_from))

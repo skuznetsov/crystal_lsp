@@ -4238,3 +4238,34 @@ crystal build -Ddebug_hooks src/crystal_v2.cr -o bin/crystal_v2 --no-debug
         - run2: `459 -> 330`
   - Notes:
     - `process_pending_lower_functions`/`Hasher#bytes` remained noisy across runs; treat this as a targeted string-scan micro-optimization, not a broad wall-time claim.
+
+### 8.52 Remove regex/double-scan overhead in type-param detection paths (2026-02-17)
+
+- [x] Replace regex/string-double-scan checks in hot type-param helpers with ASCII byte scans.
+  - Root cause:
+    - `type_param_like?` used `includes?("::")` + regex `matches?(/\A[A-Z][A-Za-z0-9_]*\z/)`.
+    - `type_name_includes_param?` did `includes?(param)` before looping with `index(param, ...)`, scanning twice.
+  - Code fix:
+    - file: `src/compiler/hir/ast_to_hir.cr`
+    - added tiny ASCII helpers:
+      - `ascii_upper_alpha?(byte : UInt8)`
+      - `ascii_alnum_or_underscore?(byte : UInt8)`
+    - rewrote:
+      - `short_type_param_name?` to byte checks (`A` / `A0` forms),
+      - `type_param_like?` to one-pass ASCII validation with early `::` rejection (no regex),
+      - `type_name_includes_param?` to use only boundary-aware `index` loop (removed pre-`includes?`).
+  - DoD / evidence:
+    - `scripts/build.sh release` => `EXIT 0`
+    - `regression_tests/run_all.sh bin/crystal_v2` => `41 passed, 0 failed`
+    - `CRYSTAL_V2_PIPELINE_CACHE=0 CRYSTAL_V2_LLVM_CACHE=0 bin/crystal_v2 examples/bootstrap_array.cr -o /tmp/bootstrap_array_type_param_scan && scripts/run_safe.sh /tmp/bootstrap_array_type_param_scan 10 768` => `EXIT 0`
+    - self-host sample A/B with rebuild on both sides (`sleep 15`, `sample 10s`), two independent runs:
+      - run1:
+        - `type_param_like?<String>`: `49 -> 8`
+        - `String#includes?<String>`: `253 -> 205`
+        - `String#index<String, Int32>`: `77 -> 64`
+      - run2:
+        - `type_param_like?<String>`: `56 -> 12`
+        - `String#includes?<String>`: `270 -> 224`
+        - `String#index<String, Int32>`: `92 -> 75`
+  - Notes:
+    - broader frames (`type_ref_for_name`, `process_pending_lower_functions`) stayed noisy across runs; this is a targeted hot-helper optimization.
