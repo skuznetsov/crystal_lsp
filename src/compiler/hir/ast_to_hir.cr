@@ -6856,7 +6856,7 @@ module Crystal::HIR
                     next if member.is_abstract
 
                     method_name = String.new(member.name)
-                    base_name = "#{class_name}##{method_name}"
+                    base_name = join_owner_method_name(class_name, '#', method_name)
 
                     # Early skip: if the class already defines this method (base_name), skip
                     # the expensive type resolution below. The class's own def takes priority.
@@ -7062,6 +7062,14 @@ module Crystal::HIR
         end
       end
       offset
+    end
+
+    private def join_owner_method_name(owner : String, separator : Char, method_name : String) : String
+      String.build(owner.bytesize + method_name.bytesize + 1) do |io|
+        io << owner
+        io << separator
+        io << method_name
+      end
     end
 
     # Resolve an unqualified module name against progressively shorter owner namespaces.

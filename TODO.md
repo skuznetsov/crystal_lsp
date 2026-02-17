@@ -3959,3 +3959,30 @@ crystal build -Ddebug_hooks src/crystal_v2.cr -o bin/crystal_v2 --no-debug
       - targeted fallback marker line reduced:
         - `ast_to_hir.cr:20978`: `82 -> 50 / 49`
       - note: run stage shifted deeper (`lower_call` appears in after-runs), so this is treated as directional hotspot reduction, not isolated wall-clock proof.
+
+### 8.42 Replace hot method-base interpolation with pre-sized builder (2026-02-17)
+
+- [x] Remove `String::interpolation` hotspot in included-method registration.
+  - Root cause:
+    - `register_module_instance_methods_for` built `base_name` via interpolation:
+      - `base_name = "#{class_name}##{method_name}"`
+    - sample showed this exact site (`ast_to_hir.cr:6859`) allocating frequently and triggering GC in hot include registration loops.
+  - Code fix:
+    - file: `src/compiler/hir/ast_to_hir.cr`
+    - added helper:
+      - `join_owner_method_name(owner : String, separator : Char, method_name : String) : String`
+      - uses `String.build` with pre-sized capacity.
+    - replaced interpolation at include method registration:
+      - `base_name = join_owner_method_name(class_name, '#', method_name)`
+  - DoD / evidence:
+    - `scripts/build.sh release` => `EXIT 0`
+    - `regression_tests/run_all.sh bin/crystal_v2` => `41 passed, 0 failed`
+    - `CRYSTAL_V2_PIPELINE_CACHE=0 CRYSTAL_V2_LLVM_CACHE=0 bin/crystal_v2 examples/bootstrap_array.cr -o /tmp/bootstrap_array_join_owner_method_name && scripts/run_safe.sh /tmp/bootstrap_array_join_owner_method_name 10 768` => `EXIT 0`
+    - self-host 5s sample comparison (directional):
+      - baseline `/tmp/self_profile_after845b.sample.txt`
+      - after `/tmp/self_profile_after846.sample.txt`, `/tmp/self_profile_after846b.sample.txt`
+      - interpolation hotspot reduced while same path stayed hot:
+        - `String::interpolation<String, String, String>:String`: `76 -> 24 / 28`
+        - `register_module_instance_methods_for<`: `311 -> 308 / 341` (same area still active)
+      - helper usage visible:
+        - `join_owner_method_name`: `75 / 75`
