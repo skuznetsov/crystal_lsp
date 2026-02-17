@@ -2018,6 +2018,7 @@ module Crystal::HIR
     @debug_resolve_histo : Hash(String, Int32)?
     @debug_resolve_histo_last_report : Time::Instant?
     @debug_resolve_histo_calls : Int32
+    @source_macro_marker_cache : Hash(UInt64, Bool)
 
     # Temporary arena switching context for cross-file yield inlining:
     # {caller_arena, callee_arena}
@@ -2324,6 +2325,7 @@ module Crystal::HIR
       @debug_resolve_histo = nil
       @debug_resolve_histo_last_report = nil
       @debug_resolve_histo_calls = 0
+      @source_macro_marker_cache = Hash(UInt64, Bool).new(initial_capacity: 128)
       @short_type_index = {} of String => Set(String)
       @top_level_type_names = Set(String).new
       @top_level_class_kinds = {} of String => Bool
@@ -20973,6 +20975,7 @@ module Crystal::HIR
 
       # Fallback: scan source spans for "yield" tokens when AST misses it (macro/recovery paths).
       if source = @sources_by_arena[resolved_arena]?
+        return false unless source_has_macro_markers?(source)
         scan_body_source = true
         if snippet = slice_source_for_span(node.span, source)
           has_macro = snippet.includes?("{%") || snippet.includes?("{{")
@@ -20990,6 +20993,16 @@ module Crystal::HIR
         end
       end
       false
+    end
+
+    private def source_has_macro_markers?(source : String) : Bool
+      source_id = source.object_id
+      if cached = @source_macro_marker_cache[source_id]?
+        return cached
+      end
+      has_markers = source.includes?("{%") || source.includes?("{{")
+      @source_macro_marker_cache[source_id] = has_markers
+      has_markers
     end
 
     private def def_contains_block_call?(node : CrystalV2::Compiler::Frontend::DefNode, arena : CrystalV2::Compiler::Frontend::ArenaLike) : Bool

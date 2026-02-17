@@ -3907,3 +3907,30 @@ crystal build -Ddebug_hooks src/crystal_v2.cr -o bin/crystal_v2 --no-debug
         - `function_def_overloads`: `168 -> 141 / 155`
       - targeted hotspot collapse in re-assert section:
         - `ast_to_hir.cr:14097`: `88 -> 1 / 0`
+
+### 8.40 Cache macro-marker presence per source in yield fallback (2026-02-17)
+
+- [x] Avoid repeated full-source macro-marker scans in `def_contains_yield_uncached?`.
+  - Root cause:
+    - yield-fallback path checks macro markers (`"{%"`, `"{{"`) on the same source many times during class/method registration.
+    - each check used `String#includes?` over full source and showed up in sampling stacks.
+  - Code fix:
+    - file: `src/compiler/hir/ast_to_hir.cr`
+    - added cache field:
+      - `@source_macro_marker_cache : Hash(UInt64, Bool)`
+    - initialized cache in `initialize`.
+    - added helper:
+      - `source_has_macro_markers?(source : String) : Bool`
+      - key is `source.object_id` (stable per source object) and value is marker presence.
+    - in `def_contains_yield_uncached?` fallback:
+      - early return `false` when source has no macro markers, before span/body snippet scans.
+  - DoD / evidence:
+    - `scripts/build.sh release` => `EXIT 0`
+    - `regression_tests/run_all.sh bin/crystal_v2` => `41 passed, 0 failed`
+    - `CRYSTAL_V2_PIPELINE_CACHE=0 CRYSTAL_V2_LLVM_CACHE=0 bin/crystal_v2 examples/bootstrap_array.cr -o /tmp/bootstrap_array_macro_cache && scripts/run_safe.sh /tmp/bootstrap_array_macro_cache 10 768` => `EXIT 0`
+    - self-host 5s sample comparison:
+      - baseline `/tmp/self_profile_after843b.sample.txt`
+      - after `/tmp/self_profile_after844.sample.txt`, `/tmp/self_profile_after844b.sample.txt`
+      - directional deltas:
+        - `def_contains_yield_uncached?`: `176 -> 89 / 113`
+        - `ast_to_hir.cr:20978`: `113 -> 66 / 82`
