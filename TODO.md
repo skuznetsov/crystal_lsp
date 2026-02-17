@@ -3689,3 +3689,27 @@ crystal build -Ddebug_hooks src/crystal_v2.cr -o bin/crystal_v2 --no-debug
         - `register_concrete_class`: `915 -> 835/854`
         - `def_contains_yield_uncached?`: `137 -> 97/96`
         - `type_ref_for_name`: `724 -> 534/579`
+
+### 8.31 Canonicalize stripped overload base via lookup helper (2026-02-17)
+
+- [x] Align stripped-overload indexing with lookup normalization to remove cold compatibility fallback scans.
+  - Root cause:
+    - stripped index build used a different normalization path than lookup (`overload_stripped_base_name` via method parse vs lookup using `strip_generic_receiver_for_lookup`), which could leave lookups in fallback scan path.
+    - sampled fallback markers stayed hot in some runs.
+  - Code fix:
+    - file: `src/compiler/hir/ast_to_hir.cr`
+    - simplified `overload_stripped_base_name`:
+      - for names with generic receiver (`includes?('(')`), use `strip_generic_receiver_for_lookup(base)` directly;
+      - otherwise return `base` unchanged.
+    - this keeps stripped-index keys consistent with lookup-side stripping.
+  - DoD / evidence:
+    - `scripts/build.sh release` => `EXIT 0`
+    - `regression_tests/run_all.sh bin/crystal_v2` => `41 passed, 0 failed`
+    - `CRYSTAL_V2_PIPELINE_CACHE=0 CRYSTAL_V2_LLVM_CACHE=0 bin/crystal_v2 examples/bootstrap_array.cr -o /tmp/bootstrap_array_after_overload_strip_unify && scripts/run_safe.sh /tmp/bootstrap_array_after_overload_strip_unify 10 768` => `EXIT 0`
+    - self-host 5s samples:
+      - baseline `/tmp/self_profile_after832b.sample.txt`
+      - after `/tmp/self_profile_after833.sample.txt`, `/tmp/self_profile_after833b.sample.txt`
+      - fallback scan markers removed in both after samples:
+        - `ast_to_hir.cr:19380`: `167 -> 0 / 0`
+        - `ast_to_hir.cr:19314`: `39 -> 0 / 0`
+        - `ast_to_hir.cr:19473`: `37 -> 0 / 0`

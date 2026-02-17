@@ -19276,16 +19276,8 @@ module Crystal::HIR
     # Resolve a single overload when argument types are unknown (all VOID).
     # Uses arity + block presence to avoid calling an unmangled base name.
     private def overload_stripped_base_name(base : String) : String
-      return base unless base.includes?('#') || base.includes?('.')
-      parts = parse_method_name_compact(base)
-      return base unless parts.separator && parts.method
-      owner_base = strip_generic_args(parts.owner)
-      method_name = parts.method.not_nil!
-      if parts.separator == '#'
-        "#{owner_base}##{method_name}"
-      else
-        "#{owner_base}.#{method_name}"
-      end
+      return base unless base.includes?('(')
+      strip_generic_receiver_for_lookup(base)
     end
 
     private def ensure_full_stripped_overload_index : Nil
