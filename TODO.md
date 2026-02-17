@@ -4751,15 +4751,17 @@ crystal build -Ddebug_hooks src/crystal_v2.cr -o bin/crystal_v2 --no-debug
       - `timeout 240 crystal spec spec/mir/llvm_backend_spec.cr` => `59 examples, 0 failures`
       - `regression_tests/run_all.sh bin/crystal_v2` => `41 passed, 0 failed`
       - `CRYSTAL_V2_PIPELINE_CACHE=0 bin/crystal_v2 examples/bootstrap_array.cr -o /tmp/bootstrap_array_cp_single_block && scripts/run_safe.sh /tmp/bootstrap_array_cp_single_block 10 768` => `EXIT 0`
-    - perf (strict A/B with identical flags and caches disabled):
+    - perf (strict binary A/B with identical flags and caches disabled):
+      - baseline binary: `/tmp/crystal_v2_cp_single_block_baseline_bin`
+      - experiment binary: `/tmp/crystal_v2_cp_single_block_experiment_bin`
       - baseline log: `/tmp/self_pass_timing_cp_single_block_baseline.log`
       - experiment log: `/tmp/self_pass_timing_cp_single_block_experiment.log`
       - command:
-        - `CRYSTAL_V2_AST_CACHE=0 CRYSTAL_V2_PIPELINE_CACHE=0 CRYSTAL_V2_LLVM_CACHE=0 CRYSTAL_V2_MIR_PASS_TIMING=1 CRYSTAL_V2_CP_PHASE_TIMING=1 CRYSTAL_V2_STOP_AFTER_MIR=1 bin/crystal_v2 --stats --release src/compiler/driver.cr ...`
+        - `CRYSTAL_V2_AST_CACHE=0 CRYSTAL_V2_PIPELINE_CACHE=0 CRYSTAL_V2_LLVM_CACHE=0 CRYSTAL_V2_MIR_PASS_TIMING=1 CRYSTAL_V2_CP_PHASE_TIMING=1 CRYSTAL_V2_STOP_AFTER_MIR=1 <binary> --stats --release src/compiler/driver.cr ...`
       - delta (experiment vs baseline):
-        - `apply_build_dominators`: `45679.2ms -> 45386.8ms` (`-0.64%`)
-        - `copy_propagation`: `46058.7ms -> 45470.8ms` (`-1.28%`)
-        - `mir_opt`: `48047.7ms -> 47543.4ms` (`-1.05%`)
-        - `total`: `104262.0ms -> 103958.5ms` (`-0.29%`)
+        - `apply_build_dominators`: `45969.8ms -> 45212.2ms` (`-1.65%`)
+        - `copy_propagation`: `46068.9ms -> 45309.2ms` (`-1.65%`)
+        - `mir_opt`: `47526.1ms -> 47314.9ms` (`-0.44%`)
+        - `total`: `103810.9ms -> 103899.7ms` (`+0.09%`)
   - Insight:
-    - improvement is modest but consistent under controlled A/B and safely reduces hot-path dominance overhead without changing semantics.
+    - targeted hotspot reduction is confirmed (`copy_propagation`/`apply_build_dominators`), while end-to-end total is neutral in this single-run A/B due variance in other MIR passes.
