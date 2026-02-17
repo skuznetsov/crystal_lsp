@@ -234,6 +234,40 @@ describe "CrystalV2::Compiler::Frontend::Parser" do
       CrystalV2::Compiler::Frontend.node_kind(value).should eq(CrystalV2::Compiler::Frontend::NodeKind::ProcLiteral)
     end
 
+    it "parses multiline typed proc params in do/end form inside method bodies" do
+      source = <<-CRYSTAL
+      def foo
+        worker = ->(
+          owner : String,
+          count : Int32
+        ) do
+          count
+        end
+        worker
+      end
+
+      def bar
+        1
+      end
+      CRYSTAL
+
+      parser = CrystalV2::Compiler::Frontend::Parser.new(CrystalV2::Compiler::Frontend::Lexer.new(source))
+      program = parser.parse_program
+
+      # The proc literal end must not terminate the surrounding def body.
+      # Both defs should remain top-level roots.
+      program.roots.size.should eq(2)
+      arena = program.arena
+
+      foo = arena[program.roots[0]]
+      CrystalV2::Compiler::Frontend.node_kind(foo).should eq(CrystalV2::Compiler::Frontend::NodeKind::Def)
+      String.new(foo.as(CrystalV2::Compiler::Frontend::DefNode).name).should eq("foo")
+
+      bar = arena[program.roots[1]]
+      CrystalV2::Compiler::Frontend.node_kind(bar).should eq(CrystalV2::Compiler::Frontend::NodeKind::Def)
+      String.new(bar.as(CrystalV2::Compiler::Frontend::DefNode).name).should eq("bar")
+    end
+
     it "parses proc with empty body" do
       source = "-> { }"
 

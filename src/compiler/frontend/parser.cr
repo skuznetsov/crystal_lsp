@@ -5308,11 +5308,17 @@ module CrystalV2
 
           if current_token.kind == Token::Kind::LParen
             advance # consume (
-            skip_trivia
+            # Allow multiline proc parameter lists:
+            # ->(
+            #   x : Int32,
+            #   y : String
+            # ) do ... end
+            skip_statement_end
 
             # Parse parameter list
             unless current_token.kind == Token::Kind::RParen
               loop do
+                skip_statement_end
                 name_token = current_token
                 unless name_token.kind == Token::Kind::Identifier
                   emit_unexpected(name_token)
@@ -5355,10 +5361,16 @@ module CrystalV2
                   nil # no default span
                 )
 
+                # Allow newline before delimiter, e.g.:
+                # ->(
+                #   x : Int32
+                # ) do ... end
+                skip_statement_end
+
                 # Check for comma or closing )
                 if current_token.kind == Token::Kind::Comma
                   advance
-                  skip_trivia
+                  skip_statement_end
                 elsif current_token.kind == Token::Kind::RParen
                   break
                 else
@@ -5368,8 +5380,9 @@ module CrystalV2
               end
             end
 
+            skip_statement_end
             advance # consume )
-            skip_trivia
+            skip_statement_end
           end
 
           # Parse optional return type: : ReturnType

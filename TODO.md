@@ -4966,3 +4966,32 @@ crystal build -Ddebug_hooks src/crystal_v2.cr -o bin/crystal_v2 --no-debug
         - crash point remains `trace_driver$$String` (`EXC_BAD_ACCESS`, null deref), called from `__crystal_main`.
   - Insight:
     - first-stage self-host compile is now passing again; remaining blocker shifted from LLVM IR invalidity to stage2 runtime segfault during compile execution.
+
+### 8.76 Parser: multiline `->(...) do ... end` proc params no longer terminate outer `def` early (2026-02-17)
+
+- [x] Fix parser recovery hole where newline-heavy typed proc params caused `parse_proc_literal` to fail and leak trailing method code to outer scopes.
+  - Root cause:
+    - `parse_proc_literal` expected parameter identifiers immediately after `(` and delimiters immediately after each type annotation.
+    - for multiline parameter lists, newline tokens were not skipped in these points, leading to:
+      - `emit_unexpected: Newline` in proc parsing,
+      - premature outer `def` termination on the proc `end`,
+      - method tail parsed as class/module or top-level statements/defs.
+  - Code fix:
+    - file: `src/compiler/frontend/parser.cr`
+      - in `parse_proc_literal`:
+        - use `skip_statement_end` after `(`,
+        - use `skip_statement_end` at each param-iteration start,
+        - use `skip_statement_end` before checking `,`/`)`,
+        - use `skip_statement_end` after `,` and before consuming `)`.
+  - Regression test:
+    - file: `spec/parser/parser_proc_literal_spec.cr`
+      - added spec: `parses multiline typed proc params in do/end form inside method bodies`
+      - asserts parser keeps both enclosing defs (`foo`, `bar`) as top-level roots.
+  - DoD / evidence:
+    - `crystal spec spec/parser/parser_proc_literal_spec.cr` => `15 examples, 0 failures`
+    - minimal repro (`/tmp/lambda_do_typed_repro.cr`) now parses as:
+      - `roots=2`, `root[0]=Def foo`, `root[1]=Def bar`
+      - no leaked `NumberNode`/`IdentifierNode` at top level.
+    - parser sanity on `src/compiler/driver.cr`:
+      - top-level def leakage removed (`top_defs=0`),
+      - class body no longer truncated (`class_body=65`).
