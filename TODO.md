@@ -3713,3 +3713,30 @@ crystal build -Ddebug_hooks src/crystal_v2.cr -o bin/crystal_v2 --no-debug
         - `ast_to_hir.cr:19380`: `167 -> 0 / 0`
         - `ast_to_hir.cr:19314`: `39 -> 0 / 0`
         - `ast_to_hir.cr:19473`: `37 -> 0 / 0`
+
+### 8.32 Precompute class inline `self` owner outside lambda (2026-02-17)
+
+- [x] Remove repeated owner-name resolution inside `inline_yield_function` apply lambda.
+  - Root cause:
+    - in class-inline path without explicit receiver, `apply_inline` lambda recomputed `method_owner(base_inline_name)` and fallback `@current_class` on every invocation.
+    - this is invariant for the whole `inline_yield_function` call and only needed once.
+  - Code fix:
+    - file: `src/compiler/hir/ast_to_hir.cr`
+    - in `inline_yield_function`:
+      - precompute `inline_self_class_name : String?` once before `apply_inline`;
+      - resolve `method_owner(base_inline_name)` + `@current_class` fallback once;
+      - inside lambda, bind class `self` only when `inline_self_class_name` is present.
+    - no behavior changes for receiver-bound inline path.
+  - DoD / evidence:
+    - `scripts/build.sh release` => `EXIT 0`
+    - `regression_tests/run_all.sh bin/crystal_v2` => `41 passed, 0 failed`
+    - `CRYSTAL_V2_PIPELINE_CACHE=0 CRYSTAL_V2_LLVM_CACHE=0 bin/crystal_v2 examples/bootstrap_array.cr -o /tmp/bootstrap_array_after_inline_selfcache && scripts/run_safe.sh /tmp/bootstrap_array_after_inline_selfcache 10 768` => `EXIT 0`
+    - directional self-host sample (5s):
+      - baseline `/tmp/self_profile_after833b.sample.txt`
+      - after `/tmp/self_profile_after834.sample.txt`
+      - parsed aggregate counters in captured call graph:
+        - `inline_yield_function`: `835 -> 557`
+        - `lower_type_literal_from_name`: `6 -> 3`
+    - note:
+      - full self-host compile used for sampling ended with existing backend issue unrelated to this change:
+        - `opt: ... error: null must be a pointer type`

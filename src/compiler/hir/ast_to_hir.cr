@@ -49194,17 +49194,21 @@ module Crystal::HIR
         end
         result_value = nil_value(ctx)
         callee_is_class = class_method?(base_inline_name)
+        inline_self_class_name : String? = nil
+        if !receiver_id && callee_is_class
+          owner_name = method_owner(base_inline_name)
+          if owner_name.empty?
+            owner_name = @current_class || ""
+          end
+          inline_self_class_name = owner_name unless owner_name.empty?
+        end
         apply_inline = -> do
           # Bind `self` for inlined callee.
           if receiver_id
             ctx.register_local("self", receiver_id)
             ctx.register_type(receiver_id, ctx.type_of(receiver_id))
           elsif callee_is_class
-            class_name = method_owner(base_inline_name)
-            if class_name.empty?
-              class_name = @current_class || ""
-            end
-            unless class_name.empty?
+            if class_name = inline_self_class_name
               class_self = lower_type_literal_from_name(ctx, class_name)
               ctx.register_local("self", class_self)
               ctx.register_type(class_self, ctx.type_of(class_self))
