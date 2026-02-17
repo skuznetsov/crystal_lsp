@@ -4298,3 +4298,33 @@ crystal build -Ddebug_hooks src/crystal_v2.cr -o bin/crystal_v2 --no-debug
         - `escape`: `92009.9ms -> 660.8ms` (~`-99.3%`)
         - `total`: `316090.2ms -> 213670.8ms` (~`-32.4%`)
         - `mir_opt`: `158499.8ms -> 151466.2ms` (secondary improvement, likely reduced pressure).
+
+### 8.54 Skip guaranteed-noop MIR passes via per-function hints (2026-02-17)
+
+- [x] Reduce MIR optimization wall time by gating expensive passes when a function lacks relevant instruction kinds.
+  - Root cause:
+    - `OptimizationPipeline#run` always executed all passes (`ConstantFolding`, `LocalCSE`, `RCElision`, `CopyPropagation`, `LockElision`, and two `DCE` runs) for every MIR function.
+    - for many functions, several passes are provable no-ops (no candidate instructions), but still pay full traversal/setup cost.
+  - Code fix:
+    - file: `src/compiler/mir/optimizations.cr`
+    - added `OptimizationHints` and `collect_hints` (single scan over instructions) to detect:
+      - binary-op presence (for constant folding),
+      - CSE candidates,
+      - RC ops,
+      - copy-propagation candidates,
+      - lock ops.
+    - pass gating in `OptimizationPipeline#run`:
+      - run `ConstantFoldingPass` only when binary ops exist,
+      - run `LocalCSEPass` only when CSE candidates exist,
+      - run `RCElisionPass` only when RC ops exist,
+      - run `CopyPropagationPass` only when copy-prop candidates exist,
+      - run `LockElisionPass` only when lock ops exist.
+    - second DCE pass now runs only if first DCE removed at least one instruction.
+  - DoD / evidence:
+    - `scripts/build.sh release` => `EXIT 0`
+    - `regression_tests/run_all.sh bin/crystal_v2` => `41 passed, 0 failed`
+    - `CRYSTAL_V2_PIPELINE_CACHE=0 CRYSTAL_V2_LLVM_CACHE=0 bin/crystal_v2 examples/bootstrap_array.cr -o /tmp/bootstrap_array_mir_hints && scripts/run_safe.sh /tmp/bootstrap_array_mir_hints 10 768` => `EXIT 0`
+    - self-host timing A/B with `CRYSTAL_V2_STOP_AFTER_MIR=1 ... --stats`:
+      - before (`/tmp/stop_after_mir_patch.log`): `mir_opt=151466.2ms`, `total=213670.8ms`
+      - after (`/tmp/stop_after_mir_hints.log`): `mir_opt=145992.7ms`, `total=206960.9ms`
+      - delta: `mir_opt -5473.5ms` (~`-3.6%`), `total -6709.9ms` (~`-3.1%`).

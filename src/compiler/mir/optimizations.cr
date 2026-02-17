@@ -1607,6 +1607,13 @@ module Crystal::MIR
   end
 
   class OptimizationPipeline
+    private record OptimizationHints,
+      has_binary : Bool,
+      has_cse_candidate : Bool,
+      has_rc_ops : Bool,
+      has_cp_candidate : Bool,
+      has_lock_ops : Bool
+
     getter function : Function
     getter stats : OptimizationStats
 
@@ -1616,39 +1623,104 @@ module Crystal::MIR
 
     # Run all optimization passes
     def run : OptimizationStats
+      hints = collect_hints
+
       # Pass 1: Constant folding (enables more DCE)
-      cf = ConstantFoldingPass.new(@function)
-      @stats.constants_folded = cf.run
+      if hints.has_binary
+        cf = ConstantFoldingPass.new(@function)
+        @stats.constants_folded = cf.run
+      end
 
       # Pass 1.5: Local CSE for pure ops within blocks
-      cse = LocalCSEPass.new(@function)
-      @stats.cse_eliminated = cse.run
+      if hints.has_cse_candidate
+        cse = LocalCSEPass.new(@function)
+        @stats.cse_eliminated = cse.run
+      end
 
       # Pass 2: RC elision (Crystal-specific)
-      rc = RCElisionPass.new(@function)
-      @stats.rc_eliminated = rc.run
+      if hints.has_rc_ops
+        rc = RCElisionPass.new(@function)
+        @stats.rc_eliminated = rc.run
+      end
 
       # Pass 2.5: Copy propagation (light)
-      cp = CopyPropagationPass.new(@function)
-      @stats.copies_propagated = cp.run
+      if hints.has_cp_candidate
+        cp = CopyPropagationPass.new(@function)
+        @stats.copies_propagated = cp.run
+      end
 
       # Pass 2.75: Peephole simplifications
       ph = PeepholePass.new(@function)
       @stats.peephole_simplified = ph.run
 
       # Pass 3: Lock elision (thread-safety optimization)
-      le = LockElisionPass.new(@function)
-      @stats.locks_elided = le.run
+      if hints.has_lock_ops
+        le = LockElisionPass.new(@function)
+        @stats.locks_elided = le.run
+      end
 
       # Pass 4: Dead code elimination
       dce = DeadCodeEliminationPass.new(@function)
       @stats.dead_eliminated = dce.run
 
-      # Pass 5: DCE again (RC/lock elision may have created more dead code)
-      dce2 = DeadCodeEliminationPass.new(@function)
-      @stats.dead_eliminated += dce2.run
+      # Pass 5: DCE again only when the first pass changed the block graph.
+      # If pass 4 removed nothing, pass 5 is guaranteed to be a no-op.
+      if @stats.dead_eliminated > 0
+        dce2 = DeadCodeEliminationPass.new(@function)
+        @stats.dead_eliminated += dce2.run
+      end
 
       @stats
+    end
+
+    private def collect_hints : OptimizationHints
+      has_binary = false
+      has_cse_candidate = false
+      has_rc_ops = false
+      has_cp_candidate = false
+      has_lock_ops = false
+
+      @function.blocks.each do |block|
+        block.instructions.each do |inst|
+          case inst
+          when BinaryOp
+            has_binary = true
+            has_cse_candidate = true
+            has_cp_candidate = true
+          when UnaryOp
+            has_cse_candidate = true
+          when Cast
+            has_cse_candidate = true
+            has_cp_candidate = true
+          when GetElementPtr, GetElementPtrDynamic
+            has_cse_candidate = true
+          when Load, Select, Phi
+            has_cp_candidate = true
+          when RCIncrement, RCDecrement
+            has_rc_ops = true
+          when MutexLock, MutexUnlock, MutexTryLock
+            has_lock_ops = true
+          end
+
+          if has_binary && has_cse_candidate && has_rc_ops && has_cp_candidate && has_lock_ops
+            return OptimizationHints.new(
+              has_binary: has_binary,
+              has_cse_candidate: has_cse_candidate,
+              has_rc_ops: has_rc_ops,
+              has_cp_candidate: has_cp_candidate,
+              has_lock_ops: has_lock_ops
+            )
+          end
+        end
+      end
+
+      OptimizationHints.new(
+        has_binary: has_binary,
+        has_cse_candidate: has_cse_candidate,
+        has_rc_ops: has_rc_ops,
+        has_cp_candidate: has_cp_candidate,
+        has_lock_ops: has_lock_ops
+      )
     end
 
     # Run specific passes
