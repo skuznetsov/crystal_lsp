@@ -1775,9 +1775,22 @@ module Crystal::MIR
       @blocks.each { |b| b.predecessors.clear }
 
       @blocks.each do |block|
-        block.terminator.successors.each do |succ_id|
+        succ_ids = block.terminator.successors
+        if succ_ids.size > 1
+          seen = Set(BlockId).new
+          succ_ids.each do |succ_id|
+            next if seen.includes?(succ_id)
+            seen << succ_id
+            if succ = @block_map[succ_id]?
+              succ.predecessors << block.id
+            end
+          end
+          next
+        end
+
+        succ_ids.each do |succ_id|
           if succ = @block_map[succ_id]?
-            succ.predecessors << block.id unless succ.predecessors.includes?(block.id)
+            succ.predecessors << block.id
           end
         end
       end

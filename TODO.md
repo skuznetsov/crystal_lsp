@@ -4845,3 +4845,36 @@ crystal build -Ddebug_hooks src/crystal_v2.cr -o bin/crystal_v2 --no-debug
           - `mir_opt`: `-29.17%`
   - Insight:
     - CP/MIR improvement is consistent across both runs; `total` remains noisy due unrelated phase variance, so follow-up benchmarking should use median of 3-5 runs.
+
+### 8.73 MIR CFG: cheaper predecessor collection without per-edge includes? scan (2026-02-17)
+
+- [x] Remove linear `includes?` checks from `compute_predecessors` hot path while preserving duplicate-edge safety.
+  - Root cause:
+    - dominator build calls `compute_predecessors`; previous implementation did `succ.predecessors.includes?(block.id)` for every edge.
+    - this added avoidable O(k) scans per inserted edge.
+  - Code fix:
+    - file: `src/compiler/mir/mir.cr`
+      - in `Function#compute_predecessors`:
+        - for multi-successor terminators, deduplicate successors per source block using local `seen : Set(BlockId)` and append predecessor directly.
+        - for single-successor case, append predecessor directly (no duplicate possible per source block).
+      - removed per-edge `includes?` scan on target predecessor arrays.
+  - DoD / evidence:
+    - correctness:
+      - `scripts/build.sh release` => `EXIT 0`
+      - `timeout 240 crystal spec spec/hir/return_type_inference_spec.cr` => `13 examples, 0 failures`
+      - `timeout 240 crystal spec spec/mir/llvm_backend_spec.cr` => `59 examples, 0 failures`
+      - `regression_tests/run_all.sh bin/crystal_v2` => `41 passed, 0 failed`
+      - `CRYSTAL_V2_PIPELINE_CACHE=0 bin/crystal_v2 examples/bootstrap_array.cr -o /tmp/bootstrap_array_predopt && scripts/run_safe.sh /tmp/bootstrap_array_predopt 10 768` => `EXIT 0`
+    - perf (strict binary A/B with identical flags and caches disabled):
+      - baseline binary: `/tmp/crystal_v2_predopt_baseline_bin`
+      - experiment binary: `/tmp/crystal_v2_predopt_experiment_bin`
+      - logs:
+        - baseline: `/tmp/self_pass_timing_predopt_baseline.log`
+        - experiment: `/tmp/self_pass_timing_predopt_experiment.log`
+      - delta (experiment vs baseline):
+        - `apply_build_dominators`: `34107.8ms -> 33278.4ms` (`-2.43%`)
+        - `copy_propagation`: `34557.0ms -> 33406.9ms` (`-3.33%`)
+        - `mir_opt`: `36050.4ms -> 35254.7ms` (`-2.21%`)
+        - `total`: `96607.7ms -> 95832.4ms` (`-0.80%`)
+  - Insight:
+    - small CFG bookkeeping cleanup yields measurable end-to-end gains because dominator construction remains the dominant CP subphase.
