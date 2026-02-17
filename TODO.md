@@ -3547,3 +3547,31 @@ crystal build -Ddebug_hooks src/crystal_v2.cr -o bin/crystal_v2 --no-debug
       - `resolve_type_name_in_context`: `228 -> 212`
       - `register_function_type`: `133 -> 93`
       - no correctness regressions observed in regression/bootstrap DoD checks.
+
+### 8.25 Gate builtin shadow checks by active type context (2026-02-17)
+
+- [x] Avoid unnecessary builtin shadow resolution in `type_ref_for_name`.
+  - Root cause:
+    - builtin branch always attempted `resolve_class_name_in_context` and `resolve_nested_builtin_shadow`, even when there is no class/namespace context where builtins can be shadowed.
+    - in samples this sat directly on `type_ref_for_name` hot lines.
+  - Code fix:
+    - file: `src/compiler/hir/ast_to_hir.cr`
+    - in builtin branch, introduced:
+      - `has_builtin_shadow_context = !!@current_class || !!@current_namespace_override`
+    - now call context-heavy resolution only when `has_builtin_shadow_context` is true:
+      - `resolve_class_name_in_context` (for unqualified builtin names)
+      - `resolve_nested_builtin_shadow`
+    - builtin fast return path is unchanged for semantics and still preserves shadow behavior where context exists.
+  - DoD / evidence:
+    - `scripts/build.sh release` => `EXIT 0`
+    - `regression_tests/run_all.sh bin/crystal_v2` => `41 passed, 0 failed`
+    - `CRYSTAL_V2_PIPELINE_CACHE=0 CRYSTAL_V2_LLVM_CACHE=0 bin/crystal_v2 examples/bootstrap_array.cr -o /tmp/bootstrap_array_after_builtin_shadow_gate && scripts/run_safe.sh /tmp/bootstrap_array_after_builtin_shadow_gate 10 768` => `EXIT 0`
+    - self-host 5s sample window (`/tmp/self_profile_after824b.sample.txt` -> `/tmp/self_profile_after825.sample.txt`):
+      - targeted hot lines in `type_ref_for_name`:
+        - `ast_to_hir.cr:54925`: `18 -> 1`
+        - `ast_to_hir.cr:54933`: `77 -> 0`
+      - nearby context resolution line:
+        - `ast_to_hir.cr:54917`: `105 -> 85`
+      - broader counters stayed stable/improved in the same window:
+        - `rebuild_function_def_overloads`: `51 -> 47`
+        - `type_ref_for_name`: `743 -> 734`

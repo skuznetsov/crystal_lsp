@@ -54921,7 +54921,8 @@ module Crystal::HIR
       end
 
       if BUILTIN_TYPE_NAMES.includes?(lookup_name)
-        if !lookup_name.includes?("::")
+        has_builtin_shadow_context = !!@current_class || !!@current_namespace_override
+        if has_builtin_shadow_context && !lookup_name.includes?("::")
           resolved = resolve_class_name_in_context(lookup_name)
           if resolved != lookup_name
             return type_ref_for_name(resolved)
@@ -54930,12 +54931,14 @@ module Crystal::HIR
         # Before returning builtin type, check if there's a nested type
         # that shadows this name in the current context or namespace override
         # (e.g., WUInt::UInt128 should resolve to the record, not global UInt128).
-        if shadow = resolve_nested_builtin_shadow(lookup_name)
-          if env_get("DEBUG_WUINT128") && lookup_name == "UInt128"
-            STDERR.puts "[DEBUG_WUINT128] Found nested shadow: #{shadow}, returning nested type directly"
+        if has_builtin_shadow_context
+          if shadow = resolve_nested_builtin_shadow(lookup_name)
+            if env_get("DEBUG_WUINT128") && lookup_name == "UInt128"
+              STDERR.puts "[DEBUG_WUINT128] Found nested shadow: #{shadow}, returning nested type directly"
+            end
+            invalidate_resolved_type_name_cache_for(lookup_name)
+            return type_ref_for_name(shadow)
           end
-          invalidate_resolved_type_name_cache_for(lookup_name)
-          return type_ref_for_name(shadow)
         end
         # No nested shadow found, return builtin type
         if builtin_ref = builtin_type_ref_for(lookup_name)
