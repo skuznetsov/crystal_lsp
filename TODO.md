@@ -30,7 +30,7 @@
   - `src/compiler/lsp/ast_cache.cr`
     - bumped cache format version `v3 -> v4`;
     - fixed missing string-table collection for `StringInterpolationNode` text pieces;
-    - added explicit `SplatNode` serialization in `write_node` (special-case path).
+    - retained dedicated `SplatNode` serialization path in `write_node` (special-case path).
   - `src/compiler/cli.cr`
     - added cached-root sanity check (`arena[expr_id]`) immediately after cache load;
     - wrapped cached require traversal with `IndexError` fallback to source parse;
