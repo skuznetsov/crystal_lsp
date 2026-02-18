@@ -845,6 +845,7 @@ module CrystalV2
         mir_lowering.register_union_types(hir_converter.union_descriptors)
         mir_lowering.register_class_types(hir_converter.class_info)
         mir_lowering.register_enum_types(hir_converter.enum_names, hir_module.types)
+        mir_lowering.register_module_types(hir_module.types)
         mir_lowering.register_tuple_types(hir_module.types)
 
         STDERR.puts "  Lowering #{hir_module.functions.size} functions to MIR..." if options.progress

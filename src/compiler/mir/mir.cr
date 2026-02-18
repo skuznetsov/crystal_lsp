@@ -1830,6 +1830,7 @@ module Crystal::MIR
     getter globals : Array(GlobalVar)
     getter extern_globals : Hash(String, TypeRef)
     getter union_descriptors : Hash(TypeRef, UnionDescriptor)
+    getter module_type_refs : Set(TypeRef)
     property source_file : String?
 
     @next_function_id : FunctionId = 0_u32
@@ -1842,6 +1843,7 @@ module Crystal::MIR
       @globals = [] of GlobalVar
       @extern_globals = {} of String => TypeRef
       @union_descriptors = {} of TypeRef => UnionDescriptor
+      @module_type_refs = Set(TypeRef).new
     end
 
     # Register a union type with full descriptor for debug info
@@ -1852,6 +1854,16 @@ module Crystal::MIR
     # Get union descriptor by type ref
     def get_union_descriptor(type_ref : TypeRef) : UnionDescriptor?
       @union_descriptors[type_ref]?
+    end
+
+    # Register a TypeRef as a module runtime value type.
+    # Module literals use singleton globals keyed by this set in LLVM lowering.
+    def register_module_type(type_ref : TypeRef)
+      @module_type_refs.add(type_ref)
+    end
+
+    def module_type?(type_ref : TypeRef) : Bool
+      @module_type_refs.includes?(type_ref)
     end
 
     def add_global(name : String, type : TypeRef, initial_value : Int64? = nil)

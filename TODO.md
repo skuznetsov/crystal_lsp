@@ -22,6 +22,38 @@
 - Float64: arithmetic, ** on literals
 
 ## Recently completed
+- **ByteFormat EOF + module-literal vdispatch stabilization (2026-02-18)** —
+  fixed the remaining `test_byteformat_decode_u32` failure after the earlier
+  `unsafe_as`/specialization fixes.
+  Root causes:
+  - module literals were lowered as `null` pointers in MIR/LLVM, so module
+    vdispatch could read invalid `type_id`;
+  - vdispatch cache key was only `call.method_name`, so an early narrow
+    call-site could poison later wider dispatch tables;
+  - inherited wrappers with parent-owned method names were sometimes lowered
+    non-virtual (`IO::Memory#read_fully -> IO#read_fully?`);
+  - virtual resolver arity fallback could pick wrong typed overload
+    (`<<$Char` resolving to `<<$String`).
+  Changes:
+  - `src/compiler/mir/mir.cr`
+    - added `@module_type_refs` with `register_module_type/module_type?`.
+  - `src/compiler/mir/hir_to_mir.cr`
+    - added `register_module_types(hir_module.types)`;
+    - vdispatch name now includes static receiver type id (`...$$T<id>`);
+    - force virtual dispatch for parent-owned instance calls on class receivers;
+    - restricted arity-only fallback in `_resolve_virtual_walk` to bare
+      method names (no `$` suffix).
+  - `src/compiler/mir/llvm_backend.cr`
+    - emit stable module singleton globals (`@.module.singleton.<type_id>`) and
+      lower module `nil` constants to pointers to those globals;
+    - fixed static-dot-method dispatch argument coercion in unified vdispatch.
+  - `src/compiler/cli.cr`, `src/compiler/driver.cr`
+    - register module types before MIR lowering.
+  Validation:
+  - `CRYSTAL_V2_PIPELINE_CACHE=0 /tmp/crystal_v2_modlitfix5 regression_tests/test_byteformat_decode_u32.cr -o /tmp/test_byteformat_modlitfix5 && scripts/run_safe.sh /tmp/test_byteformat_modlitfix5 10 768`
+    => `EXIT 0`, stdout `byteformat_u32_ok`.
+  - `CRYSTAL_V2_PIPELINE_CACHE=0 regression_tests/run_all.sh /tmp/crystal_v2_modlitfix5`
+    => `42 passed, 0 failed`.
 - **ByteFormat `read_bytes(UInt32, ...)` crash fix (2026-02-18)** —
   fixed two linked root causes in lowering:
   - partial-untyped method specialization was being dropped back to

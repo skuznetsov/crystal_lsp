@@ -363,6 +363,7 @@ module Crystal::MIR
     @alloc_element_types : Hash(ValueId, TypeRef)  # For GEP element type lookup
     @array_info : Hash(ValueId, {String, Int32})  # Array element_type and size
     @string_constants : Hash(String, String)  # String value -> global name
+    @module_singleton_globals : Hash(TypeRef, String)  # Module type -> singleton global name
     @emitted_value_types : Hash(String, String)  # SSA name -> LLVM type (per function)
     @emitted_allocas : Set(ValueId) = Set(ValueId).new  # Track pre-emitted allocas
     @addressable_allocas : Hash(ValueId, String) = {} of ValueId => String  # operand_id -> alloca SSA name
@@ -486,6 +487,7 @@ module Crystal::MIR
       @alloc_element_types = {} of ValueId => TypeRef
       @array_info = {} of ValueId => {String, Int32}
       @string_constants = {} of String => String
+      @module_singleton_globals = {} of TypeRef => String
       @emitted_value_types = {} of String => String
 
       # Type metadata
@@ -1507,7 +1509,42 @@ module Crystal::MIR
       end
     end
 
+    private def module_singleton_global_for(type_ref : TypeRef) : String
+      if existing = @module_singleton_globals[type_ref]?
+        return existing
+      end
+
+      global_name = "@.module.singleton.#{type_ref.id}"
+      @module_singleton_globals[type_ref] = global_name
+      global_name
+    end
+
+    private def collect_module_singleton_globals
+      @module.functions.each do |func|
+        func.blocks.each do |block|
+          block.instructions.each do |inst|
+            next unless inst.is_a?(Constant)
+            next unless inst.value.is_a?(Nil)
+            next unless @module.module_type?(inst.type)
+            module_singleton_global_for(inst.type)
+          end
+        end
+      end
+    end
+
+    private def emit_module_singleton_globals
+      return if @module_singleton_globals.empty?
+
+      @module_singleton_globals.each do |type_ref, global_name|
+        # Runtime module value: pointer to a stable cell whose first i32 is type_id.
+        # vdispatch reads this header exactly like class instance type_id.
+        emit_raw "#{global_name} = private global i32 #{type_ref.id.to_i32}, align 4\n"
+      end
+    end
+
     private def emit_global_variables
+      collect_module_singleton_globals
+
       # Collect all defined globals
       defined_globals = Set(String).new
       @module.globals.each do |global|
@@ -1626,8 +1663,9 @@ module Crystal::MIR
           end
         end
       end
+      emit_module_singleton_globals
 
-      emit_raw "\n" unless @module.globals.empty? && referenced_globals.empty?
+      emit_raw "\n" unless @module.globals.empty? && referenced_globals.empty? && @module_singleton_globals.empty?
     end
 
     private def emit(s : String)
@@ -6604,6 +6642,16 @@ module Crystal::MIR
       if v = inst.value.as?(String)
         global_name = get_or_create_string_global(v)
         # String constant is a pointer to the global
+        @constant_values[inst.id] = global_name
+        emit "#{name} = bitcast ptr #{global_name} to ptr"
+        @value_types[inst.id] = TypeRef::POINTER
+        return
+      end
+
+      # Module literal constants use stable singleton globals, not null pointers.
+      # This keeps module-typed virtual dispatch safe (no null type_id load).
+      if inst.value.is_a?(Nil) && @module.module_type?(inst.type)
+        global_name = module_singleton_global_for(inst.type)
         @constant_values[inst.id] = global_name
         emit "#{name} = bitcast ptr #{global_name} to ptr"
         @value_types[inst.id] = TypeRef::POINTER

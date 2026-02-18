@@ -732,6 +732,7 @@ module Crystal::V2
 
       # Register class/struct types with their fields
       mir_lowering.register_class_types(hir_converter.class_info)
+      mir_lowering.register_module_types(hir_module.types)
       # Register tuple types so tuple element access uses struct GEPs
       mir_lowering.register_tuple_types(hir_module.types)
 

@@ -301,6 +301,29 @@ module Crystal
       end
     end
 
+    # Register module types so module literals can be represented as runtime singletons.
+    # This prevents lowering module values as null pointers (which breaks vdispatch).
+    def register_module_types(type_descriptors : Array(Crystal::HIR::TypeDescriptor))
+      type_descriptors.each_with_index do |desc, idx|
+        next unless desc.kind == Crystal::HIR::TypeKind::Module
+
+        hir_ref = Crystal::HIR::TypeRef.new(Crystal::HIR::TypeRef::FIRST_USER_TYPE + idx.to_u32)
+        mir_ref = convert_type(hir_ref)
+
+        unless @mir_module.type_registry.get(mir_ref)
+          @mir_module.type_registry.create_type_with_id(
+            mir_ref.id,
+            TypeKind::Reference,
+            desc.name,
+            8_u64,
+            8_u32
+          )
+        end
+
+        @mir_module.register_module_type(mir_ref)
+      end
+    end
+
     # Register tuple/named tuple types from HIR descriptors.
     # This enables tuple element access to lower as struct GEPs instead of array layout.
     def register_tuple_types(type_descriptors : Array(Crystal::HIR::TypeDescriptor))
@@ -1176,7 +1199,20 @@ module Crystal
         end
       end
 
-      if call.virtual
+      # Some inherited wrappers are lowered with `virtual = false` but still call a
+      # parent-owned instance method on `self` (e.g. IO::Memory#read_fully ->
+      # IO#read_fully?). Treat these as virtual to preserve dynamic dispatch.
+      force_virtual_dispatch = false
+      if !call.virtual && call.receiver && recv_desc && recv_desc.kind == HIR::TypeKind::Class
+        if hash_pos = call.method_name.index('#')
+          owner_name = call.method_name.byte_slice(0, hash_pos)
+          if owner_name != recv_desc.name && !call.method_name.includes?("_super")
+            force_virtual_dispatch = true
+          end
+        end
+      end
+
+      if call.virtual || force_virtual_dispatch
         if dispatched = lower_virtual_dispatch(call, args)
           return dispatched
         end
@@ -1556,26 +1592,42 @@ module Crystal
         if call_func
           callee_param_count = call_func.params.size
           coerced_args = cand_args
+          # Module/class dispatch can route to static methods (dot methods) whose
+          # signature does not include receiver `self`. In that case, drop the
+          # dispatch receiver argument before coercion.
+          drop_dispatch_receiver = callee_param_count == cand_args.size - 1 &&
+                                   call_func.name.includes?('.') &&
+                                   !call_func.name.includes?('#')
           if hir_call
             recv_id = hir_call.receiver
-            if callee_param_count == cand_args.size
+            hir_args_with_receiver = recv_id ? [recv_id] + hir_call.args : hir_call.args
+            effective_args = cand_args
+            effective_hir_args = hir_args_with_receiver
+            if drop_dispatch_receiver
+              effective_args = cand_args[1, callee_param_count]
+              effective_hir_args = hir_call.args
+            end
+
+            if callee_param_count == effective_args.size
               # Same param count — pass all args including receiver
-              hir_args_with_receiver = recv_id ? [recv_id] + hir_call.args : hir_call.args
-              coerced_args = coerce_call_args(dispatch_builder, cand_args, hir_args_with_receiver, call_func)
-            elsif callee_param_count < cand_args.size
-              # Callee has fewer params (e.g. subclass doesn't take optional arg).
-              # Truncate dispatch args to match callee's param count, keeping receiver.
-              truncated_args = cand_args[0, callee_param_count]
-              hir_args_with_receiver = recv_id ? [recv_id] + hir_call.args : hir_call.args
-              truncated_hir = hir_args_with_receiver[0, callee_param_count]? || hir_args_with_receiver
+              coerced_args = coerce_call_args(dispatch_builder, effective_args, effective_hir_args, call_func)
+            elsif callee_param_count < effective_args.size
+              # Callee has fewer params (e.g. optional arg dropped by overload).
+              # Truncate effective dispatch args to match callee's arity.
+              truncated_args = effective_args[0, callee_param_count]
+              truncated_hir = effective_hir_args[0, callee_param_count]? || effective_hir_args
               coerced_args = coerce_call_args(dispatch_builder, truncated_args, truncated_hir, call_func)
             else
               # Callee expects more args than dispatch provides — pass all, let coercion handle it
-              hir_args_with_receiver = recv_id ? [recv_id] + hir_call.args : hir_call.args
-              coerced_args = coerce_call_args(dispatch_builder, cand_args, hir_args_with_receiver, call_func)
+              coerced_args = coerce_call_args(dispatch_builder, effective_args, effective_hir_args, call_func)
             end
-          elsif callee_param_count < cand_args.size
-            coerced_args = cand_args[0, callee_param_count]
+          else
+            effective_args = drop_dispatch_receiver ? cand_args[1, callee_param_count] : cand_args
+            if callee_param_count < effective_args.size
+              coerced_args = effective_args[0, callee_param_count]
+            else
+              coerced_args = effective_args
+            end
           end
 
           call_val = dispatch_builder.call(call_func.id, coerced_args, dispatch_func.return_type)
@@ -1643,7 +1695,16 @@ module Crystal
       end
       return nil if old_candidates.empty?
 
-      dispatch_name = "__vdispatch__#{call.method_name}"
+      # vdispatch cache key must include the static receiver type.
+      # Otherwise, an early narrow call-site (e.g. IO::FileDescriptor) can
+      # create a truncated dispatch table that is incorrectly reused by wider
+      # call-sites (e.g. IO), causing missing runtime variants.
+      dispatch_name = String.build(call.method_name.bytesize + 24) do |io|
+        io << "__vdispatch__"
+        io << call.method_name
+        io << "$T"
+        io << recv_type.id
+      end
       if existing = @mir_module.get_function(dispatch_name)
         return @builder.not_nil!.call(existing.id, args, existing.return_type)
       end
@@ -2052,6 +2113,7 @@ module Crystal
       allow_module_method : Bool
     ) : Function?
       # Pre-compute the base method name (before '$') once
+      has_explicit_suffix = method_suffix.includes?('$')
       base_method = if dollar = method_suffix.index('$')
                       method_suffix[0, dollar]
                     else
@@ -2106,7 +2168,10 @@ module Crystal
           end
         end
 
-        if arg_count
+        # Arity-only fallback is safe only for bare method names.
+        # For typed/mangled suffixes (contains '$'), returning by arity alone can
+        # select a wrong overload (e.g. <<$Char -> <<$String) and corrupt ABI.
+        if arg_count && !has_explicit_suffix
           # Use class index + pre-computed prefix (avoids O(N) full scan + GC from interpolation)
           instance_prefix = String.build(current.bytesize + 1 + base_method.bytesize) do |io|
             io << current; io << '#'; io << base_method
