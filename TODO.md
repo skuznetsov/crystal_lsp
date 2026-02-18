@@ -6,6 +6,9 @@
   - `regression_tests/test_select_map_stress.cr`
   - `regression_tests/test_float_pow_var.cr`
   - `regression_tests/test_string_upcase_large.cr`
+- Numeric `puts`/`to_s` formatting path is still unstable for integer types
+  (`puts 123` currently prints only newline). This is orthogonal to the
+  ByteFormat crash fix below and needs a separate root-cause pass in `Int#to_s`.
 
 ## Working Features
 - Basic output: puts String/Int32/Float64, string interpolation
@@ -19,6 +22,34 @@
 - Float64: arithmetic, ** on literals
 
 ## Recently completed
+- **ByteFormat `read_bytes(UInt32, ...)` crash fix (2026-02-18)** —
+  fixed two linked root causes in lowering:
+  - partial-untyped method specialization was being dropped back to
+    `IO#read_bytes$IO::ByteFormat` (lost `UInt32` callsite type);
+  - `unsafe_as` for `Int* <-> StaticArray(UInt8, N)` was lowered as
+    pointer/int address casts (`inttoptr/ptrtoint`) instead of bit reinterpretation.
+  Changes:
+  - `src/compiler/hir/ast_to_hir.cr`
+    - preserve callsite mangling for defs with at least one untyped regular param
+      (`def_has_untyped_regular_param?`) in both lookup and
+      `prefer_callsite_specialization` path;
+    - removed temporary `DEBUG_READ_BYTES_TYPES` tracing blocks.
+  - `src/compiler/mir/hir_to_mir.cr`
+    - added `unsafe_as` reinterpretation lowering for
+      `integer <-> StaticArray(UInt8, N)` via stack buffer `alloc + store/load`
+      when byte sizes match.
+  - `regression_tests/test_byteformat_decode_u32.cr`
+    - regression marker switched from raw integer print to semantic check
+      (`byteformat_u32_ok`) to avoid false negatives from the separate
+      integer `puts` bug.
+  Validation:
+  - build: `crystal build src/crystal_v2.cr -o /tmp/crystal_v2_dbg_fix3 --error-trace` => `EXIT 0`
+  - crash repro: `/tmp/crystal_v2_dbg_fix3 regression_tests/test_byteformat_decode_u32.cr -o /tmp/test_byteformat_fix3_bin && scripts/run_safe.sh /tmp/test_byteformat_fix3_bin 10 512`
+    => `EXIT 0`, stdout contains `byteformat_u32_ok`.
+  - lldb backtrace before fix pointed to
+    `StaticArray(UInt8,4)#reverse!` with invalid address `0x12345678`;
+    after fix, generated LLVM for `IO::ByteFormat::LittleEndian.encode(Int32, IO)`
+    uses stack `alloca` + `store i32` and decode returns `load i32`.
 - **HIR arena repair for lazy-specialized methods (2026-02-18)** —
   fixed a root-cause where typed call-site names could keep a stale
   `@function_def_arenas` mapping to the caller arena, causing OOB `ExprId`

@@ -2406,6 +2406,27 @@ module Crystal
         end
       end
 
+      # unsafe_as between integer and StaticArray(UInt8, N) must reinterpret bits,
+      # not convert integer values to addresses (inttoptr/ptrtoint).
+      if !cast.safe
+        if int_like.call(src_hir_type)
+          if byte_len = staticarray_u8_length(dst_hir_type)
+            if byte_len == type_size(src_hir_type)
+              align = byte_len < 8 ? byte_len.to_u32 : 8_u32
+              tmp = builder.alloc(MemoryStrategy::Stack, dst_type, byte_len.to_u64, align)
+              builder.store(tmp, value)
+              return tmp
+            end
+          end
+        elsif int_like.call(dst_hir_type)
+          if byte_len = staticarray_u8_length(src_hir_type)
+            if byte_len == type_size(dst_hir_type)
+              return builder.load(value, dst_type)
+            end
+          end
+        end
+      end
+
       # Unsafe bitcast for numeric types of the same size (unsafe_as semantics).
       if !cast.safe
         if (int_like.call(src_hir_type) && float_like.call(dst_hir_type)) ||
@@ -2444,6 +2465,19 @@ module Crystal
 
       result = builder.cast(kind, value, dst_type)
       result
+    end
+
+    private def staticarray_u8_length(type_ref : HIR::TypeRef) : Int32?
+      desc = @hir_module.get_type_descriptor(type_ref)
+      return nil unless desc
+      name = desc.name
+      return nil unless name.starts_with?("StaticArray(")
+      if match = name.match(/^StaticArray\((.+),\s*(\d+)\)$/)
+        element = match[1].strip
+        return nil unless element == "UInt8" || element == "Int8"
+        return match[2].to_i
+      end
+      nil
     end
 
     private def lower_is_a(isa : HIR::IsA) : ValueId

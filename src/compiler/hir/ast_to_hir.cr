@@ -19905,7 +19905,7 @@ module Crystal::HIR
 
       def_node = @function_defs[base_method_name]? || @function_defs[resolved_name]?
       return nil unless def_node
-      return nil unless def_params_untyped?(def_node)
+      return nil unless def_has_untyped_regular_param?(def_node)
 
       callsite = mangle_function_name(base_method_name, arg_types, has_block_call)
       return nil if callsite == resolved_name
@@ -42293,7 +42293,14 @@ module Crystal::HIR
         entry_def = entry[1]
         base_method_name = strip_type_suffix(entry_name)
         if entry_name.includes?('$')
-          mangled_method_name = entry_name
+          # Entry key may encode only annotated params (e.g. IO#read_bytes$IO::ByteFormat).
+          # When concrete callsite args are available for untyped params, preserve
+          # specialization by remangling with full arg_types.
+          if !arg_types.empty? && def_has_untyped_regular_param?(entry_def) && arg_types.any? { |t| t != TypeRef::VOID }
+            mangled_method_name = mangle_function_name(base_method_name, arg_types, has_block_call)
+          else
+            mangled_method_name = entry_name
+          end
         elsif !arg_types.empty?
           untyped_params = true
           if params = entry_def.params
@@ -55045,6 +55052,24 @@ module Crystal::HIR
       end
 
       has_regular
+    end
+
+    private def def_has_untyped_regular_param?(func_def : CrystalV2::Compiler::Frontend::DefNode) : Bool
+      params = func_def.params
+      return false unless params
+
+      params.each do |param|
+        next if named_only_separator?(param) || param.is_block || param.is_double_splat
+        if ta = param.type_annotation
+          type_name = String.new(ta)
+          return true if type_name == "_"
+          return true if type_param_like?(type_name) && !@type_param_map.has_key?(type_name) && short_type_param_name?(type_name)
+        else
+          return true
+        end
+      end
+
+      false
     end
 
     private def type_ref_for_name(name : String) : TypeRef
