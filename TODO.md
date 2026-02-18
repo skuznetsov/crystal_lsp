@@ -6,9 +6,10 @@
   - `regression_tests/test_select_map_stress.cr`
   - `regression_tests/test_float_pow_var.cr`
   - `regression_tests/test_string_upcase_large.cr`
-- Cache-warm compilations can still produce stale false regressions in some
-  files (observed as collapsed string literals like `"i123i123..."`).
-  For validation runs, use no-cache mode until cache invalidation is tightened.
+- AST cache (`--ast-cache` / `CRYSTAL_V2_AST_CACHE=1`) is still unstable:
+  warm cache can produce corrupted AST loads (`error: Index out of bounds`)
+  or wrong output on some files. Default compiler mode now runs with AST cache off.
+  Follow-up needed: fix AST serializer/deserializer integrity, then re-enable by default.
 
 ## Working Features
 - Basic output: puts String/Int32/Float64, string interpolation
@@ -22,6 +23,27 @@
 - Float64: arithmetic, ** on literals
 
 ## Recently completed
+- **Compiler AST-cache guardrails + hard invalidation header (2026-02-18)** —
+  stabilized default bootstrap/regression flow by turning compiler AST cache off
+  by default, and hardened AST cache header invalidation for explicit cache mode.
+  Changes:
+  - `src/compiler/cli.cr`
+    - default `ast_cache` now `false` unless explicitly enabled
+      (`--ast-cache` or `CRYSTAL_V2_AST_CACHE=1`).
+  - `src/compiler/lsp/ast_cache.cr`
+    - cache header version bumped `v2 -> v3`;
+    - added compiler fingerprint (`path|size|mtime_ns`) to cache header and load check;
+    - added exact source `mtime_ns` to cache header and load check.
+  Validation:
+  - default-mode targeted checks (`/tmp/crystal_v2_cacheguard_dbg`):
+    - `regression_tests/test_string_to_u64.cr` => `I=123 U8=123 U16=123 U32=123 U64=123`;
+    - `regression_tests/hash_stress.cr` => `hash_stress_ok`;
+  - full regressions (default mode): `regression_tests/run_all.sh /tmp/crystal_v2_cacheguard_dbg`
+    => `43 passed, 0 failed`;
+  - bootstrap smoke (default mode):
+    `CRYSTAL_V2_PIPELINE_CACHE=0 /tmp/crystal_v2_cacheguard_dbg examples/bootstrap_array.cr -o /tmp/bootstrap_array_cacheguard_dbg && scripts/run_safe.sh /tmp/bootstrap_array_cacheguard_dbg 10 768`
+    => `EXIT 0`.
+
 - **LLVM signed narrow-int to pointer coercion fix (2026-02-18)** —
   fixed negative `Int32` corruption in generic `Int#to_s`/`puts` paths caused by
   direct `inttoptr i32` (effectively zero-extending on 64-bit targets).
