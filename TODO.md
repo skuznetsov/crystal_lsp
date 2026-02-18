@@ -19,6 +19,25 @@
 - Float64: arithmetic, ** on literals
 
 ## Recently completed
+- **HIR arena repair for lazy-specialized methods (2026-02-18)** —
+  fixed a root-cause where typed call-site names could keep a stale
+  `@function_def_arenas` mapping to the caller arena, causing OOB `ExprId`
+  lookups during `lower_method` and invalid no-arg calls (observed as
+  `IO#write_string()` inside `Array(String)#join$IO::FileDescriptor_Char`).
+  Change in `src/compiler/hir/ast_to_hir.cr`:
+  - validate `method_arena` against Def body/span before lowering expressions;
+  - repair via `resolve_arena_for_def` when stale;
+  - refresh `@function_def_arenas[full_name]` to the repaired arena.
+  Validation:
+  - `crystal build src/crystal_v2.cr -o /tmp/crystal_v2_dbg_joinarena_fix --error-trace` => `EXIT 0`
+  - `DEBUG_CALL_TRACE=write_string,join /tmp/crystal_v2_dbg_joinarena_fix /tmp/repro_join.cr -o /tmp/repro_join_after --emit hir --no-link --no-ast-cache --no-llvm-cache --no-mir-opt`:
+    `LOWER_METHOD` for `Array(String)#join$IO::FileDescriptor_Char` now uses correct stdlib arena and no `inspect_failed`.
+  - HIR check: `/tmp/repro_join_after.hir` contains full loop body for
+    `Array(String)#join$IO::FileDescriptor_Char` (no degenerate `IO#write_string()` call).
+  - LLVM check: `/tmp/repro_join_after.ll*` has no `write_string(ptr ..., ptr null)`.
+  - runtime repro: `/tmp/crystal_v2_dbg_joinarena_fix /tmp/repro_join.cr -o /tmp/repro_join_after_bin ... && /tmp/repro_join_after_bin` => `EXIT 0`, output:
+    `a` / `b` on separate lines.
+  - regressions: `./regression_tests/run_all.sh /tmp/crystal_v2_dbg_joinarena_fix` => `41 passed, 0 failed`.
 - **Perf triage ledger (rejected experiments, 2026-02-15)** — recorded and reverted
   several SAFE perf branches that improved sub-metrics but regressed/stayed flat on
   end-to-end `real` for

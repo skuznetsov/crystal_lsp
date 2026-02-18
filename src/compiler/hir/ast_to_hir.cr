@@ -17344,6 +17344,24 @@ module Crystal::HIR
                            else
                              @function_def_arenas[full_name]? || @arena
                            end
+            # Repair stale arena mappings for lazily-specialized names.
+            # If a typed call-site name was previously mapped to the caller arena,
+            # expression IDs in the Def body become out-of-bounds and lower_expr
+            # can silently degenerate into invalid calls (e.g. dropped args).
+            if !body.empty?
+              max_index = body_max_index_for_def(node)
+              if max_index >= method_arena.size || !span_fits_source?(method_arena, node.span)
+                repaired_arena = resolve_arena_for_def(node, method_arena)
+                if repaired_arena != method_arena
+                  method_arena = repaired_arena
+                  set_function_def_arena(full_name, repaired_arena)
+                  if debug_env_filter_match?("DEBUG_METHOD_ARENA_USE", class_name, method_name, full_name)
+                    path = source_path_for(repaired_arena) || "(unknown)"
+                    STDERR.puts "[METHOD_ARENA_USE] repaired full=#{full_name} method=#{path}:#{repaired_arena.size}"
+                  end
+                end
+              end
+            end
             if debug_env_filter_match?("DEBUG_METHOD_ARENA_USE", class_name, method_name, full_name)
               stored_full = @function_def_arenas[full_name]?
               stored_base = @function_def_arenas[base_name]?
