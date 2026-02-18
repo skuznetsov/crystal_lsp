@@ -19,6 +19,14 @@ module Crystal::MIR
   alias FunctionId = UInt32
   alias TypeId = UInt32
 
+  {% if flag?(:i386) || flag?(:arm) || flag?(:wasm32) %}
+    TARGET_POINTER_BYTES_U64 = 4_u64
+    TARGET_POINTER_ALIGN_U32 = 4_u32
+  {% else %}
+    TARGET_POINTER_BYTES_U64 = 8_u64
+    TARGET_POINTER_ALIGN_U32 = 8_u32
+  {% end %}
+
   # ═══════════════════════════════════════════════════════════════════════════
   # MEMORY STRATEGY (assigned during HIR → MIR lowering)
   # ═══════════════════════════════════════════════════════════════════════════
@@ -212,9 +220,9 @@ module Crystal::MIR
       register_primitive(TypeRef::FLOAT32, TypeKind::Float32, "Float32", 4, 4)
       register_primitive(TypeRef::FLOAT64, TypeKind::Float64, "Float64", 8, 8)
       register_primitive(TypeRef::CHAR, TypeKind::Char, "Char", 4, 4)
-      register_primitive(TypeRef::STRING, TypeKind::Reference, "String", 8, 8)
+      register_primitive(TypeRef::STRING, TypeKind::Reference, "String", TARGET_POINTER_BYTES_U64, TARGET_POINTER_ALIGN_U32)
       register_primitive(TypeRef::SYMBOL, TypeKind::Symbol, "Symbol", 4, 4)
-      register_primitive(TypeRef::POINTER, TypeKind::Pointer, "Pointer", 8, 8)
+      register_primitive(TypeRef::POINTER, TypeKind::Pointer, "Pointer", TARGET_POINTER_BYTES_U64, TARGET_POINTER_ALIGN_U32)
     end
 
     private def register_primitive(ref : TypeRef, kind : TypeKind, name : String, size : UInt64, alignment : UInt32)
@@ -494,7 +502,7 @@ module Crystal::MIR
       @strategy : MemoryStrategy,
       @alloc_type : TypeRef,
       @size : UInt64 = 0_u64,
-      @align : UInt32 = 8_u32
+      @align : UInt32 = TARGET_POINTER_ALIGN_U32
     )
       super(id, type)
     end
@@ -1967,7 +1975,7 @@ module Crystal::MIR
     end
 
     # Memory operations
-    def alloc(strategy : MemoryStrategy, alloc_type : TypeRef, size : UInt64 = 0_u64, align : UInt32 = 8_u32) : ValueId
+    def alloc(strategy : MemoryStrategy, alloc_type : TypeRef, size : UInt64 = 0_u64, align : UInt32 = TARGET_POINTER_ALIGN_U32) : ValueId
       # Result type is pointer to alloc_type
       alloc = Alloc.new(@function.next_value_id, TypeRef::POINTER, strategy, alloc_type, size, align)
       alloc.no_alias = true
