@@ -2492,7 +2492,7 @@ module Crystal::MIR
       emit_raw "entry:\n"
       # Allocate 24-byte Crystal Array header
       emit_raw "  %arr = call ptr @__crystal_v2_malloc64(i64 24)\n"
-      emit_raw "  store i32 0, ptr %arr\n"  # type_id = 0
+      emit_raw "  store i32 #{array_runtime_type_id_for_element(TypeRef::INT32)}, ptr %arr\n"
       emit_raw "  %sz_ptr = getelementptr i8, ptr %arr, i32 4\n"
       emit_raw "  store i32 %size, ptr %sz_ptr\n"  # @size = size
       emit_raw "  %cap_ptr = getelementptr i8, ptr %arr, i32 8\n"
@@ -2523,7 +2523,7 @@ module Crystal::MIR
       emit_raw "define ptr @__crystal_v2_array_new_filled_bool(i32 %size, i1 %val) {\n"
       emit_raw "entry:\n"
       emit_raw "  %arr = call ptr @__crystal_v2_malloc64(i64 24)\n"
-      emit_raw "  store i32 0, ptr %arr\n"
+      emit_raw "  store i32 #{array_runtime_type_id_for_element(TypeRef::BOOL)}, ptr %arr\n"
       emit_raw "  %sz_ptr = getelementptr i8, ptr %arr, i32 4\n"
       emit_raw "  store i32 %size, ptr %sz_ptr\n"
       emit_raw "  %cap_ptr = getelementptr i8, ptr %arr, i32 8\n"
@@ -2565,7 +2565,8 @@ module Crystal::MIR
       emit_raw "  %b_buf = load ptr, ptr %b_buf_ptr\n"
       # Allocate new array header (24 bytes)
       emit_raw "  %arr = call ptr @__crystal_v2_malloc64(i64 24)\n"
-      emit_raw "  store i32 0, ptr %arr\n"
+      emit_raw "  %a_tid = load i32, ptr %a\n"
+      emit_raw "  store i32 %a_tid, ptr %arr\n"
       emit_raw "  %sz_ptr = getelementptr i8, ptr %arr, i32 4\n"
       emit_raw "  store i32 %total, ptr %sz_ptr\n"
       emit_raw "  %cap_ptr = getelementptr i8, ptr %arr, i32 8\n"
@@ -2921,7 +2922,7 @@ module Crystal::MIR
       emit_raw "count_done:\n"
       emit_raw "  %num_segs = add i32 %count, 1\n"
       emit_raw "  %arr = call ptr @__crystal_v2_malloc64(i64 24)\n"
-      emit_raw "  store i32 0, ptr %arr\n"  # type_id=0 placeholder
+      emit_raw "  store i32 #{array_runtime_type_id_for_element(TypeRef::STRING)}, ptr %arr\n"
       emit_raw "  %arr_sz = getelementptr i8, ptr %arr, i32 4\n"
       emit_raw "  store i32 %num_segs, ptr %arr_sz\n"
       emit_raw "  %arr_cap = getelementptr i8, ptr %arr, i32 8\n"
@@ -11088,12 +11089,34 @@ module Crystal::MIR
     # Array Operations
     # ─────────────────────────────────────────────────────────────────────────
 
+    # Resolve runtime type_id for Array(T) from the registered MIR type table.
+    # Returns 0 when the specialized Array(T) type is not available.
+    private def array_runtime_type_id_for_element(element_type_ref : TypeRef) : Int32
+      if elem_type = @module.type_registry.get(element_type_ref)
+        array_name = String.build(elem_type.name.bytesize + 7) do |io|
+          io << "Array("
+          io << elem_type.name
+          io << ')'
+        end
+        if array_type = @module.type_registry.get_by_name(array_name)
+          return array_type.id.to_i32
+        end
+        if ENV["DEBUG_ARRAY_TID"]?
+          STDERR.puts "[ARRAY_TID] miss array_name=#{array_name} elem_ref=#{element_type_ref.id} elem=#{elem_type.name}"
+        end
+      elsif ENV["DEBUG_ARRAY_TID"]?
+        STDERR.puts "[ARRAY_TID] no_elem_type elem_ref=#{element_type_ref.id}"
+      end
+      0_i32
+    end
+
     private def emit_array_literal(inst : ArrayLiteral, name : String)
       base_name = name.lstrip('%')
       element_type = @type_mapper.llvm_type(inst.element_type)
       # Void is not valid for array elements - use ptr instead
       element_type = "ptr" if element_type == "void"
       size = inst.size
+      array_type_id = array_runtime_type_id_for_element(inst.element_type)
 
       # For empty array literals (size 0), try to call Array(T).new(0) constructor
       # to get a proper heap-allocated Array object. This is critical when the
@@ -11109,6 +11132,12 @@ module Crystal::MIR
           ctor_func = @module.functions.find { |f| mangle_function_name(f.name) == ctor_name }
           if ctor_func
             emit "#{name} = call ptr @#{ctor_name}(i32 0)"
+            # Some constructor paths still leave array type_id as 0; patch it here
+            # so module-method vdispatch on Indexable works for empty arrays.
+            if array_type_id != 0
+              emit "%#{base_name}.tid_fix_ptr = getelementptr i8, ptr #{name}, i32 0"
+              emit "store i32 #{array_type_id}, ptr %#{base_name}.tid_fix_ptr"
+            end
             @array_info[inst.id] = {element_type, size}
             return
           end
@@ -11152,7 +11181,7 @@ module Crystal::MIR
 
       # Store type_id at offset 0
       emit "%#{base_name}.tid_ptr = getelementptr i8, ptr %#{base_name}.ptr, i32 0"
-      emit "store i32 0, ptr %#{base_name}.tid_ptr"
+      emit "store i32 #{array_type_id}, ptr %#{base_name}.tid_ptr"
 
       # Store @size at offset 4
       emit "%#{base_name}.size_ptr = getelementptr i8, ptr %#{base_name}.ptr, i32 4"
@@ -11308,6 +11337,7 @@ module Crystal::MIR
       capacity_val = value_ref(inst.capacity_value)
       element_type = @type_mapper.llvm_type(inst.element_type_ref)
       element_type = "ptr" if element_type == "void"
+      array_type_id = array_runtime_type_id_for_element(inst.element_type_ref)
       elem_size = case element_type
                   when "i1", "i8"   then 1
                   when "i16"        then 2
@@ -11322,8 +11352,8 @@ module Crystal::MIR
       #   offset 12: @offset_to_buffer (i32), offset 16: @buffer (ptr)
       emit "%#{base_name}.arr = call ptr @__crystal_v2_malloc64(i64 24)"
 
-      # Set type_id = 0
-      emit "store i32 0, ptr %#{base_name}.arr"
+      # Set runtime type_id for Array(T) when known.
+      emit "store i32 #{array_type_id}, ptr %#{base_name}.arr"
 
       # Set @size = 0 at offset 4
       emit "%#{base_name}.size_ptr = getelementptr i8, ptr %#{base_name}.arr, i32 4"
