@@ -25774,6 +25774,15 @@ module Crystal::HIR
         param_map = nil
       end
 
+      call_arg_types_for_infer = nil.as(Array(TypeRef)?)
+      if suffix = method_suffix(resolved_mangled)
+        stripped_suffix = strip_mangled_suffix_flags(suffix)
+        unless stripped_suffix.empty?
+          parsed_suffix_types = parse_types_from_suffix(stripped_suffix)
+          call_arg_types_for_infer = parsed_suffix_types unless parsed_suffix_types.empty?
+        end
+      end
+
       receiver_map = type_param_map_for_receiver_name(resolved_base)
       if param_map.nil? || param_map.empty?
         param_map = receiver_map
@@ -25809,7 +25818,8 @@ module Crystal::HIR
              resolved_mangled,
              resolved_base,
              receiver_type,
-             param_map
+             param_map,
+             call_arg_types_for_infer
            )
           return inferred
         end
@@ -25826,7 +25836,8 @@ module Crystal::HIR
              resolved_mangled,
              resolved_base,
              receiver_type,
-             param_map
+             param_map,
+             call_arg_types_for_infer
            )
           return inferred
         end
@@ -25901,6 +25912,7 @@ module Crystal::HIR
       base_method_name : String,
       receiver_type : TypeRef?,
       param_map : Hash(String, String)?,
+      call_arg_types : Array(TypeRef)? = nil,
     ) : Array(TypeRef)?
       body = func_def.body
       return nil unless body && !body.empty?
@@ -25916,8 +25928,10 @@ module Crystal::HIR
       name_map = old_names ? old_names.dup : {} of String => String
 
       if params = func_def.params
+        call_arg_index = 0
         params.each do |param|
           next unless pname = param.name
+          is_block_param = param.is_block
           name = String.new(pname)
           param_type = TypeRef::VOID
           if ta = param.type_annotation
@@ -25932,8 +25946,14 @@ module Crystal::HIR
               type_name = substitute_type_params(type_name, param_map)
             end
             param_type = type_ref_for_name(type_name)
+          elsif !is_block_param && call_arg_types && (arg_type = call_arg_types[call_arg_index]?)
+            param_type = arg_type
+          elsif !is_block_param && param_map && (mapped = param_map[name]?)
+            mapped_type = type_ref_for_name(mapped)
+            param_type = mapped_type unless mapped_type == TypeRef::VOID
           end
           local_map[name] = param_type if param_type != TypeRef::VOID
+          call_arg_index += 1 unless is_block_param
         end
       end
       if receiver_type && receiver_type != TypeRef::VOID
@@ -36241,17 +36261,49 @@ module Crystal::HIR
       end
       base_name = strip_type_suffix(func_name)
 
+      fallback_return = -> do
+        if block_ret_name = @function_type_param_maps.dig?(func_name, "__block_return__") ||
+                            @function_type_param_maps.dig?(base_name, "__block_return__") ||
+                            @type_param_map["__block_return__"]?
+          block_ret_name = block_ret_name.strip
+          if !block_ret_name.empty? && block_ret_name != "Void" && block_ret_name != "Unknown"
+            block_ret = type_ref_for_name(block_ret_name)
+            if block_ret != TypeRef::VOID && block_ret != TypeRef::NIL
+              return block_ret
+            end
+          end
+        end
+
+        candidate = ctx.function.return_type
+        if candidate == TypeRef::VOID || candidate == TypeRef::NIL
+          candidate = @function_types[func_name]? || @function_types[base_name]? || @function_base_return_types[base_name]? || TypeRef::VOID
+        end
+        if candidate == TypeRef::VOID || candidate == TypeRef::NIL
+          nil
+        else
+          candidate
+        end
+      end
+
       func_def = @function_defs[func_name]? || @function_defs[base_name]?
-      return nil unless func_def
+      return fallback_return.call unless func_def
 
       block_param = func_def.params.try(&.find(&.is_block))
-      return nil unless block_param
+      return fallback_return.call unless block_param
 
       block_type = block_param.type_annotation
-      return nil unless block_type
+      unless block_type
+        if fallback = fallback_return.call
+          if env_get("DEBUG_YIELD_RETURN")
+            STDERR.puts "[YIELD_RETURN] func=#{func_name} base=#{base_name} ret=fallback:#{get_type_name_from_ref(fallback)} reason=untyped_block_param"
+          end
+          return fallback
+        end
+        return nil
+      end
 
       ret_name = extract_proc_return_type_name(String.new(block_type))
-      return nil unless ret_name
+      return fallback_return.call unless ret_name
 
       param_map = @type_param_map.dup
       if registered = function_type_param_map_for(func_name, base_name)
@@ -36277,7 +36329,11 @@ module Crystal::HIR
         STDERR.puts "[YIELD_RETURN] func=#{func_name} base=#{base_name} ret=#{resolved_name} map=#{map_str}"
       end
 
-      type_ref_for_name(resolved_name)
+      resolved = type_ref_for_name(resolved_name)
+      if resolved == TypeRef::VOID || resolved == TypeRef::NIL
+        return fallback_return.call
+      end
+      resolved
     end
 
     private def lower_yield(ctx : LoweringContext, node : CrystalV2::Compiler::Frontend::YieldNode) : ValueId

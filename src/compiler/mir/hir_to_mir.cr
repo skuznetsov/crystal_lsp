@@ -2789,7 +2789,46 @@ module Crystal
       unless is_ptr
         block_val = builder.cast(CastKind::IntToPtr, block_val, TypeRef::POINTER)
       end
-      builder.call_indirect(block_val, args, convert_type(yld.type))
+      yield_type = yld.type
+      if yield_type == HIR::TypeRef::VOID || yield_type == HIR::TypeRef::NIL
+        if inferred = infer_yield_type_from_users(yld.id)
+          yield_type = inferred
+        end
+      end
+      @hir_value_types[yld.id] = yield_type
+      builder.call_indirect(block_val, args, convert_type(yield_type))
+    end
+
+    private def infer_yield_type_from_users(yield_id : HIR::ValueId) : HIR::TypeRef?
+      return nil unless hir_func = @current_hir_func
+
+      hir_func.blocks.each do |block|
+        block.instructions.each do |inst|
+          case inst
+          when HIR::Phi
+            if inst.incoming.any? { |(_, value_id)| value_id == yield_id }
+              return inst.type unless inst.type == HIR::TypeRef::VOID || inst.type == HIR::TypeRef::NIL
+            end
+          when HIR::Copy
+            if inst.source == yield_id
+              return inst.type unless inst.type == HIR::TypeRef::VOID || inst.type == HIR::TypeRef::NIL
+            end
+          when HIR::Cast
+            if inst.value == yield_id
+              return inst.target_type unless inst.target_type == HIR::TypeRef::VOID || inst.target_type == HIR::TypeRef::NIL
+            end
+          end
+        end
+
+        if term = block.terminator
+          if term.is_a?(HIR::Return) && term.value == yield_id
+            func_ret = hir_func.return_type
+            return func_ret unless func_ret == HIR::TypeRef::VOID || func_ret == HIR::TypeRef::NIL
+          end
+        end
+      end
+
+      nil
     end
 
     # Check if a function contains yield instructions (inline-only function)
