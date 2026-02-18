@@ -235,12 +235,12 @@ module CrystalV2
         property progress : Bool = false
         property check_only : Bool = false
         property dump_symbols : Bool = false
-        # Disabled by default for compiler pipeline correctness. AST cache can be
-        # explicitly enabled with --ast-cache or CRYSTAL_V2_AST_CACHE=1.
+        # Enabled by default to speed up repeated compiler runs.
+        # Set CRYSTAL_V2_AST_CACHE=0 or pass --no-ast-cache to disable.
         {% if flag?(:bootstrap_fast) %}
         property ast_cache : Bool = false
         {% else %}
-        property ast_cache : Bool = ENV["CRYSTAL_V2_AST_CACHE"]? == "1"
+        property ast_cache : Bool = ENV["CRYSTAL_V2_AST_CACHE"]? != "0"
         {% end %}
         property llvm_opt : Bool = true
         property llvm_cache : Bool = ENV["CRYSTAL_V2_LLVM_CACHE"]? != "0"
