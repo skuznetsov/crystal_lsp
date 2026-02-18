@@ -22,6 +22,31 @@
 - Float64: arithmetic, ** on literals
 
 ## Recently completed
+- **HIR closure/self + primitive `object_id/hash` stabilization (2026-02-18)** —
+  hardened block/proc capture lowering and removed Object-level dispatch fallback
+  hazards for value-like receivers.
+  Changes (`src/compiler/hir/ast_to_hir.cr`):
+  - `emit_self` + identifier lowering now prefer captured lexical `self` when
+    synthetic local `self` is `Void` in proc/block wrappers;
+  - block/proc capture discovery now includes `self`, index expressions, begin/rescue,
+    hash/tuple/named tuple/range/yield/spawn traversal, reducing missed captures;
+  - added `lexical_self_capture(...)` helper and used inline-caller locals fallback
+    for nested inline/yield contexts;
+  - closure-cell assignments now coerce/wrap/unwrap union variants before
+    `ClassVarSet` (prevents cell type drift on `Nil | T` flows);
+  - member/call lowering now handles `object_id` as intrinsic for both implicit
+    and explicit receivers; value-like `hash` calls that resolve to `Object#hash`
+    are rerouted through `<recv>#hash(Crystal::Hasher)#result`;
+  - module receiver specialization fallback is skipped for implicit-self calls
+    (prevents accidental module-method rebinding in block-proc contexts).
+  Validation:
+  - `crystal build src/crystal_v2.cr -o /tmp/crystal_v2_wip_dbg_clean --error-trace`
+    => `EXIT 0`;
+  - `CRYSTAL_V2_PIPELINE_CACHE=0 /tmp/crystal_v2_wip_dbg_clean examples/bootstrap_array.cr -o /tmp/bootstrap_array_wip_dbg_clean && scripts/run_safe.sh /tmp/bootstrap_array_wip_dbg_clean 10 768`
+    => `EXIT 0`;
+  - `regression_tests/run_all.sh /tmp/crystal_v2_wip_dbg_clean`
+    => `43 passed, 0 failed`.
+
 - **Removed `Hash#key_hash` hardcoded LLVM overrides (2026-02-18)** —
   dropped backend method-name-specific overrides for:
   - `...$Hkey_hash$$Int32`

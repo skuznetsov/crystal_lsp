@@ -17315,6 +17315,21 @@ module Crystal::HIR
       @inline_yield_name_stack = [] of String
       @inline_arenas = nil
       last_value : ValueId? = nil
+      # Primitive object_id methods (Reference#object_id and inherited wrappers)
+      # can be lowered via parent/object fallback without pending annotation context.
+      # In that case they have empty bodies; synthesize pointer->UInt64 directly.
+      if method_name == "object_id" && !is_class_method && (node.body.nil? || node.body.try(&.empty?))
+        self_id = emit_self(ctx)
+        cast = Cast.new(ctx.next_id, TypeRef::UINT64, self_id, TypeRef::UINT64)
+        ctx.emit(cast)
+        ctx.register_type(cast.id, TypeRef::UINT64)
+        last_value = cast.id
+        if return_type == TypeRef::VOID || return_type == TypeRef::NIL
+          return_type = TypeRef::UINT64
+          func.return_type = TypeRef::UINT64
+          register_function_type(full_name, TypeRef::UINT64)
+        end
+      end
       begin
         if body = node.body
           if debug_env_filter_match?("DEBUG_BODY_EXPRS", class_name, method_name, base_name)
@@ -31588,9 +31603,34 @@ module Crystal::HIR
       # Check local variables first, unless this name is explicitly marked as
       # by-ref capture and must be read via closure cell.
       if local_id = ctx.lookup_local(name)
-        if prefer_closure_cell
-          if ref_cell = @closure_ref_cells[name]?
+        local_type = ctx.type_of(local_id)
+        # In proc/block wrappers, an implicit `self` local may be materialized as
+        # Void before closure captures are wired. Prefer captured lexical self.
+        if name == "self" && local_type == TypeRef::VOID
+          if ref_cell = @closure_ref_cells["self"]?
             cell_class, cell_name, cell_type = ref_cell
+            if cell_type != TypeRef::VOID
+              get = ClassVarGet.new(ctx.next_id, cell_type, cell_class, cell_name)
+              ctx.emit(get)
+              ctx.register_type(get.id, cell_type)
+              return get.id
+            end
+          elsif current = @current_class
+            resolved = resolve_type_alias_chain(substitute_type_params_in_type_name(current))
+            inferred = type_ref_for_name(resolved)
+            if inferred != TypeRef::VOID
+              ctx.register_type(local_id, inferred)
+              local_type = inferred
+            end
+          end
+        end
+
+        if ref_cell = @closure_ref_cells[name]?
+          cell_class, cell_name, cell_type = ref_cell
+          # Captured vars can accidentally get a stale/mismatched local binding during
+          # nested lowering passes. When that happens, prefer the closure cell source.
+          use_cell = prefer_closure_cell || local_type == TypeRef::VOID || local_type != cell_type
+          if use_cell
             get = ClassVarGet.new(ctx.next_id, cell_type, cell_class, cell_name)
             ctx.emit(get)
             ctx.register_type(get.id, cell_type)
@@ -31599,7 +31639,7 @@ module Crystal::HIR
         end
 
         # Return a copy/reference to the local
-        copy = Copy.new(ctx.next_id, ctx.type_of(local_id), local_id)
+        copy = Copy.new(ctx.next_id, local_type, local_id)
         ctx.emit(copy)
         ctx.mark_type_literal(copy.id) if ctx.type_literal?(local_id)
         if enum_name = @enum_value_types.try(&.[local_id]?)
@@ -32549,7 +32589,29 @@ module Crystal::HIR
     private def emit_self(ctx : LoweringContext) : ValueId
       # Check if we have a 'self' local
       if self_id = ctx.lookup_local("self")
-        return self_id
+        self_type = ctx.type_of(self_id)
+        return self_id unless self_type == TypeRef::VOID
+        # In standalone proc/block functions, lexical self is captured through
+        # closure cells; prefer that over a synthetic Void local.
+        if ref_cell = @closure_ref_cells["self"]?
+          cell_class, cell_name, cell_type = ref_cell
+          if cell_type != TypeRef::VOID
+            get = ClassVarGet.new(ctx.next_id, cell_type, cell_class, cell_name)
+            ctx.emit(get)
+            ctx.register_type(get.id, cell_type)
+            return get.id
+          end
+        end
+      end
+      # Standalone proc/block functions may keep lexical self in closure cells.
+      if ref_cell = @closure_ref_cells["self"]?
+        cell_class, cell_name, cell_type = ref_cell
+        if cell_type != TypeRef::VOID
+          get = ClassVarGet.new(ctx.next_id, cell_type, cell_class, cell_name)
+          ctx.emit(get)
+          ctx.register_type(get.id, cell_type)
+          return get.id
+        end
       end
       param = ctx.function.params.find { |p| p.name == "self" }
       if param.nil? && ctx.function.name.includes?('#')
@@ -42584,41 +42646,53 @@ module Crystal::HIR
         end
       end
       if receiver_id
-        if type_desc = @module.get_type_descriptor(ctx.type_of(receiver_id))
-          if type_desc.kind == TypeKind::Module || (type_desc.kind == TypeKind::Generic && module_like_type_name?(type_desc.name))
-            # Prefer the fully-qualified (possibly generic) module name first.
-            # Generic module instances (e.g. Impl(Float32, ImplInfo_Float32)) can
-            # have specialized method bodies and type-param substitutions. Only
-            # fall back to the stripped base module when no specialized method exists.
-            module_full = type_desc.name
-            used_full = false
-            if module_full.includes?('(')
-              ensure_method_index_built
-              base_owner = strip_generic_args(module_full)
-              if owner_methods = @method_index[base_owner]?
-                if candidates = owner_methods[method_name]?
-                  owner_prefix = "#{module_full}."
-                  candidates.each do |cand|
-                    if cand.starts_with?(owner_prefix)
-                      module_method_full = "#{module_full}.#{method_name}"
-                      base_method_name = module_method_full
-                      mangled_method_name = mangle_function_name(module_method_full, arg_types, has_block_call)
-                      used_full = true
-                      break
+        implicit_self_call = case callee_node
+                             when CrystalV2::Compiler::Frontend::IdentifierNode
+                               true
+                             when CrystalV2::Compiler::Frontend::MemberAccessNode
+                               obj_node = @arena[callee_node.object]
+                               obj_node.is_a?(CrystalV2::Compiler::Frontend::SelfNode) ||
+                                 obj_node.is_a?(CrystalV2::Compiler::Frontend::ImplicitObjNode)
+                             else
+                               false
+                             end
+        unless implicit_self_call
+          if type_desc = @module.get_type_descriptor(ctx.type_of(receiver_id))
+            if type_desc.kind == TypeKind::Module || (type_desc.kind == TypeKind::Generic && module_like_type_name?(type_desc.name))
+              # Prefer the fully-qualified (possibly generic) module name first.
+              # Generic module instances (e.g. Impl(Float32, ImplInfo_Float32)) can
+              # have specialized method bodies and type-param substitutions. Only
+              # fall back to the stripped base module when no specialized method exists.
+              module_full = type_desc.name
+              used_full = false
+              if module_full.includes?('(')
+                ensure_method_index_built
+                base_owner = strip_generic_args(module_full)
+                if owner_methods = @method_index[base_owner]?
+                  if candidates = owner_methods[method_name]?
+                    owner_prefix = "#{module_full}."
+                    candidates.each do |cand|
+                      if cand.starts_with?(owner_prefix)
+                        module_method_full = "#{module_full}.#{method_name}"
+                        base_method_name = module_method_full
+                        mangled_method_name = mangle_function_name(module_method_full, arg_types, has_block_call)
+                        used_full = true
+                        break
+                      end
                     end
                   end
                 end
               end
-            end
-            unless used_full
-              module_base = module_full
-              if paren = module_base.index('(')
-                module_base = module_base[0, paren]
-              end
-              module_method_base = "#{module_base}.#{method_name}"
-              if has_function_base?(module_method_base) || @function_defs.has_key?(module_method_base)
-                base_method_name = module_method_base
-                mangled_method_name = mangle_function_name(module_method_base, arg_types, has_block_call)
+              unless used_full
+                module_base = module_full
+                if paren = module_base.index('(')
+                  module_base = module_base[0, paren]
+                end
+                module_method_base = "#{module_base}.#{method_name}"
+                if has_function_base?(module_method_base) || @function_defs.has_key?(module_method_base)
+                  base_method_name = module_method_base
+                  mangled_method_name = mangle_function_name(module_method_base, arg_types, has_block_call)
+                end
               end
             end
           end
@@ -44549,7 +44623,21 @@ module Crystal::HIR
         end
       end
 
-      # Check if callee is a registered primitive — emit intrinsic instead of Call
+      # object_id on an explicit receiver OR implicit self (bare call in instance methods)
+      # should lower to a pointer->UInt64 cast and never dispatch through Object#object_id.
+      if method_name == "object_id" && args.empty?
+        object_id_receiver = receiver_id
+        if object_id_receiver.nil?
+          if self_id = ctx.lookup_local("self")
+            object_id_receiver = self_id unless ctx.type_literal?(self_id)
+          end
+        end
+        if object_id_receiver
+          if object_id_intrinsic = lower_primitive_object_id(ctx, object_id_receiver)
+            return object_id_intrinsic
+          end
+        end
+      end
       if prim_kind = @module.primitive_for(mangled_method_name) || @module.primitive_for(base_method_name)
         if prim_result = lower_primitive_call(ctx, prim_kind, method_name, receiver_id, args, return_type, mangled_method_name)
           return prim_result
@@ -44569,6 +44657,15 @@ module Crystal::HIR
           ctx.emit(cast)
           ctx.register_type(cast.id, target)
           return cast.id
+        end
+      end
+
+      # Value-types (Int/UInt/Bool/Char, etc.) cannot safely call Object#hash()
+      # because it uses object-style virtual dispatch. Route through
+      # `<value>#hash(Crystal::Hasher)#result` instead.
+      if receiver_id && method_name == "hash" && args.empty?
+        if lowered = lower_value_hash_intrinsic(ctx, receiver_id, mangled_method_name)
+          return lowered
         end
       end
 
@@ -44624,6 +44721,92 @@ module Crystal::HIR
         STDERR.puts "[CALL_TRACE] stage=after_emit method=#{method_name} mangled=#{mangled_method_name}"
       end
       call.id
+    end
+
+    private def lower_value_hash_intrinsic(
+      ctx : LoweringContext,
+      receiver_id : ValueId,
+      resolved_hash_name : String,
+    ) : ValueId?
+      base_hash_name = strip_type_suffix(resolved_hash_name)
+      return nil unless base_hash_name == "Object#hash"
+
+      recv_type = ctx.type_of(receiver_id)
+      recv_desc = @module.get_type_descriptor(recv_type)
+      recv_is_primitive = if recv_desc
+                            recv_desc.kind == TypeKind::Primitive
+                          else
+                            !primitive_class_name(recv_type).nil?
+                          end
+      return nil unless recv_is_primitive
+
+      hasher_type = type_ref_for_name("Crystal::Hasher")
+      return nil if hasher_type == TypeRef::VOID
+
+      hash_with_hasher = begin
+        primitive_owner = primitive_class_name(recv_type)
+        if primitive_owner
+          mangle_function_name("#{primitive_owner}#hash", [hasher_type], false)
+        else
+          recv_owner = recv_desc.try(&.name)
+          specific = nil
+          if recv_owner
+            specific_base = "#{recv_owner}#hash"
+            specific_mangled = mangle_function_name(specific_base, [hasher_type], false)
+            if @function_types.has_key?(specific_mangled) || @function_defs.has_key?(specific_mangled) || @module.has_function?(specific_mangled)
+              specific = specific_mangled
+            elsif @function_types.has_key?(specific_base) || has_function_base?(specific_base) || @function_defs.has_key?(specific_base) || @module.has_function?(specific_base)
+              specific = specific_base
+            end
+          end
+          specific || resolve_method_call(ctx, receiver_id, "hash", [hasher_type], false)
+        end
+      end
+      hash_with_hasher_base = strip_type_suffix(hash_with_hasher)
+      return nil if hash_with_hasher_base == "Object#hash"
+
+      hasher_ctor = "Crystal::Hasher.new"
+      remember_callsite_arg_types(hasher_ctor, [] of TypeRef)
+      lower_function_if_needed(hasher_ctor)
+      hasher_ctor_type = get_function_return_type(hasher_ctor)
+      hasher_ctor_type = hasher_type if hasher_ctor_type == TypeRef::VOID || hasher_ctor_type == TypeRef::NIL
+      hasher_ctor_call = Call.new(ctx.next_id, hasher_ctor_type, nil, hasher_ctor, [] of ValueId)
+      ctx.emit(hasher_ctor_call)
+      ctx.register_type(hasher_ctor_call.id, hasher_ctor_type)
+      hasher_id = hasher_ctor_call.id
+      if hasher_ctor_type != hasher_type
+        hasher_id = coerce_value_to_type(ctx, hasher_id, hasher_type)
+      end
+
+      remember_callsite_arg_types(hash_with_hasher, [hasher_type])
+      lower_function_if_needed(hash_with_hasher)
+      hash_with_hasher_type = get_function_return_type(hash_with_hasher)
+      hash_with_hasher_type = hasher_ctor_type if hash_with_hasher_type == TypeRef::VOID || hash_with_hasher_type == TypeRef::NIL
+      hash_with_hasher_call = Call.new(
+        ctx.next_id,
+        hash_with_hasher_type,
+        receiver_id,
+        hash_with_hasher,
+        [hasher_id]
+      )
+      ctx.emit(hash_with_hasher_call)
+      ctx.register_type(hash_with_hasher_call.id, hash_with_hasher_type)
+
+      hasher_result_name = resolve_method_call(ctx, hash_with_hasher_call.id, "result", [] of TypeRef, false)
+      remember_callsite_arg_types(hasher_result_name, [] of TypeRef)
+      lower_function_if_needed(hasher_result_name)
+      hasher_result_type = get_function_return_type(hasher_result_name)
+      hasher_result_type = TypeRef::UINT64 if hasher_result_type == TypeRef::VOID || hasher_result_type == TypeRef::NIL
+      hasher_result_call = Call.new(
+        ctx.next_id,
+        hasher_result_type,
+        hash_with_hasher_call.id,
+        hasher_result_name,
+        [] of ValueId
+      )
+      ctx.emit(hasher_result_call)
+      ctx.register_type(hasher_result_call.id, hasher_result_type)
+      hasher_result_call.id
     end
 
     # Expand splat arguments in a call
@@ -45532,7 +45715,14 @@ module Crystal::HIR
         # on the base name (e.g., Foo#each_with_index$block).
         if has_block
           base = strip_type_suffix(func_name)
-          if block_entry = lookup_block_function_def_for_call(base, arg_count, arg_types)
+          receiver_base_for_block : String? = nil
+          if base.includes?('#') || base.includes?('.')
+            owner = method_owner_from_name(base)
+            unless owner.empty?
+              receiver_base_for_block = strip_generic_args(owner)
+            end
+          end
+          if block_entry = lookup_block_function_def_for_call(base, arg_count, arg_types, receiver_base_for_block)
             @function_lookup_cache[cache_key] = FunctionLookupEntry.new(block_entry, base_epoch)
             @function_lookup_last_name_id = name_id
             @function_lookup_last_arg_count = arg_count
@@ -49889,14 +50079,35 @@ module Crystal::HIR
                      param_names.each_with_index do |param_name, idx|
                        next unless idx < yield_args.size
                        arg_id = yield_args[idx]
+                       bound_id = arg_id
+                       bound_type = ctx.type_of(arg_id)
+
                        if param_types && (param_type = param_types[idx]?) && param_type != TypeRef::VOID
-                         ctx.register_local(param_name, arg_id)
-                         ctx.register_type(arg_id, param_type)
-                         update_typeof_local(param_name, param_type)
-                         update_typeof_local_name(param_name, get_type_name_from_ref(param_type))
-                       else
-                         ctx.register_local(param_name, arg_id)
-                         ctx.register_type(arg_id, ctx.type_of(arg_id))
+                         if bound_type == TypeRef::VOID
+                           # Don't mutate the caller value id type in-place.
+                           # Create a typed view for the block parameter binding.
+                           typed_copy = Copy.new(ctx.next_id, param_type, arg_id)
+                           ctx.emit(typed_copy)
+                           ctx.register_type(typed_copy.id, param_type)
+                           bound_id = typed_copy.id
+                           bound_type = param_type
+                         elsif bound_type != param_type
+                           coerced_id = coerce_value_to_type(ctx, arg_id, param_type)
+                           coerced_type = ctx.type_of(coerced_id)
+                           # Only trust declared block param type when coercion succeeded.
+                           # If types are incompatible, preserve the concrete caller type.
+                           if coerced_id != arg_id || coerced_type == param_type
+                             bound_id = coerced_id
+                             bound_type = coerced_type
+                           end
+                         end
+                       end
+
+                       ctx.register_local(param_name, bound_id)
+                       ctx.register_type(bound_id, bound_type)
+                       update_typeof_local(param_name, bound_type)
+                       if bound_type != TypeRef::VOID
+                         update_typeof_local_name(param_name, get_type_name_from_ref(bound_type))
                        end
                      end
 
@@ -52193,6 +52404,16 @@ module Crystal::HIR
       if debug_env_filter_match?("DEBUG_MEMBER_CALL", member_name, actual_name)
         STDERR.puts "[MEMBER_CALL] name=#{actual_name} return_id=#{return_type.id} return=#{get_type_name_from_ref(return_type)}"
       end
+      if member_name == "object_id" && args.empty?
+        if object_id_intrinsic = lower_primitive_object_id(ctx, object_id)
+          return object_id_intrinsic
+        end
+      end
+      if member_name == "hash" && args.empty?
+        if lowered = lower_value_hash_intrinsic(ctx, object_id, actual_name)
+          return lowered
+        end
+      end
       call = Call.new(ctx.next_id, return_type, object_id, actual_name, args, nil, call_virtual)
       ctx.emit(call)
       ctx.register_type(call.id, return_type)
@@ -52220,7 +52441,39 @@ module Crystal::HIR
         # Check if this variable is stored in a closure cell (by-reference capture)
         if ref_cell = @closure_ref_cells[name]?
           cell_class, cell_name, cell_type = ref_cell
-          set = ClassVarSet.new(ctx.next_id, cell_type, cell_class, cell_name, value_id)
+          stored_value_id = value_id
+          stored_type = value_type
+
+          # Keep closure-cell writes type-consistent.
+          # Captured vars can flow through unions (e.g. Nil | T) even when the
+          # closure cell was introduced as T. Unwrap/wrap before storing.
+          if stored_type != cell_type
+            if is_union_type?(stored_type)
+              if variant_id = get_union_variant_id(stored_type, cell_type)
+                if variant_id >= 0
+                  unwrap = UnionUnwrap.new(ctx.next_id, cell_type, stored_value_id, variant_id)
+                  ctx.emit(unwrap)
+                  ctx.register_type(unwrap.id, cell_type)
+                  stored_value_id = unwrap.id
+                  stored_type = cell_type
+                end
+              end
+            end
+
+            if stored_type != cell_type && is_union_type?(cell_type)
+              if variant_id = get_union_variant_id(cell_type, stored_type)
+                if variant_id >= 0
+                  wrap = UnionWrap.new(ctx.next_id, cell_type, stored_value_id, variant_id)
+                  ctx.emit(wrap)
+                  ctx.register_type(wrap.id, cell_type)
+                  stored_value_id = wrap.id
+                  stored_type = cell_type
+                end
+              end
+            end
+          end
+
+          set = ClassVarSet.new(ctx.next_id, cell_type, cell_class, cell_name, stored_value_id)
           ctx.emit(set)
           ctx.register_type(set.id, cell_type)
           return set.id
@@ -53544,8 +53797,14 @@ module Crystal::HIR
       return if expr_id.index < 0 || expr_id.index >= @arena.size
       node = @arena[expr_id]
       case node
+      when CrystalV2::Compiler::Frontend::SelfNode,
+           CrystalV2::Compiler::Frontend::ImplicitObjNode
+        names.add("self")
       when CrystalV2::Compiler::Frontend::IdentifierNode
         names.add(String.new(node.name))
+      when CrystalV2::Compiler::Frontend::IndexNode
+        collect_proc_body_ident_walk(node.object, names)
+        node.indexes.each { |idx| collect_proc_body_ident_walk(idx, names) }
       when CrystalV2::Compiler::Frontend::BinaryNode
         collect_proc_body_ident_walk(node.left, names)
         collect_proc_body_ident_walk(node.right, names)
@@ -53571,17 +53830,56 @@ module Crystal::HIR
       when CrystalV2::Compiler::Frontend::AssignNode
         collect_proc_body_ident_walk(node.target, names)
         collect_proc_body_ident_walk(node.value, names)
+      when CrystalV2::Compiler::Frontend::MultipleAssignNode
+        node.targets.each { |t| collect_proc_body_ident_walk(t, names) }
+        collect_proc_body_ident_walk(node.value, names)
       when CrystalV2::Compiler::Frontend::ReturnNode
         if v = node.value
           collect_proc_body_ident_walk(v, names)
         end
+      when CrystalV2::Compiler::Frontend::YieldNode
+        if args = node.args
+          args.each { |arg| collect_proc_body_ident_walk(arg, names) }
+        end
+      when CrystalV2::Compiler::Frontend::SpawnNode
+        if expr = node.expression
+          collect_proc_body_ident_walk(expr, names)
+        end
+        if body = node.body
+          body.each { |e| collect_proc_body_ident_walk(e, names) }
+        end
       when CrystalV2::Compiler::Frontend::ArrayLiteralNode
         node.elements.each { |e| collect_proc_body_ident_walk(e, names) }
+      when CrystalV2::Compiler::Frontend::HashLiteralNode
+        node.entries.each do |entry|
+          collect_proc_body_ident_walk(entry.key, names)
+          collect_proc_body_ident_walk(entry.value, names)
+        end
+      when CrystalV2::Compiler::Frontend::TupleLiteralNode
+        node.elements.each { |e| collect_proc_body_ident_walk(e, names) }
+      when CrystalV2::Compiler::Frontend::NamedTupleLiteralNode
+        node.entries.each { |entry| collect_proc_body_ident_walk(entry.value, names) }
+      when CrystalV2::Compiler::Frontend::RangeNode
+        collect_proc_body_ident_walk(node.begin_expr, names)
+        collect_proc_body_ident_walk(node.end_expr, names)
       when CrystalV2::Compiler::Frontend::StringInterpolationNode
         node.pieces.each do |piece|
           if e = piece.expr
             collect_proc_body_ident_walk(e, names)
           end
+        end
+      when CrystalV2::Compiler::Frontend::BeginNode
+        node.body.each { |e| collect_proc_body_ident_walk(e, names) }
+        if rescues = node.rescue_clauses
+          rescues.each do |rescue_clause|
+            rescue_clause.body.each { |e| collect_proc_body_ident_walk(e, names) }
+          end
+        end
+        if else_body = node.else_body
+          else_body.each { |e| collect_proc_body_ident_walk(e, names) }
+        end
+        if ensure_body = node.ensure_body
+          ensure_body.each { |e| collect_proc_body_ident_walk(e, names) }
         end
       when CrystalV2::Compiler::Frontend::BlockNode
         node.body.each { |e| collect_proc_body_ident_walk(e, names) }
@@ -53601,6 +53899,53 @@ module Crystal::HIR
           eb.each { |e| collect_proc_body_ident_walk(e, names) }
         end
       end
+    end
+
+    private def lexical_self_capture(ctx : LoweringContext) : {ValueId, TypeRef}?
+      fallback_self_type : TypeRef? = nil
+      if current = @current_class
+        resolved = resolve_type_alias_chain(substitute_type_params_in_type_name(current))
+        inferred = type_ref_for_name(resolved)
+        fallback_self_type = inferred unless inferred == TypeRef::VOID
+      end
+
+      if caller_self_id = inline_caller_local_id("self")
+        caller_self_type = ctx.type_of(caller_self_id)
+        return {caller_self_id, caller_self_type} unless caller_self_type == TypeRef::VOID
+        if inferred = fallback_self_type
+          ctx.register_type(caller_self_id, inferred)
+          return {caller_self_id, inferred}
+        end
+      end
+
+      if self_id = ctx.lookup_local("self")
+        self_type = ctx.type_of(self_id)
+        return {self_id, self_type} unless self_type == TypeRef::VOID
+        if inferred = fallback_self_type
+          ctx.register_type(self_id, inferred)
+          return {self_id, inferred}
+        end
+      end
+
+      if self_param = ctx.function.params.find { |p| p.name == "self" }
+        return {self_param.id, self_param.type} unless self_param.type == TypeRef::VOID
+        if inferred = fallback_self_type
+          ctx.register_type(self_param.id, inferred)
+          return {self_param.id, inferred}
+        end
+      end
+
+      if ctx.function.name.includes?('#')
+        if receiver_param = ctx.function.params.first?
+          return {receiver_param.id, receiver_param.type} unless receiver_param.type == TypeRef::VOID
+          if inferred = fallback_self_type
+            ctx.register_type(receiver_param.id, inferred)
+            return {receiver_param.id, inferred}
+          end
+        end
+      end
+
+      nil
     end
 
     # Detect which captured variable names are WRITTEN to in the block body.
@@ -53707,11 +54052,21 @@ module Crystal::HIR
       captures = [] of {String, ValueId, TypeRef} # {name, parent_value_id, type}
       referenced_names.each do |name|
         next if proc_param_names.includes?(name)
-        next if name == "self"
-        if parent_value_id = parent_locals[name]?
+        if name == "self"
+          if self_capture = lexical_self_capture(ctx)
+            captures << {"self", self_capture[0], self_capture[1]}
+          end
+          next
+        end
+        if parent_value_id = parent_locals[name]? || inline_caller_local_id(name)
           parent_type = ctx.type_of(parent_value_id)
           next if parent_type == TypeRef::VOID
           captures << {name, parent_value_id, parent_type}
+        end
+      end
+      unless captures.any? { |name, _, _| name == "self" }
+        if self_capture = lexical_self_capture(ctx)
+          captures << {"self", self_capture[0], self_capture[1]}
         end
       end
 
@@ -53887,11 +54242,21 @@ module Crystal::HIR
       captures = [] of {String, ValueId, TypeRef}
       referenced_names.each do |name|
         next if block_param_names.includes?(name)
-        next if name == "self"
-        if parent_value_id = parent_locals[name]?
+        if name == "self"
+          if self_capture = lexical_self_capture(ctx)
+            captures << {"self", self_capture[0], self_capture[1]}
+          end
+          next
+        end
+        if parent_value_id = parent_locals[name]? || inline_caller_local_id(name)
           parent_type = ctx.type_of(parent_value_id)
           next if parent_type == TypeRef::VOID
           captures << {name, parent_value_id, parent_type}
+        end
+      end
+      unless captures.any? { |name, _, _| name == "self" }
+        if self_capture = lexical_self_capture(ctx)
+          captures << {"self", self_capture[0], self_capture[1]}
         end
       end
 
@@ -53946,8 +54311,15 @@ module Crystal::HIR
       saved_class = @current_class
       saved_typeof_locals = @current_typeof_locals
       saved_typeof_local_names = @current_typeof_local_names
+      saved_method = @current_method
+      saved_method_is_class = @current_method_is_class
       @current_typeof_locals = saved_typeof_locals ? saved_typeof_locals.dup : nil
       @current_typeof_local_names = saved_typeof_local_names ? saved_typeof_local_names.dup : nil
+      if owner = @block_owner[block_node.object_id]?
+        @current_class = owner[:class_name]
+        @current_method = owner[:method_name]
+        @current_method_is_class = owner[:is_class]
+      end
 
       # Save and isolate inline-yield state — proc body is a separate function context
       saved_return_stack = @inline_yield_return_stack
@@ -54018,6 +54390,8 @@ module Crystal::HIR
       end
 
       @current_class = saved_class
+      @current_method = saved_method
+      @current_method_is_class = saved_method_is_class
       @current_typeof_locals = saved_typeof_locals
       @current_typeof_local_names = saved_typeof_local_names
 
