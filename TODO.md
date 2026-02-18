@@ -23,6 +23,32 @@
 - Float64: arithmetic, ** on literals
 
 ## Recently completed
+- **AST cache header width fix + strict string-table safety (2026-02-18)** —
+  fixed root cache stream corruption and removed silent wrong-code writes in `--ast-cache` mode.
+  Root cause:
+  - cache header wrote `source_mtime_ns` as `Int128` (16 bytes on Crystal 1.19),
+    but loader read `Int64` (8 bytes), shifting the payload stream and corrupting
+    string/node/root sections on warm loads.
+  Changes:
+  - `src/compiler/lsp/ast_cache.cr`
+    - write/load now use `source_mtime_ns.to_i64` symmetrically;
+    - cache save is now atomic (`*.tmp.<pid>` + rename) to avoid partial `.ast` files;
+    - `write_string_ref` is strict (raises on missing string-table entry) instead of
+      silently writing index `0`.
+  - `src/compiler/cli.cr`
+    - root ExprId sanity check moved under local cache-load rescue path (per-file fallback).
+  Validation:
+  - minimal alias repro (`/tmp/cache_alias.cr`) now warm-loads from cache
+    (`AST cache hit`, no `Index out of bounds`);
+  - forced cache mode regressions:
+    - `CRYSTAL_V2_AST_CACHE=1 CRYSTAL_V2_PIPELINE_CACHE=0 regression_tests/run_all.sh /tmp/crystal_v2_astcache_strict`
+      => `43 passed, 0 failed`;
+  - bootstrap smoke with forced cache:
+    - `/tmp/crystal_v2_astcache_strict examples/bootstrap_array.cr --ast-cache -o /tmp/bootstrap_array_astcache_strict && scripts/run_safe.sh /tmp/bootstrap_array_astcache_strict 8 512`
+      => `EXIT 0`;
+  - previously observed semantic drift on `hash_stress` in warm cache path is gone
+    (output restored to `hash_stress_ok`).
+
 - **AST cache corruption containment + serializer fixes (2026-02-18)** —
   fixed two concrete cache serialization gaps and added fail-safe recovery so
   `--ast-cache` no longer hard-fails compilation.
