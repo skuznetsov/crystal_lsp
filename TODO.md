@@ -22,6 +22,35 @@
 - Float64: arithmetic, ** on literals
 
 ## Recently completed
+- **Implicit-self bare call owner fallback fix (2026-02-18)** —
+  fixed a lowering path where bare calls with args inside instance methods could
+  degrade to top-level names (`method$...`) instead of owner-qualified
+  instance methods (`Owner#method$...`), producing dead-code stubs and runtime
+  misbehavior (e.g. `valid_mm_mode?` path in CLI).
+  Changes:
+  - `src/compiler/hir/ast_to_hir.cr`
+    - in `lower_call` base-method fallback (`base_method_name` builder),
+      instance-method unresolved fallback now prefers `#{current}##{method_name}`
+      unless a real top-level function exists;
+    - preserved output helpers (`puts/print/p/pp`) as bare calls to keep direct
+      print interception behavior unchanged.
+  - added regression:
+    - `regression_tests/test_implicit_self_call_args.cr`
+      (`# EXPECT: implicit-self-ok`)
+  Validation:
+  - targeted compile+run:
+    - `bin/crystal_v2 regression_tests/test_implicit_self_call_args.cr -o /tmp/test_implicit_self_call_args_bin --no-debug`
+    - `scripts/run_safe.sh /tmp/test_implicit_self_call_args_bin 5 512`
+    - output: `implicit-self-ok`, `EXIT 0`
+  - IR ownership check:
+    - `bin/crystal_v2 regression_tests/test_implicit_self_call_args.cr --emit llvm-ir -o /tmp/test_implicit_self_call_args_ir --no-debug`
+    - `rg -n "valid_mm_mode|CliLike\\$H" /tmp/test_implicit_self_call_args_ir.ll`
+    - confirms call+def use `@CliLike$Hvalid_mm_mode$Q$$String` (owner preserved)
+  Notes:
+  - full stage2 self-build validation is pending; local stage2 rebuild cycle on
+    current stage1 remains long (~8–10 min) and is tracked as a performance
+    bottleneck for bootstrap iteration speed.
+
 - **HIR closure/self + primitive `object_id/hash` stabilization (2026-02-18)** —
   hardened block/proc capture lowering and removed Object-level dispatch fallback
   hazards for value-like receivers.

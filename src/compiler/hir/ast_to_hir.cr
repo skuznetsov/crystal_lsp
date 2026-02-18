@@ -42551,7 +42551,27 @@ module Crystal::HIR
                                  STDERR.puts "[INCLUDED_BASE] class=#{current} NO_MODULES"
                                end
                              end
-                             class_method_fallback || included_candidate || method_name
+                             if @current_method_is_class
+                               class_method_fallback || method_name
+                             else
+                               if included_candidate
+                                 included_candidate
+                               else
+                                 # In instance methods, keep implicit calls bound to `self`
+                                 # unless a real top-level function exists. Falling back to
+                                 # bare names here can lose owner context and emit dead stubs.
+                                 is_output_helper = method_name == "puts" || method_name == "print" ||
+                                                    method_name == "p" || method_name == "pp"
+                                 if is_output_helper
+                                   method_name
+                                 else
+                                   top_level_exists = @function_defs.has_key?(method_name) ||
+                                                      @function_types.has_key?(method_name) ||
+                                                      has_function_base?(method_name)
+                                   top_level_exists ? method_name : "#{current}##{method_name}"
+                                 end
+                               end
+                             end
                            end
                          else
                            # receiver_id might be set but full_method_name is nil
