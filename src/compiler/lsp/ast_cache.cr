@@ -178,7 +178,7 @@ module CrystalV2
           # Quick mtime check — exact source/compiler validation happens from cache header.
           cache_mtime = File.info(cache_path).modification_time
           return nil if compiler_mtime > cache_mtime
-          source_mtime_ns = File.info(file_path).modification_time.to_unix_ns
+          source_mtime_ns = File.info(file_path).modification_time.to_unix_ns.to_i64
 
           File.open(cache_path, "rb") do |io|
             # Read header
@@ -225,36 +225,44 @@ module CrystalV2
         def save(file_path : String)
           cache_path = AstCache.cache_path(file_path)
           Dir.mkdir_p(File.dirname(cache_path))
+          tmp_path = "#{cache_path}.tmp.#{Process.pid}"
 
           # Build string table from all slices in arena
           string_table = build_string_table
 
-          File.open(cache_path, "wb") do |io|
-            # Write header
-            io.write(MAGIC.to_slice)
-            io.write_bytes(VERSION, IO::ByteFormat::LittleEndian)
-            io.write_bytes(AstCache.compiler_fingerprint, IO::ByteFormat::LittleEndian)
-            source_mtime_ns = begin
-              File.info(file_path).modification_time.to_unix_ns
-            rescue
-              0_i64
-            end
-            io.write_bytes(source_mtime_ns, IO::ByteFormat::LittleEndian)
+          begin
+            File.open(tmp_path, "wb") do |io|
+              # Write header
+              io.write(MAGIC.to_slice)
+              io.write_bytes(VERSION, IO::ByteFormat::LittleEndian)
+              io.write_bytes(AstCache.compiler_fingerprint, IO::ByteFormat::LittleEndian)
+              source_mtime_ns = begin
+                File.info(file_path).modification_time.to_unix_ns.to_i64
+              rescue
+                0_i64
+              end
+              io.write_bytes(source_mtime_ns, IO::ByteFormat::LittleEndian)
 
-            # Write string table
-            write_string_table(io, string_table)
+              # Write string table
+              write_string_table(io, string_table)
 
-            # Write nodes
-            io.write_bytes(@arena.size.to_u32, IO::ByteFormat::LittleEndian)
-            @arena.nodes.each do |node|
-              write_node(io, node, string_table)
+              # Write nodes
+              io.write_bytes(@arena.size.to_u32, IO::ByteFormat::LittleEndian)
+              @arena.nodes.each do |node|
+                write_node(io, node, string_table)
+              end
+
+              # Write roots
+              io.write_bytes(@roots.size.to_u32, IO::ByteFormat::LittleEndian)
+              @roots.each do |root|
+                io.write_bytes(root.index, IO::ByteFormat::LittleEndian)
+              end
             end
 
-            # Write roots
-            io.write_bytes(@roots.size.to_u32, IO::ByteFormat::LittleEndian)
-            @roots.each do |root|
-              io.write_bytes(root.index, IO::ByteFormat::LittleEndian)
-            end
+            File.rename(tmp_path, cache_path)
+          rescue ex
+            File.delete?(tmp_path)
+            raise ex
           end
         end
 
@@ -1199,7 +1207,11 @@ module CrystalV2
         end
 
         private def write_string_ref(io : IO, str : String, table : Hash(String, UInt32))
-          idx = table[str]? || 0_u32
+          idx = table[str]?
+          unless idx
+            preview = str.size > 80 ? str.byte_slice(0, 80) + "..." : str
+            raise "AST cache string table missing entry: #{preview.inspect}"
+          end
           io.write_bytes(idx, IO::ByteFormat::LittleEndian)
         end
 

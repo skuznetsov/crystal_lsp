@@ -978,6 +978,9 @@ module CrystalV2
       rescue ex
         if allow_ast_cache_retry && options.ast_cache && ex.is_a?(IndexError)
           err_io.puts "warning: invalid AST cache state detected; retrying without AST cache"
+          if options.verbose
+            err_io.puts ex.backtrace.join("\n")
+          end
           options.ast_cache = false
           return compile(input_file, options, out_io, err_io, allow_ast_cache_retry: false)
         end
@@ -1245,11 +1248,12 @@ module CrystalV2
             @ast_cache_hits += 1
             arena = cached.arena
             exprs = cached.roots
-            # Fast sanity check: ensure root ExprIds are valid for this arena.
-            # Corrupted cache payloads can carry out-of-range roots.
-            exprs.each { |expr_id| arena[expr_id] }
             base_dir = File.dirname(abs_path)
             begin
+              # Fast sanity check: ensure root ExprIds are valid for this arena.
+              # Corrupted cache payloads can carry out-of-range roots.
+              exprs.each { |expr_id| arena[expr_id] }
+
               if cached_requires = load_require_cache(abs_path)
                 if source_has_glob_require?(source) || cached_requires.any? { |path| !File.exists?(path) }
                   cached_requires = nil
