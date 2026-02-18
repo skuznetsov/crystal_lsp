@@ -6,10 +6,9 @@
   - `regression_tests/test_select_map_stress.cr`
   - `regression_tests/test_float_pow_var.cr`
   - `regression_tests/test_string_upcase_large.cr`
-- AST cache (`--ast-cache` / `CRYSTAL_V2_AST_CACHE=1`) is still unstable:
-  warm cache can produce corrupted AST loads (`error: Index out of bounds`)
-  or wrong output on some files. Default compiler mode now runs with AST cache off.
-  Follow-up needed: fix AST serializer/deserializer integrity, then re-enable by default.
+- AST cache safety fallback remains enabled in compiler path:
+  if an unexpected cache payload issue surfaces, compile retries once with
+  `--no-ast-cache` behavior (warning + continue).
 
 ## Working Features
 - Basic output: puts String/Int32/Float64, string interpolation
@@ -23,6 +22,23 @@
 - Float64: arithmetic, ** on literals
 
 ## Recently completed
+- **AST cache re-enabled by default (2026-02-18)** —
+  after header-width + string-table fixes, compiler default mode now uses AST cache
+  again for faster repeated runs.
+  Changes:
+  - `src/compiler/cli.cr`
+    - `Options#ast_cache` default changed to enabled (`CRYSTAL_V2_AST_CACHE != "0"`);
+    - `--no-ast-cache` and `CRYSTAL_V2_AST_CACHE=0` remain hard kill-switches.
+  Validation:
+  - default-mode regressions:
+    - `CRYSTAL_V2_PIPELINE_CACHE=0 regression_tests/run_all.sh /tmp/crystal_v2_astcache_defaulton`
+      => `43 passed, 0 failed`;
+  - default-mode bootstrap smoke:
+    - `CRYSTAL_V2_PIPELINE_CACHE=0 /tmp/crystal_v2_astcache_defaulton examples/bootstrap_array.cr -o /tmp/bootstrap_array_defaulton && scripts/run_safe.sh /tmp/bootstrap_array_defaulton 8 512`
+      => `EXIT 0`;
+  - warm parse soak (`src/crystal_v2.cr`, `CRYSTAL_V2_STOP_AFTER_PARSE=1`, `--ast-cache`, verbose):
+    - no `AST cache invalid`, no `AST cache save failed`, cache hits observed on second pass.
+
 - **AST cache string-table coverage expansion (2026-02-18)** —
   removed remaining `AST cache save failed: string table missing entry ...` cases
   for regression/bootstrap workloads in forced cache mode.
