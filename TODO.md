@@ -22,6 +22,32 @@
 - Float64: arithmetic, ** on literals
 
 ## Recently completed
+- **Yield-owner compatibility positive cache (2026-02-18)** —
+  added a positive-only cache for `(receiver_base, owner_base)` compatibility in
+  yield fallback matching to avoid repeated parent/module-chain checks in hot loops.
+  Changes:
+  - `src/compiler/hir/ast_to_hir.cr`
+    - added `@receiver_owner_allow_true_cache` (receiver -> set(owner));
+    - added `cache_receiver_owner_allow_true(...)` helper (stores only `true`
+      matches, bounded by `@receiver_owner_allow_true_cache_limit`);
+    - `receiver_allows_yield_owner?` now:
+      - checks positive cache first,
+      - records `true` outcomes through helper,
+      - keeps `false` uncached to avoid stale-negative behavior during evolving
+        registration state.
+    - cache invalidation wired into `invalidate_parent_lookup_cache`.
+  Validation:
+  - correctness:
+    - `crystal build src/crystal_v2.cr -o /tmp/crystal_v2_owner_truecache2 --error-trace` => `EXIT 0`
+    - `regression_tests/run_all.sh /tmp/crystal_v2_owner_truecache2` => `44 passed, 0 failed`
+  - compile-time A/B (same workload, caches disabled):
+    - baseline: `CRYSTAL_V2_PIPELINE_CACHE=0 CRYSTAL_V2_LLVM_CACHE=0 /tmp/crystal_v2_perf_owner_scan examples/bootstrap_array.cr -o /tmp/bootstrap_array_perf_owner_scan_ab` => `8.834s`
+    - experiment: `CRYSTAL_V2_PIPELINE_CACHE=0 CRYSTAL_V2_LLVM_CACHE=0 /tmp/crystal_v2_owner_truecache2 examples/bootstrap_array.cr -o /tmp/bootstrap_array_owner_truecache2_ab` => `8.209s`
+    - delta: about `-7.1%`
+  - runtime smoke:
+    - `scripts/run_safe.sh /tmp/bootstrap_array_perf_owner_scan_ab 10 768` => `EXIT 0`
+    - `scripts/run_safe.sh /tmp/bootstrap_array_owner_truecache2_ab 10 768` => `EXIT 0`
+
 - **Yield-owner hotpath string-scan optimization (2026-02-18)** —
   reduced `String#rindex` pressure in fallback yield-owner checks and block lookup.
   Changes:

@@ -1048,6 +1048,12 @@ module Crystal::HIR
     # Pre-computed parent chains: owner → [parent1, parent2, ..., Object]
     # Eliminates repeated @class_info hash lookups during parent walks.
     @parent_chains : Hash(String, Array(String)) = {} of String => Array(String)
+    # Positive-only cache for receiver/owner compatibility in yield fallback.
+    # Keyed as receiver_base -> set(owner_base). We only cache true results to
+    # avoid stale negatives while class/module registration is still evolving.
+    @receiver_owner_allow_true_cache : Hash(String, Set(String)) = {} of String => Set(String)
+    @receiver_owner_allow_true_cache_size : Int32 = 0
+    @receiver_owner_allow_true_cache_limit : Int32 = 65536
 
     # Functions that contain yield (candidates for inline)
     @yield_functions : Set(String)
@@ -1850,6 +1856,29 @@ module Crystal::HIR
       @parent_lookup_cache.clear
       @parent_class_for_method.clear
       @parent_chains.clear
+      @receiver_owner_allow_true_cache.clear
+      @receiver_owner_allow_true_cache_size = 0
+    end
+
+    @[AlwaysInline]
+    private def cache_receiver_owner_allow_true(receiver_base : String, owner_base : String) : Bool
+      owners = @receiver_owner_allow_true_cache[receiver_base]?
+      unless owners
+        owners = Set(String).new
+        @receiver_owner_allow_true_cache[receiver_base] = owners
+      end
+      unless owners.includes?(owner_base)
+        owners << owner_base
+        @receiver_owner_allow_true_cache_size += 1
+        if @receiver_owner_allow_true_cache_size > @receiver_owner_allow_true_cache_limit
+          @receiver_owner_allow_true_cache.clear
+          @receiver_owner_allow_true_cache_size = 1
+          new_set = Set(String).new
+          new_set << owner_base
+          @receiver_owner_allow_true_cache[receiver_base] = new_set
+        end
+      end
+      true
     end
 
     # Call-site argument types for lazily lowered functions (mangled name -> arg types).
@@ -2285,6 +2314,8 @@ module Crystal::HIR
       @module_includers_version = 0
       @class_included_modules = {} of String => Array(String)
       @class_included_module_seen = {} of String => Set(String)
+      @receiver_owner_allow_true_cache = {} of String => Set(String)
+      @receiver_owner_allow_true_cache_size = 0
       @union_type_cache = {} of UInt32 => Bool
       @debug_cache_histo = !env_get("DEBUG_CACHE_HISTO").nil?
       @debug_cache_stats = {} of String => Tuple(Int32, Int32)
@@ -20940,30 +20971,33 @@ module Crystal::HIR
     end
 
     private def receiver_allows_yield_owner?(receiver_base : String, owner_base : String) : Bool
+      if owners = @receiver_owner_allow_true_cache[receiver_base]?
+        return true if owners.includes?(owner_base)
+      end
       # Primitive receivers don't have full class_info chains; treat them as Object descendants
       # for yield-inline owner checks (e.g., Object#try on Int32).
       if owner_base == "Object"
-        return true if primitive_self_type(receiver_base)
+        return cache_receiver_owner_allow_true(receiver_base, owner_base) if primitive_self_type(receiver_base)
       end
-      return true if receiver_base == owner_base
+      return cache_receiver_owner_allow_true(receiver_base, owner_base) if receiver_base == owner_base
       owner_short = last_namespace_component_if_nested(owner_base)
       if owner_short
-        return true if receiver_base == owner_short
-        return true if namespace_last_component_equals?(receiver_base, owner_short)
+        return cache_receiver_owner_allow_true(receiver_base, owner_base) if receiver_base == owner_short
+        return cache_receiver_owner_allow_true(receiver_base, owner_base) if namespace_last_component_equals?(receiver_base, owner_short)
       end
       get_parent_chain(receiver_base).each do |parent|
-        return true if parent == owner_base
+        return cache_receiver_owner_allow_true(receiver_base, owner_base) if parent == owner_base
         if owner_short
-          return true if parent == owner_short
-          return true if namespace_last_component_equals?(parent, owner_short)
+          return cache_receiver_owner_allow_true(receiver_base, owner_base) if parent == owner_short
+          return cache_receiver_owner_allow_true(receiver_base, owner_base) if namespace_last_component_equals?(parent, owner_short)
         end
       end
       if modules = @class_included_modules[receiver_base]?
         modules.each do |mod|
-          return true if mod == owner_base
+          return cache_receiver_owner_allow_true(receiver_base, owner_base) if mod == owner_base
           if owner_short
-            return true if mod == owner_short
-            return true if namespace_last_component_equals?(mod, owner_short)
+            return cache_receiver_owner_allow_true(receiver_base, owner_base) if mod == owner_short
+            return cache_receiver_owner_allow_true(receiver_base, owner_base) if namespace_last_component_equals?(mod, owner_short)
           end
         end
       end
