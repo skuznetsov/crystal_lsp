@@ -23635,18 +23635,10 @@ module Crystal::HIR
     end
 
     private def function_context_from_name(name : String) : String?
-      base = name
-      if dollar = base.index('$')
-        base = base[0, dollar]
-      end
-
-      if hash = base.index('#')
-        return base[0, hash]
-      elsif dot = base.index('.')
-        return base[0, dot]
-      end
-
-      nil
+      parts = parse_method_name_compact(name)
+      sep = parts.separator
+      return nil unless sep == '#' || sep == '.'
+      parts.owner
     end
 
     # Resolve method name with inheritance: look in class and all parent classes

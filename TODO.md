@@ -22,6 +22,25 @@
 - Float64: arithmetic, ** on literals
 
 ## Recently completed
+- **HIR lookup hot-path: reuse compact method-name parser in `function_context_from_name` (2026-02-18)** —
+  replaced ad-hoc `index`/slice parsing with `parse_method_name_compact(name)` in
+  `src/compiler/hir/ast_to_hir.cr`, so repeated owner extraction in
+  `lookup_function_def_for_call` reuses the existing compact cache path instead of
+  allocating fresh slices on each call.
+  Validation:
+  - release build: `crystal build src/crystal_v2.cr --release -o /tmp/crystal_v2_rel_ctxcache`
+    => `real 415.70s`;
+  - regressions: `regression_tests/run_all.sh /tmp/crystal_v2_rel_ctxcache`
+    => `42 passed, 0 failed`;
+  - stage1 (release, no pipeline cache):
+    - new: `1:51.99`, `1:53.15` (`/tmp/crystal_v2_rel_ctxcache`)
+    - baseline: `1:52.44`, `1:52.81` (`/tmp/crystal_v2_rel_substlookup_opt`)
+    - result: wall-clock is neutral/slightly better within noise;
+  - sample comparison (same 10s window, stage1 no-cache):
+    - `function_context_from_name` hits: `27 -> 16`
+    - `String#byte_slice?` hits: `160 -> 127`
+    - files: `/tmp/stage1_profile_current.sample.txt` vs `/tmp/stage1_profile_ctxcache.sample.txt`.
+
 - **Type-param substitution lookup gating (2026-02-18)** —
   reduced needless type-parameter/fallback-map hash probes in
   `substitute_type_params_in_type_name` for non-identifier type strings.
