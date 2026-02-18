@@ -24531,12 +24531,26 @@ module Crystal::HIR
         end
         type_param_map = @type_param_map
         fallback_map : Hash(String, String)? = nil
-        if current = @current_class
-          if info = generic_owner_info(current)
-            fallback_map = info[:map]
+        fallback_map_loaded = false
+        substitution : String? = nil
+
+        if simple_identifier_token?(name)
+          substitution = type_param_map[name]?
+          if substitution.nil?
+            unless fallback_map_loaded
+              fallback_map_loaded = true
+              if current = @current_class
+                if info = generic_owner_info(current)
+                  fallback_map = info[:map]
+                end
+              end
+            end
+            if fmap = fallback_map
+              substitution = fmap[name]?
+            end
           end
         end
-        substitution = type_param_map[name]? || (fallback_map ? fallback_map[name]? : nil)
+
         if substitution
           return @subst_cache[name] = substitution
         end
@@ -24551,7 +24565,23 @@ module Crystal::HIR
           if idx = name.index("::")
             prefix = name[0, idx]
             suffix = name[(idx + 2)..]
-            substitution = type_param_map[prefix]? || (fallback_map ? fallback_map[prefix]? : nil)
+            substitution = nil
+            if simple_identifier_token?(prefix)
+              substitution = type_param_map[prefix]?
+              if substitution.nil?
+                unless fallback_map_loaded
+                  fallback_map_loaded = true
+                  if current = @current_class
+                    if info = generic_owner_info(current)
+                      fallback_map = info[:map]
+                    end
+                  end
+                end
+                if fmap = fallback_map
+                  substitution = fmap[prefix]?
+                end
+              end
+            end
             if substitution
               # Recursively substitute the suffix in case it also contains type params
               return @subst_cache[name] = "#{substitution}::#{substitute_type_params_in_type_name(suffix)}"
@@ -24560,7 +24590,23 @@ module Crystal::HIR
           # Also check if the suffix after the last :: is a type param
           if idx = name.rindex("::")
             suffix = name[(idx + 2)..]
-            substitution = type_param_map[suffix]? || (fallback_map ? fallback_map[suffix]? : nil)
+            substitution = nil
+            if simple_identifier_token?(suffix)
+              substitution = type_param_map[suffix]?
+              if substitution.nil?
+                unless fallback_map_loaded
+                  fallback_map_loaded = true
+                  if current = @current_class
+                    if info = generic_owner_info(current)
+                      fallback_map = info[:map]
+                    end
+                  end
+                end
+                if fmap = fallback_map
+                  substitution = fmap[suffix]?
+                end
+              end
+            end
             if substitution
               return @subst_cache[name] = substitution
             end
@@ -24607,6 +24653,18 @@ module Crystal::HIR
         @substitute_type_params_depth -= 1
         @substitute_type_params_stack.delete(name)
       end
+    end
+
+    @[AlwaysInline]
+    private def simple_identifier_token?(name : String) : Bool
+      return false if name.empty?
+      bytes = name.to_unsafe
+      i = 0
+      while i < name.bytesize
+        return false unless ascii_alnum_or_underscore?(bytes[i])
+        i += 1
+      end
+      true
     end
 
     private def find_top_level_arrow(name : String) : Int32?
