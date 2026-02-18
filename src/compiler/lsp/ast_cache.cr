@@ -6,7 +6,8 @@
 # Cache format:
 # - Magic: "CV2A" (4 bytes)
 # - Version: UInt32
-# - File mtime hash: UInt64
+# - Compiler fingerprint: UInt64 (path+size+mtime_ns hash)
+# - Source mtime_ns: Int64
 # - String table: count + [length + bytes...]
 # - Node count: UInt32
 # - Nodes: [tag + fields...]
@@ -118,9 +119,9 @@ module CrystalV2
 
       class AstCache
         MAGIC   = "CV2A"
-        # Bump this version whenever the parser or AST format changes
+        # Bump this version whenever the parser, AST format, or cache header changes
         # to invalidate all cached ASTs
-        VERSION = 2_u32
+        VERSION = 3_u32
 
         getter arena : Frontend::AstArena
         getter roots : Array(Frontend::ExprId)
@@ -152,16 +153,32 @@ module CrystalV2
           end
         end
 
+        @@compiler_fingerprint : UInt64? = nil
+
+        def self.compiler_fingerprint : UInt64
+          @@compiler_fingerprint ||= begin
+            if exe = Process.executable_path
+              begin
+                info = File.info(exe)
+                fnv_hash("#{exe}|#{info.size}|#{info.modification_time.to_unix_ns}")
+              rescue
+                fnv_hash(exe)
+              end
+            else
+              fnv_hash("no_executable")
+            end
+          end
+        end
+
         def self.load(file_path : String) : AstCache?
           cache_path = self.cache_path(file_path)
           return nil unless File.exists?(cache_path)
           return nil unless File.exists?(file_path)
 
-          # Check mtime — invalidate if source file OR compiler binary is newer
+          # Quick mtime check — exact source/compiler validation happens from cache header.
           cache_mtime = File.info(cache_path).modification_time
-          file_mtime = File.info(file_path).modification_time
-          return nil if file_mtime > cache_mtime
           return nil if compiler_mtime > cache_mtime
+          source_mtime_ns = File.info(file_path).modification_time.to_unix_ns
 
           File.open(cache_path, "rb") do |io|
             # Read header
@@ -171,6 +188,12 @@ module CrystalV2
 
             version = io.read_bytes(UInt32, IO::ByteFormat::LittleEndian)
             return nil unless version == VERSION
+
+            cached_compiler_fingerprint = io.read_bytes(UInt64, IO::ByteFormat::LittleEndian)
+            return nil unless cached_compiler_fingerprint == compiler_fingerprint
+
+            cached_source_mtime_ns = io.read_bytes(Int64, IO::ByteFormat::LittleEndian)
+            return nil unless cached_source_mtime_ns == source_mtime_ns
 
             # Read string table
             string_pool = Frontend::StringPool.new
@@ -210,6 +233,13 @@ module CrystalV2
             # Write header
             io.write(MAGIC.to_slice)
             io.write_bytes(VERSION, IO::ByteFormat::LittleEndian)
+            io.write_bytes(AstCache.compiler_fingerprint, IO::ByteFormat::LittleEndian)
+            source_mtime_ns = begin
+              File.info(file_path).modification_time.to_unix_ns
+            rescue
+              0_i64
+            end
+            io.write_bytes(source_mtime_ns, IO::ByteFormat::LittleEndian)
 
             # Write string table
             write_string_table(io, string_table)

@@ -235,12 +235,12 @@ module CrystalV2
         property progress : Bool = false
         property check_only : Bool = false
         property dump_symbols : Bool = false
-        # Enabled by default (except in bootstrap_fast): stdlib/prelude parsing dominates
-        # cold starts, and cache is invalidated by source mtime + compiler mtime.
+        # Disabled by default for compiler pipeline correctness. AST cache can be
+        # explicitly enabled with --ast-cache or CRYSTAL_V2_AST_CACHE=1.
         {% if flag?(:bootstrap_fast) %}
         property ast_cache : Bool = false
         {% else %}
-        property ast_cache : Bool = ENV["CRYSTAL_V2_AST_CACHE"]? != "0"
+        property ast_cache : Bool = ENV["CRYSTAL_V2_AST_CACHE"]? == "1"
         {% end %}
         property llvm_opt : Bool = true
         property llvm_cache : Bool = ENV["CRYSTAL_V2_LLVM_CACHE"]? != "0"
