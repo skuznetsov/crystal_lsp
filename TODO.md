@@ -1,8 +1,15 @@
 # Crystal v2 — Active Work (codegen branch)
 
 ## Known Bugs (codegen)
-- No currently confirmed repro in the previous top-3 bug list; now guarded by
-  targeted regressions:
+- Confirmed repros in new complex regression suite:
+  - `regression_tests/complex/test_find_nil_and_value.cr`
+    - status: compiles/runs but returns wrong result (`find_nil_and_value_bad`)
+      in current `bin/crystal_v2`.
+  - `regression_tests/complex/test_channel_receive_state.cr`
+    - status: link failure (missing `_current` symbol in spawn/channel path).
+  - `regression_tests/complex/test_option_parser_to_s.cr`
+    - status: compile timeout in current debug-stage compiler (>45s).
+- Existing targeted regressions remain in place:
   - `regression_tests/test_select_map_stress.cr`
   - `regression_tests/test_float_pow_var.cr`
   - `regression_tests/test_string_upcase_large.cr`
@@ -22,6 +29,34 @@
 - Float64: arithmetic, ** on literals
 
 ## Recently completed
+- **Complex regression suite for bootstrap blockers (2026-02-18)** —
+  added a focused suite to catch high-cost codegen regressions before full
+  bootstrap runs.
+  Changes:
+  - added runner:
+    - `regression_tests/run_complex.sh`
+      - modes: `quick` and `full`
+      - per-test compile timeout (`COMPILE_TIMEOUT`, default `45s`)
+      - safe runtime execution via `scripts/run_safe.sh`
+      - supports single-test run: `run_complex.sh <compiler> <test_name>`
+  - added curated tests from `/private/tmp` repro pool:
+    - `regression_tests/complex/test_find_nil_and_value.cr`
+    - `regression_tests/complex/test_find_nil_only.cr`
+    - `regression_tests/complex/test_yield_three_args.cr`
+    - `regression_tests/complex/test_while_yield_method.cr`
+    - `regression_tests/complex/test_string_to_u64_like.cr`
+    - `regression_tests/complex/test_channel_receive_state.cr`
+    - `regression_tests/complex/test_option_parser_to_s.cr`
+    - `regression_tests/complex/test_generic_nil_return.cr`
+  Validation:
+  - `./regression_tests/run_complex.sh bin/crystal_v2 quick`
+    => `4 passed, 1 failed` (`test_find_nil_and_value`).
+  - `./regression_tests/run_complex.sh bin/crystal_v2 full`
+    => `5 passed, 3 failed`:
+      - output mismatch: `test_find_nil_and_value`
+      - link error: `test_channel_receive_state`
+      - compile-timeout: `test_option_parser_to_s`
+
 - **Deferred module context owner-slot cache (2026-02-18)** —
   reduced repeated hash lookups in lazy module-context registration path by
   caching the last owner's context/seen containers.
