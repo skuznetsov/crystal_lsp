@@ -22,6 +22,37 @@
 - Float64: arithmetic, ** on literals
 
 ## Recently completed
+- **Stage1 release bootstrap unblocked: LLVM IR validity chain (2026-02-18)** —
+  removed the failing IR sequence that previously stopped release stage1 before link.
+  Changes in `src/compiler/mir/llvm_backend.cr`:
+  - cross-block prepass now treats `GlobalStore`/`AtomicStore` operands as real uses, so
+    values used across blocks get slots and no longer violate dominance;
+  - indirect-call argument emission maps void-typed/nil-like args to valid `ptr` args;
+  - global union stores normalize `null/0` to union-safe form (`zeroinitializer`);
+  - union checks (`UnionTypeIdGet`/`UnionIs`) prefer emitted union LLVM type over stale static type.
+  Validation:
+  - release build: `crystal build src/crystal_v2.cr --release -o /tmp/crystal_v2_rel_recvfix`
+  - stage1 (release): `/tmp/crystal_v2_rel_recvfix build src/crystal_v2.cr --release -o /tmp/crystal_v2_stage1_rel_recvfix`
+    moved past previous IR errors (`Instruction does not dominate all uses`, `void type only allowed...`,
+    `null must be a pointer type`) to a later linker-only tail.
+
+- **Stage1 release link tail fixed (`_get_entry`, `_each`) (2026-02-18)** —
+  eliminated remaining unresolved bare method symbols in release stage1.
+  Changes in `src/compiler/hir/ast_to_hir.cr`:
+  - removed accidental `receiver_id = nil` reset in identifier-call lowering path
+    (kept implicit `self` binding intact);
+  - rewrote `find_module_class_def` candidate collection from tuple-array aggregation
+    (`empty?/max_by`) to single-pass best-candidate selection to avoid tuple-array type
+    degradation in self-hosted lowering;
+  - rewrote `refresh_void_type_params` `each_with_index.map...to_a` into a `while` loop
+    to avoid unstable iterator lowering in bootstrap-critical path.
+  Validation:
+  - release build: `crystal build src/crystal_v2.cr --release -o /tmp/crystal_v2_rel_bestcandfix`
+  - stage1 (release): `/tmp/crystal_v2_rel_bestcandfix build src/crystal_v2.cr --release -o /tmp/crystal_v2_stage1_rel_bestcandfix`
+    => success (`real 119.71s`, binary produced, no `Undefined symbols`);
+  - regressions: `regression_tests/run_all.sh /tmp/crystal_v2_rel_bestcandfix`
+    => `42 passed, 0 failed`.
+
 - **ByteFormat EOF + module-literal vdispatch stabilization (2026-02-18)** —
   fixed the remaining `test_byteformat_decode_u32` failure after the earlier
   `unsafe_as`/specialization fixes.

@@ -14464,10 +14464,23 @@ module Crystal::HIR
           next unless param_names.size == desc.type_params.size
 
           updated = false
-          new_params = desc.type_params.each_with_index.map do |ref, i|
-            next ref unless ref == TypeRef::VOID
+          new_params = [] of TypeRef
+          i = 0
+          while i < desc.type_params.size
+            ref = desc.type_params[i]
+            if ref != TypeRef::VOID
+              new_params << ref
+              i += 1
+              next
+            end
+
             pname = param_names[i]
-            next ref if pname.empty? || pname == "_"
+            if pname.empty? || pname == "_"
+              new_params << ref
+              i += 1
+              next
+            end
+
             resolved = resolve_type_alias_chain(pname)
             if resolved == pname && !pname.includes?("::")
               if alias_target = resolve_type_alias_by_suffix(pname)
@@ -14475,6 +14488,7 @@ module Crystal::HIR
               end
             end
             resolved = resolve_type_name_in_context(resolved)
+
             new_ref = if resolved.includes?('|')
                         union_ref = create_union_type(resolved)
                         if union_ref == TypeRef::VOID
@@ -14497,9 +14511,11 @@ module Crystal::HIR
                       else
                         type_ref_for_name(resolved)
                       end
+
             updated = true if new_ref != ref
-            new_ref
-          end.to_a
+            new_params << new_ref
+            i += 1
+          end
 
           if updated
             @module.types[idx] = TypeDescriptor.new(desc.kind, desc.name, new_params)
@@ -37304,8 +37320,10 @@ module Crystal::HIR
       entries = @module_defs[module_name]?
       return nil unless entries
 
-      # Collect all matching candidates
-      candidates = [] of {CrystalV2::Compiler::Frontend::DefNode, CrystalV2::Compiler::Frontend::ArenaLike, Int32}
+      # Track the best matching candidate in a single pass.
+      best_member = nil.as(CrystalV2::Compiler::Frontend::DefNode?)
+      best_arena = nil.as(CrystalV2::Compiler::Frontend::ArenaLike?)
+      best_score = Int32::MIN
 
       entries.each do |mod_node, mod_arena|
         with_arena(mod_arena) do
@@ -37384,18 +37402,20 @@ module Crystal::HIR
                                    end
                 STDERR.puts "[MATH_MIN_FIND_DEF]   candidate param_types=#{param_type_names.join(",")} score=#{score}"
               end
-              candidates << {member, mod_arena, score}
+              if best_member.nil? || score > best_score
+                best_member = member
+                best_arena = mod_arena
+                best_score = score
+              end
             end
           end
         end
       end
 
-      return nil if candidates.empty?
+      return nil if best_member.nil? || best_arena.nil?
 
-      # Sort by score descending and take the best
-      best = candidates.max_by { |c| c[2] }
       if is_math_min_debug
-        best_param_types = if params = best[0].params
+        best_param_types = if params = best_member.not_nil!.params
                              params.map do |p|
                                next "" if p.is_block
                                if ta = p.type_annotation
@@ -37407,9 +37427,9 @@ module Crystal::HIR
                            else
                              [] of String
                            end
-        STDERR.puts "[MATH_MIN_FIND_DEF]   SELECTED param_types=#{best_param_types.join(",")} score=#{best[2]}"
+        STDERR.puts "[MATH_MIN_FIND_DEF]   SELECTED param_types=#{best_param_types.join(",")} score=#{best_score}"
       end
-      result = {best[0], best[1]}
+      result = {best_member.not_nil!, best_arena.not_nil!}
       @module_class_def_lookup_cache[cache_key] = result
       result
     end
@@ -39805,8 +39825,6 @@ module Crystal::HIR
             receiver_id = nil
             full_method_name = "#{current}.#{method_name}"
           end
-        else
-          receiver_id = nil
         end
         if receiver_id.nil? && full_method_name.nil? && !current_is_class
           if current = @current_class
