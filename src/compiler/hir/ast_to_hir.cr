@@ -1528,7 +1528,29 @@ module Crystal::HIR
     private def set_function_def_entry(name : String, def_node : CrystalV2::Compiler::Frontend::DefNode) : Nil
       is_new = !@function_defs.has_key?(name)
       @function_defs[name] = def_node
-      @pending_function_def_keys << name if is_new
+      if is_new
+        @pending_function_def_keys << name
+        index_method_index_entry(name)
+      end
+    end
+
+    private def index_method_index_entry(full_name : String) : Nil
+      parts = parse_method_name_compact(full_name)
+      return unless parts.separator && parts.method
+
+      base_owner = strip_generic_args(parts.owner)
+      method_name = parts.method.not_nil!
+      owner_methods = @method_index[base_owner]?
+      unless owner_methods
+        owner_methods = Hash(String, Array(String)).new
+        @method_index[base_owner] = owner_methods
+      end
+      list = owner_methods[method_name]?
+      if list
+        list << full_name
+      else
+        owner_methods[method_name] = [full_name]
+      end
     end
 
     # Centralized write path so type-key indexes can process only newly-added keys.
@@ -1550,24 +1572,6 @@ module Crystal::HIR
       base_name = strip_type_suffix(full_name)
       @function_lookup_base_epoch[base_name] = (@function_lookup_base_epoch[base_name]? || 0) + 1
       @function_lookup_last_result_valid = false
-
-      # Update method index: base_owner → method_name → [full_names]
-      parts = parse_method_name_compact(full_name)
-      if parts.separator && parts.method
-        base_owner = strip_generic_args(parts.owner)
-        method_name = parts.method.not_nil!
-        owner_methods = @method_index[base_owner]?
-        unless owner_methods
-          owner_methods = Hash(String, Array(String)).new
-          @method_index[base_owner] = owner_methods
-        end
-        list = owner_methods[method_name]?
-        if list
-          list << full_name
-        else
-          owner_methods[method_name] = [full_name]
-        end
-      end
     end
 
     # Lazily build the method index from all registered function defs.
@@ -1576,27 +1580,13 @@ module Crystal::HIR
     private def ensure_method_index_built
       current_size = @function_defs.size
       return if @method_index_built && current_size == @method_index_size_at_build
-      count = 0
-      @function_defs.each_key do |full_name|
-        count += 1
-        next if count <= @method_index_processed_count
-        parts = parse_method_name_compact(full_name)
-        next unless parts.separator && parts.method
-        base_owner = strip_generic_args(parts.owner)
-        method_name = parts.method.not_nil!
-        owner_methods = @method_index[base_owner]?
-        unless owner_methods
-          owner_methods = Hash(String, Array(String)).new
-          @method_index[base_owner] = owner_methods
-        end
-        list = owner_methods[method_name]?
-        if list
-          list << full_name
-        else
-          owner_methods[method_name] = [full_name]
+      # Normal path: entries are indexed eagerly in set_function_def_entry.
+      # Safety fallback: if current index is unexpectedly empty, rebuild once.
+      if @method_index.empty? && current_size > 0
+        @function_defs.each_key do |full_name|
+          index_method_index_entry(full_name)
         end
       end
-      @method_index_processed_count = count
       @method_index_built = true
       @method_index_size_at_build = current_size
       # NOTE: We intentionally do NOT invalidate nil cache entries here.

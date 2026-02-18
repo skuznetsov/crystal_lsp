@@ -22,6 +22,33 @@
 - Float64: arithmetic, ** on literals
 
 ## Recently completed
+- **Method index eager update (2026-02-18)** —
+  reduced lookup overhead by indexing method entries at function-def insertion time
+  instead of rebuilding on-demand over the whole `@function_defs` map.
+  Changes:
+  - `src/compiler/hir/ast_to_hir.cr`
+    - `set_function_def_entry(...)` now indexes new keys immediately via
+      `index_method_index_entry(...)`;
+    - removed duplicate method-index insertion from `register_function_def(...)`;
+    - `ensure_method_index_built(...)` now fast-paths (size sync) and does a
+      one-time safety rebuild only when index is unexpectedly empty.
+  Validation (clean worktree at `327267e`):
+  - build:
+    - `crystal build src/crystal_v2.cr -o /tmp/crystal_v2_head327_midx_dbg --error-trace`
+      => `8.009s` wall (baseline before patch in same tree: `11.406s`);
+  - regressions:
+    - `CRYSTAL_V2_PIPELINE_CACHE=0 regression_tests/run_all.sh /tmp/crystal_v2_head327_midx_dbg`
+      => `43 passed, 0 failed`;
+  - bootstrap smoke:
+    - `CRYSTAL_V2_PIPELINE_CACHE=0 /tmp/crystal_v2_head327_midx_dbg examples/bootstrap_array.cr -o /tmp/bootstrap_array_head327_midx_dbg && scripts/run_safe.sh /tmp/bootstrap_array_head327_midx_dbg 10 768`
+      => `EXIT 0`;
+  - sample (10s, self-build window):
+    - pre-patch top hotspot included `AstToHir#ensure_method_index_built` (`51`);
+    - post-patch: `ensure_method_index_built` drops from top-of-stack list.
+  - A/B (same compile workload):
+    - `/tmp/crystal_v2_head327_dbg ... examples/bootstrap_array.cr ...` => `9.864s`;
+    - `/tmp/crystal_v2_head327_midx_dbg ... examples/bootstrap_array.cr ...` => `9.503s`.
+
 - **Yield-owner fallback lookup hot-path reduction (2026-02-18)** —
   reduced repeated hierarchy/name work in block-yield fallback resolution:
   - `src/compiler/hir/ast_to_hir.cr`
