@@ -1555,6 +1555,17 @@ module Crystal::HIR
 
     # Centralized write path so type-key indexes can process only newly-added keys.
     private def set_function_type_entry(name : String, return_type : TypeRef) : Nil
+      if existing = @function_types[name]?
+        # Never downgrade a known concrete return type back to unknown.
+        if (return_type == TypeRef::VOID || return_type == TypeRef::NIL) &&
+           existing != TypeRef::VOID && existing != TypeRef::NIL
+          return
+        end
+        # Keep a concrete type when the new value is still unresolved.
+        if unresolved_generic_return_type?(return_type) && !unresolved_generic_return_type?(existing)
+          return
+        end
+      end
       is_new = !@function_types.has_key?(name)
       @function_types[name] = return_type
       @pending_function_type_keys << name if is_new
@@ -2747,6 +2758,10 @@ module Crystal::HIR
       # The bug: when Unicode.upcase is inlined into Char#upcase(io, options), the Hash#[]?
       # return type gets incorrectly inferred as IO from the outer context's local variable.
       if old_type = @function_types[full_name]?
+        if (return_type == TypeRef::VOID || return_type == TypeRef::NIL) &&
+           old_type != TypeRef::VOID && old_type != TypeRef::NIL
+          return
+        end
         old_name = get_type_name_from_ref(old_type)
         new_name = get_type_name_from_ref(return_type)
         # If existing type is a union/nilable (contains "|") and new type is a plain type
@@ -7699,17 +7714,32 @@ module Crystal::HIR
         return nil unless value
         create_union_type_for_nullable(value)
       when TypeKind::Class, TypeKind::Struct
-        elem = desc.type_params.first?
-        return nil unless elem
         base = desc.name
         if paren = base.index('(')
           base = base[0, paren]
         end
         short_base = last_namespace_component(base)
         case short_base
+        when "Hash"
+          value = desc.type_params[1]?
+          if value.nil?
+            if info = split_generic_base_and_args(desc.name)
+              args = split_generic_type_args(info[:args])
+              if args.size > 1
+                parsed = type_ref_for_name(args[1].strip)
+                value = parsed unless parsed == TypeRef::VOID
+              end
+            end
+          end
+          return nil unless value
+          create_union_type_for_nullable(value)
         when "Deque", "Slice", "StaticArray", "Set"
+          elem = desc.type_params.first?
+          return nil unless elem
           create_union_type_for_nullable(elem)
         when "PointerLinkedList"
+          elem = desc.type_params.first?
+          return nil unless elem
           elem_name = get_type_name_from_ref(elem)
           if elem_name.empty? || elem_name == "Void" || elem_name == "Unknown"
             if info = split_generic_base_and_args(desc.name)
@@ -7726,6 +7756,51 @@ module Crystal::HIR
       else
         nil
       end
+    end
+
+    private def hash_value_type_for(self_type : TypeRef) : TypeRef?
+      return nil if self_type == TypeRef::VOID
+      desc = @module.get_type_descriptor(self_type)
+      return nil unless desc
+
+      if desc.kind == TypeKind::Hash
+        value = desc.type_params[1]?
+        return value if value && value != TypeRef::VOID
+      end
+
+      base = desc.name
+      if paren = base.index('(')
+        base = base[0, paren]
+      end
+      return nil unless last_namespace_component(base) == "Hash"
+
+      value = desc.type_params[1]?
+      if value && value != TypeRef::VOID
+        return value
+      end
+
+      if info = split_generic_base_and_args(desc.name)
+        args = split_generic_type_args(info[:args])
+        if args.size > 1
+          parsed = type_ref_for_name(args[1].strip)
+          return parsed unless parsed == TypeRef::VOID
+        end
+      end
+
+      nil
+    end
+
+    private def infer_hash_fetch_return_type(self_type : TypeRef, param_types : Array(TypeRef), has_block : Bool) : TypeRef?
+      value_type = hash_value_type_for(self_type)
+      return nil unless value_type
+
+      return value_type if has_block
+
+      default_type = param_types[1]?
+      return value_type unless default_type
+      return value_type if default_type == TypeRef::VOID
+
+      union_type_for_values(value_type, default_type)
     end
 
     private def infer_unannotated_search_return_type(method_name : String, self_type : TypeRef) : TypeRef?
@@ -13078,10 +13153,13 @@ module Crystal::HIR
         end
       end
 
-      if registered_params = function_type_param_map_for(full_name_override || base_name, base_name)
+      # Mangle function name with parameter types before loading lazy generic substitutions.
+      full_name = full_name_override || function_full_name_for_def(base_name, param_types, node.params, has_block)
+
+      if registered_params = function_type_param_map_for(full_name, base_name)
         extra_type_params.merge!(registered_params)
-        if debug_env_filter_match?("DEBUG_LOWER_METHOD_TPM", full_name_override || base_name, base_name)
-          STDERR.puts "[LOWER_MODULE_TPM] base=#{base_name} override=#{full_name_override || "nil"} merged=#{registered_params}"
+        if debug_env_filter_match?("DEBUG_LOWER_METHOD_TPM", full_name, base_name)
+          STDERR.puts "[LOWER_MODULE_TPM] full=#{full_name} base=#{base_name} merged=#{registered_params}"
         end
       end
 
@@ -13146,8 +13224,18 @@ module Crystal::HIR
         end
       end
 
-      # Mangle function name with parameter types
-      full_name = full_name_override || function_full_name_for_def(base_name, param_types, node.params, has_block)
+      if known = @function_types[full_name]?
+        if (return_type == TypeRef::VOID || return_type == TypeRef::NIL || unresolved_generic_return_type?(return_type)) &&
+           known != TypeRef::VOID && known != TypeRef::NIL
+          return_type = known
+        end
+      end
+      if known = @function_types[base_name]?
+        if (return_type == TypeRef::VOID || return_type == TypeRef::NIL || unresolved_generic_return_type?(return_type)) &&
+           known != TypeRef::VOID && known != TypeRef::NIL
+          return_type = known
+        end
+      end
 
       register_pending_method_effects(full_name, param_types.size)
 
@@ -13311,6 +13399,18 @@ module Crystal::HIR
           if inferred_type && inferred_type != TypeRef::VOID && inferred_type != return_type
             return_type = inferred_type
             func.return_type = inferred_type
+          end
+        end
+
+        # Fallback for unresolved non-annotated methods: if lowering still
+        # produced VOID, use the AST return-type inference path once.
+        # This is intentionally late and conditional to avoid global perf cost.
+        if return_type == TypeRef::VOID
+          if inferred = infer_concrete_return_type_from_body(node, module_name)
+            if inferred != TypeRef::VOID
+              return_type = inferred
+              func.return_type = inferred
+            end
           end
         end
       end
@@ -17140,6 +17240,21 @@ module Crystal::HIR
         has_block = def_contains_yield?(node, def_arena)
       end
 
+      # Mangle function name with parameter types for overloading.
+      # Needed early so lazy generic type-param substitutions can be loaded
+      # before computing return/param-dependent types.
+      full_name = full_name_override || function_full_name_for_def(base_name, param_types, node.params, has_block)
+
+      # Retrieve stored type param map for lazy lowering of generic class methods.
+      # When a monomorphized class's method is lowered, we need the type parameter
+      # substitutions (e.g., T => UInt8) that were stored during method registration.
+      if registered_params = function_type_param_map_for(full_name, base_name)
+        extra_type_params.merge!(registered_params)
+        if debug_env_filter_match?("DEBUG_LOWER_METHOD_TPM", full_name, base_name)
+          STDERR.puts "[LOWER_METHOD_TPM] full=#{full_name} base=#{base_name} merged=#{registered_params}"
+        end
+      end
+
       return_type = TypeRef::VOID
       if extra_type_params.empty?
         return_type = if rt = node.return_type
@@ -17183,21 +17298,27 @@ module Crystal::HIR
                         else
                           # Try to infer return type from getter-style methods (single ivar access)
                           inferred = infer_getter_return_type(node, class_info.ivars)
-                          inferred || TypeRef::VOID
-                        end
+                        inferred || TypeRef::VOID
+                      end
         end
       end
 
-      # Mangle function name with parameter types for overloading
-      full_name = full_name_override || function_full_name_for_def(base_name, param_types, node.params, has_block)
+      if return_type == TypeRef::VOID && method_name == "fetch"
+        if inferred_fetch = infer_hash_fetch_return_type(class_info.type_ref, param_types, has_block)
+          return_type = inferred_fetch
+        end
+      end
 
-      # Retrieve stored type param map for lazy lowering of generic class methods.
-      # When a monomorphized class's method is lowered, we need the type parameter
-      # substitutions (e.g., T => UInt8) that were stored during method registration.
-      if registered_params = function_type_param_map_for(full_name, base_name)
-        extra_type_params.merge!(registered_params)
-        if debug_env_filter_match?("DEBUG_LOWER_METHOD_TPM", full_name, base_name)
-          STDERR.puts "[LOWER_METHOD_TPM] full=#{full_name} base=#{base_name} merged=#{registered_params}"
+      if known = @function_types[full_name]?
+        if (return_type == TypeRef::VOID || return_type == TypeRef::NIL || unresolved_generic_return_type?(return_type)) &&
+           known != TypeRef::VOID && known != TypeRef::NIL
+          return_type = known
+        end
+      end
+      if known = @function_types[base_name]?
+        if (return_type == TypeRef::VOID || return_type == TypeRef::NIL || unresolved_generic_return_type?(return_type)) &&
+           known != TypeRef::VOID && known != TypeRef::NIL
+          return_type = known
         end
       end
 
@@ -17516,6 +17637,18 @@ module Crystal::HIR
           if inferred_type && inferred_type != TypeRef::VOID && inferred_type != return_type
             return_type = inferred_type
             func.return_type = inferred_type
+          end
+        end
+
+        # Fallback for unresolved non-annotated methods: if lowering still
+        # produced VOID, use the AST return-type inference path once.
+        # This is intentionally late and conditional to avoid global perf cost.
+        if return_type == TypeRef::VOID
+          if inferred = infer_concrete_return_type_from_body(node, class_name)
+            if inferred != TypeRef::VOID
+              return_type = inferred
+              func.return_type = inferred
+            end
           end
         end
       end
@@ -22785,11 +22918,16 @@ module Crystal::HIR
           if ivar_type = ivar_return_type_for_method(base_name)
             return ivar_type
           end
-          if base_type = @function_types[base_name]?
-            return base_type unless base_type == TypeRef::VOID
-          end
-          if cached = @function_base_return_types[base_name]?
-            return cached
+          # Avoid cross-overload return type pollution:
+          # for mangled overload names (contain "$$"), base-name caches can carry
+          # the return type of a different arity/signature (e.g. inspect vs inspect(io)).
+          if !name.includes?("$$")
+            if base_type = @function_types[base_name]?
+              return base_type unless base_type == TypeRef::VOID
+            end
+            if cached = @function_base_return_types[base_name]?
+              return cached
+            end
           end
           if def_node = lookup_function_def_for_return(base_name, base_name)
             owner_name = nil.as(String?)

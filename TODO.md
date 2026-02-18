@@ -2630,6 +2630,20 @@ r2 = maybe(false)  # => nil
       - `CRYSTAL_V2_AST_FILTER=1 CRYSTAL_V2_PHASE_STATS=1 timeout 120 /tmp/crystal_v2_head3 spec/hir/return_type_inference_spec.cr -o /tmp/rti_phase_head3` no longer reports `%r7.phi_extract.2` undefined.
     - New downstream blocker on that path:
       - `opt: ... error: use of undefined value '@__crystal_main'` (requires separate entrypoint/reachability fix when `AST_FILTER=1` is enabled).
+  - **Update (2026-02-18)**: fixed return-type downgrades and Hash query/fetch inference in HIR lowering (`ast_to_hir.cr`).
+    - `set_function_type_entry`/`register_function_type` now preserve existing concrete return types (no downgrade back to `VOID`/`NIL`).
+    - Mangled overload lookups in `get_function_return_type` no longer reuse base-name return caches for `$$` signatures (prevents cross-overload pollution like `inspect` vs `inspect(io)`).
+    - `infer_unannotated_query_return_type` now handles generic `Hash(...)` represented as `Class/Struct` descriptors.
+    - Added `infer_hash_fetch_return_type` to infer concrete return for `Hash#fetch(key, default)` overloads from value/default types.
+    - Evidence:
+      - Old stage2 (`/tmp/crystal_v2_stage2_rel_retfix2 --help`) crashed with `EXIT 139`.
+      - New stage2 (`/tmp/crystal_v2_stage2_rel_fix1 --help`) no longer segfaults (now exits with CLI error, no crash).
+      - LLVM call/define return mismatches reduced from `8755` to `5718` (`/tmp/stage2_emit_retfix2.ll` vs `/tmp/crystal_v2_stage2_rel_fix1.ll`).
+      - `Hash(String, OptionParser::Handler)#[]?` and `#fetch(..., nil)` now emit non-void union signatures in LLVM (`/tmp/crystal_v2_stage2_rel_fix1.ll`).
+      - `regression_tests/run_all.sh /tmp/crystal_v2_wip_dbg_fix1` → `43 passed, 0 failed`.
+    - Remaining blockers after this step:
+      - stage2 CLI currently exits with `Error: Unknown --mm mode: balanced` (no segfault, but still blocks normal CLI flow).
+      - several unresolved return-signature mismatches remain (notably dead-code stubs like `Time$Dinstant`).
 
 **Regressions (open):**
 - [ ] **Bootstrap regression (2026-01-31)**: `bootstrap_array` link fails with 10+ missing symbols after commit b135d46.
