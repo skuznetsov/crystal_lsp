@@ -10850,6 +10850,12 @@ module Crystal::MIR
           val = "%global_inttoptr.#{c}"
         end
       end
+
+      # Scalar stores cannot use `null` literal in LLVM IR.
+      # Normalize accidental nulls (e.g. const nil lowered through non-ptr MIR type).
+      if val == "null" && llvm_type != "ptr" && !llvm_type.includes?(".union")
+        val = (llvm_type == "float" || llvm_type == "double") ? "0.0" : "0"
+      end
       mangled_global = @type_mapper.mangle_name(inst.global_name)
       # Use renamed global if it was renamed to avoid function name conflict
       actual_global = @global_name_mapping[mangled_global]? || mangled_global
