@@ -23,6 +23,31 @@
 - Float64: arithmetic, ** on literals
 
 ## Recently completed
+- **AST cache string-table coverage expansion (2026-02-18)** —
+  removed remaining `AST cache save failed: string table missing entry ...` cases
+  for regression/bootstrap workloads in forced cache mode.
+  Changes:
+  - `src/compiler/frontend/string_pool.cr`
+    - added `StringPool#each_string` iterator for interned keys.
+  - `src/compiler/lsp/ast_cache.cr`
+    - `build_string_table` now also includes all interned parser strings from `StringPool`;
+    - expanded `collect_strings` coverage for:
+      - `NamedTupleLiteralNode` keys,
+      - `BlockNode` / `ProcLiteralNode` parameter names/types,
+      - `BeginNode` rescue type/variable strings,
+      - `AnnotationDefNode` names,
+      - `UnionNode` names.
+  Validation:
+  - forced cache regressions:
+    - `CRYSTAL_V2_AST_CACHE=1 CRYSTAL_V2_PIPELINE_CACHE=0 regression_tests/run_all.sh /tmp/crystal_v2_astcache_fullfix2`
+      => `43 passed, 0 failed`;
+  - `hash_stress` warm-cache A/B:
+    - no `AST cache save failed` diagnostics in verbose logs;
+    - runtime output remains correct (`hash_stress_ok`);
+  - bootstrap smoke with `--ast-cache`:
+    - `/tmp/crystal_v2_astcache_fullfix2 examples/bootstrap_array.cr --ast-cache -o /tmp/bootstrap_array_astcache_fullfix2 && scripts/run_safe.sh /tmp/bootstrap_array_astcache_fullfix2 8 512`
+      => `EXIT 0`.
+
 - **AST cache header width fix + strict string-table safety (2026-02-18)** —
   fixed root cache stream corruption and removed silent wrong-code writes in `--ast-cache` mode.
   Root cause:
