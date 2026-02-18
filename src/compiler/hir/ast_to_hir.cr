@@ -41689,11 +41689,7 @@ module Crystal::HIR
                           "__crystal_v2_array_new_filled_i32"
                         end
           # Determine the element type name for proper array type
-          elem_name = if owner.includes?("(")
-                        owner.split("(").last.rstrip(')')
-                      else
-                        get_type_name_from_ref(value_type)
-                      end
+          elem_name = element_type_for_type_name(owner) || get_type_name_from_ref(value_type)
           arr_type_name = "Array(#{elem_name})"
           arr_type = type_ref_for_name(arr_type_name) || TypeRef::POINTER
           ext_call = ExternCall.new(ctx.next_id, arr_type, helper_name, [size_id, value_id])
@@ -41734,7 +41730,7 @@ module Crystal::HIR
         if type_desc = @module.get_type_descriptor(ctx.type_of(receiver_id))
           tuple_size = tuple_size_from_type_name(type_desc.name)
           if tuple_size.nil?
-            base_name = type_desc.name.split("(").first
+            base_name = strip_generic_args(type_desc.name)
             tuple_size = type_desc.type_params.size if base_name == "Tuple" && !type_desc.type_params.empty?
           end
           if tuple_size
@@ -51780,7 +51776,7 @@ module Crystal::HIR
         if type_desc = @module.get_type_descriptor(receiver_type)
           tuple_size = tuple_size_from_type_name(type_desc.name)
           if tuple_size.nil?
-            base_name = type_desc.name.split("(").first
+            base_name = strip_generic_args(type_desc.name)
             tuple_size = type_desc.type_params.size if base_name == "Tuple" && !type_desc.type_params.empty?
           end
           if tuple_size

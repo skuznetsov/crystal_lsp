@@ -22,6 +22,19 @@
 - Float64: arithmetic, ** on literals
 
 ## Recently completed
+- **HIR zero-copy cleanup: remove remaining `split(\"(\")` in call/tuple fast paths (2026-02-18)** —
+  replaced three split-based generic-base extractions in `src/compiler/hir/ast_to_hir.cr`:
+  - `Array.new(size, value)` element type extraction now uses `element_type_for_type_name(owner)`;
+  - `Tuple#size` fallback base extraction now uses `strip_generic_args(type_desc.name)` in both call and member-access paths.
+  This removes short-lived `Array(String)` allocations and keeps generic parsing on
+  existing zero-copy helpers.
+  Validation:
+  - release build: `crystal build src/crystal_v2.cr --release -o /tmp/crystal_v2_rel_nosplit3`
+    => `real 416.90s`;
+  - regressions: `regression_tests/run_all.sh /tmp/crystal_v2_rel_nosplit3`
+    => `42 passed, 0 failed`;
+  - stage1 no-cache smoke: `1:55.05` (`/tmp/crystal_v2_rel_nosplit3`) under concurrent external CPU load.
+
 - **HIR overload matching: removed `split(\"(\").first` in hot path (2026-02-18)** —
   replaced generic-base extraction via `split` with `strip_generic_args(...)` in
   `params_compatible_with_args?` and `params_match_score`
