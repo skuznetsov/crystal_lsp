@@ -22,6 +22,30 @@
 - Float64: arithmetic, ** on literals
 
 ## Recently completed
+- **Generic split fast-path for non-generic names (2026-02-18)** —
+  reduced hot hash/cache traffic in `split_generic_base_and_args` by avoiding
+  cache probes for names that cannot be generic.
+  Changes:
+  - `src/compiler/hir/ast_to_hir.cr`
+    - added `generic_split_candidate_name?(name)` (single byte scan for `(` or `,`);
+    - `split_generic_base_and_args` now returns early for non-candidate names
+      before touching `@generic_split_cache`.
+  Why:
+  - fresh self-host sample (`/tmp/self_profile_after_owner_truecache.sample.txt`)
+    showed repeated hash lookups in `split_generic_base_and_args` /
+    `unresolved_generic_type_arg?` on simple names.
+  Validation:
+  - correctness:
+    - `crystal build src/crystal_v2.cr -o /tmp/crystal_v2_generic_split_fastpath --error-trace` => `EXIT 0`
+    - `regression_tests/run_all.sh /tmp/crystal_v2_generic_split_fastpath` => `44 passed, 0 failed`
+  - compile-time A/B (same workload, caches disabled):
+    - baseline: `CRYSTAL_V2_PIPELINE_CACHE=0 CRYSTAL_V2_LLVM_CACHE=0 /tmp/crystal_v2_owner_truecache2 examples/bootstrap_array.cr -o /tmp/bootstrap_array_owner_truecache2_ab2` => `8.939s`
+    - experiment: `CRYSTAL_V2_PIPELINE_CACHE=0 CRYSTAL_V2_LLVM_CACHE=0 /tmp/crystal_v2_generic_split_fastpath examples/bootstrap_array.cr -o /tmp/bootstrap_array_generic_split_fastpath_ab` => `8.177s`
+    - delta: about `-8.5%`
+  - runtime smoke:
+    - `scripts/run_safe.sh /tmp/bootstrap_array_owner_truecache2_ab2 10 768` => `EXIT 0`
+    - `scripts/run_safe.sh /tmp/bootstrap_array_generic_split_fastpath_ab 10 768` => `EXIT 0`
+
 - **Yield-owner compatibility positive cache (2026-02-18)** —
   added a positive-only cache for `(receiver_base, owner_base)` compatibility in
   yield fallback matching to avoid repeated parent/module-chain checks in hot loops.

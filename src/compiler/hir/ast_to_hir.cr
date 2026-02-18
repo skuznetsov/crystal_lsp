@@ -24597,6 +24597,18 @@ module Crystal::HIR
       false
     end
 
+    @[AlwaysInline]
+    private def generic_split_candidate_name?(name : String) : Bool
+      i = 0
+      bytesize = name.bytesize
+      while i < bytesize
+        byte = name.byte_at(i)
+        return true if byte == '('.ord.to_u8 || byte == ','.ord.to_u8
+        i += 1
+      end
+      false
+    end
+
     # Split a full generic type name into base and args, handling nested parens in the base.
     # Example: "Foo(Bar, Baz)::Entry(Qux)" -> base="Foo(Bar, Baz)::Entry", args="Qux"
     private def split_generic_base_and_args(name : String) : NamedTuple(base: String, args: String)?
@@ -24604,6 +24616,12 @@ module Crystal::HIR
         if last_input == name
           return @generic_split_last_output
         end
+      end
+
+      unless generic_split_candidate_name?(name)
+        @generic_split_last_input = name
+        @generic_split_last_output = nil
+        return nil
       end
 
       if cached = @generic_split_cache[name]?
