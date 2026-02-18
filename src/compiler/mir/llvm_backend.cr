@@ -5826,6 +5826,8 @@ module Crystal::MIR
                         when ExternCall   then inst.args.to_a
                         when IndirectCall then inst.args.to_a + [inst.callee_ptr]
                         when Store        then [inst.value, inst.ptr]
+                        when GlobalStore  then [inst.value]
+                        when AtomicStore  then [inst.value, inst.ptr]
                         when Load         then [inst.ptr]
                         when GetElementPtr        then [inst.base]
                         when GetElementPtrDynamic then [inst.base, inst.index]
@@ -9958,7 +9960,16 @@ module Crystal::MIR
         next if arg_type == TypeRef::VOID
         if arg_type
           arg_llvm_type = @type_mapper.llvm_type(arg_type)
-          if arg_llvm_type.includes?(".union")
+          # Nil-like arguments map to LLVM "void" in our type mapper, but LLVM
+          # function arguments cannot be typed as void. Pass them as ptr values.
+          if arg_llvm_type == "void"
+            val = value_ref(a)
+            if val == "0" || val == "null"
+              "ptr null"
+            else
+              "ptr #{val}"
+            end
+          elsif arg_llvm_type.includes?(".union")
             # For union types, check if we have a cross-block slot to use
             if slot_name = @cross_block_slots[a]?
               "ptr %#{slot_name}"
@@ -10808,6 +10819,8 @@ module Crystal::MIR
           # Value is not a union (or type unknown) - use zeroinitializer for the union
           val = "zeroinitializer"
         end
+        # Union stores cannot use scalar null/0 literals directly.
+        val = normalize_union_value(val, llvm_type)
       end
 
       # Reconcile scalar pointer/integer mismatches using emitted SSA type.
@@ -11023,7 +11036,13 @@ module Crystal::MIR
       # Union may be passed by value - need to store to stack first
       union_val = value_ref(inst.union_value)
       union_type_ref = @value_types[inst.union_value]? || TypeRef::POINTER
-      union_type = @type_mapper.llvm_type(union_type_ref)
+      static_union_type = @type_mapper.llvm_type(union_type_ref)
+      emitted_union_type = @emitted_value_types[union_val]?
+      union_type = if emitted_union_type && emitted_union_type.includes?(".union")
+                     emitted_union_type
+                   else
+                     static_union_type
+                   end
       base_name = name.lstrip('%')
 
       # Check if LLVM type is actually a union struct (not just ptr)
@@ -11075,7 +11094,13 @@ module Crystal::MIR
       # Union may be passed by value (from load) - need to store to stack first
       union_val = value_ref(inst.union_value)
       union_type_ref = @value_types[inst.union_value]? || TypeRef::POINTER
-      union_type = @type_mapper.llvm_type(union_type_ref)
+      static_union_type = @type_mapper.llvm_type(union_type_ref)
+      emitted_union_type = @emitted_value_types[union_val]?
+      union_type = if emitted_union_type && emitted_union_type.includes?(".union")
+                     emitted_union_type
+                   else
+                     static_union_type
+                   end
       base_name = name.lstrip('%')
 
       # Check if LLVM type is actually a union struct (not just ptr)
