@@ -5090,4 +5090,35 @@ crystal build -Ddebug_hooks src/crystal_v2.cr -o bin/crystal_v2 --no-debug
       - `scripts/run_safe.sh /tmp/bench_fib42_dbg_unionptrfix 10 768` => `EXIT 0`
     - regression suite:
       - `./regression_tests/run_all.sh /tmp/crystal_v2_dbg_unionptrfix` => `41 passed, 0 failed`
-    - previously failing signatures (`%r68.fromslot.15` union-store mismatch) no longer reproduce in these runs.
+  - previously failing signatures (`%r68.fromslot.15` union-store mismatch) no longer reproduce in these runs.
+
+### 8.79 HIR/MIR block ABI: untyped `yield` no longer drops block execution; closure receiver resolution stabilized (2026-02-18)
+
+- [x] Fix missing execution of blocks in `yield` methods with untyped `&`, while keeping closure-ref semantics and avoiding receiver mis-resolution in block procs.
+  - Root cause:
+    - `HIR::Yield` lowering treated block param type `VOID` as non-callable and returned `nil` instead of emitting indirect call.
+    - this broke `Int#internal_to_s` blocks (`puts 123` printed empty output; `test_closure_ref` output was empty due Int printing path).
+    - first naive fix (always indirect-call) exposed ABI issues for block procs with captures; additional resolver hardening was needed for captured receiver identifiers in block-proc bodies.
+  - Code fix:
+    - file: `src/compiler/mir/hir_to_mir.cr`
+      - `lower_yield`: treat untyped block param `VOID` as runtime pointer and emit `call_indirect` instead of returning `nil`.
+    - file: `src/compiler/hir/ast_to_hir.cr`
+      - `lower_block_to_proc`:
+        - route captured locals through closure cells (no hidden capture params in block-proc signature),
+        - detect written captures and keep closure-cell binding only for those names after block-proc lowering,
+        - restore previous bindings for non-written captures to avoid cross-scope contamination.
+      - member-call receiver resolution:
+        - treat identifiers from `@closure_ref_cells` as runtime instance receivers (not type/module receivers).
+      - identifier lookup policy:
+        - added `@closure_ref_prefer_cell` and made closure-cell precedence explicit only for by-ref capture names,
+        - local vars win by default; non-local captures still resolve through closure cells.
+      - function-scope hygiene:
+        - save/clear/restore `@closure_ref_prefer_cell` alongside `@closure_ref_cells` in method/function lowering boundaries.
+  - DoD / evidence:
+    - targeted:
+      - `printf 'puts 123\n' > /tmp/repro_puts_123.cr && /tmp/crystal_v2_yieldfix4 /tmp/repro_puts_123.cr -o /tmp/repro_puts_123_yieldfix4 && scripts/run_safe.sh /tmp/repro_puts_123_yieldfix4 10 768` => stdout `123`, `EXIT 0`
+      - `/tmp/crystal_v2_yieldfix4 regression_tests/test_closure_ref.cr -o /tmp/test_closure_ref_yieldfix4 && scripts/run_safe.sh /tmp/test_closure_ref_yieldfix4 10 768` => stdout `42`, `EXIT 0`
+    - full regression:
+      - `regression_tests/run_all.sh /tmp/crystal_v2_yieldfix4` => `41 passed, 1 failed` (`test_byteformat_decode_u32` existing crash, unchanged by this fix line).
+  - Insight:
+    - the robust path is: keep block-proc ABI explicit-args-only for `yield` dispatch, but scope closure-cell override semantics tightly (written captures only) to avoid accidental receiver/value shadowing in unrelated locals.

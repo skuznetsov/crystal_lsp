@@ -2070,6 +2070,7 @@ module Crystal::HIR
     # Closure by-reference cells: var_name → {classvar_class, classvar_name, type}
     # When set, reads/writes to this var go through ClassVarGet/ClassVarSet (global cell)
     @closure_ref_cells = {} of String => {String, String, TypeRef}
+    @closure_ref_prefer_cell = Set(String).new
     @closure_cell_counter : Int32 = 0
 
     # Inline return handling for yield-function inlining.
@@ -12920,7 +12921,9 @@ module Crystal::HIR
       old_enum_value_types = @enum_value_types
       @enum_value_types = nil
       saved_closure_ref_cells_mm = @closure_ref_cells.dup
+      saved_closure_ref_prefer_mm = @closure_ref_prefer_cell.dup
       @closure_ref_cells.clear
+      @closure_ref_prefer_cell.clear
 
       old_class = @current_class
       old_method = @current_method
@@ -13342,6 +13345,7 @@ module Crystal::HIR
 
       @enum_value_types = old_enum_value_types
       @closure_ref_cells = saved_closure_ref_cells_mm
+      @closure_ref_prefer_cell = saved_closure_ref_prefer_mm
     end
 
     # Register a class type and its methods (pass 1)
@@ -16907,7 +16911,9 @@ module Crystal::HIR
       old_enum_value_types = @enum_value_types
       @enum_value_types = nil
       saved_closure_ref_cells_lm = @closure_ref_cells.dup
+      saved_closure_ref_prefer_lm = @closure_ref_prefer_cell.dup
       @closure_ref_cells.clear
+      @closure_ref_prefer_cell.clear
 
       # Track current method for super calls
       old_class = @current_class
@@ -17509,6 +17515,7 @@ module Crystal::HIR
 
       @enum_value_types = old_enum_value_types
       @closure_ref_cells = saved_closure_ref_cells_lm
+      @closure_ref_prefer_cell = saved_closure_ref_prefer_lm
 
       # Restore previous method context
       @current_class = old_class
@@ -27264,7 +27271,9 @@ module Crystal::HIR
       @enum_value_types = nil
       # Closure ref cells are per-function scope; save and clear for new function.
       saved_closure_ref_cells = @closure_ref_cells.dup
+      saved_closure_ref_prefer = @closure_ref_prefer_cell.dup
       @closure_ref_cells.clear
+      @closure_ref_prefer_cell.clear
       base_name = String.new(node.name)
       if debug_env_filter_match?("DEBUG_STRING_METHOD_LOWER", base_name)
         STDERR.puts "[DEBUG_LOWER_DEF] name=#{base_name} override=#{full_name_override || "(none)"} current_class=#{@current_class || "(none)"}"
@@ -27496,6 +27505,7 @@ module Crystal::HIR
       if existing = @module.function_by_name(full_name)
         @enum_value_types = old_enum_value_types
         @closure_ref_cells = saved_closure_ref_cells
+        @closure_ref_prefer_cell = saved_closure_ref_prefer
         return existing
       end
 
@@ -27643,6 +27653,7 @@ module Crystal::HIR
 
       @enum_value_types = old_enum_value_types
       @closure_ref_cells = saved_closure_ref_cells
+      @closure_ref_prefer_cell = saved_closure_ref_prefer
 
       func
     end
@@ -31467,17 +31478,21 @@ module Crystal::HIR
         return lit.id
       end
 
-      # Check if variable is stored in a closure cell (by-reference capture)
-      if ref_cell = @closure_ref_cells[name]?
-        cell_class, cell_name, cell_type = ref_cell
-        get = ClassVarGet.new(ctx.next_id, cell_type, cell_class, cell_name)
-        ctx.emit(get)
-        ctx.register_type(get.id, cell_type)
-        return get.id
-      end
+      prefer_closure_cell = @closure_ref_prefer_cell.includes?(name)
 
-      # Check if it's a local variable first
+      # Check local variables first, unless this name is explicitly marked as
+      # by-ref capture and must be read via closure cell.
       if local_id = ctx.lookup_local(name)
+        if prefer_closure_cell
+          if ref_cell = @closure_ref_cells[name]?
+            cell_class, cell_name, cell_type = ref_cell
+            get = ClassVarGet.new(ctx.next_id, cell_type, cell_class, cell_name)
+            ctx.emit(get)
+            ctx.register_type(get.id, cell_type)
+            return get.id
+          end
+        end
+
         # Return a copy/reference to the local
         copy = Copy.new(ctx.next_id, ctx.type_of(local_id), local_id)
         ctx.emit(copy)
@@ -31492,6 +31507,15 @@ module Crystal::HIR
         end
         return copy.id
       else
+        # Non-local identifier: captured values are resolved through closure cells.
+        if ref_cell = @closure_ref_cells[name]?
+          cell_class, cell_name, cell_type = ref_cell
+          get = ClassVarGet.new(ctx.next_id, cell_type, cell_class, cell_name)
+          ctx.emit(get)
+          ctx.register_type(get.id, cell_type)
+          return get.id
+        end
+
         # Local not found - try inline caller locals for block bodies
         if @inline_yield_block_body_depth > 0
           # Inline-yield block bodies should be able to see caller locals. When a
@@ -40062,6 +40086,11 @@ module Crystal::HIR
           name = String.new(obj_node.name)
           if name != "self"
             if local_id = ctx.lookup_local(name)
+              force_instance_receiver = true
+            elsif @closure_ref_cells.has_key?(name)
+              # Captured locals lowered via closure cells are not present in the
+              # lexical local table, but they are still runtime values. Treat
+              # them as instance receivers (not type/module receivers).
               force_instance_receiver = true
             elsif mapped = @type_param_map[name]?
               type_param_receiver_name = mapped
@@ -53719,31 +53748,31 @@ module Crystal::HIR
         end
       end
 
-      # Detect which captures are WRITTEN to inside the block body.
-      # These need by-reference semantics via global closure cells.
-      all_capture_names = captures.map { |name, _, _| name }.to_set
-      written_captures = detect_written_captures(block_node.body, all_capture_names, block_arena)
+      capture_names = captures.map { |name, _, _| name }.to_set
+      written_captures = detect_written_captures(block_node.body, capture_names, block_arena)
+      previous_capture_cells = {} of String => {String, String, TypeRef}
+      new_capture_cells = Set(String).new
+      previous_prefer_cell = {} of String => Bool
 
-      # For written captures, set up global closure cells
-      by_ref_captures = [] of {String, String, String, TypeRef}  # {var_name, class_name, cell_name, type}
-      written_captures.each do |var_name|
-        cap = captures.find { |n, _, _| n == var_name }
-        next unless cap
-        cap_name, parent_vid, cap_type = cap
+      # Block procs are invoked by runtime yield dispatch with only explicit
+      # block args. Hidden capture params would break ABI at call sites.
+      # Route captured locals through closure cells instead.
+      captures.each do |cap_name, parent_vid, cap_type|
+        previous_prefer_cell[cap_name] = @closure_ref_prefer_cell.includes?(cap_name)
+        if existing = @closure_ref_cells[cap_name]?
+          previous_capture_cells[cap_name] = existing
+        else
+          new_capture_cells.add(cap_name)
+        end
         cell_name = "__closure_cell_#{@closure_cell_counter}"
         @closure_cell_counter += 1
         class_name = "__closure"
-        # Store the current value of the captured variable into the global cell
         set = ClassVarSet.new(ctx.next_id, cap_type, class_name, cell_name, parent_vid)
         ctx.emit(set)
         ctx.register_type(set.id, cap_type)
-        # Register this variable as a closure-ref cell for both proc body and parent's remaining code
-        @closure_ref_cells[var_name] = {class_name, cell_name, cap_type}
-        by_ref_captures << {var_name, class_name, cell_name, cap_type}
+        @closure_ref_cells[cap_name] = {class_name, cell_name, cap_type}
+        @closure_ref_prefer_cell.add(cap_name) if written_captures.includes?(cap_name)
       end
-
-      # Remove by-ref captures from the by-value captures list (they're accessed via globals)
-      captures.reject! { |name, _, _| written_captures.includes?(name) }
 
       # Add parameters to the standalone function
       if params = block_node.params
@@ -53764,13 +53793,6 @@ module Crystal::HIR
           proc_ctx.register_local(name, hir_param.id)
           proc_ctx.register_type(hir_param.id, param_type)
         end
-      end
-
-      # Add captured variables as hidden extra parameters (by-value only)
-      captures.each do |cap_name, _parent_vid, cap_type|
-        hir_param = proc_func.add_param("__capture_#{cap_name}", cap_type)
-        proc_ctx.register_local(cap_name, hir_param.id)
-        proc_ctx.register_type(hir_param.id, cap_type)
       end
 
       # Lower block body into the standalone function
@@ -53806,6 +53828,21 @@ module Crystal::HIR
       last_value = begin
         lower_body(proc_ctx, block_node.body)
       ensure
+        captures.each do |cap_name, _, _|
+          next if written_captures.includes?(cap_name)
+          if previous = previous_capture_cells[cap_name]?
+            @closure_ref_cells[cap_name] = previous
+          elsif new_capture_cells.includes?(cap_name)
+            @closure_ref_cells.delete(cap_name)
+          end
+          if prev_prefer = previous_prefer_cell[cap_name]?
+            if prev_prefer
+              @closure_ref_prefer_cell.add(cap_name)
+            else
+              @closure_ref_prefer_cell.delete(cap_name)
+            end
+          end
+        end
         @inline_yield_proc_depth -= 1
         @arena = saved_arena_outer
         @inline_yield_return_stack = saved_return_stack
@@ -53844,12 +53881,6 @@ module Crystal::HIR
       fp = FuncPointer.new(ctx.next_id, proc_type, proc_func_name)
       ctx.emit(fp)
       ctx.register_type(fp.id, proc_type)
-
-      # Store capture parent value IDs for use at call site
-      if !captures.empty?
-        capture_parent_ids = captures.map { |_, parent_vid, _| parent_vid }
-        @proc_captures_by_value[fp.id] = capture_parent_ids
-      end
 
       fp.id
     end

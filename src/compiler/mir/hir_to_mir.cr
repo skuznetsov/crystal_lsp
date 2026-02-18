@@ -2688,12 +2688,12 @@ module Crystal
       end
       block_val = get_value(block_param_id)
       block_type = @hir_value_types[block_param_id]? || HIR::TypeRef::POINTER
+      # Unannotated `&` block params are currently inferred as VOID in HIR,
+      # but runtime still passes a block function pointer for yield dispatch.
+      block_type = HIR::TypeRef::POINTER if block_type == HIR::TypeRef::VOID
       block_desc = @hir_module.get_type_descriptor(block_type)
       is_ptr = block_type == HIR::TypeRef::POINTER || (block_desc && block_desc.kind == HIR::TypeKind::Proc)
       unless is_ptr
-        if block_type == HIR::TypeRef::VOID
-          return builder.const_nil
-        end
         block_val = builder.cast(CastKind::IntToPtr, block_val, TypeRef::POINTER)
       end
       builder.call_indirect(block_val, args, convert_type(yld.type))
