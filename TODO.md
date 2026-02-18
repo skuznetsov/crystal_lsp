@@ -6,9 +6,9 @@
   - `regression_tests/test_select_map_stress.cr`
   - `regression_tests/test_float_pow_var.cr`
   - `regression_tests/test_string_upcase_large.cr`
-- Numeric `puts`/`to_s` formatting path is still unstable for integer types
-  (`puts 123` currently prints only newline). This is orthogonal to the
-  ByteFormat crash fix below and needs a separate root-cause pass in `Int#to_s`.
+- Cache-warm compilations can still produce stale false regressions in some
+  files (observed as collapsed string literals like `"i123i123..."`).
+  For validation runs, use no-cache mode until cache invalidation is tightened.
 
 ## Working Features
 - Basic output: puts String/Int32/Float64, string interpolation
@@ -22,6 +22,25 @@
 - Float64: arithmetic, ** on literals
 
 ## Recently completed
+- **LLVM signed narrow-int to pointer coercion fix (2026-02-18)** —
+  fixed negative `Int32` corruption in generic `Int#to_s`/`puts` paths caused by
+  direct `inttoptr i32` (effectively zero-extending on 64-bit targets).
+  Changes:
+  - `src/compiler/mir/llvm_backend.cr`
+    - `emit_cast`: for `inttoptr` with integer source width `< 64`, now emits
+      signed/unsigned extension to `i64` before `inttoptr`;
+    - `emit_call` arg coercion (`expected ptr`, `actual int`): same extension
+      rule before pointer cast.
+  - `regression_tests/test_negative_int32_puts.cr`
+    - added regression guard for `puts -7` (`# EXPECT: neg=-7`).
+  Validation:
+  - repro: `/tmp/repro_neg_arith.cr` and `/tmp/repro_to_s_neg.cr` now print `-7` correctly;
+  - regressions (no-cache wrapper): `regression_tests/run_all.sh /tmp/crystal_v2_nocache.sh`
+    => `43 passed, 0 failed`;
+  - bootstrap smoke (no-cache):
+    `CRYSTAL_V2_PIPELINE_CACHE=0 CRYSTAL_V2_LLVM_CACHE=0 bin/crystal_v2 --no-ast-cache examples/bootstrap_array.cr -o /tmp/bootstrap_array_rel_check && scripts/run_safe.sh /tmp/bootstrap_array_rel_check 10 512`
+    => `EXIT 0`.
+
 - **Untyped block/yield value preservation in HIR/MIR (2026-02-18)** —
   fixed lost return values for untyped block paths by combining callsite-driven block
   param inference in HIR with use-site yield type recovery in MIR.
