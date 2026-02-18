@@ -23,6 +23,36 @@
 - Float64: arithmetic, ** on literals
 
 ## Recently completed
+- **AST cache corruption containment + serializer fixes (2026-02-18)** —
+  fixed two concrete cache serialization gaps and added fail-safe recovery so
+  `--ast-cache` no longer hard-fails compilation.
+  Changes:
+  - `src/compiler/lsp/ast_cache.cr`
+    - bumped cache format version `v3 -> v4`;
+    - fixed missing string-table collection for `StringInterpolationNode` text pieces;
+    - added explicit `SplatNode` serialization in `write_node` (special-case path).
+  - `src/compiler/cli.cr`
+    - added cached-root sanity check (`arena[expr_id]`) immediately after cache load;
+    - wrapped cached require traversal with `IndexError` fallback to source parse;
+    - added compile-time fail-safe: on `IndexError` with AST cache enabled, retry once
+      with AST cache disabled (warning emitted), instead of failing the whole compile.
+  Validation:
+  - warm cache repros now recover instead of failing:
+    - `regression_tests/test_string_to_u64.cr` with `--ast-cache` (2nd run)
+      => warning + successful compile, output `I=123 U8=123 U16=123 U32=123 U64=123`;
+    - `regression_tests/hash_stress.cr` with `--ast-cache` (2nd run)
+      => warning + successful compile, output includes `hash_stress_ok`.
+  - full regressions with cache flag on:
+    - `CRYSTAL_V2_AST_CACHE=1 CRYSTAL_V2_PIPELINE_CACHE=0 regression_tests/run_all.sh /tmp/crystal_v2_astcache_fix`
+      => `43 passed, 0 failed`.
+  - bootstrap smoke:
+    - `/tmp/crystal_v2_astcache_fix examples/bootstrap_array.cr -o /tmp/bootstrap_array_astfix && scripts/run_safe.sh /tmp/bootstrap_array_astfix 8 512`
+      => `EXIT 0`.
+    - warm `--ast-cache` bootstrap run also compiles/runs (with fallback warning).
+  Follow-up:
+  - some AST cache payloads are still detected as invalid in warm mode; keep default
+    AST cache disabled in compiler path until full serializer/deserializer parity is reached.
+
 - **Compiler AST-cache guardrails + hard invalidation header (2026-02-18)** —
   stabilized default bootstrap/regression flow by turning compiler AST cache off
   by default, and hardened AST cache header invalidation for explicit cache mode.

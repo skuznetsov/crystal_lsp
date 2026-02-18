@@ -313,7 +313,14 @@ module CrystalV2
       end
 
       # Full compilation (driver.cr functionality)
-      private def compile(input_file : String, options : Options, out_io : IO, err_io : IO) : Int32
+      private def compile(
+        input_file : String,
+        options : Options,
+        out_io : IO,
+        err_io : IO,
+        *,
+        allow_ast_cache_retry : Bool = true
+      ) : Int32
         timings = {} of String => Float64
         total_start = Time.instant
         @ast_cache_hits = 0
@@ -969,6 +976,11 @@ module CrystalV2
         emit_timings(options, out_io, timings, total_start)
         return 1
       rescue ex
+        if allow_ast_cache_retry && options.ast_cache && ex.is_a?(IndexError)
+          err_io.puts "warning: invalid AST cache state detected; retrying without AST cache"
+          options.ast_cache = false
+          return compile(input_file, options, out_io, err_io, allow_ast_cache_retry: false)
+        end
         err_io.puts "error: #{ex.message}"
         err_io.puts ex.backtrace.join("\n") if options.verbose
         emit_timings(options, out_io, timings, total_start)
@@ -1233,28 +1245,38 @@ module CrystalV2
             @ast_cache_hits += 1
             arena = cached.arena
             exprs = cached.roots
+            # Fast sanity check: ensure root ExprIds are valid for this arena.
+            # Corrupted cache payloads can carry out-of-range roots.
+            exprs.each { |expr_id| arena[expr_id] }
             base_dir = File.dirname(abs_path)
-            if cached_requires = load_require_cache(abs_path)
-              if source_has_glob_require?(source) || cached_requires.any? { |path| !File.exists?(path) }
-                cached_requires = nil
+            begin
+              if cached_requires = load_require_cache(abs_path)
+                if source_has_glob_require?(source) || cached_requires.any? { |path| !File.exists?(path) }
+                  cached_requires = nil
+                end
               end
+              if cached_requires
+                log(options, out_io, "  Require cache hit (#{cached_requires.size}): #{abs_path}") if options.verbose
+                cached_requires.each do |req_path|
+                  parse_file_recursive(req_path, results, loaded, input_file, options, out_io)
+                end
+              else
+                log(options, out_io, "  Require cache miss: #{abs_path}") if options.verbose
+                requires = [] of String
+                exprs.each do |expr_id|
+                  process_require_node(arena, expr_id, base_dir, input_file, results, loaded, options, out_io, requires)
+                end
+                save_require_cache(abs_path, requires)
+              end
+
+              results << {arena, exprs, abs_path, source}
+              log(options, out_io, "  AST cache hit: #{abs_path}") if options.verbose
+              return
+            rescue ex : IndexError
+              # Corrupted/stale cached AST can contain invalid ExprId references.
+              # Fall back to source parse instead of crashing the full compile.
+              log(options, out_io, "  AST cache invalid (#{abs_path}): #{ex.message}") if options.verbose
             end
-            if cached_requires
-              log(options, out_io, "  Require cache hit (#{cached_requires.size}): #{abs_path}") if options.verbose
-              cached_requires.each do |req_path|
-                parse_file_recursive(req_path, results, loaded, input_file, options, out_io)
-              end
-            else
-              log(options, out_io, "  Require cache miss: #{abs_path}") if options.verbose
-              requires = [] of String
-              exprs.each do |expr_id|
-                process_require_node(arena, expr_id, base_dir, input_file, results, loaded, options, out_io, requires)
-              end
-              save_require_cache(abs_path, requires)
-            end
-            results << {arena, exprs, abs_path, source}
-            log(options, out_io, "  AST cache hit: #{abs_path}") if options.verbose
-            return
           end
           @ast_cache_misses += 1
         end

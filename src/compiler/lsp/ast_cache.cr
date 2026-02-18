@@ -121,7 +121,7 @@ module CrystalV2
         MAGIC   = "CV2A"
         # Bump this version whenever the parser, AST format, or cache header changes
         # to invalidate all cached ASTs
-        VERSION = 3_u32
+        VERSION = 4_u32
 
         getter arena : Frontend::AstArena
         getter roots : Array(Frontend::ExprId)
@@ -457,6 +457,11 @@ module CrystalV2
             gvar_decl_node = node.as(Frontend::GlobalVarDeclNode)
             yield String.new(gvar_decl_node.name)
             yield String.new(gvar_decl_node.type)
+          when Frontend::NodeKind::StringInterpolation
+            interp_node = node.as(Frontend::StringInterpolationNode)
+            interp_node.pieces.each do |piece|
+              piece.text.try { |t| yield t }
+            end
           when Frontend::NodeKind::MacroLiteral
             macro_node = node.as(Frontend::MacroLiteralNode)
             macro_node.pieces.each do |piece|
