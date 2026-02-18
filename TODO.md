@@ -22,6 +22,39 @@
 - Float64: arithmetic, ** on literals
 
 ## Recently completed
+- **Untyped block/yield value preservation in HIR/MIR (2026-02-18)** —
+  fixed lost return values for untyped block paths by combining callsite-driven block
+  param inference in HIR with use-site yield type recovery in MIR.
+  Changes:
+  - `src/compiler/hir/ast_to_hir.cr`
+    - threaded parsed callsite arg types into `infer_block_param_types_from_body(...)`
+      so untyped block params can be inferred from mangled call suffixes;
+    - improved `infer_yield_return_type(...)` fallback to use `__block_return__` /
+      registered function return caches when block param annotation is missing.
+  - `src/compiler/mir/hir_to_mir.cr`
+    - for `Yield` with `Void/Nil` type, infer concrete type from downstream uses
+      (`Phi`, `Copy`, `Cast`, `Return`) before emitting indirect call.
+  Validation:
+  - `CRYSTAL_V2_PIPELINE_CACHE=0 /tmp/crystal_v2_hostcheck /tmp/clone_test.cr -o /tmp/clone_test_bin && scripts/run_safe.sh /tmp/clone_test_bin`
+    => prints `2`, `EXIT 0`;
+  - `CRYSTAL_V2_PIPELINE_CACHE=0 /tmp/crystal_v2_hostcheck /tmp/fetch_block_test.cr -o /tmp/fetch_block_test_bin && scripts/run_safe.sh /tmp/fetch_block_test_bin`
+    => prints `8` and `9`, `EXIT 0`.
+
+- **LLVM global-store null normalization for scalar types (2026-02-18)** —
+  fixed invalid IR pattern `store i32 null` caused by nil constants flowing through
+  non-pointer MIR static types into `emit_global_store`.
+  Changes:
+  - `src/compiler/mir/llvm_backend.cr`
+    - in `emit_global_store`, normalize `val == "null"` to `0` / `0.0` for
+      non-`ptr`, non-union destination LLVM types.
+  Validation:
+  - `CRYSTAL_V2_PIPELINE_CACHE=0 CRYSTAL_V2_LLVM_CACHE=0 bin/crystal_v2 regression_tests/test_byteformat_decode_u32.cr -o /tmp/test_byteformat_decode_u32_bin && scripts/run_safe.sh /tmp/test_byteformat_decode_u32_bin 10 512`
+    => `byteformat_u32_ok`, `EXIT 0`;
+  - `CRYSTAL_V2_PIPELINE_CACHE=0 CRYSTAL_V2_LLVM_CACHE=0 regression_tests/run_all.sh bin/crystal_v2`
+    => `42 passed, 0 failed`;
+  - `CRYSTAL_V2_PIPELINE_CACHE=0 CRYSTAL_V2_LLVM_CACHE=0 bin/crystal_v2 examples/bootstrap_array.cr -o /tmp/bootstrap_array_after_global_null_fix && scripts/run_safe.sh /tmp/bootstrap_array_after_global_null_fix 10 768`
+    => `EXIT 0`.
+
 - **HIR zero-copy cleanup: remove remaining `split(\"(\")` in call/tuple fast paths (2026-02-18)** —
   replaced three split-based generic-base extractions in `src/compiler/hir/ast_to_hir.cr`:
   - `Array.new(size, value)` element type extraction now uses `element_type_for_type_name(owner)`;
