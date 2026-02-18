@@ -22,6 +22,31 @@
 - Float64: arithmetic, ** on literals
 
 ## Recently completed
+- **Yield-owner fallback lookup hot-path reduction (2026-02-18)** —
+  reduced repeated hierarchy/name work in block-yield fallback resolution:
+  - `src/compiler/hir/ast_to_hir.cr`
+    - `receiver_allows_yield_owner?` now:
+      - uses cached parent chains (`get_parent_chain`) instead of repeated `@class_info` walks;
+      - uses `namespace_last_component_equals?` (byte-scan) instead of repeated
+        `rindex("::")` extraction for parent/module short-name checks.
+    - deduplicated repeated owner-allow checks in hot loops via last-owner memo:
+      - `find_yield_method_fallback(...)`
+      - `lookup_block_function_def_for_call(...)` fallback loop
+  Validation:
+  - correctness (debug compiler build):
+    - `CRYSTAL_V2_PIPELINE_CACHE=0 regression_tests/run_all.sh /tmp/crystal_v2_perf_ownercache`
+      => `43 passed, 0 failed`
+    - `CRYSTAL_V2_PIPELINE_CACHE=0 /tmp/crystal_v2_perf_ownercache examples/bootstrap_array.cr -o /tmp/bootstrap_array_perf_ownercache && scripts/run_safe.sh /tmp/bootstrap_array_perf_ownercache 10 768`
+      => `EXIT 0`
+  - correctness (release compiler build, caches off):
+    - `CRYSTAL_V2_PIPELINE_CACHE=0 CRYSTAL_V2_LLVM_CACHE=0 CRYSTAL_V2_AST_CACHE=0 regression_tests/run_all.sh /tmp/crystal_v2_perf_ownercache_rel`
+      => `43 passed, 0 failed`
+    - `CRYSTAL_V2_PIPELINE_CACHE=0 CRYSTAL_V2_LLVM_CACHE=0 CRYSTAL_V2_AST_CACHE=0 /tmp/crystal_v2_perf_ownercache_rel examples/bootstrap_array.cr -o /tmp/bootstrap_array_perf_ownercache_rel && scripts/run_safe.sh /tmp/bootstrap_array_perf_ownercache_rel 10 768`
+      => `EXIT 0`
+  - sampling evidence (release, 10s self-build window, caches off):
+    - old `bin/crystal_v2`: `receiver_allows_yield_owner?` present in top-of-stack (`61`), `String#rindex<String, Int32>`=`550`, `Hash(String, ClassInfo)#find_entry_with_index`=`230`
+    - new `/tmp/crystal_v2_perf_ownercache_rel`: `receiver_allows_yield_owner?` no longer appears in top-of-stack; `String#rindex<String, Int32>` reduced to `43`
+
 - **AST cache re-enabled by default (2026-02-18)** —
   after header-width + string-table fixes, compiler default mode now uses AST cache
   again for faster repeated runs.

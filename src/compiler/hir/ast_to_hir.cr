@@ -20809,29 +20809,23 @@ module Crystal::HIR
       end
       return true if receiver_base == owner_base
       owner_short = last_namespace_component_if_nested(owner_base)
-      if owner_short && !receiver_base.includes?("::")
-        return true if owner_short == receiver_base
+      if owner_short
+        return true if receiver_base == owner_short
+        return true if namespace_last_component_equals?(receiver_base, owner_short)
       end
-      current = receiver_base
-      while current
-        info = @class_info[current]?
-        break unless info
-        parent = info.parent_name
-        if parent
-          return true if parent == owner_base
-          if owner_short
-            parent_short = last_namespace_component_if_nested(parent)
-            return true if parent_short && parent_short == owner_short
-          end
+      get_parent_chain(receiver_base).each do |parent|
+        return true if parent == owner_base
+        if owner_short
+          return true if parent == owner_short
+          return true if namespace_last_component_equals?(parent, owner_short)
         end
-        current = parent
       end
       if modules = @class_included_modules[receiver_base]?
         modules.each do |mod|
           return true if mod == owner_base
           if owner_short
-            mod_short = last_namespace_component_if_nested(mod)
-            return true if mod_short && mod_short == owner_short
+            return true if mod == owner_short
+            return true if namespace_last_component_equals?(mod, owner_short)
           end
         end
       end
@@ -20846,6 +20840,8 @@ module Crystal::HIR
 
       candidates = [] of String
       seen_defs = Set(UInt64).new
+      last_owner_base : String? = nil
+      last_owner_allowed = false
       @yield_functions.each do |name|
         base = strip_type_suffix(name)
         next unless base.ends_with?(instance_suffix) || base.ends_with?(class_suffix)
@@ -20862,7 +20858,13 @@ module Crystal::HIR
                        else
                          owner
                        end
-          next unless receiver_allows_yield_owner?(receiver_base, owner_base)
+          if owner_base == last_owner_base
+            next unless last_owner_allowed
+          else
+            last_owner_base = owner_base
+            last_owner_allowed = receiver_allows_yield_owner?(receiver_base, owner_base)
+            next unless last_owner_allowed
+          end
         end
         func_def = @function_defs[name]?
         func_def ||= @function_defs[base]?
@@ -45674,6 +45676,8 @@ module Crystal::HIR
       # Example: Int32#try should inline Object#try when receiver_base allows it.
       method_short = method_short_from_name(func_name)
       if method_short
+        last_owner_base : String? = nil
+        last_owner_allowed = false
         fallback_key = BlockLookupKey.new(method_short, arg_count, args_hash, receiver_base, !arg_types.nil?)
         if @block_fallback_lookup_cache.has_key?(fallback_key)
           result = @block_fallback_lookup_cache[fallback_key]
@@ -45686,7 +45690,13 @@ module Crystal::HIR
           if receiver_base
             owner = method_owner_from_name(name)
             owner_base = strip_generic_args(owner)
-            next unless receiver_allows_yield_owner?(receiver_base, owner_base)
+            if owner_base == last_owner_base
+              next unless last_owner_allowed
+            else
+              last_owner_base = owner_base
+              last_owner_allowed = receiver_allows_yield_owner?(receiver_base, owner_base)
+              next unless last_owner_allowed
+            end
           end
 
           stats = function_param_stats(name, def_node)
@@ -54811,6 +54821,29 @@ module Crystal::HIR
       else
         name
       end
+    end
+
+    # Checks whether `name`'s last namespace component equals `component`
+    # without rindex/split allocations.
+    @[AlwaysInline]
+    private def namespace_last_component_equals?(name : String, component : String) : Bool
+      comp_size = component.bytesize
+      return false if comp_size == 0
+      name_size = name.bytesize
+      return false if name_size < comp_size
+
+      start = name_size - comp_size
+      name_ptr = name.to_unsafe
+      comp_ptr = component.to_unsafe
+      i = 0
+      while i < comp_size
+        return false if name_ptr[start + i] != comp_ptr[i]
+        i += 1
+      end
+
+      return true if start == 0
+      return false if start < 2
+      name_ptr[start - 2] == ':'.ord && name_ptr[start - 1] == ':'.ord
     end
 
     private def current_type_name_context_key : TypeNameContextKey?
