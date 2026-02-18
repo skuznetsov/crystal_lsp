@@ -1569,6 +1569,7 @@ Goal: match original Crystal target coverage (all LLVM targets supported by upst
     - **Follow-up**: run real ARM/AArch64 runtime checks in CI/hardware.
 - [x] **ARM/AArch64 alignment audit**: verify stack/alloca/struct field alignment for ARM targets (incl. AArch64); ensure align=4 where required and matches LLVM target ABI.
   - **Update (2026-02-15)**: `llvm_backend` union payload load/store paths are covered by multiple IR guards (`union_wrap/unwrap` and call coercion path) enforcing `align 4`; spec suite `55 examples` green.
+  - **Update (2026-02-18)**: removed remaining hardcoded pointer-size/alignment fallbacks (`8/8`) in `hir_to_mir` and switched tuple/module/allocation/reference defaults to target-width helpers (`4` on `i386/arm/wasm32`, `8` elsewhere). Validation: `crystal spec spec/mir/abi_layout_spec.cr` => `6 examples, 0 failures`; `crystal build src/crystal_v2.cr --release -o /tmp/crystal_v2_rel_ptralign2`; `regression_tests/run_all.sh /tmp/crystal_v2_rel_ptralign2` => `42 passed, 0 failed`.
   - **Follow-up**: execute cross-target runtime validation on actual ARM/AArch64 environment.
 
 **Test Coverage:** 307 new tests (155 HIR + 152 MIR)

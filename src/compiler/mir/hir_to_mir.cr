@@ -269,7 +269,7 @@ module Crystal
             type_kind,
             class_name,
             total_size,
-            8_u32  # alignment
+            pointer_word_align_u32
           )
         end
 
@@ -315,8 +315,8 @@ module Crystal
             mir_ref.id,
             TypeKind::Reference,
             desc.name,
-            8_u64,
-            8_u32
+            pointer_word_bytes_u64,
+            pointer_word_align_u32
           )
         end
 
@@ -350,12 +350,12 @@ module Crystal
                       elsif elem_kind && elem_kind.union? && elem_type && elem_type.size > 8
                         elem_type.size  # Union discriminated repr needs more than a pointer
                       else
-                        8_u64  # Pointer/reference size
+                        pointer_word_bytes_u64
                       end
           elem_align = if is_inline && elem_type && elem_type.alignment > 0
                          elem_type.alignment
                        else
-                         8_u32  # Pointer alignment
+                         pointer_word_align_u32
                        end
           size = align_u64(size, elem_align)
           size += elem_size
@@ -381,6 +381,33 @@ module Crystal
       a = align.to_u64
       return value if a <= 1
       ((value + a - 1) // a) * a
+    end
+
+    @[AlwaysInline]
+    private def pointer_word_bytes_u64 : UInt64
+      {% if flag?(:i386) || flag?(:arm) || flag?(:wasm32) %}
+        4_u64
+      {% else %}
+        8_u64
+      {% end %}
+    end
+
+    @[AlwaysInline]
+    private def pointer_word_align_u32 : UInt32
+      {% if flag?(:i386) || flag?(:arm) || flag?(:wasm32) %}
+        4_u32
+      {% else %}
+        8_u32
+      {% end %}
+    end
+
+    @[AlwaysInline]
+    private def pointer_word_bytes_i32 : Int32
+      {% if flag?(:i386) || flag?(:arm) || flag?(:wasm32) %}
+        4
+      {% else %}
+        8
+      {% end %}
     end
 
     # Create function stub with params and return type (no body)
@@ -758,12 +785,12 @@ module Crystal
 
       # Get the MIR type reference and look up size from type registry
       mir_type_ref = convert_type(alloc.type)
-      alloc_size = 8_u64  # Default pointer size
+      alloc_size = pointer_word_bytes_u64
       if mir_type = @mir_module.type_registry.get(mir_type_ref)
         alloc_size = mir_type.size
       elsif !alloc.constructor_args.empty?
         # Fallback for tuples not in registry: estimate from constructor arg count
-        alloc_size = (alloc.constructor_args.size * 8).to_u64
+        alloc_size = (alloc.constructor_args.size * pointer_word_bytes_i32).to_u64
       end
 
       # Fix StaticArray size: if type is StaticArray but size is 0, compute from name
@@ -777,7 +804,7 @@ module Crystal
           elem_size = 1_u64 if elem_size == 0
           alloc_size = elem_size * count
         end
-        alloc_size = 8_u64 if alloc_size == 0  # safety fallback
+        alloc_size = pointer_word_bytes_u64 if alloc_size == 0
       end
 
       # Create allocation with proper size
@@ -816,12 +843,12 @@ module Crystal
                           elsif elem.kind.union? && elem.size > 8
                             elem.size  # Union discriminated repr needs more than a pointer
                           else
-                            8_u64  # Pointer/reference size
+                            pointer_word_bytes_u64
                           end
               elem_align = if is_inline && elem.alignment > 0
                              elem.alignment
                            else
-                             8_u32
+                             pointer_word_align_u32
                            end
               current_offset = align_u64(current_offset, elem_align)
               offsets << current_offset.to_u32
@@ -840,8 +867,8 @@ module Crystal
           byte_offset = if (offsets = tuple_byte_offsets) && idx < offsets.size
                           offsets[idx]
                         else
-                          # Fallback: estimate byte offset assuming 8-byte elements
-                          (idx * 8).to_u32
+                          # Fallback: estimate byte offset using pointer-size elements.
+                          (idx * pointer_word_bytes_i32).to_u32
                         end
           field_ptr = builder.gep(ptr, [byte_offset], TypeRef::POINTER)
           store_id = builder.store(field_ptr, arg_val)
@@ -1905,8 +1932,8 @@ module Crystal
         mir_ref.id,
         TypeKind::Reference,
         name,
-        8_u64,
-        8_u32
+        pointer_word_bytes_u64,
+        pointer_word_align_u32
       )
     end
 
@@ -2477,7 +2504,8 @@ module Crystal
         if int_like.call(src_hir_type)
           if byte_len = staticarray_u8_length(dst_hir_type)
             if byte_len == type_size(src_hir_type)
-              align = byte_len < 8 ? byte_len.to_u32 : 8_u32
+              ptr_align = pointer_word_align_u32
+              align = byte_len < ptr_align ? byte_len.to_u32 : ptr_align
               tmp = builder.alloc(MemoryStrategy::Stack, dst_type, byte_len.to_u64, align)
               builder.store(tmp, value)
               return tmp
@@ -3197,8 +3225,8 @@ module Crystal
       when HIR::TypeRef::FLOAT32 then 4
       when HIR::TypeRef::FLOAT64 then 8
       when HIR::TypeRef::CHAR    then 4
-      when HIR::TypeRef::POINTER then 8
-      else                            8  # Default pointer size for user types
+      when HIR::TypeRef::POINTER then pointer_word_bytes_i32
+      else                            pointer_word_bytes_i32
       end
     end
 
