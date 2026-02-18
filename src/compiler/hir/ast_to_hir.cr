@@ -26993,26 +26993,53 @@ module Crystal::HIR
     # Find an existing union type in the module that can represent all required types.
     # Prefer the smallest matching union (fewest variants) to avoid needlessly wide phis.
     private def find_covering_union_type(required_types : Array(TypeRef)) : TypeRef?
-      required_mir = required_types.map { |t| hir_to_mir_type_ref(t) }.uniq
+      return nil if required_types.empty?
+
+      # Keep this allocation-light: this path is hot in branch/phi lowering.
+      required_mir = [] of MIR::TypeRef
+      required_types.each do |type_ref|
+        mir_ref = hir_to_mir_type_ref(type_ref)
+        seen = false
+        required_mir.each do |existing|
+          if existing == mir_ref
+            seen = true
+            break
+          end
+        end
+        required_mir << mir_ref unless seen
+      end
 
       best_ref : TypeRef? = nil
       best_variant_count = Int32::MAX
 
-      @module.types.each_with_index do |desc, idx|
-        next unless desc.kind == TypeKind::Union
+      @union_descriptors.each do |mir_union_ref, descriptor|
+        variant_count = descriptor.variants.size
+        next if variant_count < required_mir.size
+        next if variant_count >= best_variant_count
 
-        hir_union_ref = TypeRef.new(TypeRef::FIRST_USER_TYPE + idx.to_u32)
-        mir_union_ref = hir_to_mir_type_ref(hir_union_ref)
-        descriptor = @union_descriptors[mir_union_ref]?
-        next unless descriptor
+        covers_all = true
+        required_mir.each do |required|
+          found = false
+          descriptor.variants.each do |variant|
+            if variant.type_ref == required
+              found = true
+              break
+            end
+          end
 
-        variants = descriptor.variants.map(&.type_ref)
-        next unless required_mir.all? { |rt| variants.includes?(rt) }
-
-        if variants.size < best_variant_count
-          best_variant_count = variants.size
-          best_ref = hir_union_ref
+          unless found
+            covers_all = false
+            break
+          end
         end
+
+        next unless covers_all
+
+        best_variant_count = variant_count
+        best_ref = mir_to_hir_type_ref(mir_union_ref)
+
+        # Exact minimal cover: cannot do better than number of required variants.
+        break if best_variant_count == required_mir.size
       end
 
       best_ref

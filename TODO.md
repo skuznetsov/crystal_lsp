@@ -22,6 +22,33 @@
 - Float64: arithmetic, ** on literals
 
 ## Recently completed
+- **HIR union-cover selection hotspot reduced (2026-02-18)** —
+  optimized `AstToHir#find_covering_union_type` to remove repeated high-allocation
+  paths seen in `sample` on release stage1 self-build (`CRYSTAL_V2_PIPELINE_CACHE=0`).
+  Root hotspot before fix (`/tmp/stage1_profile_nocache.sample.txt`):
+  - `String#index` (1652 top-stack hits), `GC_mark_from` (2164),
+    `AstToHir#find_covering_union_type` (360), with stack dominated by
+    `lower_if -> find_covering_union_type -> GC`.
+  Changes in `src/compiler/hir/ast_to_hir.cr`:
+  - replaced `required_types.map(...).uniq` with manual de-dup over small
+    `Array(MIR::TypeRef)` (no intermediate array chain);
+  - switched scan source from full `@module.types` to existing
+    `@union_descriptors` only;
+  - removed per-candidate `descriptor.variants.map(&.type_ref)` allocations;
+  - added branch pruning (`variant_count < required.size`,
+    `variant_count >= best_variant_count`) and exact-cover early break.
+  Validation:
+  - release build: `crystal build src/crystal_v2.cr --release -o /tmp/crystal_v2_rel_unioncover_opt`
+    => `real 411.83s`;
+  - stage1 (release, no pipeline cache):
+    `CRYSTAL_V2_PIPELINE_CACHE=0 /tmp/crystal_v2_rel_unioncover_opt build src/crystal_v2.cr --release --no-ast-cache --no-llvm-cache -o /tmp/crystal_v2_stage1_rel_unioncover_opt`
+    => `real 115.23s` (previous comparable run: `119.71s`);
+  - regressions: `regression_tests/run_all.sh /tmp/crystal_v2_rel_unioncover_opt`
+    => `42 passed, 0 failed`;
+  - bootstrap smoke:
+    `/tmp/crystal_v2_rel_unioncover_opt examples/bootstrap_array.cr -o /tmp/bootstrap_array_unioncover_opt && scripts/run_safe.sh /tmp/bootstrap_array_unioncover_opt 10 768`
+    => `EXIT 0`.
+
 - **Stage1 release bootstrap unblocked: LLVM IR validity chain (2026-02-18)** —
   removed the failing IR sequence that previously stopped release stage1 before link.
   Changes in `src/compiler/mir/llvm_backend.cr`:
