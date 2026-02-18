@@ -100,6 +100,11 @@ module CrystalV2
           @pool.size
         end
 
+        # Iterate interned string keys.
+        def each_string(& : String ->) : Nil
+          @pool.each_key { |str| yield str }
+        end
+
         # Estimated memory saved (rough calculation)
         #
         # For each interned string after the first occurrence, we save

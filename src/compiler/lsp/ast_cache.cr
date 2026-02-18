@@ -280,6 +280,15 @@ module CrystalV2
             end
           end
 
+          # Include all interned strings from lexer/parser pool to avoid
+          # missing entries for slices not yet covered by node-specific collectors.
+          @string_pool.each_string do |str|
+            unless table.has_key?(str)
+              table[str] = index
+              index += 1
+            end
+          end
+
           table
         end
 
@@ -365,6 +374,26 @@ module CrystalV2
             hash_node = node.as(Frontend::HashLiteralNode)
             hash_node.of_key_type.try { |s| yield String.new(s) }
             hash_node.of_value_type.try { |s| yield String.new(s) }
+          when Frontend::NodeKind::NamedTupleLiteral
+            named_tuple_node = node.as(Frontend::NamedTupleLiteralNode)
+            named_tuple_node.entries.each do |entry|
+              yield String.new(entry.key)
+            end
+          when Frontend::NodeKind::Block
+            block_node = node.as(Frontend::BlockNode)
+            block_node.params.try &.each do |p|
+              p.name.try { |n| yield String.new(n) }
+              p.external_name.try { |n| yield String.new(n) }
+              p.type_annotation.try { |t| yield String.new(t) }
+            end
+          when Frontend::NodeKind::ProcLiteral
+            proc_node = node.as(Frontend::ProcLiteralNode)
+            proc_node.return_type.try { |rt| yield String.new(rt) }
+            proc_node.params.try &.each do |p|
+              p.name.try { |n| yield String.new(n) }
+              p.external_name.try { |n| yield String.new(n) }
+              p.type_annotation.try { |t| yield String.new(t) }
+            end
           when Frontend::NodeKind::Def
             def_node = node.as(Frontend::DefNode)
             yield String.new(def_node.name)
@@ -453,6 +482,9 @@ module CrystalV2
             anno_node.named_args.try &.each do |arg|
               yield String.new(arg.name)
             end
+          when Frontend::NodeKind::AnnotationDef
+            anno_def_node = node.as(Frontend::AnnotationDefNode)
+            yield String.new(anno_def_node.name)
           when Frontend::NodeKind::InstanceVarDecl
             ivar_decl_node = node.as(Frontend::InstanceVarDeclNode)
             yield String.new(ivar_decl_node.name)
@@ -484,6 +516,15 @@ module CrystalV2
           when Frontend::NodeKind::MacroFor
             macro_for = node.as(Frontend::MacroForNode)
             macro_for.iter_vars.each { |v| yield String.new(v) }
+          when Frontend::NodeKind::Begin
+            begin_node = node.as(Frontend::BeginNode)
+            begin_node.rescue_clauses.try &.each do |clause|
+              clause.exception_type.try { |t| yield String.new(t) }
+              clause.variable_name.try { |v| yield String.new(v) }
+            end
+          when Frontend::NodeKind::Union
+            union_node = node.as(Frontend::UnionNode)
+            yield String.new(union_node.name)
           else
             # Other nodes don't have string fields or are handled elsewhere
           end
