@@ -109,6 +109,7 @@ module CrystalV2
 
           # Codegen control (Crystal-compatible)
           p.on("--no-codegen", "Don't do code generation (semantic check only)") { options.check_only = true }
+          p.on("--target TRIPLE", "Target triple") { |triple| options.target_triple = triple }
 
           # Debug info
           p.on("-d", "--debug", "Add symbolic debug info") { options.debug = true }
@@ -234,6 +235,7 @@ module CrystalV2
         property stats : Bool = false
         property progress : Bool = false
         property check_only : Bool = false
+        property target_triple : String = ""
         property dump_symbols : Bool = false
         # Enabled by default to speed up repeated compiler runs.
         # Set CRYSTAL_V2_AST_CACHE=0 or pass --no-ast-cache to disable.
@@ -913,6 +915,9 @@ module CrystalV2
         llvm_gen.progress = options.progress
         llvm_gen.reachability = true  # Only emit reachable functions from main
         llvm_gen.no_prelude = options.no_prelude
+        unless options.target_triple.empty?
+          llvm_gen.target_triple = options.target_triple
+        end
 
         # Pass constant literal values for global initialization (e.g., Math::PI)
         const_init = {} of String => (Float64 | Int64)
@@ -1054,7 +1059,8 @@ module CrystalV2
             FileUtils.cp(obj_cache_file, obj_file)
             @llvm_cache_hits += 1
           else
-            llc_cmd = "llc #{opt_flag} -filetype=obj -o #{obj_file} #{opt_ll_file} 2>&1"
+            llc_target_flag = options.target_triple.empty? ? "" : " -mtriple=#{options.target_triple}"
+            llc_cmd = "llc #{opt_flag}#{llc_target_flag} -filetype=obj -o #{obj_file} #{opt_ll_file} 2>&1"
             log(options, out_io, "  $ #{llc_cmd}")
             llc_result = `#{llc_cmd}`
             unless $?.success?
@@ -1097,7 +1103,8 @@ module CrystalV2
             end
 
             lto_flag = options.lto ? "-flto" : ""
-            clang_cmd = "clang #{opt_flag} #{lto_flag} #{pgo_flags.join(" ")} -o #{options.output} #{opt_ll_file}"
+            clang_target_flag = options.target_triple.empty? ? "" : "--target=#{options.target_triple}"
+            clang_cmd = "clang #{opt_flag} #{lto_flag} #{clang_target_flag} #{pgo_flags.join(" ")} -o #{options.output} #{opt_ll_file}"
             clang_cmd += " #{runtime_stub}" if File.exists?(runtime_stub)
             clang_cmd += " #{link_flags_str}" unless link_flags_str.empty?
             clang_cmd += " 2>&1"

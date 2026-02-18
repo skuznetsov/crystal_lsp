@@ -1006,6 +1006,42 @@ about syntax or types and should match what the original compiler would report.
 ### In Progress
 - [x] Replace method-name string `split` usage with zero-copy helpers (`parse_method_name`, `strip_type_suffix`) in HIR lowering hot paths (ast_to_hir).
 - [x] Audit remaining `split("$")`/`split("#")` in other files (if any) to ensure method-name parsing uses helpers.
+- [ ] LLVM codegen configuration parity with original compiler (analysis 2026-02-18):
+  - P0 target/toolchain controls:
+    - add CLI parity options in `src/compiler/cli.cr`: `--target`, `--mcpu`, `--mattr`, `--mcmodel`, `--static`;
+    - propagate target config to codegen + backend (`llvm_backend.target_triple`, `llc`/`clang` flags: `-mtriple`, `-mcpu`, `-mattr`, relocation model);
+    - stop hardcoding backend triple defaults (`arm64-apple-macosx` / `x86_64-unknown-linux-gnu`) as primary source of truth.
+  - P0 IR header parity:
+    - emit `target datalayout` in `src/compiler/mir/llvm_backend.cr` (original sets module data layout from target machine);
+    - keep `target triple` consistent with CLI target and object generation flags.
+  - P0 ABI/alignment parity (AArch64/ARM first):
+    - replace broad hardcoded `align 8`/`align 4` in backend with target-aware helpers;
+    - ensure ARM uses 4-byte ABI baseline where required, AArch64 uses 8-byte baseline, and union payload access alignment remains safe.
+  - P1 linker parity by platform:
+    - port original platform-specific defaults/branches (`-rdynamic` on POSIX, BSD `/usr/local/lib`, AVR/wasm linker paths, win32 stack/response-file handling);
+    - support `pkg-config --static` path when `--static` is active.
+  - P1 module flags parity:
+    - add optional LLVM module flags for branch/cf protection parity (`branch-target-enforcement`, `cf-protection-*`) when corresponding target flags are present.
+  - DoD:
+    - compile+run smoke on host target;
+    - cross-target dry run (`--target` + `--no-link`) emits coherent triple+datalayout and correct llc flags;
+    - ARM/AArch64 IR checks validate target-aware alignments in generated IR.
+  - Update (2026-02-18, P0 slice 1 complete):
+    - implemented `--target TRIPLE` in `src/compiler/cli.cr`;
+    - propagate target triple into LLVM text backend (`llvm_gen.target_triple`) before IR generation;
+    - pass target to codegen tools:
+      - `llc`: `-mtriple=<triple>`;
+      - clang LTO/PGO path: `--target=<triple>`.
+    - validation:
+      - build: `crystal build src/crystal_v2.cr -o /tmp/crystal_v2_target_cli --error-trace` => `EXIT 0`;
+      - CLI help: `/tmp/crystal_v2_target_cli --help | rg -- '--target'` => option visible;
+      - dry-run no-link:
+        - `CRYSTAL_V2_PIPELINE_CACHE=0 CRYSTAL_V2_LLVM_CACHE=0 /tmp/crystal_v2_target_cli --target x86_64-unknown-linux-gnu examples/bootstrap_array.cr -o /tmp/bootstrap_array_target_cli --no-link --verbose --no-debug`
+        - log confirms `llc ... -mtriple=x86_64-unknown-linux-gnu ...` and `Skipping link (--no-link)`;
+        - IR header confirms `target triple = "x86_64-unknown-linux-gnu"` in `/tmp/bootstrap_array_target_cli.ll`.
+      - LTO path:
+        - `... /tmp/crystal_v2_target_cli --target arm64-apple-macosx --lto examples/bench_simple.cr -o /tmp/bench_simple_lto_target --verbose --no-debug`
+        - log confirms `clang ... --target=arm64-apple-macosx ...`.
 - [x] Investigate `spec/hir/return_type_inference_spec.cr` timeout: resolved early arena scans; samples show hot path in HIR lowering (`lower_call → lower_path → lower_type_literal_from_name → generate_allocator → lower_method`), with heavy `type_ref_for_name/monomorphize_generic_class` (see `/tmp/rt_infer10.sample`, `/tmp/rt_infer11.sample`, `/tmp/rt_infer12.sample`, `/tmp/rt_infer13.sample`). Histogram (`DEBUG_LOWER_HISTO=1`) still dominated by Identifier/Assign/Call/MemberAccess/If. Added: local type inference cache (scope + nil cache), zero‑copy name compares, generic split cache, method resolution key build w/out map+join, split‑free `register_type_cache_key`, callsite method resolution cache (per current method), and normalized generic spacing in `type_ref_for_name`. Spec still >30s. Next: reduce `type_ref_for_name` allocations further (union/generic normalization), add a fast path for type literal lowering, and re‑profile.
   - Update (2026-02-14): no longer reproduces timeout in the current tree.
     - `crystal spec spec/hir/return_type_inference_spec.cr` => `13 examples, 0 failures` in `30.71ms` (`/tmp/rt_spec_cachefp.out`).
