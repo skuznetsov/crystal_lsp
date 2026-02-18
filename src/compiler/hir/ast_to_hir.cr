@@ -2000,6 +2000,10 @@ module Crystal::HIR
     @deferred_module_contexts : Hash(String, Array(DeferredModuleContext))
     @deferred_module_context_seen : Hash(String, Set(DeferredModuleContextKey))
     @deferred_module_context_first_lookup : Hash(DeferredModuleLookupKey, DeferredModuleContext)
+    # Last-owner fast path for deferred context registration.
+    @deferred_module_context_last_owner : String? = nil
+    @deferred_module_context_last_list : Array(DeferredModuleContext)? = nil
+    @deferred_module_context_last_seen : Set(DeferredModuleContextKey)? = nil
     @lazy_module_methods : Bool
     @module_defs_cache_version : Int32
     @module_include_alias_cache : Hash({String, String?, Int32, Int32}, String)
@@ -2324,6 +2328,9 @@ module Crystal::HIR
       @deferred_module_contexts = {} of String => Array(DeferredModuleContext)
       @deferred_module_context_seen = {} of String => Set(DeferredModuleContextKey)
       @deferred_module_context_first_lookup = {} of DeferredModuleLookupKey => DeferredModuleContext
+      @deferred_module_context_last_owner = nil
+      @deferred_module_context_last_list = nil
+      @deferred_module_context_last_seen = nil
       @lazy_module_methods = false
       @module_defs_cache_version = 0
       @module_include_alias_cache = {} of {String, String?, Int32, Int32} => String
@@ -6148,24 +6155,44 @@ module Crystal::HIR
       end
     end
 
+    @[AlwaysInline]
+    private def deferred_module_context_slots(owner : String) : {Array(DeferredModuleContext), Set(DeferredModuleContextKey)}
+      if last_owner = @deferred_module_context_last_owner
+        if last_owner == owner
+          if list = @deferred_module_context_last_list
+            if seen = @deferred_module_context_last_seen
+              return {list, seen}
+            end
+          end
+        end
+      end
+
+      contexts = @deferred_module_contexts[owner]?
+      unless contexts
+        contexts = [] of DeferredModuleContext
+        @deferred_module_contexts[owner] = contexts
+      end
+      context_list = contexts.not_nil!
+
+      seen = @deferred_module_context_seen[owner]?
+      unless seen
+        seen = Set(DeferredModuleContextKey).new
+        @deferred_module_context_seen[owner] = seen
+      end
+      seen_set = seen.not_nil!
+
+      @deferred_module_context_last_owner = owner
+      @deferred_module_context_last_list = context_list
+      @deferred_module_context_last_seen = seen_set
+      {context_list, seen_set}
+    end
+
     private def record_deferred_module_context(
       class_name : String,
       module_full_name : String,
       mod_arena : CrystalV2::Compiler::Frontend::ArenaLike,
     ) : Nil
-      contexts = @deferred_module_contexts[class_name]?
-      unless contexts
-        contexts = [] of DeferredModuleContext
-        @deferred_module_contexts[class_name] = contexts
-      end
-      context_list = contexts.not_nil!
-
-      seen = @deferred_module_context_seen[class_name]?
-      unless seen
-        seen = Set(DeferredModuleContextKey).new
-        @deferred_module_context_seen[class_name] = seen
-      end
-      seen_set = seen.not_nil!
+      context_list, seen_set = deferred_module_context_slots(class_name)
 
       namespace_override = @current_namespace_override
       generation = @subst_cache_gen

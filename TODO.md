@@ -22,6 +22,37 @@
 - Float64: arithmetic, ** on literals
 
 ## Recently completed
+- **Deferred module context owner-slot cache (2026-02-18)** —
+  reduced repeated hash lookups in lazy module-context registration path by
+  caching the last owner's context/seen containers.
+  Changes:
+  - `src/compiler/hir/ast_to_hir.cr`
+    - added last-owner cache fields:
+      - `@deferred_module_context_last_owner`
+      - `@deferred_module_context_last_list`
+      - `@deferred_module_context_last_seen`
+    - added helper:
+      - `deferred_module_context_slots(owner)` returning `{contexts, seen_set}`
+        with last-hit fast path and lazy map initialization.
+    - `record_deferred_module_context(...)` now uses the helper instead of
+      separate `@deferred_module_contexts[...]` and `@deferred_module_context_seen[...]`
+      lookups each call.
+  Validation:
+  - correctness:
+    - `crystal build src/crystal_v2.cr -o /tmp/crystal_v2_deferred_slots_cache --error-trace` => `EXIT 0`
+    - `regression_tests/run_all.sh /tmp/crystal_v2_deferred_slots_cache` => `44 passed, 0 failed`
+    - `scripts/run_safe.sh /tmp/bootstrap_array_after_deferred_slots 10 768` => `EXIT 0`
+  - hotspot evidence (`sample` on 10s self-host window):
+    - baseline: `/tmp/self_profile_head_perfnext.sample.txt`
+    - after: `/tmp/self_profile_after_deferred_slots.sample.txt`
+    - targeted count deltas:
+      - `record_deferred_module_context`: `139 -> 76`
+      - deferred-context list hash `key_hash`: `35 -> 0`
+      - deferred-seen hash `key_hash`: `28 -> 1`
+  - compile-time A/B on `examples/bootstrap_array.cr` with caches off:
+    - directional but noisy across runs (mixed faster/slower); no stable
+      wall-clock claim recorded for this step.
+
 - **Mangle path allocation reduction (2026-02-18)** —
   removed avoidable allocations and duplicate work in function-name mangling used
   during method/def registration.
