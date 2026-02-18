@@ -5724,3 +5724,29 @@ crystal build -Ddebug_hooks src/crystal_v2.cr -o bin/crystal_v2 --no-debug
       - `regression_tests/run_all.sh /tmp/crystal_v2_yieldfix4` => `41 passed, 1 failed` (`test_byteformat_decode_u32` existing crash, unchanged by this fix line).
   - Insight:
     - the robust path is: keep block-proc ABI explicit-args-only for `yield` dispatch, but scope closure-cell override semantics tightly (written captures only) to avoid accidental receiver/value shadowing in unrelated locals.
+
+### 8.80 CLI macro-condition grouping fix: stop loading both iconv branches on darwin (2026-02-18)
+
+- [x] Fix `evaluate_macro_condition` so grouped expressions `(...)` are evaluated instead of degrading to `nil`.
+  - Root cause:
+    - `src/stdlib/crystal/iconv.cr` uses:
+      - `{% if flag?(:use_libiconv) || flag?(:win32) || (flag?(:android) && LibC::ANDROID_API < 28) %}`
+    - in `src/compiler/cli.cr`, `evaluate_macro_condition` had no `GroupingNode` case, so the right grouped branch evaluated to `nil`;
+    - top-level `MacroIf` became `nil` and both branches were traversed in require/top-level collection, which pulled `LibIconv` path on darwin and caused link-time unresolved `_libiconv*`.
+  - Code fix:
+    - file: `src/compiler/cli.cr`
+      - in `evaluate_macro_condition(...)`, added:
+        - `when Frontend::GroupingNode` -> recurse into `node.expression`.
+  - DoD / evidence:
+    - condition check:
+      - `crystal run tmp_eval_iconv_cond_with_cli.cr` => `condition=false` with flags `aarch64,arm64,bits64,darwin,little_endian,unix`.
+    - stage1 rebuild with fix:
+      - `/usr/bin/time -p crystal build src/crystal_v2.cr --release --no-debug -o /tmp/cv2_stage1_rel_groupfix`
+      - result: `real 422.71`.
+    - cold/no-cache stage2 rebuild with new stage1:
+      - `/usr/bin/time -p env CRYSTAL_V2_PIPELINE_CACHE=0 /tmp/cv2_stage1_rel_groupfix build src/crystal_v2.cr --release --no-ast-cache --no-llvm-cache -o /tmp/cv2_stage2_rel_groupfix`
+      - result: `EXIT 0`, `real 258.61`, no `_libiconv/_libiconv_open/_libiconv_close` undefined symbols.
+    - prior failing baseline (same scenario, before this fix in stage1):
+      - `/tmp/stage2_after_grouping.log` had `Undefined symbols for architecture arm64: _libiconv*`, `real 259.81`.
+  - Note:
+    - historical fast numbers in this file are cold no-cache stage1 values (e.g. `111.77s` at `8.51`, `115.23s` at `8.52`), not warm-cache runs.

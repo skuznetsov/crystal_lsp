@@ -1546,99 +1546,23 @@ module CrystalV2
         when Frontend::VisibilityModifierNode
           collect_top_level_nodes(arena, node.expression, def_nodes, class_nodes, module_nodes, enum_nodes, macro_nodes, alias_nodes, lib_nodes, constant_exprs, main_exprs, pending_annotations, acyclic_types, flags, sources_by_arena, source, depth, collect_main_exprs)
         when Frontend::MacroIfNode
-          if ENV["DEBUG_MACRO_EXPAND"]?
-            STDERR.puts "[DEBUG_MACRO_EXPAND] MacroIfNode condition=#{evaluate_macro_condition(arena, node.condition, flags).inspect}"
-          end
-          if raw_text = macro_if_raw_text(node, source)
-            # If the raw text contains {% for %} loops, don't use macro_literal_texts_from_raw
-            # which doesn't handle for-loops. Instead fall through to MacroLiteralNode processing.
-            has_for_loop = raw_text.includes?("{% for") || raw_text.includes?("{%- for") || raw_text.includes?("{%~ for")
-            unless has_for_loop
-              parsed_any = false
-              combined = macro_literal_texts_from_raw(raw_text, flags).join
-              if ENV["DEBUG_MACRO_EXPAND"]?
-                STDERR.puts "[DEBUG_MACRO_EXPAND] MacroIfNode combined empty=#{combined.strip.empty?} has_percent=#{combined.includes?("{%")} size=#{combined.size}"
-                if combined.size < 200
-                  STDERR.puts "[DEBUG_MACRO_EXPAND] MacroIfNode combined content=#{combined.inspect}"
-                end
-              end
-              unless combined.strip.empty? || combined.includes?("{%")
-                if parsed = parse_macro_literal_program(combined)
-                  program, sanitized = parsed
-                  parsed_any = true
-                  sources_by_arena[program.arena] = sanitized
-                  program.roots.each do |inner_id|
-                    collect_top_level_nodes(program.arena, inner_id, def_nodes, class_nodes, module_nodes, enum_nodes, macro_nodes, alias_nodes, lib_nodes, constant_exprs, main_exprs, pending_annotations, acyclic_types, flags, sources_by_arena, sanitized, depth + 1, false)
-                  end
-                end
-              end
-              if ENV["DEBUG_MACRO_EXPAND"]? && parsed_any
-                STDERR.puts "[DEBUG_MACRO_EXPAND] MacroIfNode early return (parsed_any)"
-              end
-              return if parsed_any
-            end
-          end
-          if ENV["DEBUG_MACRO_EXPAND"]?
-            STDERR.puts "[DEBUG_MACRO_EXPAND] MacroIfNode continuing to condition check (raw_text exists=#{!raw_text.nil?})"
-          end
-          condition = evaluate_macro_condition(arena, node.condition, flags)
-          if condition == true
-            if ENV["DEBUG_MACRO_EXPAND"]?
-              then_node = arena[node.then_body]
-              STDERR.puts "[DEBUG_MACRO_EXPAND] MacroIfNode then_body type=#{then_node.class}"
-            end
-            collect_top_level_nodes(arena, node.then_body, def_nodes, class_nodes, module_nodes, enum_nodes, macro_nodes, alias_nodes, lib_nodes, constant_exprs, main_exprs, pending_annotations, acyclic_types, flags, sources_by_arena, source, depth, collect_main_exprs)
-          elsif condition == false
-            if else_body = node.else_body
-              collect_top_level_nodes(arena, else_body, def_nodes, class_nodes, module_nodes, enum_nodes, macro_nodes, alias_nodes, lib_nodes, constant_exprs, main_exprs, pending_annotations, acyclic_types, flags, sources_by_arena, source, depth, collect_main_exprs)
-            end
-          else
-            collect_top_level_nodes(arena, node.then_body, def_nodes, class_nodes, module_nodes, enum_nodes, macro_nodes, alias_nodes, lib_nodes, constant_exprs, main_exprs, pending_annotations, acyclic_types, flags, sources_by_arena, source, depth, collect_main_exprs)
-            if else_body = node.else_body
-              collect_top_level_nodes(arena, else_body, def_nodes, class_nodes, module_nodes, enum_nodes, macro_nodes, alias_nodes, lib_nodes, constant_exprs, main_exprs, pending_annotations, acyclic_types, flags, sources_by_arena, source, depth, collect_main_exprs)
-            end
-          end
+          collect_top_level_macro_if(
+            arena, node, def_nodes, class_nodes, module_nodes, enum_nodes, macro_nodes,
+            alias_nodes, lib_nodes, constant_exprs, main_exprs, pending_annotations,
+            acyclic_types, flags, sources_by_arena, source, depth, collect_main_exprs
+          )
         when Frontend::MacroLiteralNode
-          # Check if this literal has macro control flow ({% for %}, {% begin %}, etc.)
-          has_control_flow = node.pieces.any? { |p| p.kind.control_start? }
-          if ENV["DEBUG_MACRO_EXPAND"]?
-            STDERR.puts "[DEBUG_MACRO_EXPAND] MacroLiteralNode has_control_flow=#{has_control_flow} pieces=#{node.pieces.size}"
-            node.pieces.each_with_index do |p, i|
-              STDERR.puts "[DEBUG_MACRO_EXPAND]   piece[#{i}] kind=#{p.kind} keyword=#{p.control_keyword.inspect}"
-            end
-          end
-          if has_control_flow
-            # Use MacroExpander for full expansion of {% for %} loops, variable assignments, etc.
-            if expanded = expand_macro_literal_via_expander(expr_id, arena, source, flags)
-              if ENV["DEBUG_MACRO_EXPAND"]?
-                STDERR.puts "[DEBUG_MACRO_EXPAND] expanded=#{expanded[0, [expanded.size, 200].min].inspect}"
-              end
-              unless expanded.strip.empty?
-                if parsed = parse_top_level_macro_expansion(expanded)
-                  program, exp_source = parsed
-                  sources_by_arena[program.arena] = exp_source
-                  program.roots.each do |inner_id|
-                    collect_top_level_nodes(program.arena, inner_id, def_nodes, class_nodes, module_nodes, enum_nodes, macro_nodes, alias_nodes, lib_nodes, constant_exprs, main_exprs, pending_annotations, acyclic_types, flags, sources_by_arena, exp_source, depth + 1, false)
-                  end
-                end
-              end
-            end
-          elsif raw_text = macro_literal_raw_text(node, source)
-            # Track macro variable assignments (e.g., {% nums = %w(Int8 ...) %})
-            track_macro_var_assignment(raw_text)
-            combined = macro_literal_texts_from_raw(raw_text, flags).join
-            unless combined.strip.empty? || combined.includes?("{%")
-              if parsed = parse_macro_literal_program(combined)
-                program, sanitized = parsed
-                sources_by_arena[program.arena] = sanitized
-                program.roots.each do |inner_id|
-                  collect_top_level_nodes(program.arena, inner_id, def_nodes, class_nodes, module_nodes, enum_nodes, macro_nodes, alias_nodes, lib_nodes, constant_exprs, main_exprs, pending_annotations, acyclic_types, flags, sources_by_arena, sanitized, depth + 1, false)
-                end
-              end
-            end
-          end
+          collect_top_level_macro_literal(
+            arena, expr_id, node, def_nodes, class_nodes, module_nodes, enum_nodes, macro_nodes,
+            alias_nodes, lib_nodes, constant_exprs, main_exprs, pending_annotations,
+            acyclic_types, flags, sources_by_arena, source, depth
+          )
         when Frontend::MacroForNode
-          expand_top_level_macro_for(node, arena, source, def_nodes, class_nodes, module_nodes, enum_nodes, macro_nodes, alias_nodes, lib_nodes, constant_exprs, main_exprs, pending_annotations, acyclic_types, flags, sources_by_arena, depth)
+          collect_top_level_macro_for(
+            node, arena, source, def_nodes, class_nodes, module_nodes, enum_nodes, macro_nodes,
+            alias_nodes, lib_nodes, constant_exprs, main_exprs, pending_annotations,
+            acyclic_types, flags, sources_by_arena, depth
+          )
         when Frontend::AssignNode
           target = arena[node.target]
           if target.is_a?(Frontend::ConstantNode)
@@ -1648,6 +1572,130 @@ module CrystalV2
         else
           main_exprs << {expr_id, arena} if collect_main_exprs
         end
+      end
+
+      private def collect_top_level_macro_if(
+        arena : Frontend::ArenaLike,
+        node : Frontend::MacroIfNode,
+        def_nodes : Array(Tuple(Frontend::DefNode, Frontend::ArenaLike)),
+        class_nodes : Array(Tuple(Frontend::ClassNode, Frontend::ArenaLike)),
+        module_nodes : Array(Tuple(Frontend::ModuleNode, Frontend::ArenaLike)),
+        enum_nodes : Array(Tuple(Frontend::EnumNode, Frontend::ArenaLike)),
+        macro_nodes : Array(Tuple(Frontend::MacroDefNode, Frontend::ArenaLike)),
+        alias_nodes : Array(Tuple(Frontend::AliasNode, Frontend::ArenaLike)),
+        lib_nodes : Array(Tuple(Frontend::LibNode, Frontend::ArenaLike, Array(Tuple(Frontend::AnnotationNode, Frontend::ArenaLike)))),
+        constant_exprs : Array(Tuple(Frontend::ExprId, Frontend::ArenaLike)),
+        main_exprs : Array(Tuple(Frontend::ExprId, Frontend::ArenaLike)),
+        pending_annotations : Array(Tuple(Frontend::AnnotationNode, Frontend::ArenaLike)),
+        acyclic_types : Set(String),
+        flags : Set(String),
+        sources_by_arena : Hash(Frontend::ArenaLike, String),
+        source : String,
+        depth : Int32,
+        collect_main_exprs : Bool
+      ) : Nil
+        if ENV["DEBUG_MACRO_EXPAND"]?
+          STDERR.puts "[DEBUG_MACRO_EXPAND] MacroIfNode condition=#{evaluate_macro_condition(arena, node.condition, flags).inspect}"
+        end
+        condition = evaluate_macro_condition(arena, node.condition, flags)
+        if condition == true
+          if ENV["DEBUG_MACRO_EXPAND"]?
+            then_node = arena[node.then_body]
+            STDERR.puts "[DEBUG_MACRO_EXPAND] MacroIfNode then_body type=#{then_node.class}"
+          end
+          collect_top_level_nodes(arena, node.then_body, def_nodes, class_nodes, module_nodes, enum_nodes, macro_nodes, alias_nodes, lib_nodes, constant_exprs, main_exprs, pending_annotations, acyclic_types, flags, sources_by_arena, source, depth, collect_main_exprs)
+        elsif condition == false
+          if else_body = node.else_body
+            collect_top_level_nodes(arena, else_body, def_nodes, class_nodes, module_nodes, enum_nodes, macro_nodes, alias_nodes, lib_nodes, constant_exprs, main_exprs, pending_annotations, acyclic_types, flags, sources_by_arena, source, depth, collect_main_exprs)
+          end
+        else
+          collect_top_level_nodes(arena, node.then_body, def_nodes, class_nodes, module_nodes, enum_nodes, macro_nodes, alias_nodes, lib_nodes, constant_exprs, main_exprs, pending_annotations, acyclic_types, flags, sources_by_arena, source, depth, collect_main_exprs)
+          if else_body = node.else_body
+            collect_top_level_nodes(arena, else_body, def_nodes, class_nodes, module_nodes, enum_nodes, macro_nodes, alias_nodes, lib_nodes, constant_exprs, main_exprs, pending_annotations, acyclic_types, flags, sources_by_arena, source, depth, collect_main_exprs)
+          end
+        end
+      end
+
+      private def collect_top_level_macro_literal(
+        arena : Frontend::ArenaLike,
+        expr_id : Frontend::ExprId,
+        node : Frontend::MacroLiteralNode,
+        def_nodes : Array(Tuple(Frontend::DefNode, Frontend::ArenaLike)),
+        class_nodes : Array(Tuple(Frontend::ClassNode, Frontend::ArenaLike)),
+        module_nodes : Array(Tuple(Frontend::ModuleNode, Frontend::ArenaLike)),
+        enum_nodes : Array(Tuple(Frontend::EnumNode, Frontend::ArenaLike)),
+        macro_nodes : Array(Tuple(Frontend::MacroDefNode, Frontend::ArenaLike)),
+        alias_nodes : Array(Tuple(Frontend::AliasNode, Frontend::ArenaLike)),
+        lib_nodes : Array(Tuple(Frontend::LibNode, Frontend::ArenaLike, Array(Tuple(Frontend::AnnotationNode, Frontend::ArenaLike)))),
+        constant_exprs : Array(Tuple(Frontend::ExprId, Frontend::ArenaLike)),
+        main_exprs : Array(Tuple(Frontend::ExprId, Frontend::ArenaLike)),
+        pending_annotations : Array(Tuple(Frontend::AnnotationNode, Frontend::ArenaLike)),
+        acyclic_types : Set(String),
+        flags : Set(String),
+        sources_by_arena : Hash(Frontend::ArenaLike, String),
+        source : String,
+        depth : Int32
+      ) : Nil
+        # Check if this literal has macro control flow ({% for %}, {% begin %}, etc.)
+        has_control_flow = node.pieces.any? { |p| p.kind.control_start? }
+        if ENV["DEBUG_MACRO_EXPAND"]?
+          STDERR.puts "[DEBUG_MACRO_EXPAND] MacroLiteralNode has_control_flow=#{has_control_flow} pieces=#{node.pieces.size}"
+          node.pieces.each_with_index do |p, i|
+            STDERR.puts "[DEBUG_MACRO_EXPAND]   piece[#{i}] kind=#{p.kind} keyword=#{p.control_keyword.inspect}"
+          end
+        end
+        if has_control_flow
+          # Use MacroExpander for full expansion of {% for %} loops, variable assignments, etc.
+          if expanded = expand_macro_literal_via_expander(expr_id, arena, source, flags)
+            if ENV["DEBUG_MACRO_EXPAND"]?
+              STDERR.puts "[DEBUG_MACRO_EXPAND] expanded=#{expanded[0, [expanded.size, 200].min].inspect}"
+            end
+            unless expanded.strip.empty?
+              if parsed = parse_top_level_macro_expansion(expanded)
+                program, exp_source = parsed
+                sources_by_arena[program.arena] = exp_source
+                program.roots.each do |inner_id|
+                  collect_top_level_nodes(program.arena, inner_id, def_nodes, class_nodes, module_nodes, enum_nodes, macro_nodes, alias_nodes, lib_nodes, constant_exprs, main_exprs, pending_annotations, acyclic_types, flags, sources_by_arena, exp_source, depth + 1, false)
+                end
+              end
+            end
+          end
+        elsif raw_text = macro_literal_raw_text(node, source)
+          # Track macro variable assignments (e.g., {% nums = %w(Int8 ...) %})
+          track_macro_var_assignment(raw_text)
+          combined = macro_literal_texts_from_raw(raw_text, flags).join
+          unless combined.strip.empty? || combined.includes?("{%")
+            if parsed = parse_macro_literal_program(combined)
+              program, sanitized = parsed
+              sources_by_arena[program.arena] = sanitized
+              program.roots.each do |inner_id|
+                collect_top_level_nodes(program.arena, inner_id, def_nodes, class_nodes, module_nodes, enum_nodes, macro_nodes, alias_nodes, lib_nodes, constant_exprs, main_exprs, pending_annotations, acyclic_types, flags, sources_by_arena, sanitized, depth + 1, false)
+              end
+            end
+          end
+        end
+      end
+
+      private def collect_top_level_macro_for(
+        node : Frontend::MacroForNode,
+        arena : Frontend::ArenaLike,
+        source : String,
+        def_nodes : Array(Tuple(Frontend::DefNode, Frontend::ArenaLike)),
+        class_nodes : Array(Tuple(Frontend::ClassNode, Frontend::ArenaLike)),
+        module_nodes : Array(Tuple(Frontend::ModuleNode, Frontend::ArenaLike)),
+        enum_nodes : Array(Tuple(Frontend::EnumNode, Frontend::ArenaLike)),
+        macro_nodes : Array(Tuple(Frontend::MacroDefNode, Frontend::ArenaLike)),
+        alias_nodes : Array(Tuple(Frontend::AliasNode, Frontend::ArenaLike)),
+        lib_nodes : Array(Tuple(Frontend::LibNode, Frontend::ArenaLike, Array(Tuple(Frontend::AnnotationNode, Frontend::ArenaLike)))),
+        constant_exprs : Array(Tuple(Frontend::ExprId, Frontend::ArenaLike)),
+        main_exprs : Array(Tuple(Frontend::ExprId, Frontend::ArenaLike)),
+        pending_annotations : Array(Tuple(Frontend::AnnotationNode, Frontend::ArenaLike)),
+        acyclic_types : Set(String),
+        flags : Set(String),
+        sources_by_arena : Hash(Frontend::ArenaLike, String),
+        depth : Int32
+      ) : Nil
+        expand_top_level_macro_for(node, arena, source, def_nodes, class_nodes, module_nodes, enum_nodes, macro_nodes, alias_nodes, lib_nodes, constant_exprs, main_exprs, pending_annotations, acyclic_types, flags, sources_by_arena, depth)
       end
 
       # Track macro variable assignments from raw text like {% nums = %w(Int8 Int16 ...) %}
@@ -2613,6 +2661,8 @@ module CrystalV2
         when Frontend::NilNode
           false
         when Frontend::MacroExpressionNode
+          evaluate_macro_condition(arena, node.expression, flags)
+        when Frontend::GroupingNode
           evaluate_macro_condition(arena, node.expression, flags)
         when Frontend::UnaryNode
           op = String.new(node.operator)
