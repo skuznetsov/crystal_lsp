@@ -22,6 +22,27 @@
 - Float64: arithmetic, ** on literals
 
 ## Recently completed
+- **Yield-owner hotpath string-scan optimization (2026-02-18)** —
+  reduced `String#rindex` pressure in fallback yield-owner checks and block lookup.
+  Changes:
+  - `src/compiler/hir/ast_to_hir.cr`
+    - `find_yield_method_fallback(...)` now uses `method_owner(...)` (compact parser/cache)
+      instead of per-candidate `rindex('#' / '.')` slicing;
+    - `last_namespace_component(...)` and `last_namespace_component_if_nested(...)`
+      now use `last_namespace_separator_index(...)` (reverse byte scan) instead of
+      `String#rindex("::")`.
+  Validation:
+  - correctness:
+    - `crystal build src/crystal_v2.cr -o /tmp/crystal_v2_perf_owner_scan --error-trace` => `EXIT 0`
+    - `regression_tests/run_all.sh /tmp/crystal_v2_perf_owner_scan` => `44 passed, 0 failed`
+  - compile-time A/B (`CRYSTAL_V2_PIPELINE_CACHE=0`, same workload):
+    - before (`/tmp/crystal_v2_fix_stage1`): `examples/bootstrap_array.cr` compile `9.225s`
+    - after (`/tmp/crystal_v2_perf_owner_scan`): `examples/bootstrap_array.cr` compile `8.494s`
+    - delta: about `-7.9%`
+  - sample A/B (10s self-build window):
+    - `String#rindex<String, Int32>` aggregate samples: `122 -> 112`
+    - `lookup_block_function_def_for_call` aggregate samples: `45 -> 40`
+
 - **Implicit-self bare call owner fallback fix (2026-02-18)** —
   fixed a lowering path where bare calls with args inside instance methods could
   degrade to top-level names (`method$...`) instead of owner-qualified

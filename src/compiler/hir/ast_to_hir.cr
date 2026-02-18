@@ -20984,13 +20984,7 @@ module Crystal::HIR
         base = strip_type_suffix(name)
         next unless base.ends_with?(instance_suffix) || base.ends_with?(class_suffix)
         if receiver_base
-          owner = if idx = base.rindex('#')
-                    base[0, idx]
-                  elsif idx = base.rindex('.')
-                    base[0, idx]
-                  else
-                    ""
-                  end
+          owner = method_owner(base)
           owner_base = if split = split_generic_base_and_args(owner)
                          split[:base]
                        else
@@ -55296,7 +55290,7 @@ module Crystal::HIR
     # Avoids allocating an array like split("::").last would
     @[AlwaysInline]
     private def last_namespace_component(name : String) : String
-      if idx = name.rindex("::")
+      if idx = last_namespace_separator_index(name)
         name[(idx + 2)..]
       else
         name
@@ -55306,11 +55300,27 @@ module Crystal::HIR
     # Returns last component only if name contains "::", otherwise nil
     @[AlwaysInline]
     private def last_namespace_component_if_nested(name : String) : String?
-      if idx = name.rindex("::")
+      if idx = last_namespace_separator_index(name)
         name[(idx + 2)..]
       else
         nil
       end
+    end
+
+    # Reverse scan for the last namespace separator without String#rindex
+    # to keep hot-path owner checks allocation-light.
+    @[AlwaysInline]
+    private def last_namespace_separator_index(name : String) : Int32?
+      return nil if name.bytesize < 2
+      ptr = name.to_unsafe
+      i = name.bytesize - 2
+      while i >= 0
+        if ptr[i] == ':'.ord && ptr[i + 1] == ':'.ord
+          return i
+        end
+        i -= 1
+      end
+      nil
     end
 
     @[AlwaysInline]
