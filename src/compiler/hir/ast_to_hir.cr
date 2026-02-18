@@ -18711,18 +18711,31 @@ module Crystal::HIR
       if dollar = base_name.index('$')
         base_name = base_name[0, dollar]
       end
-      # Filter out VOID types (untyped parameters don't provide overload info)
-      typed_params = param_types.reject { |t| t == TypeRef::VOID }
-
-      suffix = typed_params.map { |t| type_name_for_mangling(t) }.join("_")
-      if has_block
-        suffix = suffix.empty? ? "block" : "#{suffix}_block"
+      first_suffix_part = true
+      suffix = String.build do |io|
+        param_types.each do |t|
+          next if t == TypeRef::VOID
+          io << '_' unless first_suffix_part
+          io << type_name_for_mangling(t)
+          first_suffix_part = false
+        end
+        if has_block
+          io << '_' unless first_suffix_part
+          io << "block"
+          first_suffix_part = false
+        end
+        if has_named_only
+          io << '_' unless first_suffix_part
+          io << "named"
+          first_suffix_part = false
+        end
       end
-      if has_named_only
-        suffix = suffix.empty? ? "named" : "#{suffix}_named"
+      return base_name if suffix.empty?
+      String.build(base_name.bytesize + 1 + suffix.bytesize) do |io|
+        io << base_name
+        io << '$'
+        io << suffix
       end
-
-      suffix.empty? ? base_name : "#{base_name}$#{suffix}"
     end
 
     private def function_full_name_for_def(
@@ -18731,28 +18744,24 @@ module Crystal::HIR
       params : Array(CrystalV2::Compiler::Frontend::Parameter)?,
       has_block : Bool,
     ) : String
-      if params
-        params.each do |param|
-          if param.is_block
-            has_block = true
-            break
-          end
-        end
-      end
+      return mangle_function_name(base_name, param_types, has_block, false) unless params
+
+      params = params.not_nil!
       has_named_only = false
-      full_name = mangle_function_name(base_name, param_types, has_block, has_named_only)
-      return full_name unless params
 
       param_count = 0
       has_splat = false
       has_double_splat = false
       has_untyped = param_types.any? { |t| t == TypeRef::VOID }
       params.each do |param|
+        if param.is_block
+          has_block = true
+          next
+        end
         if named_only_separator?(param)
           has_named_only = true
           next
         end
-        next if param.is_block || named_only_separator?(param)
         param_count += 1
         has_splat = true if param.is_splat
         has_double_splat = true if param.is_double_splat

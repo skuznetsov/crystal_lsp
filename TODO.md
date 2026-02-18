@@ -22,6 +22,34 @@
 - Float64: arithmetic, ** on literals
 
 ## Recently completed
+- **Mangle path allocation reduction (2026-02-18)** —
+  removed avoidable allocations and duplicate work in function-name mangling used
+  during method/def registration.
+  Changes:
+  - `src/compiler/hir/ast_to_hir.cr`
+    - `mangle_function_name(...)`:
+      - removed `reject.map.join` pipeline over params;
+      - now appends suffix parts in one `String.build` pass and builds final
+        `<base>$<suffix>` directly.
+    - `function_full_name_for_def(...)`:
+      - removed duplicate call to `mangle_function_name` for methods with params;
+      - merged block/named/splat/arity scan into a single pass.
+  Validation:
+  - correctness:
+    - `crystal build src/crystal_v2.cr -o /tmp/crystal_v2_mangle_nalloc --error-trace` => `EXIT 0`
+    - `regression_tests/run_all.sh /tmp/crystal_v2_mangle_nalloc` => `44 passed, 0 failed`
+  - compile-time A/B (same workload, caches disabled):
+    - run1:
+      - baseline: `... /tmp/crystal_v2_generic_split_fastpath ...` => `10.346s`
+      - experiment: `... /tmp/crystal_v2_mangle_nalloc ...` => `9.602s`
+    - run2 (reversed order):
+      - baseline: `... /tmp/crystal_v2_generic_split_fastpath ...` => `9.201s`
+      - experiment: `... /tmp/crystal_v2_mangle_nalloc ...` => `8.540s`
+    - delta: about `-7.2%` in both runs.
+  - runtime smoke:
+    - `scripts/run_safe.sh /tmp/bootstrap_array_generic_split_fastpath_ab2 10 768` => `EXIT 0`
+    - `scripts/run_safe.sh /tmp/bootstrap_array_mangle_nalloc_ab 10 768` => `EXIT 0`
+
 - **Generic split fast-path for non-generic names (2026-02-18)** —
   reduced hot hash/cache traffic in `split_generic_base_and_args` by avoiding
   cache probes for names that cannot be generic.
