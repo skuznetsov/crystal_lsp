@@ -22,6 +22,25 @@
 - Float64: arithmetic, ** on literals
 
 ## Recently completed
+- **Removed `Hash#key_hash` hardcoded LLVM overrides (2026-02-18)** —
+  dropped backend method-name-specific overrides for:
+  - `...$Hkey_hash$$Int32`
+  - `...$Hkey_hash$$String`
+  in `src/compiler/mir/llvm_backend.cr`.
+  Rationale:
+  - these were symptom-level bypasses for vdispatch/hash lowering;
+  - current pipeline is stable without them on regression/bootstrap coverage.
+  Validation (clean worktree at `8cc4380`, debug compiler build):
+  - `CRYSTAL_V2_PIPELINE_CACHE=0 /tmp/crystal_v2_no_keyhash_hacks_dbg regression_tests/hash_compaction.cr -o /tmp/hash_compaction_nohack && scripts/run_safe.sh /tmp/hash_compaction_nohack 10 512`
+    => `hash_compaction_ok`, `EXIT 0`;
+  - `CRYSTAL_V2_PIPELINE_CACHE=0 /tmp/crystal_v2_no_keyhash_hacks_dbg regression_tests/hash_stress.cr -o /tmp/hash_stress_nohack && scripts/run_safe.sh /tmp/hash_stress_nohack 10 512`
+    => `hash_stress_ok`, `EXIT 0`;
+  - `CRYSTAL_V2_PIPELINE_CACHE=0 /tmp/crystal_v2_no_keyhash_hacks_dbg examples/bootstrap_array.cr -o /tmp/bootstrap_array_nohack && scripts/run_safe.sh /tmp/bootstrap_array_nohack 10 768`
+    => `EXIT 0`;
+  - full regressions:
+    - `CRYSTAL_V2_PIPELINE_CACHE=0 regression_tests/run_all.sh /tmp/crystal_v2_no_keyhash_hacks_dbg`
+      => `43 passed, 0 failed`.
+
 - **Method index eager update (2026-02-18)** —
   reduced lookup overhead by indexing method entries at function-def insertion time
   instead of rebuilding on-demand over the whole `@function_defs` map.
