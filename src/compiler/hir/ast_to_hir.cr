@@ -20559,7 +20559,7 @@ module Crystal::HIR
             end
             # Allow generic base match: Hash matches Hash(Int32, T), Array matches Array(T), etc.
             if arg_desc && !param_resolved_name.empty?
-              param_base = param_resolved_name.split("(").first
+              param_base = strip_generic_args(param_resolved_name)
               if BUILTIN_GENERIC_BASES.includes?(param_base) && arg_desc.name.starts_with?("#{param_base}(")
                 arg_idx += 1
                 next
@@ -20579,7 +20579,7 @@ module Crystal::HIR
             # e.g., IO::FileDescriptor includes Crystal::System::FileDescriptor
             if arg_desc
               arg_class = arg_desc.name
-              param_base = param_type_name.split("(").first
+              param_base = strip_generic_args(param_type_name)
               if @class_included_modules[arg_class]?.try(&.any? { |m| m.includes?(param_base) || param_base.includes?(last_namespace_component(m)) })
                 arg_idx += 1
                 next
@@ -20653,7 +20653,7 @@ module Crystal::HIR
               score += 1 if numeric_target
             end
             if arg_desc = @module.get_type_descriptor(arg_type)
-              param_base = resolved_name.split("(").first
+              param_base = strip_generic_args(resolved_name)
               if BUILTIN_GENERIC_BASES.includes?(param_base) && arg_desc.name.starts_with?("#{param_base}(")
                 score += 1
               end

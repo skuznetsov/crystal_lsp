@@ -22,6 +22,21 @@
 - Float64: arithmetic, ** on literals
 
 ## Recently completed
+- **HIR overload matching: removed `split(\"(\").first` in hot path (2026-02-18)** —
+  replaced generic-base extraction via `split` with `strip_generic_args(...)` in
+  `params_compatible_with_args?` and `params_match_score`
+  (`src/compiler/hir/ast_to_hir.cr`), removing per-check array/string allocations
+  inside overload compatibility scoring.
+  Validation:
+  - release build: `crystal build src/crystal_v2.cr --release -o /tmp/crystal_v2_rel_parambase`
+    => `real 416.34s`;
+  - regressions: `regression_tests/run_all.sh /tmp/crystal_v2_rel_parambase`
+    => `42 passed, 0 failed`;
+  - stage1 no-cache A/B (same working tree source):
+    - new binary (`/tmp/crystal_v2_rel_parambase`): `1:52.25`, `1:54.87`
+    - previous binary (`/tmp/crystal_v2_rel_ctxcache`): `1:55.59`, `1:55.65`
+    - result: directional win (~`2s` mean), with expected run-to-run noise.
+
 - **HIR lookup hot-path: reuse compact method-name parser in `function_context_from_name` (2026-02-18)** —
   replaced ad-hoc `index`/slice parsing with `parse_method_name_compact(name)` in
   `src/compiler/hir/ast_to_hir.cr`, so repeated owner extraction in
