@@ -446,6 +446,32 @@ describe Crystal::MIR::LLVMIRGenerator do
       body.should_not contain("sitofp i32 %x to double")
     end
 
+    it "uses fptoui for float64 argument when calling uint32 callee" do
+      mod = Crystal::MIR::Module.new("test")
+
+      callee = mod.create_function("takes_u32_arg", Crystal::MIR::TypeRef::UINT32)
+      callee.add_param("x", Crystal::MIR::TypeRef::UINT32)
+      callee_builder = Crystal::MIR::Builder.new(callee)
+      callee_builder.ret(0_u32)
+
+      caller = mod.create_function("call_f64_to_u32_arg", Crystal::MIR::TypeRef::UINT32)
+      caller.add_param("x", Crystal::MIR::TypeRef::FLOAT64)
+      caller_builder = Crystal::MIR::Builder.new(caller)
+      call = caller_builder.extern_call("takes_u32_arg", ([0_u32] of Crystal::MIR::ValueId), Crystal::MIR::TypeRef::UINT32)
+      caller_builder.ret(call)
+
+      gen = Crystal::MIR::LLVMIRGenerator.new(mod)
+      gen.emit_type_metadata = false
+      output = gen.generate
+
+      func_ir = output[/define i32 @call_f64_to_u32_arg\([^)]*\)\s*\{.*?\n\}/m]
+      func_ir.should_not be_nil
+      body = func_ir.not_nil!
+
+      body.should contain("fptoui double %x to i32")
+      body.should_not contain("fptosi double %x to i32")
+    end
+
     it "uses ptrtoint + uitofp for pointer argument when calling float64 callee" do
       mod = Crystal::MIR::Module.new("test")
 

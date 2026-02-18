@@ -10067,7 +10067,7 @@ module Crystal::MIR
         end
       end
 
-      cast_fixed_arg = ->(actual_type : String, actual_type_ref : TypeRef?, value : String, expected_type : String) : String {
+      cast_fixed_arg = ->(actual_type : String, actual_type_ref : TypeRef?, value : String, expected_type : String, expected_type_ref : TypeRef?) : String {
         if expected_type == "void"
           expected_type = "ptr"
         end
@@ -10126,7 +10126,8 @@ module Crystal::MIR
         end
 
         if expected_type.starts_with?('i') && (actual_type == "double" || actual_type == "float")
-          emit "#{cast_name} = fptosi #{actual_type} #{value} to #{expected_type}"
+          op = (expected_type_ref && unsigned_type_ref?(expected_type_ref)) ? "fptoui" : "fptosi"
+          emit "#{cast_name} = #{op} #{actual_type} #{value} to #{expected_type}"
           return cast_name
         end
 
@@ -10668,7 +10669,7 @@ module Crystal::MIR
         fixed_sig.each_with_index do |expected_type, idx|
           break if idx >= arg_entries.size
           actual_type, actual_val, actual_type_ref = arg_entries[idx]
-          coerced_val = cast_fixed_arg.call(actual_type, actual_type_ref, actual_val, expected_type)
+          coerced_val = cast_fixed_arg.call(actual_type, actual_type_ref, actual_val, expected_type, nil)
           arg_entries[idx] = {expected_type, coerced_val, actual_type_ref}
         end
       elsif matching_func
@@ -10677,7 +10678,7 @@ module Crystal::MIR
           expected_type = @type_mapper.llvm_type(param.type)
           expected_type = "ptr" if expected_type == "void"
           actual_type, actual_val, actual_type_ref = arg_entries[idx]
-          coerced_val = cast_fixed_arg.call(actual_type, actual_type_ref, actual_val, expected_type)
+          coerced_val = cast_fixed_arg.call(actual_type, actual_type_ref, actual_val, expected_type, param.type)
           arg_entries[idx] = {expected_type, coerced_val, actual_type_ref}
         end
       end
