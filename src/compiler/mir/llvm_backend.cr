@@ -8311,6 +8311,24 @@ module Crystal::MIR
         end
       end
 
+      # Preserve signedness for narrow int -> ptr casts.
+      # Direct `inttoptr i32` on 64-bit targets effectively zero-extends and breaks
+      # negative Int32 values in generic Int paths (puts/to_s through Int#internal_to_s).
+      if op == "inttoptr" && is_src_int && dst_type == "ptr"
+        if src_bits = src_type[1..].to_i?
+          if src_bits < 64
+            base_name = name.lstrip('%')
+            ext_name = "%#{base_name}.inttoptr_ext"
+            extend_op = (src_type_ref == TypeRef::BOOL || unsigned_type_ref?(src_type_ref)) ? "zext" : "sext"
+            emit "#{ext_name} = #{extend_op} #{src_type} #{value} to i64"
+            emit "#{name} = inttoptr i64 #{ext_name} to ptr"
+            record_emitted_type(name, "ptr")
+            @value_types[inst.id] = TypeRef::POINTER
+            return
+          end
+        end
+      end
+
       # Guard: ptr to float/double - convert pointer VALUE (address) numerically.
       # Never dereference unknown pointers here.
       if src_type == "ptr" && (dst_type == "float" || dst_type == "double")
@@ -9546,7 +9564,18 @@ module Crystal::MIR
                        c = @cond_counter
                        @cond_counter += 1
                        temp_ptr = "%inttoptr.#{c}"
-                       emit "#{temp_ptr} = inttoptr #{actual_llvm_type} #{val} to ptr"
+                       if src_bits = actual_llvm_type[1..].to_i?
+                         if src_bits < 64
+                           ext_name = "#{temp_ptr}.ext"
+                           ext_op = (actual_type == TypeRef::BOOL || unsigned_type_ref?(actual_type)) ? "zext" : "sext"
+                           emit "#{ext_name} = #{ext_op} #{actual_llvm_type} #{val} to i64"
+                           emit "#{temp_ptr} = inttoptr i64 #{ext_name} to ptr"
+                         else
+                           emit "#{temp_ptr} = inttoptr #{actual_llvm_type} #{val} to ptr"
+                         end
+                       else
+                         emit "#{temp_ptr} = inttoptr #{actual_llvm_type} #{val} to ptr"
+                       end
                        "ptr #{temp_ptr}"
                      end
                    end
