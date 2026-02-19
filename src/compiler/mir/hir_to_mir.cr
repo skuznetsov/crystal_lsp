@@ -49,6 +49,7 @@ module Crystal
     @current_slab_frame : Bool = false
     @current_block_param_id : HIR::ValueId?
     @class_children : Hash(String, Array(String))
+    @hir_value_by_id : Hash(HIR::ValueId, HIR::Value)
 
     # Index: base_name (before "$") → first matching MIR function.
     # Eliminates O(N) linear scans during fuzzy call resolution.
@@ -83,6 +84,7 @@ module Crystal
       @slab_frame_enabled = slab_frame
       @current_block_param_id = nil
       @class_children = {} of String => Array(String)
+      @hir_value_by_id = {} of HIR::ValueId => HIR::Value
       @hir_module.class_parents.each do |name, parent|
         next unless parent
         (@class_children[parent] ||= [] of String) << name
@@ -449,12 +451,14 @@ module Crystal
       @stack_slot_values.clear
       @stack_slot_types.clear
       @inline_struct_ptrs.clear
+      @hir_value_by_id.clear
       @builder = Builder.new(mir_func)
 
       # Map HIR params to MIR params (already added in stub)
       hir_func.params.each_with_index do |param, idx|
         # MIR params are value IDs starting from 0
         @value_map[param.id] = idx.to_u32
+        @hir_value_by_id[param.id] = param
       end
 
       # Record HIR value types for cast lowering
@@ -464,6 +468,7 @@ module Crystal
       hir_func.blocks.each do |hir_block|
         hir_block.instructions.each do |inst|
           @hir_value_types[inst.id] = inst.type
+          @hir_value_by_id[inst.id] = inst
         end
       end
 
@@ -3236,6 +3241,22 @@ module Crystal
 
     private def lower_address_of(addr_of : HIR::AddressOf) : ValueId
       builder = @builder.not_nil!
+
+      # pointerof(obj.@field) must return address of the ACTUAL field storage,
+      # not address of a temporary loaded copy.
+      if hir_operand = @hir_value_by_id[addr_of.operand]?
+        if field_get = hir_operand.as?(HIR::FieldGet)
+          # Struct ivars are represented as pointers in current MIR ABI.
+          # pointerof(@struct_field) should therefore return that struct pointer
+          # (Context*), not the address of the ivar slot (Context**).
+          if hir_type_is_struct?(field_get.type)
+            return get_value(field_get.id)
+          end
+
+          obj_ptr = get_value(field_get.object)
+          return builder.gep(obj_ptr, [field_get.field_offset.to_u32], TypeRef::POINTER)
+        end
+      end
 
       # Get the operand value
       operand = get_value(addr_of.operand)

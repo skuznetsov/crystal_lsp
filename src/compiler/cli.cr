@@ -28,8 +28,17 @@ module CrystalV2
   module Compiler
     VERSION = "0.1.0-dev"
 
-    # Standard library path - relative to compiler source
-    STDLIB_PATH = File.expand_path("../stdlib", File.dirname(__FILE__))
+    # Standard library path.
+    # Can be overridden to test compatibility with an external/original stdlib.
+    STDLIB_DEFAULT_PATH = File.expand_path("../stdlib", File.dirname(__FILE__))
+    STDLIB_PATH = begin
+      override = ENV["CRYSTAL_V2_STDLIB_PATH"]? || ENV["CRYSTAL_V2_ORIGINAL_STDLIB_PATH"]?
+      if override && !override.empty?
+        File.expand_path(override)
+      else
+        STDLIB_DEFAULT_PATH
+      end
+    end
 
     # Original Crystal compiler source path - for require'ing compiler modules
     # (e.g., require "compiler/crystal/syntax/lexer")
@@ -335,6 +344,12 @@ module CrystalV2
         log(options, out_io, "=== Crystal v2 Compiler ===")
         log(options, out_io, "Input: #{input_file}")
         log(options, out_io, "Output: #{options.output}")
+        if options.verbose
+          log(options, out_io, "Stdlib root: #{STDLIB_PATH}")
+          if crystal_path = ENV["CRYSTAL_PATH"]?
+            log(options, out_io, "CRYSTAL_PATH: #{crystal_path}")
+          end
+        end
 
         # Step 1: Parse source (with require support)
         log(options, out_io, "\n[1/6] Parsing...")
@@ -346,10 +361,10 @@ module CrystalV2
         # Load prelude first (unless --no-prelude)
         unless options.no_prelude
           prelude_path = if options.prelude_file.empty?
-                           File.join(STDLIB_PATH, "prelude.cr")
+                           resolve_stdlib_path("prelude.cr")
                          elsif !options.prelude_file.includes?(File::SEPARATOR) && !options.prelude_file.ends_with?(".cr")
                            # Short name like "prelude" -> resolve to stdlib path
-                           File.join(STDLIB_PATH, "#{options.prelude_file}.cr")
+                           resolve_stdlib_path("#{options.prelude_file}.cr")
                          else
                            options.prelude_file
                          end
@@ -500,59 +515,50 @@ module CrystalV2
         # across reopened types (require order interleaves files).
         debug_filter = ENV["DEBUG_PRE_SCAN_CONST"]?
         scan_constants_in_body = ->(owner : String, arena : Frontend::ArenaLike, body : Array(Frontend::ExprId)) do
-          stack = [body]
+          stack = [{owner: owner, body: body}]
           while current = stack.pop?
-            current.each do |expr_id|
-              expr_node = arena[expr_id]
-              while expr_node.is_a?(Frontend::VisibilityModifierNode)
-                expr_node = arena[expr_node.expression]
-              end
-              case expr_node
-              when Frontend::BlockNode
-                stack << expr_node.body
-              when Frontend::ConstantNode
-                if debug_filter && (debug_filter == "1" || String.new(expr_node.name) == debug_filter)
-                  path = paths_by_arena[arena]? || "(unknown)"
-                  STDERR.puts "[PRE_SCAN_CONST] owner=#{owner} name=#{String.new(expr_node.name)} file=#{path}"
-                end
-                hir_converter.register_constant(expr_node, owner)
-              when Frontend::AssignNode
-                target = arena[expr_node.target]
-                if target.is_a?(Frontend::ConstantNode)
-                  if debug_filter && (debug_filter == "1" || String.new(target.name) == debug_filter)
-                    path = paths_by_arena[arena]? || "(unknown)"
-                    STDERR.puts "[PRE_SCAN_CONST] owner=#{owner} name=#{String.new(target.name)} file=#{path}"
-                  end
-                  hir_converter.register_constant_value(String.new(target.name), expr_node.value, arena, owner)
-                end
-              end
-            end
-          end
-        end
-
-        scan_module_body = ->(prefix : String, arena : Frontend::ArenaLike, body : Array(Frontend::ExprId)) do
-          stack = [{prefix: prefix, body: body}]
-          while current = stack.pop?
+            current_owner = current[:owner]
             current[:body].each do |expr_id|
               expr_node = arena[expr_id]
               while expr_node.is_a?(Frontend::VisibilityModifierNode)
                 expr_node = arena[expr_node.expression]
               end
               case expr_node
-              when Frontend::ModuleNode
-                next unless mod_body = expr_node.body
-                name = String.new(expr_node.name)
-                full_name = current[:prefix].empty? ? name : "#{current[:prefix]}::#{name}"
-                stack << {prefix: full_name, body: mod_body}
+              when Frontend::BlockNode
+                stack << {owner: current_owner, body: expr_node.body}
+              when Frontend::ConstantNode
+                if debug_filter && (debug_filter == "1" || String.new(expr_node.name) == debug_filter)
+                  path = paths_by_arena[arena]? || "(unknown)"
+                  STDERR.puts "[PRE_SCAN_CONST] owner=#{current_owner} name=#{String.new(expr_node.name)} file=#{path}"
+                end
+                hir_converter.register_constant(expr_node, current_owner)
+              when Frontend::AssignNode
+                target = arena[expr_node.target]
+                if target.is_a?(Frontend::ConstantNode)
+                  if debug_filter && (debug_filter == "1" || String.new(target.name) == debug_filter)
+                    path = paths_by_arena[arena]? || "(unknown)"
+                    STDERR.puts "[PRE_SCAN_CONST] owner=#{current_owner} name=#{String.new(target.name)} file=#{path}"
+                  end
+                  hir_converter.register_constant_value(String.new(target.name), expr_node.value, arena, current_owner)
+                end
               when Frontend::ClassNode
-                next unless class_body = expr_node.body
-                name = String.new(expr_node.name)
-                full_name = if current[:prefix].empty? || name.includes?("::")
-                              name
+                next unless nested_body = expr_node.body
+                nested_name = String.new(expr_node.name)
+                full_name = if current_owner.empty? || nested_name.includes?("::")
+                              nested_name
                             else
-                              "#{current[:prefix]}::#{name}"
+                              "#{current_owner}::#{nested_name}"
                             end
-                scan_constants_in_body.call(full_name, arena, class_body)
+                stack << {owner: full_name, body: nested_body}
+              when Frontend::ModuleNode
+                next unless nested_body = expr_node.body
+                nested_name = String.new(expr_node.name)
+                full_name = if current_owner.empty? || nested_name.includes?("::")
+                              nested_name
+                            else
+                              "#{current_owner}::#{nested_name}"
+                            end
+                stack << {owner: full_name, body: nested_body}
               end
             end
           end
@@ -569,7 +575,7 @@ module CrystalV2
           next unless body = module_node.body
           hir_converter.arena = arena
           module_name = String.new(module_node.name)
-          scan_module_body.call(module_name, arena, body)
+          scan_constants_in_body.call(module_name, arena, body)
         end
 
         # Pass 1: Register types
@@ -921,6 +927,7 @@ module CrystalV2
 
         # Pass constant literal values for global initialization (e.g., Math::PI)
         const_init = {} of String => (Float64 | Int64)
+        const_name_mapper = MIR::LLVMTypeMapper.new(mir_module.type_registry)
         hir_converter.constant_literal_values.each do |name, value|
           if value.is_a?(CrystalV2::Compiler::Semantic::MacroNumberValue)
             # Convert constant name (Math::PI) to global name (Math__classvar__PI)
@@ -932,7 +939,12 @@ module CrystalV2
               const_name = name
             end
             global_name = "#{owner}__classvar__#{const_name}"
-            const_init[global_name] = value.value
+            const_val = value.value
+            # Keep both key formats for compatibility:
+            # - raw global name (legacy/diagnostics)
+            # - mangled global name used by LLVM emission
+            const_init[global_name] = const_val
+            const_init[const_name_mapper.mangle_name(global_name)] = const_val
           end
         end
         llvm_gen.constant_initial_values = const_init unless const_init.empty?
@@ -2739,9 +2751,11 @@ module CrystalV2
           # On macOS aarch64, resolve to lib_c/aarch64-darwin/c/*
           # TODO: Detect actual platform
           platform = "aarch64-darwin"
-          platform_path = File.join(STDLIB_PATH, "lib_c", platform, req_path)
-          result = try_require_path(platform_path)
-          return result if result
+          stdlib_search_paths.each do |stdlib_root|
+            platform_path = File.join(stdlib_root, "lib_c", platform, req_path)
+            result = try_require_path(platform_path)
+            return result if result
+          end
         end
 
         # Relative paths
@@ -2762,9 +2776,11 @@ module CrystalV2
           return result if result
 
           # Try stdlib
-          stdlib_path = File.expand_path(req_path, STDLIB_PATH)
-          result = try_require_path(stdlib_path)
-          return result if result
+          stdlib_search_paths.each do |stdlib_root|
+            stdlib_path = File.expand_path(req_path, stdlib_root)
+            result = try_require_path(stdlib_path)
+            return result if result
+          end
 
           # Try original Crystal compiler source (for compiler modules like lexer/parser)
           if File.directory?(CRYSTAL_SRC_PATH)
@@ -2824,15 +2840,44 @@ module CrystalV2
         # Handle relative paths
         if pattern.starts_with?("./") || pattern.starts_with?("../")
           full_dir = File.expand_path(pattern, base_dir)
-        else
-          full_dir = File.expand_path(pattern, STDLIB_PATH)
+          return nil unless Dir.exists?(full_dir)
+
+          files = [] of String
+          gather_crystal_files(full_dir, files, recursive)
+          return files.empty? ? nil : files.sort
         end
 
-        return nil unless Dir.exists?(full_dir)
+        stdlib_search_paths.each do |stdlib_root|
+          full_dir = File.expand_path(pattern, stdlib_root)
+          next unless Dir.exists?(full_dir)
 
-        files = [] of String
-        gather_crystal_files(full_dir, files, recursive)
-        files.empty? ? nil : files.sort  # Sort for deterministic order
+          files = [] of String
+          gather_crystal_files(full_dir, files, recursive)
+          return files.sort unless files.empty?
+        end
+
+        nil
+      end
+
+      private def resolve_stdlib_path(relative_path : String) : String
+        stdlib_search_paths.each do |root|
+          candidate = File.join(root, relative_path)
+          return candidate if File.exists?(candidate)
+        end
+        File.join(STDLIB_PATH, relative_path)
+      end
+
+      private def stdlib_search_paths : Array(String)
+        paths = [STDLIB_PATH]
+        if crystal_path = ENV["CRYSTAL_PATH"]?
+          separator = crystal_path.includes?(';') ? ';' : ':'
+          crystal_path.split(separator).each do |entry|
+            next if entry.empty?
+            expanded = File.expand_path(entry)
+            paths << expanded unless paths.includes?(expanded)
+          end
+        end
+        paths
       end
 
       # Gather all .cr files in a directory

@@ -1837,6 +1837,19 @@ module Crystal::MIR
       emit_raw "  ret ptr %ptr\n"
       emit_raw "}\n\n"
 
+      # Fiber context switch runtime helper used by @[Primitive(:fiber_swapcontext)].
+      # Must be naked: any prologue/epilogue breaks saved stack/context semantics.
+      emit_raw "define void @__crystal_v2_fiber_swapcontext(ptr %current_context, ptr %new_context) #9000 {\n"
+      emit_raw "entry:\n"
+      if @target_triple.includes?("arm64") || @target_triple.includes?("aarch64")
+        emit_raw "  call void asm sideeffect \"stp d15, d14, [sp, #-22*8]!\\0Astp d13, d12, [sp, #2*8]\\0Astp d11, d10, [sp, #4*8]\\0Astp d9, d8, [sp, #6*8]\\0Astp x30, x29, [sp, #8*8]\\0Astp x28, x27, [sp, #10*8]\\0Astp x26, x25, [sp, #12*8]\\0Astp x24, x23, [sp, #14*8]\\0Astp x22, x21, [sp, #16*8]\\0Astp x20, x19, [sp, #18*8]\\0Astp x0, x1, [sp, #20*8]\\0Amov x19, sp\\0Astr x19, [x0, #0]\\0Admb ish\\0Amov x19, #1\\0Astr x19, [x0, #8]\\0Amov x19, #0\\0Astr x19, [x1, #8]\\0Aldr x19, [x1, #0]\\0Amov sp, x19\\0Aldp x0, x1, [sp, #20*8]\\0Aldp x20, x19, [sp, #18*8]\\0Aldp x22, x21, [sp, #16*8]\\0Aldp x24, x23, [sp, #14*8]\\0Aldp x26, x25, [sp, #12*8]\\0Aldp x28, x27, [sp, #10*8]\\0Aldp x30, x29, [sp, #8*8]\\0Aldp d9, d8, [sp, #6*8]\\0Aldp d11, d10, [sp, #4*8]\\0Aldp d13, d12, [sp, #2*8]\\0Aldp d15, d14, [sp], #22*8\\0Amov x16, x30\\0Amov x30, #0\\0Abr x16\", \"~{x0},~{x1},~{x16},~{x19},~{x20},~{x21},~{x22},~{x23},~{x24},~{x25},~{x26},~{x27},~{x28},~{x29},~{x30},~{d8},~{d9},~{d10},~{d11},~{d12},~{d13},~{d14},~{d15},~{memory},~{dirflag},~{fpsr},~{flags}\"()\n"
+      elsif @target_triple.includes?("x86_64")
+        emit_raw "  call void asm sideeffect \"pushq %rdi\\0Apushq %rbx\\0Apushq %rbp\\0Apushq %r12\\0Apushq %r13\\0Apushq %r14\\0Apushq %r15\\0Amovq %rsp, 0(%rdi)\\0Amovl $1, 8(%rdi)\\0Amovl $0, 8(%rsi)\\0Amovq 0(%rsi), %rsp\\0Apopq %r15\\0Apopq %r14\\0Apopq %r13\\0Apopq %r12\\0Apopq %rbp\\0Apopq %rbx\\0Apopq %rdi\", \"~{rdi},~{rsi},~{rbx},~{rbp},~{r12},~{r13},~{r14},~{r15},~{memory},~{dirflag},~{fpsr},~{flags}\"()\n"
+      end
+      emit_raw "  ret void\n"
+      emit_raw "}\n"
+      emit_raw "attributes #9000 = { naked noinline nounwind }\n\n"
+
       emit_raw "define ptr @__crystal_malloc_atomic64(i64 %size) {\n"
       emit_raw "  %ptr = call ptr @malloc(i64 %size)\n"
       emit_raw "  ret ptr %ptr\n"
@@ -7733,6 +7746,12 @@ module Crystal::MIR
         end
       end
 
+      # Prefer actual emitted SSA type when available. @value_types may lag after
+      # ABI-preserving call adaptations (for example, widened union return types).
+      if emitted_operand_type = (@emitted_value_types[operand]? || (operand.starts_with?('%') ? @emitted_value_types[operand[1..]]? : nil))
+        operand_llvm_type = emitted_operand_type
+      end
+
       case inst.op
       when .neg?
         if operand_llvm_type.includes?(".union")
@@ -7992,6 +8011,7 @@ module Crystal::MIR
       if dst_type.includes?(".union")
         base_name = name.lstrip('%')
         emit "%#{base_name}.ptr = alloca #{dst_type}, align 8"
+        emit "store #{dst_type} zeroinitializer, ptr %#{base_name}.ptr"
         emit "%#{base_name}.type_id_ptr = getelementptr #{dst_type}, ptr %#{base_name}.ptr, i32 0, i32 0"
 
         # Check if source is null/nil - create nil union
@@ -9836,7 +9856,42 @@ module Crystal::MIR
         emit "%union_abi.#{c}.alloca = alloca #{return_type}, align 8"
         emit "store #{return_type} #{call_reg}, ptr %union_abi.#{c}.alloca"
         emit "%union_abi.#{c}.payload = getelementptr #{return_type}, ptr %union_abi.#{c}.alloca, i32 0, i32 1"
-        emit "#{name} = load #{union_abi_desired_type}, ptr %union_abi.#{c}.payload, align 4"
+        # Nilable unions can leave payload bytes unspecified for nil branch.
+        # When adapting union -> ptr, branch on union tag to avoid turning nil
+        # into a non-null garbage pointer.
+        if union_abi_desired_type == "ptr"
+          has_nil_variant = false
+          [prepass_type, callee_func.try(&.return_type), inst.type].each do |candidate|
+            next unless candidate
+            next unless @type_mapper.llvm_type(candidate) == return_type
+            if descriptor = @module.get_union_descriptor(candidate)
+              has_nil_variant = descriptor.variants.any? { |variant| variant.type_ref == TypeRef::NIL }
+              break
+            end
+          end
+
+          unless has_nil_variant
+            @module.union_descriptors.each do |type_ref, descriptor|
+              next unless @type_mapper.llvm_type(type_ref) == return_type
+              if descriptor.variants.any? { |variant| variant.type_ref == TypeRef::NIL }
+                has_nil_variant = true
+                break
+              end
+            end
+          end
+
+          if has_nil_variant
+            emit "%union_abi.#{c}.tag_ptr = getelementptr #{return_type}, ptr %union_abi.#{c}.alloca, i32 0, i32 0"
+            emit "%union_abi.#{c}.tag = load i32, ptr %union_abi.#{c}.tag_ptr"
+            emit "%union_abi.#{c}.payload_ptr = load ptr, ptr %union_abi.#{c}.payload, align 4"
+            emit "%union_abi.#{c}.is_nil = icmp eq i32 %union_abi.#{c}.tag, 0"
+            emit "#{name} = select i1 %union_abi.#{c}.is_nil, ptr null, ptr %union_abi.#{c}.payload_ptr"
+          else
+            emit "#{name} = load #{union_abi_desired_type}, ptr %union_abi.#{c}.payload, align 4"
+          end
+        else
+          emit "#{name} = load #{union_abi_desired_type}, ptr %union_abi.#{c}.payload, align 4"
+        end
         record_emitted_type(name, union_abi_desired_type)
         @value_types[inst.id] = prepass_type.not_nil!
       else
@@ -9847,17 +9902,18 @@ module Crystal::MIR
         # Update value_types to match EMITTED return type (not callee's return type)
         # This is critical because prepass may have determined a different type
         if return_type.includes?(".union")
-          # For union types, find matching TypeRef for the emitted union
-          # Use prepass_type if it matches, otherwise try to find from callee
-          if prepass_type && @type_mapper.llvm_type(prepass_type).includes?(".union")
+          # For union returns, keep @value_types consistent with the emitted LLVM union.
+          # Prepass hints are accepted only if the union layout matches exactly.
+          if prepass_type && @type_mapper.llvm_type(prepass_type) == return_type
             @value_types[inst.id] = prepass_type
+          elsif callee_func && @type_mapper.llvm_type(callee_func.return_type) == return_type
+            @value_types[inst.id] = callee_func.return_type
+          elsif @type_mapper.llvm_type(inst.type) == return_type
+            @value_types[inst.id] = inst.type
           elsif callee_func && @type_mapper.llvm_type(callee_func.return_type).includes?(".union")
             @value_types[inst.id] = callee_func.return_type
-          else
-            # Fallback to inst.type if it's a union
-            if @type_mapper.llvm_type(inst.type).includes?(".union")
-              @value_types[inst.id] = inst.type
-            end
+          elsif prepass_type && @type_mapper.llvm_type(prepass_type).includes?(".union")
+            @value_types[inst.id] = prepass_type
           end
         else
           # If the MIR type is a tuple, preserve it even if ABI uses ptr.
@@ -12234,6 +12290,7 @@ module Crystal::MIR
               c = @cond_counter
               @cond_counter += 1
               emit "%ret_nil.#{c}.ptr = alloca #{@current_return_type}, align 8"
+              emit "store #{@current_return_type} zeroinitializer, ptr %ret_nil.#{c}.ptr"
               emit "%ret_nil.#{c}.type_id_ptr = getelementptr #{@current_return_type}, ptr %ret_nil.#{c}.ptr, i32 0, i32 0"
               emit "store i32 0, ptr %ret_nil.#{c}.type_id_ptr"
               emit "%ret_nil.#{c}.val = load #{@current_return_type}, ptr %ret_nil.#{c}.ptr"
@@ -12260,6 +12317,7 @@ module Crystal::MIR
               c = @cond_counter
               @cond_counter += 1
               emit "%ret_nil_union.#{c}.ptr = alloca #{@current_return_type}, align 8"
+              emit "store #{@current_return_type} zeroinitializer, ptr %ret_nil_union.#{c}.ptr"
               emit "%ret_nil_union.#{c}.type_id_ptr = getelementptr #{@current_return_type}, ptr %ret_nil_union.#{c}.ptr, i32 0, i32 0"
               emit "store i32 0, ptr %ret_nil_union.#{c}.type_id_ptr"
               emit "%ret_nil_union.#{c}.val = load #{@current_return_type}, ptr %ret_nil_union.#{c}.ptr"
@@ -12272,6 +12330,7 @@ module Crystal::MIR
             c = @cond_counter  # Reuse cond_counter for unique naming
             @cond_counter += 1
             emit "%ret#{c}.union_ptr = alloca #{@current_return_type}, align 8"
+            emit "store #{@current_return_type} zeroinitializer, ptr %ret#{c}.union_ptr"
             emit "%ret#{c}.type_id_ptr = getelementptr #{@current_return_type}, ptr %ret#{c}.union_ptr, i32 0, i32 0"
 
             # Check if this is a nil/void return - set type_id=0 (nil variant)
@@ -12458,6 +12517,7 @@ module Crystal::MIR
             c = @cond_counter
             @cond_counter += 1
             emit "%ret_nil_union.#{c}.ptr = alloca #{@current_return_type}, align 8"
+            emit "store #{@current_return_type} zeroinitializer, ptr %ret_nil_union.#{c}.ptr"
             emit "%ret_nil_union.#{c}.type_id_ptr = getelementptr #{@current_return_type}, ptr %ret_nil_union.#{c}.ptr, i32 0, i32 0"
             emit "store i32 0, ptr %ret_nil_union.#{c}.type_id_ptr"
             emit "%ret_nil_union.#{c}.val = load #{@current_return_type}, ptr %ret_nil_union.#{c}.ptr"
