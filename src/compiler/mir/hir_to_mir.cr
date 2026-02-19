@@ -48,8 +48,9 @@ module Crystal
     @slab_frame_enabled : Bool
     @current_slab_frame : Bool = false
     @current_block_param_id : HIR::ValueId?
+    @inline_block_arg_stack : Array(Array(ValueId))
+    @inlined_block_ids : Set(HIR::BlockId)
     @class_children : Hash(String, Array(String))
-    @hir_value_by_id : Hash(HIR::ValueId, HIR::Value)
 
     # Index: base_name (before "$") → first matching MIR function.
     # Eliminates O(N) linear scans during fuzzy call resolution.
@@ -83,8 +84,9 @@ module Crystal
       @stack_slot_types = {} of ValueId => TypeRef
       @slab_frame_enabled = slab_frame
       @current_block_param_id = nil
+      @inline_block_arg_stack = [] of Array(ValueId)
+      @inlined_block_ids = Set(HIR::BlockId).new
       @class_children = {} of String => Array(String)
-      @hir_value_by_id = {} of HIR::ValueId => HIR::Value
       @hir_module.class_parents.each do |name, parent|
         next unless parent
         (@class_children[parent] ||= [] of String) << name
@@ -271,7 +273,7 @@ module Crystal
             type_kind,
             class_name,
             total_size,
-            pointer_word_align_u32
+            8_u32  # alignment
           )
         end
 
@@ -303,29 +305,6 @@ module Crystal
       end
     end
 
-    # Register module types so module literals can be represented as runtime singletons.
-    # This prevents lowering module values as null pointers (which breaks vdispatch).
-    def register_module_types(type_descriptors : Array(Crystal::HIR::TypeDescriptor))
-      type_descriptors.each_with_index do |desc, idx|
-        next unless desc.kind == Crystal::HIR::TypeKind::Module
-
-        hir_ref = Crystal::HIR::TypeRef.new(Crystal::HIR::TypeRef::FIRST_USER_TYPE + idx.to_u32)
-        mir_ref = convert_type(hir_ref)
-
-        unless @mir_module.type_registry.get(mir_ref)
-          @mir_module.type_registry.create_type_with_id(
-            mir_ref.id,
-            TypeKind::Reference,
-            desc.name,
-            pointer_word_bytes_u64,
-            pointer_word_align_u32
-          )
-        end
-
-        @mir_module.register_module_type(mir_ref)
-      end
-    end
-
     # Register tuple/named tuple types from HIR descriptors.
     # This enables tuple element access to lower as struct GEPs instead of array layout.
     def register_tuple_types(type_descriptors : Array(Crystal::HIR::TypeDescriptor))
@@ -349,15 +328,13 @@ module Crystal
           is_inline = elem_kind && (elem_kind.primitive? || elem_kind.enum?)
           elem_size = if is_inline && elem_type && elem_type.size > 0
                         elem_type.size
-                      elsif elem_kind && elem_kind.union? && elem_type && elem_type.size > 8
-                        elem_type.size  # Union discriminated repr needs more than a pointer
                       else
-                        pointer_word_bytes_u64
+                        8_u64  # Pointer/reference size
                       end
           elem_align = if is_inline && elem_type && elem_type.alignment > 0
                          elem_type.alignment
                        else
-                         pointer_word_align_u32
+                         8_u32  # Pointer alignment
                        end
           size = align_u64(size, elem_align)
           size += elem_size
@@ -383,33 +360,6 @@ module Crystal
       a = align.to_u64
       return value if a <= 1
       ((value + a - 1) // a) * a
-    end
-
-    @[AlwaysInline]
-    private def pointer_word_bytes_u64 : UInt64
-      {% if flag?(:i386) || flag?(:arm) || flag?(:wasm32) %}
-        4_u64
-      {% else %}
-        8_u64
-      {% end %}
-    end
-
-    @[AlwaysInline]
-    private def pointer_word_align_u32 : UInt32
-      {% if flag?(:i386) || flag?(:arm) || flag?(:wasm32) %}
-        4_u32
-      {% else %}
-        8_u32
-      {% end %}
-    end
-
-    @[AlwaysInline]
-    private def pointer_word_bytes_i32 : Int32
-      {% if flag?(:i386) || flag?(:arm) || flag?(:wasm32) %}
-        4
-      {% else %}
-        8
-      {% end %}
     end
 
     # Create function stub with params and return type (no body)
@@ -451,14 +401,14 @@ module Crystal
       @stack_slot_values.clear
       @stack_slot_types.clear
       @inline_struct_ptrs.clear
-      @hir_value_by_id.clear
+      @inline_block_arg_stack.clear
+      @inlined_block_ids.clear
       @builder = Builder.new(mir_func)
 
       # Map HIR params to MIR params (already added in stub)
       hir_func.params.each_with_index do |param, idx|
         # MIR params are value IDs starting from 0
         @value_map[param.id] = idx.to_u32
-        @hir_value_by_id[param.id] = param
       end
 
       # Record HIR value types for cast lowering
@@ -468,7 +418,6 @@ module Crystal
       hir_func.blocks.each do |hir_block|
         hir_block.instructions.each do |inst|
           @hir_value_types[inst.id] = inst.type
-          @hir_value_by_id[inst.id] = inst
         end
       end
 
@@ -599,6 +548,8 @@ module Crystal
     # ─────────────────────────────────────────────────────────────────────────
 
     private def lower_block(hir_block : HIR::Block)
+      return if @inlined_block_ids.includes?(hir_block.id)
+
       builder = @builder.not_nil!
       mir_block_id = @block_map[hir_block.id]
       builder.current_block = mir_block_id
@@ -630,16 +581,35 @@ module Crystal
                  if existing = @value_map[hir_value.id]?
                    existing
                  else
-                   # Block parameter - allocate stack slot for it
-                   builder = @builder.not_nil!
-                   param_type = convert_type(hir_value.type)
-                   slot = builder.alloc(MemoryStrategy::Stack, param_type)
-                   record_stack_slot(slot, param_type)
+                   if inline_args = @inline_block_arg_stack.last?
+                     if hir_value.index >= 0 && hir_value.index < inline_args.size
+                       mapped = inline_args[hir_value.index]
+                       @value_map[hir_value.id] = mapped
+                       mapped
+                     else
+                       # Block parameter without passed value — materialize slot fallback.
+                       builder = @builder.not_nil!
+                       param_type = convert_type(hir_value.type)
+                       slot = builder.alloc(MemoryStrategy::Stack, param_type)
+                       record_stack_slot(slot, param_type)
+                       if (default_id = default_value_for_type(builder, param_type))
+                         builder.store(slot, default_id)
+                       end
+                       @value_map[hir_value.id] = slot
+                       slot
+                     end
+                   else
+                    # Block parameter - allocate stack slot for it
+                    builder = @builder.not_nil!
+                    param_type = convert_type(hir_value.type)
+                    slot = builder.alloc(MemoryStrategy::Stack, param_type)
+                    record_stack_slot(slot, param_type)
                    if (default_id = default_value_for_type(builder, param_type))
                      builder.store(slot, default_id)
+                    end
+                    @value_map[hir_value.id] = slot
+                    slot
                    end
-                   @value_map[hir_value.id] = slot
-                   slot
                  end
                when HIR::Allocate
                  lower_allocate(hir_value)
@@ -790,12 +760,12 @@ module Crystal
 
       # Get the MIR type reference and look up size from type registry
       mir_type_ref = convert_type(alloc.type)
-      alloc_size = pointer_word_bytes_u64
+      alloc_size = 8_u64  # Default pointer size
       if mir_type = @mir_module.type_registry.get(mir_type_ref)
         alloc_size = mir_type.size
       elsif !alloc.constructor_args.empty?
         # Fallback for tuples not in registry: estimate from constructor arg count
-        alloc_size = (alloc.constructor_args.size * pointer_word_bytes_i32).to_u64
+        alloc_size = (alloc.constructor_args.size * 8).to_u64
       end
 
       # Fix StaticArray size: if type is StaticArray but size is 0, compute from name
@@ -809,7 +779,7 @@ module Crystal
           elem_size = 1_u64 if elem_size == 0
           alloc_size = elem_size * count
         end
-        alloc_size = pointer_word_bytes_u64 if alloc_size == 0
+        alloc_size = 8_u64 if alloc_size == 0  # safety fallback
       end
 
       # Create allocation with proper size
@@ -845,15 +815,13 @@ module Crystal
               is_inline = elem.kind.primitive? || elem.kind.enum?
               elem_size = if is_inline && elem.size > 0
                             elem.size
-                          elsif elem.kind.union? && elem.size > 8
-                            elem.size  # Union discriminated repr needs more than a pointer
                           else
-                            pointer_word_bytes_u64
+                            8_u64  # Pointer/reference size
                           end
               elem_align = if is_inline && elem.alignment > 0
                              elem.alignment
                            else
-                             pointer_word_align_u32
+                             8_u32
                            end
               current_offset = align_u64(current_offset, elem_align)
               offsets << current_offset.to_u32
@@ -872,8 +840,8 @@ module Crystal
           byte_offset = if (offsets = tuple_byte_offsets) && idx < offsets.size
                           offsets[idx]
                         else
-                          # Fallback: estimate byte offset using pointer-size elements.
-                          (idx * pointer_word_bytes_i32).to_u32
+                          # Fallback: estimate byte offset assuming 8-byte elements
+                          (idx * 8).to_u32
                         end
           field_ptr = builder.gep(ptr, [byte_offset], TypeRef::POINTER)
           store_id = builder.store(field_ptr, arg_val)
@@ -1104,6 +1072,77 @@ module Crystal
       builder.extern_call(extern_call.extern_name, args, convert_type(extern_call.type))
     end
 
+    private def trace_with_inline_block_call?(method_name : String) : Bool
+      method_name.starts_with?("Crystal.trace$") && method_name.includes?("_block")
+    end
+
+    private def spinlock_sync_with_inline_block_call?(method_name : String) : Bool
+      method_name == "Crystal::SpinLock#sync$block"
+    end
+
+    private def tap_with_inline_block_call?(method_name : String) : Bool
+      method_name.ends_with?("#tap$block")
+    end
+
+    private def lower_spinlock_sync_with_block(args : Array(ValueId), block_id : HIR::BlockId) : ValueId?
+      return nil if args.empty?
+
+      lock_func = @mir_module.get_function("Crystal::SpinLock#lock")
+      unlock_func = @mir_module.get_function("Crystal::SpinLock#unlock")
+      return nil unless lock_func && unlock_func
+
+      builder = @builder.not_nil!
+      spinlock_obj = args[0]
+
+      # Preserve sync semantics for scheduler/runtime paths even when block params
+      # were lowered without explicit proc types.
+      builder.call(lock_func.id, [spinlock_obj], lock_func.return_type)
+      result = lower_inlined_call_block(block_id) || builder.const_nil
+      builder.call(unlock_func.id, [spinlock_obj], unlock_func.return_type)
+      result
+    end
+
+    private def lower_tap_with_block(args : Array(ValueId), block_id : HIR::BlockId) : ValueId?
+      return nil if args.empty?
+      lower_inlined_call_block(block_id, [args[0]])
+      args[0]
+    end
+
+    private def lower_inlined_call_block(block_id : HIR::BlockId, block_args : Array(ValueId)? = nil) : ValueId?
+      hir_func = @current_hir_func
+      return nil unless hir_func
+
+      hir_block = hir_func.blocks.find { |block| block.id == block_id }
+      return nil unless hir_block
+
+      @inlined_block_ids.add(block_id)
+
+      pushed_inline_args = false
+      if block_args && !block_args.empty?
+        @inline_block_arg_stack << block_args
+        pushed_inline_args = true
+      end
+
+      begin
+        hir_block.instructions.each do |inst|
+          lower_value(inst)
+        end
+      ensure
+        @inline_block_arg_stack.pop? if pushed_inline_args
+      end
+
+      case term = hir_block.terminator
+      when HIR::Return
+        if value_id = term.value
+          get_value(value_id)
+        else
+          @builder.not_nil!.const_nil
+        end
+      else
+        nil
+      end
+    end
+
     private def lower_call(call : HIR::Call) : ValueId
       builder = @builder.not_nil!
       debug_virtual = ENV.has_key?("DEBUG_VIRTUAL_CALLS")
@@ -1119,6 +1158,26 @@ module Crystal
       if recv = call.receiver
         args.unshift(get_value(recv))
       end
+
+      # Crystal.trace(&block) wrappers currently lower to calls with detached
+      # `with_block` HIR blocks. Inline the call-site block here so scheduling
+      # side effects are preserved even when fallback yield lowering is used.
+      if block_id = call.block
+        if trace_with_inline_block_call?(call.method_name)
+          if inlined = lower_inlined_call_block(block_id)
+            return inlined
+          end
+        elsif spinlock_sync_with_inline_block_call?(call.method_name)
+          if lowered = lower_spinlock_sync_with_block(args, block_id)
+            return lowered
+          end
+        elsif tap_with_inline_block_call?(call.method_name)
+          if lowered = lower_tap_with_block(args, block_id)
+            return lowered
+          end
+        end
+      end
+
       if debug_virtual && call.virtual
         recv_type = call.receiver ? @hir_value_types[call.receiver.not_nil!]? : nil
         recv_type_name = hir_type_name(recv_type)
@@ -1169,6 +1228,22 @@ module Crystal
           old_val = builder.load(val_ptr, convert_type(call.type))
           builder.store(val_ptr, new_val)
           return old_val
+        end
+      end
+
+      # Proc accessors: our current ABI uses receiver value as callable pointer.
+      # Avoid lowering through stdlib Proc#internal_representation path, which
+      # expects tuple-backed Proc storage not guaranteed by HIR func_pointer.
+      if call.receiver && recv_desc && recv_desc.kind == HIR::TypeKind::Proc
+        if method_suffix = extract_method_suffix_loose(call.method_name)
+          case method_suffix
+          when "pointer"
+            return args[0]
+          when "closure_data"
+            return builder.const_nil_typed(TypeRef::POINTER)
+          when "closure?"
+            return builder.const_bool(false)
+          end
         end
       end
 
@@ -1231,20 +1306,7 @@ module Crystal
         end
       end
 
-      # Some inherited wrappers are lowered with `virtual = false` but still call a
-      # parent-owned instance method on `self` (e.g. IO::Memory#read_fully ->
-      # IO#read_fully?). Treat these as virtual to preserve dynamic dispatch.
-      force_virtual_dispatch = false
-      if !call.virtual && call.receiver && recv_desc && recv_desc.kind == HIR::TypeKind::Class
-        if hash_pos = call.method_name.index('#')
-          owner_name = call.method_name.byte_slice(0, hash_pos)
-          if owner_name != recv_desc.name && !call.method_name.includes?("_super")
-            force_virtual_dispatch = true
-          end
-        end
-      end
-
-      if call.virtual || force_virtual_dispatch
+      if call.virtual
         if dispatched = lower_virtual_dispatch(call, args)
           return dispatched
         end
@@ -1271,31 +1333,47 @@ module Crystal
         if debug_virtual && call.virtual
           STDERR.puts "[VIRTUAL_CALL] unresolved method=#{method_name_str} base=#{base_method_name} func=#{@current_lowering_func_name}"
         end
-        # Only apply fuzzy matching for qualified method names (containing . or #)
-        if method_name_str.includes?('.') || method_name_str.includes?('#')
-          # Extract base name (before $ type suffix) without allocating
-          dollar_idx = method_name_str.index('$')
-          base_name = dollar_idx ? method_name_str[0, dollar_idx] : method_name_str
+        # For qualified instance names, walk inheritance first.
+        # Example: IO::FileDescriptor#puts() should resolve to IO#puts().
+        if hash_idx = method_name_str.index('#')
+          receiver_name = method_name_str[0, hash_idx]
+          method_suffix = method_name_str[hash_idx + 1, method_name_str.size - hash_idx - 1]
+          if !receiver_name.empty? && !method_suffix.empty?
+            func = resolve_virtual_method_for_class(receiver_name, method_suffix, call.args.size, allow_module_method: true)
+          end
+        end
 
-          # O(1) lookup via pre-computed index
-          func = @function_by_base_name[base_name]?
-        else
-          # For unqualified method names with a receiver, try to qualify based on receiver type
-          if call.receiver
-            recv_type = @hir_value_types[call.receiver.not_nil!]?
-            if recv_type
-              recv_desc = @hir_module.get_type_descriptor(recv_type)
-              type_name = recv_desc.try(&.name) || hir_type_name(recv_type)
-              if type_name && !type_name.empty?
-                # Try qualified name with type prefix
-                qualified_name = "#{type_name}##{method_name_str}"
-                func = @mir_module.get_function(qualified_name)
+        unless func
+          # Only apply fuzzy matching for qualified method names (containing . or #)
+          if method_name_str.includes?('.') || method_name_str.includes?('#')
+            # Extract base name (before $ type suffix) without allocating
+            dollar_idx = method_name_str.index('$')
+            base_name = dollar_idx ? method_name_str[0, dollar_idx] : method_name_str
 
-                # If not found, try fuzzy matching via index
-                unless func
-                  q_dollar = qualified_name.index('$')
-                  q_base = q_dollar ? qualified_name[0, q_dollar] : qualified_name
-                  func = @function_by_base_name[q_base]?
+            # O(1) lookup via pre-computed index + arity compatibility guard.
+            if candidate = @function_by_base_name[base_name]?
+              func = candidate if call_arity_compatible?(candidate, call.args.size, call.receiver != nil)
+            end
+          else
+            # For unqualified method names with a receiver, try to qualify based on receiver type
+            if call.receiver
+              recv_type = @hir_value_types[call.receiver.not_nil!]?
+              if recv_type
+                recv_desc = @hir_module.get_type_descriptor(recv_type)
+                type_name = recv_desc.try(&.name) || hir_type_name(recv_type)
+                if type_name && !type_name.empty?
+                  # Try qualified name with type prefix
+                  qualified_name = "#{type_name}##{method_name_str}"
+                  func = @mir_module.get_function(qualified_name)
+
+                  # If not found, try fuzzy matching via index
+                  unless func
+                    q_dollar = qualified_name.index('$')
+                    q_base = q_dollar ? qualified_name[0, q_dollar] : qualified_name
+                    if candidate = @function_by_base_name[q_base]?
+                      func = candidate if call_arity_compatible?(candidate, call.args.size, true)
+                    end
+                  end
                 end
               end
             end
@@ -1387,6 +1465,15 @@ module Crystal
         STDERR.puts "[UNRESOLVED_CALL] #{call.method_name} in #{@current_lowering_func_name}"
       end
       builder.extern_call(call.method_name, args, convert_type(call.type))
+    end
+
+    private def call_arity_compatible?(func : Function, explicit_arg_count : Int32, has_receiver : Bool) : Bool
+      provided = explicit_arg_count + (has_receiver ? 1 : 0)
+      total = func.params.size
+      required = func.params.count { |p| p.default_value.nil? }
+      return false if provided < required
+      return false if provided > total
+      true
     end
 
     private def extract_method_suffix_loose(full_name : String) : String?
@@ -1624,42 +1711,26 @@ module Crystal
         if call_func
           callee_param_count = call_func.params.size
           coerced_args = cand_args
-          # Module/class dispatch can route to static methods (dot methods) whose
-          # signature does not include receiver `self`. In that case, drop the
-          # dispatch receiver argument before coercion.
-          drop_dispatch_receiver = callee_param_count == cand_args.size - 1 &&
-                                   call_func.name.includes?('.') &&
-                                   !call_func.name.includes?('#')
           if hir_call
             recv_id = hir_call.receiver
-            hir_args_with_receiver = recv_id ? [recv_id] + hir_call.args : hir_call.args
-            effective_args = cand_args
-            effective_hir_args = hir_args_with_receiver
-            if drop_dispatch_receiver
-              effective_args = cand_args[1, callee_param_count]
-              effective_hir_args = hir_call.args
-            end
-
-            if callee_param_count == effective_args.size
+            if callee_param_count == cand_args.size
               # Same param count — pass all args including receiver
-              coerced_args = coerce_call_args(dispatch_builder, effective_args, effective_hir_args, call_func)
-            elsif callee_param_count < effective_args.size
-              # Callee has fewer params (e.g. optional arg dropped by overload).
-              # Truncate effective dispatch args to match callee's arity.
-              truncated_args = effective_args[0, callee_param_count]
-              truncated_hir = effective_hir_args[0, callee_param_count]? || effective_hir_args
+              hir_args_with_receiver = recv_id ? [recv_id] + hir_call.args : hir_call.args
+              coerced_args = coerce_call_args(dispatch_builder, cand_args, hir_args_with_receiver, call_func)
+            elsif callee_param_count < cand_args.size
+              # Callee has fewer params (e.g. subclass doesn't take optional arg).
+              # Truncate dispatch args to match callee's param count, keeping receiver.
+              truncated_args = cand_args[0, callee_param_count]
+              hir_args_with_receiver = recv_id ? [recv_id] + hir_call.args : hir_call.args
+              truncated_hir = hir_args_with_receiver[0, callee_param_count]? || hir_args_with_receiver
               coerced_args = coerce_call_args(dispatch_builder, truncated_args, truncated_hir, call_func)
             else
               # Callee expects more args than dispatch provides — pass all, let coercion handle it
-              coerced_args = coerce_call_args(dispatch_builder, effective_args, effective_hir_args, call_func)
+              hir_args_with_receiver = recv_id ? [recv_id] + hir_call.args : hir_call.args
+              coerced_args = coerce_call_args(dispatch_builder, cand_args, hir_args_with_receiver, call_func)
             end
-          else
-            effective_args = drop_dispatch_receiver ? cand_args[1, callee_param_count] : cand_args
-            if callee_param_count < effective_args.size
-              coerced_args = effective_args[0, callee_param_count]
-            else
-              coerced_args = effective_args
-            end
+          elsif callee_param_count < cand_args.size
+            coerced_args = cand_args[0, callee_param_count]
           end
 
           call_val = dispatch_builder.call(call_func.id, coerced_args, dispatch_func.return_type)
@@ -1727,16 +1798,7 @@ module Crystal
       end
       return nil if old_candidates.empty?
 
-      # vdispatch cache key must include the static receiver type.
-      # Otherwise, an early narrow call-site (e.g. IO::FileDescriptor) can
-      # create a truncated dispatch table that is incorrectly reused by wider
-      # call-sites (e.g. IO), causing missing runtime variants.
-      dispatch_name = String.build(call.method_name.bytesize + 24) do |io|
-        io << "__vdispatch__"
-        io << call.method_name
-        io << "$T"
-        io << recv_type.id
-      end
+      dispatch_name = "__vdispatch__#{call.method_name}"
       if existing = @mir_module.get_function(dispatch_name)
         return @builder.not_nil!.call(existing.id, args, existing.return_type)
       end
@@ -1937,8 +1999,8 @@ module Crystal
         mir_ref.id,
         TypeKind::Reference,
         name,
-        pointer_word_bytes_u64,
-        pointer_word_align_u32
+        8_u64,
+        8_u32
       )
     end
 
@@ -2145,7 +2207,6 @@ module Crystal
       allow_module_method : Bool
     ) : Function?
       # Pre-compute the base method name (before '$') once
-      has_explicit_suffix = method_suffix.includes?('$')
       base_method = if dollar = method_suffix.index('$')
                       method_suffix[0, dollar]
                     else
@@ -2200,10 +2261,7 @@ module Crystal
           end
         end
 
-        # Arity-only fallback is safe only for bare method names.
-        # For typed/mangled suffixes (contains '$'), returning by arity alone can
-        # select a wrong overload (e.g. <<$Char -> <<$String) and corrupt ABI.
-        if arg_count && !has_explicit_suffix
+        if arg_count
           # Use class index + pre-computed prefix (avoids O(N) full scan + GC from interpolation)
           instance_prefix = String.build(current.bytesize + 1 + base_method.bytesize) do |io|
             io << current; io << '#'; io << base_method
@@ -2503,28 +2561,6 @@ module Crystal
         end
       end
 
-      # unsafe_as between integer and StaticArray(UInt8, N) must reinterpret bits,
-      # not convert integer values to addresses (inttoptr/ptrtoint).
-      if !cast.safe
-        if int_like.call(src_hir_type)
-          if byte_len = staticarray_u8_length(dst_hir_type)
-            if byte_len == type_size(src_hir_type)
-              ptr_align = pointer_word_align_u32
-              align = byte_len < ptr_align ? byte_len.to_u32 : ptr_align
-              tmp = builder.alloc(MemoryStrategy::Stack, dst_type, byte_len.to_u64, align)
-              builder.store(tmp, value)
-              return tmp
-            end
-          end
-        elsif int_like.call(dst_hir_type)
-          if byte_len = staticarray_u8_length(src_hir_type)
-            if byte_len == type_size(dst_hir_type)
-              return builder.load(value, dst_type)
-            end
-          end
-        end
-      end
-
       # Unsafe bitcast for numeric types of the same size (unsafe_as semantics).
       if !cast.safe
         if (int_like.call(src_hir_type) && float_like.call(dst_hir_type)) ||
@@ -2563,19 +2599,6 @@ module Crystal
 
       result = builder.cast(kind, value, dst_type)
       result
-    end
-
-    private def staticarray_u8_length(type_ref : HIR::TypeRef) : Int32?
-      desc = @hir_module.get_type_descriptor(type_ref)
-      return nil unless desc
-      name = desc.name
-      return nil unless name.starts_with?("StaticArray(")
-      if match = name.match(/^StaticArray\((.+),\s*(\d+)\)$/)
-        element = match[1].strip
-        return nil unless element == "UInt8" || element == "Int8"
-        return match[2].to_i
-      end
-      nil
     end
 
     private def lower_is_a(isa : HIR::IsA) : ValueId
@@ -2786,54 +2809,15 @@ module Crystal
       end
       block_val = get_value(block_param_id)
       block_type = @hir_value_types[block_param_id]? || HIR::TypeRef::POINTER
-      # Unannotated `&` block params are currently inferred as VOID in HIR,
-      # but runtime still passes a block function pointer for yield dispatch.
-      block_type = HIR::TypeRef::POINTER if block_type == HIR::TypeRef::VOID
       block_desc = @hir_module.get_type_descriptor(block_type)
       is_ptr = block_type == HIR::TypeRef::POINTER || (block_desc && block_desc.kind == HIR::TypeKind::Proc)
       unless is_ptr
+        if block_type == HIR::TypeRef::VOID
+          return builder.const_nil
+        end
         block_val = builder.cast(CastKind::IntToPtr, block_val, TypeRef::POINTER)
       end
-      yield_type = yld.type
-      if yield_type == HIR::TypeRef::VOID || yield_type == HIR::TypeRef::NIL
-        if inferred = infer_yield_type_from_users(yld.id)
-          yield_type = inferred
-        end
-      end
-      @hir_value_types[yld.id] = yield_type
-      builder.call_indirect(block_val, args, convert_type(yield_type))
-    end
-
-    private def infer_yield_type_from_users(yield_id : HIR::ValueId) : HIR::TypeRef?
-      return nil unless hir_func = @current_hir_func
-
-      hir_func.blocks.each do |block|
-        block.instructions.each do |inst|
-          case inst
-          when HIR::Phi
-            if inst.incoming.any? { |(_, value_id)| value_id == yield_id }
-              return inst.type unless inst.type == HIR::TypeRef::VOID || inst.type == HIR::TypeRef::NIL
-            end
-          when HIR::Copy
-            if inst.source == yield_id
-              return inst.type unless inst.type == HIR::TypeRef::VOID || inst.type == HIR::TypeRef::NIL
-            end
-          when HIR::Cast
-            if inst.value == yield_id
-              return inst.target_type unless inst.target_type == HIR::TypeRef::VOID || inst.target_type == HIR::TypeRef::NIL
-            end
-          end
-        end
-
-        if term = block.terminator
-          if term.is_a?(HIR::Return) && term.value == yield_id
-            func_ret = hir_func.return_type
-            return func_ret unless func_ret == HIR::TypeRef::VOID || func_ret == HIR::TypeRef::NIL
-          end
-        end
-      end
-
-      nil
+      builder.call_indirect(block_val, args, convert_type(yld.type))
     end
 
     # Check if a function contains yield instructions (inline-only function)
@@ -2903,19 +2887,18 @@ module Crystal
     private def lower_union_unwrap(unwrap : HIR::UnionUnwrap) : ValueId
       builder = @builder.not_nil!
       union_value = get_value(unwrap.union_value)
-      result_type = convert_type(unwrap.type)
+      declared_result_type = convert_type(unwrap.type)
+      result_type = declared_result_type
       if union_hir_type = @hir_value_types[unwrap.union_value]?
         union_mir_type = convert_type(union_hir_type)
         if descriptor = @mir_module.union_descriptors[union_mir_type]?
           if variant = descriptor.variants.find { |v| v.type_id == unwrap.variant_type_id }
-            result_type = variant.type_ref
-            if nested = @mir_module.union_descriptors[result_type]?
-              if nested_variant = nested.variants.find { |v| v.type_ref != TypeRef::NIL && v.type_ref != TypeRef::VOID }
-                result_type = nested_variant.type_ref
-              end
+            descriptor_result_type = variant.type_ref
+            if should_override_union_unwrap_result_type?(declared_result_type, descriptor_result_type)
+              result_type = descriptor_result_type
             end
             if ENV.has_key?("DEBUG_UNION_UNWRAP")
-              STDERR.puts "[UNION_UNWRAP] union_type=#{union_mir_type.id} variant_id=#{unwrap.variant_type_id} variant_type=#{variant.type_ref.id}"
+              STDERR.puts "[UNION_UNWRAP] union_type=#{union_mir_type.id} variant_id=#{unwrap.variant_type_id} variant_type=#{variant.type_ref.id} declared=#{declared_result_type.id} result=#{result_type.id}"
             end
           elsif ENV.has_key?("DEBUG_UNION_UNWRAP")
             STDERR.puts "[UNION_UNWRAP] union_type=#{union_mir_type.id} variant_id=#{unwrap.variant_type_id} variant_type=nil"
@@ -2942,6 +2925,12 @@ module Crystal
         unwrap.safe
       )
       builder.emit(mir_unwrap)
+    end
+
+    private def should_override_union_unwrap_result_type?(declared_type : TypeRef, descriptor_type : TypeRef) : Bool
+      return false if declared_type == descriptor_type
+      return true if declared_type == TypeRef::VOID || declared_type == TypeRef::NIL || declared_type == TypeRef::POINTER
+      @mir_module.union_descriptors.has_key?(declared_type)
     end
 
     private def lower_union_type_id(type_id : HIR::UnionTypeId) : ValueId
@@ -3242,28 +3231,22 @@ module Crystal
     private def lower_address_of(addr_of : HIR::AddressOf) : ValueId
       builder = @builder.not_nil!
 
-      # pointerof(obj.@field) must return address of the ACTUAL field storage,
-      # not address of a temporary loaded copy.
-      if hir_operand = @hir_value_by_id[addr_of.operand]?
-        if field_get = hir_operand.as?(HIR::FieldGet)
-          # Struct ivars are represented as pointers in current MIR ABI.
-          # pointerof(@struct_field) should therefore return that struct pointer
-          # (Context*), not the address of the ivar slot (Context**).
-          if hir_type_is_struct?(field_get.type)
-            return get_value(field_get.id)
-          end
-
-          obj_ptr = get_value(field_get.object)
-          return builder.gep(obj_ptr, [field_get.field_offset.to_u32], TypeRef::POINTER)
-        end
-      end
-
       # Get the operand value
       operand = get_value(addr_of.operand)
 
-      # For address-of, we need to return the address of the operand
-      # In MIR, this is a pointer to the value's storage location
-      # For now, emit an alloca and return its address
+      # Struct values are represented as pointers in MIR. Taking address-of a
+      # struct would otherwise create pointer-to-pointer and break pointerof
+      # flows (e.g. Channel::Receiver/Sender queue nodes).
+      if hir_type = @hir_value_types[addr_of.operand]?
+        return operand if hir_type_is_struct?(hir_type)
+      end
+
+      # If operand is already an addressable location (stack slot), don't take
+      # address-of again. Doing so creates pointer-to-pointer and breaks
+      # pointerof(value_type) callsites (e.g. channel sender/receiver nodes).
+      return operand if @stack_slot_values.includes?(operand)
+
+      # Primitive/immediate values still need materialized storage to take address.
       builder.addressof(operand, TypeRef::POINTER)
     end
 
@@ -3285,8 +3268,8 @@ module Crystal
       when HIR::TypeRef::FLOAT32 then 4
       when HIR::TypeRef::FLOAT64 then 8
       when HIR::TypeRef::CHAR    then 4
-      when HIR::TypeRef::POINTER then pointer_word_bytes_i32
-      else                            pointer_word_bytes_i32
+      when HIR::TypeRef::POINTER then 8
+      else                            8  # Default pointer size for user types
       end
     end
 

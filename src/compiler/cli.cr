@@ -28,17 +28,8 @@ module CrystalV2
   module Compiler
     VERSION = "0.1.0-dev"
 
-    # Standard library path.
-    # Can be overridden to test compatibility with an external/original stdlib.
-    STDLIB_DEFAULT_PATH = File.expand_path("../stdlib", File.dirname(__FILE__))
-    STDLIB_PATH = begin
-      override = ENV["CRYSTAL_V2_STDLIB_PATH"]? || ENV["CRYSTAL_V2_ORIGINAL_STDLIB_PATH"]?
-      if override && !override.empty?
-        File.expand_path(override)
-      else
-        STDLIB_DEFAULT_PATH
-      end
-    end
+    # Standard library path - relative to compiler source
+    STDLIB_PATH = File.expand_path("../stdlib", File.dirname(__FILE__))
 
     # Original Crystal compiler source path - for require'ing compiler modules
     # (e.g., require "compiler/crystal/syntax/lexer")
@@ -118,7 +109,6 @@ module CrystalV2
 
           # Codegen control (Crystal-compatible)
           p.on("--no-codegen", "Don't do code generation (semantic check only)") { options.check_only = true }
-          p.on("--target TRIPLE", "Target triple") { |triple| options.target_triple = triple }
 
           # Debug info
           p.on("-d", "--debug", "Add symbolic debug info") { options.debug = true }
@@ -244,10 +234,9 @@ module CrystalV2
         property stats : Bool = false
         property progress : Bool = false
         property check_only : Bool = false
-        property target_triple : String = ""
         property dump_symbols : Bool = false
-        # Enabled by default to speed up repeated compiler runs.
-        # Set CRYSTAL_V2_AST_CACHE=0 or pass --no-ast-cache to disable.
+        # Enabled by default (except in bootstrap_fast): stdlib/prelude parsing dominates
+        # cold starts, and cache is invalidated by source mtime + compiler mtime.
         {% if flag?(:bootstrap_fast) %}
         property ast_cache : Bool = false
         {% else %}
@@ -324,14 +313,7 @@ module CrystalV2
       end
 
       # Full compilation (driver.cr functionality)
-      private def compile(
-        input_file : String,
-        options : Options,
-        out_io : IO,
-        err_io : IO,
-        *,
-        allow_ast_cache_retry : Bool = true
-      ) : Int32
+      private def compile(input_file : String, options : Options, out_io : IO, err_io : IO) : Int32
         timings = {} of String => Float64
         total_start = Time.instant
         @ast_cache_hits = 0
@@ -344,12 +326,6 @@ module CrystalV2
         log(options, out_io, "=== Crystal v2 Compiler ===")
         log(options, out_io, "Input: #{input_file}")
         log(options, out_io, "Output: #{options.output}")
-        if options.verbose
-          log(options, out_io, "Stdlib root: #{STDLIB_PATH}")
-          if crystal_path = ENV["CRYSTAL_PATH"]?
-            log(options, out_io, "CRYSTAL_PATH: #{crystal_path}")
-          end
-        end
 
         # Step 1: Parse source (with require support)
         log(options, out_io, "\n[1/6] Parsing...")
@@ -361,10 +337,10 @@ module CrystalV2
         # Load prelude first (unless --no-prelude)
         unless options.no_prelude
           prelude_path = if options.prelude_file.empty?
-                           resolve_stdlib_path("prelude.cr")
+                           File.join(STDLIB_PATH, "prelude.cr")
                          elsif !options.prelude_file.includes?(File::SEPARATOR) && !options.prelude_file.ends_with?(".cr")
                            # Short name like "prelude" -> resolve to stdlib path
-                           resolve_stdlib_path("#{options.prelude_file}.cr")
+                           File.join(STDLIB_PATH, "#{options.prelude_file}.cr")
                          else
                            options.prelude_file
                          end
@@ -456,7 +432,24 @@ module CrystalV2
           sources_by_arena[arena] = source
           paths_by_arena[arena] = path
         end
-        hir_converter = HIR::AstToHir.new(first_arena, input_file, sources_by_arena, paths_by_arena)
+        force_inline_yield = case force = ENV["CRYSTAL_V2_FORCE_INLINE_YIELD"]?
+                             when nil, "", "0", "false", "False", "FALSE" then false
+                             else                                                true
+                             end
+        # Inline-yield lowering is currently unstable in full link mode for some stdlib paths
+        # (e.g., DWARF parsing callbacks). Keep it disabled by default for deterministic bootstrap.
+        auto_disable_inline_yield = !force_inline_yield
+        disable_inline_yield = ENV.has_key?("CRYSTAL_V2_DISABLE_INLINE_YIELD") || auto_disable_inline_yield
+        if auto_disable_inline_yield && !ENV.has_key?("CRYSTAL_V2_DISABLE_INLINE_YIELD")
+          log(options, out_io, "  Auto: disabling inline-yield by default (set CRYSTAL_V2_FORCE_INLINE_YIELD=1 to override)")
+        end
+        hir_converter = HIR::AstToHir.new(
+          first_arena,
+          input_file,
+          sources_by_arena,
+          paths_by_arena,
+          disable_inline_yield: disable_inline_yield
+        )
         link_libs.each { |lib_name| hir_converter.module.add_link_library(lib_name) }
 
         # Collect nodes by type
@@ -515,50 +508,59 @@ module CrystalV2
         # across reopened types (require order interleaves files).
         debug_filter = ENV["DEBUG_PRE_SCAN_CONST"]?
         scan_constants_in_body = ->(owner : String, arena : Frontend::ArenaLike, body : Array(Frontend::ExprId)) do
-          stack = [{owner: owner, body: body}]
+          stack = [body]
           while current = stack.pop?
-            current_owner = current[:owner]
-            current[:body].each do |expr_id|
+            current.each do |expr_id|
               expr_node = arena[expr_id]
               while expr_node.is_a?(Frontend::VisibilityModifierNode)
                 expr_node = arena[expr_node.expression]
               end
               case expr_node
               when Frontend::BlockNode
-                stack << {owner: current_owner, body: expr_node.body}
+                stack << expr_node.body
               when Frontend::ConstantNode
                 if debug_filter && (debug_filter == "1" || String.new(expr_node.name) == debug_filter)
                   path = paths_by_arena[arena]? || "(unknown)"
-                  STDERR.puts "[PRE_SCAN_CONST] owner=#{current_owner} name=#{String.new(expr_node.name)} file=#{path}"
+                  STDERR.puts "[PRE_SCAN_CONST] owner=#{owner} name=#{String.new(expr_node.name)} file=#{path}"
                 end
-                hir_converter.register_constant(expr_node, current_owner)
+                hir_converter.register_constant(expr_node, owner)
               when Frontend::AssignNode
                 target = arena[expr_node.target]
                 if target.is_a?(Frontend::ConstantNode)
                   if debug_filter && (debug_filter == "1" || String.new(target.name) == debug_filter)
                     path = paths_by_arena[arena]? || "(unknown)"
-                    STDERR.puts "[PRE_SCAN_CONST] owner=#{current_owner} name=#{String.new(target.name)} file=#{path}"
+                    STDERR.puts "[PRE_SCAN_CONST] owner=#{owner} name=#{String.new(target.name)} file=#{path}"
                   end
-                  hir_converter.register_constant_value(String.new(target.name), expr_node.value, arena, current_owner)
+                  hir_converter.register_constant_value(String.new(target.name), expr_node.value, arena, owner)
                 end
-              when Frontend::ClassNode
-                next unless nested_body = expr_node.body
-                nested_name = String.new(expr_node.name)
-                full_name = if current_owner.empty? || nested_name.includes?("::")
-                              nested_name
-                            else
-                              "#{current_owner}::#{nested_name}"
-                            end
-                stack << {owner: full_name, body: nested_body}
+              end
+            end
+          end
+        end
+
+        scan_module_body = ->(prefix : String, arena : Frontend::ArenaLike, body : Array(Frontend::ExprId)) do
+          stack = [{prefix: prefix, body: body}]
+          while current = stack.pop?
+            current[:body].each do |expr_id|
+              expr_node = arena[expr_id]
+              while expr_node.is_a?(Frontend::VisibilityModifierNode)
+                expr_node = arena[expr_node.expression]
+              end
+              case expr_node
               when Frontend::ModuleNode
-                next unless nested_body = expr_node.body
-                nested_name = String.new(expr_node.name)
-                full_name = if current_owner.empty? || nested_name.includes?("::")
-                              nested_name
+                next unless mod_body = expr_node.body
+                name = String.new(expr_node.name)
+                full_name = current[:prefix].empty? ? name : "#{current[:prefix]}::#{name}"
+                stack << {prefix: full_name, body: mod_body}
+              when Frontend::ClassNode
+                next unless class_body = expr_node.body
+                name = String.new(expr_node.name)
+                full_name = if current[:prefix].empty? || name.includes?("::")
+                              name
                             else
-                              "#{current_owner}::#{nested_name}"
+                              "#{current[:prefix]}::#{name}"
                             end
-                stack << {owner: full_name, body: nested_body}
+                scan_constants_in_body.call(full_name, arena, class_body)
               end
             end
           end
@@ -575,7 +577,7 @@ module CrystalV2
           next unless body = module_node.body
           hir_converter.arena = arena
           module_name = String.new(module_node.name)
-          scan_constants_in_body.call(module_name, arena, body)
+          scan_module_body.call(module_name, arena, body)
         end
 
         # Pass 1: Register types
@@ -701,16 +703,30 @@ module CrystalV2
           STDERR.puts "[PHASE_STATS] AST analysis: #{ast_result[:defs].size}/#{hir_converter.function_defs_count} defs reachable, #{ast_result[:method_names].size} method names (analysis-only, #{(Time.instant - ast_filter_start).total_milliseconds.round(1)}ms)"
         end
 
+        force_safety_nets = case force = ENV["CRYSTAL_V2_FORCE_SAFETY_NETS"]?
+                            when nil, "", "0", "false", "False", "FALSE" then false
+                            else                                                 true
+                            end
+        skip_safety_nets = case skip = ENV["CRYSTAL_V2_SKIP_SAFETY_NETS"]?
+                           when nil, "", "0", "false", "False", "FALSE" then false
+                           else                                               true
+                           end
+        run_safety_nets = true
+        if skip_safety_nets && !force_safety_nets
+          run_safety_nets = false
+          log(options, out_io, "  Warning: skipping HIR safety-net lowering (experimental, may produce invalid IR)")
+        end
+
         # Ensure top-level `fun main` is lowered as a real entrypoint (C ABI).
         did_flush = false
         if fun_main = def_nodes.find { |(n, _)| n.receiver.try { |recv| String.new(recv) == HIR::AstToHir::FUN_DEF_RECEIVER } && String.new(n.name) == "main" }
           hir_converter.arena = fun_main[1]
           hir_converter.lower_def(fun_main[0])
           # Process any pending functions from fun main lowering (e.g., Crystal.init_runtime)
-          hir_converter.flush_pending_functions
+          hir_converter.flush_pending_functions(run_safety_nets)
           did_flush = true
         end
-        hir_converter.flush_pending_functions unless did_flush
+        hir_converter.flush_pending_functions(run_safety_nets) unless did_flush
         STDERR.puts "  Main function created" if options.progress
 
         # Refresh generic type params that were captured as VOID after lowering.
@@ -860,7 +876,6 @@ module CrystalV2
         mir_lowering.register_union_types(hir_converter.union_descriptors)
         mir_lowering.register_class_types(hir_converter.class_info)
         mir_lowering.register_enum_types(hir_converter.enum_names, hir_module.types)
-        mir_lowering.register_module_types(hir_module.types)
         mir_lowering.register_tuple_types(hir_module.types)
 
         STDERR.puts "  Lowering #{hir_module.functions.size} functions to MIR..." if options.progress
@@ -873,12 +888,6 @@ module CrystalV2
         if options.mir_opt
           log(options, out_io, "  Optimizing MIR...")
           mir_opt_start = Time.instant
-          if options.stats && MIR::OptimizationPipeline.pass_timing_enabled?
-            MIR::OptimizationPipeline.reset_pass_timing
-          end
-          if options.stats && MIR::CopyPropagationPass.cp_phase_timing_enabled?
-            MIR::CopyPropagationPass.reset_cp_phase_timing
-          end
           mir_module.functions.each_with_index do |func, idx|
             begin
               STDERR.puts "  Optimizing #{idx + 1}/#{mir_module.functions.size}: #{func.name}..." if options.progress
@@ -921,13 +930,9 @@ module CrystalV2
         llvm_gen.progress = options.progress
         llvm_gen.reachability = true  # Only emit reachable functions from main
         llvm_gen.no_prelude = options.no_prelude
-        unless options.target_triple.empty?
-          llvm_gen.target_triple = options.target_triple
-        end
 
         # Pass constant literal values for global initialization (e.g., Math::PI)
         const_init = {} of String => (Float64 | Int64)
-        const_name_mapper = MIR::LLVMTypeMapper.new(mir_module.type_registry)
         hir_converter.constant_literal_values.each do |name, value|
           if value.is_a?(CrystalV2::Compiler::Semantic::MacroNumberValue)
             # Convert constant name (Math::PI) to global name (Math__classvar__PI)
@@ -939,12 +944,7 @@ module CrystalV2
               const_name = name
             end
             global_name = "#{owner}__classvar__#{const_name}"
-            const_val = value.value
-            # Keep both key formats for compatibility:
-            # - raw global name (legacy/diagnostics)
-            # - mangled global name used by LLVM emission
-            const_init[global_name] = const_val
-            const_init[const_name_mapper.mangle_name(global_name)] = const_val
+            const_init[global_name] = value.value
           end
         end
         llvm_gen.constant_initial_values = const_init unless const_init.empty?
@@ -993,14 +993,6 @@ module CrystalV2
         emit_timings(options, out_io, timings, total_start)
         return 1
       rescue ex
-        if allow_ast_cache_retry && options.ast_cache && ex.is_a?(IndexError)
-          err_io.puts "warning: invalid AST cache state detected; retrying without AST cache"
-          if options.verbose
-            err_io.puts ex.backtrace.join("\n")
-          end
-          options.ast_cache = false
-          return compile(input_file, options, out_io, err_io, allow_ast_cache_retry: false)
-        end
         err_io.puts "error: #{ex.message}"
         err_io.puts ex.backtrace.join("\n") if options.verbose
         emit_timings(options, out_io, timings, total_start)
@@ -1071,8 +1063,7 @@ module CrystalV2
             FileUtils.cp(obj_cache_file, obj_file)
             @llvm_cache_hits += 1
           else
-            llc_target_flag = options.target_triple.empty? ? "" : " -mtriple=#{options.target_triple}"
-            llc_cmd = "llc #{opt_flag}#{llc_target_flag} -filetype=obj -o #{obj_file} #{opt_ll_file} 2>&1"
+            llc_cmd = "llc #{opt_flag} -filetype=obj -o #{obj_file} #{opt_ll_file} 2>&1"
             log(options, out_io, "  $ #{llc_cmd}")
             llc_result = `#{llc_cmd}`
             unless $?.success?
@@ -1115,8 +1106,7 @@ module CrystalV2
             end
 
             lto_flag = options.lto ? "-flto" : ""
-            clang_target_flag = options.target_triple.empty? ? "" : "--target=#{options.target_triple}"
-            clang_cmd = "clang #{opt_flag} #{lto_flag} #{clang_target_flag} #{pgo_flags.join(" ")} -o #{options.output} #{opt_ll_file}"
+            clang_cmd = "clang #{opt_flag} #{lto_flag} #{pgo_flags.join(" ")} -o #{options.output} #{opt_ll_file}"
             clang_cmd += " #{runtime_stub}" if File.exists?(runtime_stub)
             clang_cmd += " #{link_flags_str}" unless link_flags_str.empty?
             clang_cmd += " 2>&1"
@@ -1268,38 +1258,27 @@ module CrystalV2
             arena = cached.arena
             exprs = cached.roots
             base_dir = File.dirname(abs_path)
-            begin
-              # Fast sanity check: ensure root ExprIds are valid for this arena.
-              # Corrupted cache payloads can carry out-of-range roots.
-              exprs.each { |expr_id| arena[expr_id] }
-
-              if cached_requires = load_require_cache(abs_path)
-                if source_has_glob_require?(source) || cached_requires.any? { |path| !File.exists?(path) }
-                  cached_requires = nil
-                end
+            if cached_requires = load_require_cache(abs_path)
+              if source_has_glob_require?(source) || cached_requires.any? { |path| !File.exists?(path) }
+                cached_requires = nil
               end
-              if cached_requires
-                log(options, out_io, "  Require cache hit (#{cached_requires.size}): #{abs_path}") if options.verbose
-                cached_requires.each do |req_path|
-                  parse_file_recursive(req_path, results, loaded, input_file, options, out_io)
-                end
-              else
-                log(options, out_io, "  Require cache miss: #{abs_path}") if options.verbose
-                requires = [] of String
-                exprs.each do |expr_id|
-                  process_require_node(arena, expr_id, base_dir, input_file, results, loaded, options, out_io, requires)
-                end
-                save_require_cache(abs_path, requires)
-              end
-
-              results << {arena, exprs, abs_path, source}
-              log(options, out_io, "  AST cache hit: #{abs_path}") if options.verbose
-              return
-            rescue ex : IndexError
-              # Corrupted/stale cached AST can contain invalid ExprId references.
-              # Fall back to source parse instead of crashing the full compile.
-              log(options, out_io, "  AST cache invalid (#{abs_path}): #{ex.message}") if options.verbose
             end
+            if cached_requires
+              log(options, out_io, "  Require cache hit (#{cached_requires.size}): #{abs_path}") if options.verbose
+              cached_requires.each do |req_path|
+                parse_file_recursive(req_path, results, loaded, input_file, options, out_io)
+              end
+            else
+              log(options, out_io, "  Require cache miss: #{abs_path}") if options.verbose
+              requires = [] of String
+              exprs.each do |expr_id|
+                process_require_node(arena, expr_id, base_dir, input_file, results, loaded, options, out_io, requires)
+              end
+              save_require_cache(abs_path, requires)
+            end
+            results << {arena, exprs, abs_path, source}
+            log(options, out_io, "  AST cache hit: #{abs_path}") if options.verbose
+            return
           end
           @ast_cache_misses += 1
         end
@@ -1565,23 +1544,99 @@ module CrystalV2
         when Frontend::VisibilityModifierNode
           collect_top_level_nodes(arena, node.expression, def_nodes, class_nodes, module_nodes, enum_nodes, macro_nodes, alias_nodes, lib_nodes, constant_exprs, main_exprs, pending_annotations, acyclic_types, flags, sources_by_arena, source, depth, collect_main_exprs)
         when Frontend::MacroIfNode
-          collect_top_level_macro_if(
-            arena, node, def_nodes, class_nodes, module_nodes, enum_nodes, macro_nodes,
-            alias_nodes, lib_nodes, constant_exprs, main_exprs, pending_annotations,
-            acyclic_types, flags, sources_by_arena, source, depth, collect_main_exprs
-          )
+          if ENV["DEBUG_MACRO_EXPAND"]?
+            STDERR.puts "[DEBUG_MACRO_EXPAND] MacroIfNode condition=#{evaluate_macro_condition(arena, node.condition, flags).inspect}"
+          end
+          if raw_text = macro_if_raw_text(node, source)
+            # If the raw text contains {% for %} loops, don't use macro_literal_texts_from_raw
+            # which doesn't handle for-loops. Instead fall through to MacroLiteralNode processing.
+            has_for_loop = raw_text.includes?("{% for") || raw_text.includes?("{%- for") || raw_text.includes?("{%~ for")
+            unless has_for_loop
+              parsed_any = false
+              combined = macro_literal_texts_from_raw(raw_text, flags).join
+              if ENV["DEBUG_MACRO_EXPAND"]?
+                STDERR.puts "[DEBUG_MACRO_EXPAND] MacroIfNode combined empty=#{combined.strip.empty?} has_percent=#{combined.includes?("{%")} size=#{combined.size}"
+                if combined.size < 200
+                  STDERR.puts "[DEBUG_MACRO_EXPAND] MacroIfNode combined content=#{combined.inspect}"
+                end
+              end
+              unless combined.strip.empty? || combined.includes?("{%")
+                if parsed = parse_macro_literal_program(combined)
+                  program, sanitized = parsed
+                  parsed_any = true
+                  sources_by_arena[program.arena] = sanitized
+                  program.roots.each do |inner_id|
+                    collect_top_level_nodes(program.arena, inner_id, def_nodes, class_nodes, module_nodes, enum_nodes, macro_nodes, alias_nodes, lib_nodes, constant_exprs, main_exprs, pending_annotations, acyclic_types, flags, sources_by_arena, sanitized, depth + 1, false)
+                  end
+                end
+              end
+              if ENV["DEBUG_MACRO_EXPAND"]? && parsed_any
+                STDERR.puts "[DEBUG_MACRO_EXPAND] MacroIfNode early return (parsed_any)"
+              end
+              return if parsed_any
+            end
+          end
+          if ENV["DEBUG_MACRO_EXPAND"]?
+            STDERR.puts "[DEBUG_MACRO_EXPAND] MacroIfNode continuing to condition check (raw_text exists=#{!raw_text.nil?})"
+          end
+          condition = evaluate_macro_condition(arena, node.condition, flags)
+          if condition == true
+            if ENV["DEBUG_MACRO_EXPAND"]?
+              then_node = arena[node.then_body]
+              STDERR.puts "[DEBUG_MACRO_EXPAND] MacroIfNode then_body type=#{then_node.class}"
+            end
+            collect_top_level_nodes(arena, node.then_body, def_nodes, class_nodes, module_nodes, enum_nodes, macro_nodes, alias_nodes, lib_nodes, constant_exprs, main_exprs, pending_annotations, acyclic_types, flags, sources_by_arena, source, depth, collect_main_exprs)
+          elsif condition == false
+            if else_body = node.else_body
+              collect_top_level_nodes(arena, else_body, def_nodes, class_nodes, module_nodes, enum_nodes, macro_nodes, alias_nodes, lib_nodes, constant_exprs, main_exprs, pending_annotations, acyclic_types, flags, sources_by_arena, source, depth, collect_main_exprs)
+            end
+          else
+            collect_top_level_nodes(arena, node.then_body, def_nodes, class_nodes, module_nodes, enum_nodes, macro_nodes, alias_nodes, lib_nodes, constant_exprs, main_exprs, pending_annotations, acyclic_types, flags, sources_by_arena, source, depth, collect_main_exprs)
+            if else_body = node.else_body
+              collect_top_level_nodes(arena, else_body, def_nodes, class_nodes, module_nodes, enum_nodes, macro_nodes, alias_nodes, lib_nodes, constant_exprs, main_exprs, pending_annotations, acyclic_types, flags, sources_by_arena, source, depth, collect_main_exprs)
+            end
+          end
         when Frontend::MacroLiteralNode
-          collect_top_level_macro_literal(
-            arena, expr_id, node, def_nodes, class_nodes, module_nodes, enum_nodes, macro_nodes,
-            alias_nodes, lib_nodes, constant_exprs, main_exprs, pending_annotations,
-            acyclic_types, flags, sources_by_arena, source, depth
-          )
+          # Check if this literal has macro control flow ({% for %}, {% begin %}, etc.)
+          has_control_flow = node.pieces.any? { |p| p.kind.control_start? }
+          if ENV["DEBUG_MACRO_EXPAND"]?
+            STDERR.puts "[DEBUG_MACRO_EXPAND] MacroLiteralNode has_control_flow=#{has_control_flow} pieces=#{node.pieces.size}"
+            node.pieces.each_with_index do |p, i|
+              STDERR.puts "[DEBUG_MACRO_EXPAND]   piece[#{i}] kind=#{p.kind} keyword=#{p.control_keyword.inspect}"
+            end
+          end
+          if has_control_flow
+            # Use MacroExpander for full expansion of {% for %} loops, variable assignments, etc.
+            if expanded = expand_macro_literal_via_expander(expr_id, arena, source, flags)
+              if ENV["DEBUG_MACRO_EXPAND"]?
+                STDERR.puts "[DEBUG_MACRO_EXPAND] expanded=#{expanded[0, [expanded.size, 200].min].inspect}"
+              end
+              unless expanded.strip.empty?
+                if parsed = parse_top_level_macro_expansion(expanded)
+                  program, exp_source = parsed
+                  sources_by_arena[program.arena] = exp_source
+                  program.roots.each do |inner_id|
+                    collect_top_level_nodes(program.arena, inner_id, def_nodes, class_nodes, module_nodes, enum_nodes, macro_nodes, alias_nodes, lib_nodes, constant_exprs, main_exprs, pending_annotations, acyclic_types, flags, sources_by_arena, exp_source, depth + 1, false)
+                  end
+                end
+              end
+            end
+          elsif raw_text = macro_literal_raw_text(node, source)
+            # Track macro variable assignments (e.g., {% nums = %w(Int8 ...) %})
+            track_macro_var_assignment(raw_text)
+            combined = macro_literal_texts_from_raw(raw_text, flags).join
+            unless combined.strip.empty? || combined.includes?("{%")
+              if parsed = parse_macro_literal_program(combined)
+                program, sanitized = parsed
+                sources_by_arena[program.arena] = sanitized
+                program.roots.each do |inner_id|
+                  collect_top_level_nodes(program.arena, inner_id, def_nodes, class_nodes, module_nodes, enum_nodes, macro_nodes, alias_nodes, lib_nodes, constant_exprs, main_exprs, pending_annotations, acyclic_types, flags, sources_by_arena, sanitized, depth + 1, false)
+                end
+              end
+            end
+          end
         when Frontend::MacroForNode
-          collect_top_level_macro_for(
-            node, arena, source, def_nodes, class_nodes, module_nodes, enum_nodes, macro_nodes,
-            alias_nodes, lib_nodes, constant_exprs, main_exprs, pending_annotations,
-            acyclic_types, flags, sources_by_arena, depth
-          )
+          expand_top_level_macro_for(node, arena, source, def_nodes, class_nodes, module_nodes, enum_nodes, macro_nodes, alias_nodes, lib_nodes, constant_exprs, main_exprs, pending_annotations, acyclic_types, flags, sources_by_arena, depth)
         when Frontend::AssignNode
           target = arena[node.target]
           if target.is_a?(Frontend::ConstantNode)
@@ -1591,130 +1646,6 @@ module CrystalV2
         else
           main_exprs << {expr_id, arena} if collect_main_exprs
         end
-      end
-
-      private def collect_top_level_macro_if(
-        arena : Frontend::ArenaLike,
-        node : Frontend::MacroIfNode,
-        def_nodes : Array(Tuple(Frontend::DefNode, Frontend::ArenaLike)),
-        class_nodes : Array(Tuple(Frontend::ClassNode, Frontend::ArenaLike)),
-        module_nodes : Array(Tuple(Frontend::ModuleNode, Frontend::ArenaLike)),
-        enum_nodes : Array(Tuple(Frontend::EnumNode, Frontend::ArenaLike)),
-        macro_nodes : Array(Tuple(Frontend::MacroDefNode, Frontend::ArenaLike)),
-        alias_nodes : Array(Tuple(Frontend::AliasNode, Frontend::ArenaLike)),
-        lib_nodes : Array(Tuple(Frontend::LibNode, Frontend::ArenaLike, Array(Tuple(Frontend::AnnotationNode, Frontend::ArenaLike)))),
-        constant_exprs : Array(Tuple(Frontend::ExprId, Frontend::ArenaLike)),
-        main_exprs : Array(Tuple(Frontend::ExprId, Frontend::ArenaLike)),
-        pending_annotations : Array(Tuple(Frontend::AnnotationNode, Frontend::ArenaLike)),
-        acyclic_types : Set(String),
-        flags : Set(String),
-        sources_by_arena : Hash(Frontend::ArenaLike, String),
-        source : String,
-        depth : Int32,
-        collect_main_exprs : Bool
-      ) : Nil
-        if ENV["DEBUG_MACRO_EXPAND"]?
-          STDERR.puts "[DEBUG_MACRO_EXPAND] MacroIfNode condition=#{evaluate_macro_condition(arena, node.condition, flags).inspect}"
-        end
-        condition = evaluate_macro_condition(arena, node.condition, flags)
-        if condition == true
-          if ENV["DEBUG_MACRO_EXPAND"]?
-            then_node = arena[node.then_body]
-            STDERR.puts "[DEBUG_MACRO_EXPAND] MacroIfNode then_body type=#{then_node.class}"
-          end
-          collect_top_level_nodes(arena, node.then_body, def_nodes, class_nodes, module_nodes, enum_nodes, macro_nodes, alias_nodes, lib_nodes, constant_exprs, main_exprs, pending_annotations, acyclic_types, flags, sources_by_arena, source, depth, collect_main_exprs)
-        elsif condition == false
-          if else_body = node.else_body
-            collect_top_level_nodes(arena, else_body, def_nodes, class_nodes, module_nodes, enum_nodes, macro_nodes, alias_nodes, lib_nodes, constant_exprs, main_exprs, pending_annotations, acyclic_types, flags, sources_by_arena, source, depth, collect_main_exprs)
-          end
-        else
-          collect_top_level_nodes(arena, node.then_body, def_nodes, class_nodes, module_nodes, enum_nodes, macro_nodes, alias_nodes, lib_nodes, constant_exprs, main_exprs, pending_annotations, acyclic_types, flags, sources_by_arena, source, depth, collect_main_exprs)
-          if else_body = node.else_body
-            collect_top_level_nodes(arena, else_body, def_nodes, class_nodes, module_nodes, enum_nodes, macro_nodes, alias_nodes, lib_nodes, constant_exprs, main_exprs, pending_annotations, acyclic_types, flags, sources_by_arena, source, depth, collect_main_exprs)
-          end
-        end
-      end
-
-      private def collect_top_level_macro_literal(
-        arena : Frontend::ArenaLike,
-        expr_id : Frontend::ExprId,
-        node : Frontend::MacroLiteralNode,
-        def_nodes : Array(Tuple(Frontend::DefNode, Frontend::ArenaLike)),
-        class_nodes : Array(Tuple(Frontend::ClassNode, Frontend::ArenaLike)),
-        module_nodes : Array(Tuple(Frontend::ModuleNode, Frontend::ArenaLike)),
-        enum_nodes : Array(Tuple(Frontend::EnumNode, Frontend::ArenaLike)),
-        macro_nodes : Array(Tuple(Frontend::MacroDefNode, Frontend::ArenaLike)),
-        alias_nodes : Array(Tuple(Frontend::AliasNode, Frontend::ArenaLike)),
-        lib_nodes : Array(Tuple(Frontend::LibNode, Frontend::ArenaLike, Array(Tuple(Frontend::AnnotationNode, Frontend::ArenaLike)))),
-        constant_exprs : Array(Tuple(Frontend::ExprId, Frontend::ArenaLike)),
-        main_exprs : Array(Tuple(Frontend::ExprId, Frontend::ArenaLike)),
-        pending_annotations : Array(Tuple(Frontend::AnnotationNode, Frontend::ArenaLike)),
-        acyclic_types : Set(String),
-        flags : Set(String),
-        sources_by_arena : Hash(Frontend::ArenaLike, String),
-        source : String,
-        depth : Int32
-      ) : Nil
-        # Check if this literal has macro control flow ({% for %}, {% begin %}, etc.)
-        has_control_flow = node.pieces.any? { |p| p.kind.control_start? }
-        if ENV["DEBUG_MACRO_EXPAND"]?
-          STDERR.puts "[DEBUG_MACRO_EXPAND] MacroLiteralNode has_control_flow=#{has_control_flow} pieces=#{node.pieces.size}"
-          node.pieces.each_with_index do |p, i|
-            STDERR.puts "[DEBUG_MACRO_EXPAND]   piece[#{i}] kind=#{p.kind} keyword=#{p.control_keyword.inspect}"
-          end
-        end
-        if has_control_flow
-          # Use MacroExpander for full expansion of {% for %} loops, variable assignments, etc.
-          if expanded = expand_macro_literal_via_expander(expr_id, arena, source, flags)
-            if ENV["DEBUG_MACRO_EXPAND"]?
-              STDERR.puts "[DEBUG_MACRO_EXPAND] expanded=#{expanded[0, [expanded.size, 200].min].inspect}"
-            end
-            unless expanded.strip.empty?
-              if parsed = parse_top_level_macro_expansion(expanded)
-                program, exp_source = parsed
-                sources_by_arena[program.arena] = exp_source
-                program.roots.each do |inner_id|
-                  collect_top_level_nodes(program.arena, inner_id, def_nodes, class_nodes, module_nodes, enum_nodes, macro_nodes, alias_nodes, lib_nodes, constant_exprs, main_exprs, pending_annotations, acyclic_types, flags, sources_by_arena, exp_source, depth + 1, false)
-                end
-              end
-            end
-          end
-        elsif raw_text = macro_literal_raw_text(node, source)
-          # Track macro variable assignments (e.g., {% nums = %w(Int8 ...) %})
-          track_macro_var_assignment(raw_text)
-          combined = macro_literal_texts_from_raw(raw_text, flags).join
-          unless combined.strip.empty? || combined.includes?("{%")
-            if parsed = parse_macro_literal_program(combined)
-              program, sanitized = parsed
-              sources_by_arena[program.arena] = sanitized
-              program.roots.each do |inner_id|
-                collect_top_level_nodes(program.arena, inner_id, def_nodes, class_nodes, module_nodes, enum_nodes, macro_nodes, alias_nodes, lib_nodes, constant_exprs, main_exprs, pending_annotations, acyclic_types, flags, sources_by_arena, sanitized, depth + 1, false)
-              end
-            end
-          end
-        end
-      end
-
-      private def collect_top_level_macro_for(
-        node : Frontend::MacroForNode,
-        arena : Frontend::ArenaLike,
-        source : String,
-        def_nodes : Array(Tuple(Frontend::DefNode, Frontend::ArenaLike)),
-        class_nodes : Array(Tuple(Frontend::ClassNode, Frontend::ArenaLike)),
-        module_nodes : Array(Tuple(Frontend::ModuleNode, Frontend::ArenaLike)),
-        enum_nodes : Array(Tuple(Frontend::EnumNode, Frontend::ArenaLike)),
-        macro_nodes : Array(Tuple(Frontend::MacroDefNode, Frontend::ArenaLike)),
-        alias_nodes : Array(Tuple(Frontend::AliasNode, Frontend::ArenaLike)),
-        lib_nodes : Array(Tuple(Frontend::LibNode, Frontend::ArenaLike, Array(Tuple(Frontend::AnnotationNode, Frontend::ArenaLike)))),
-        constant_exprs : Array(Tuple(Frontend::ExprId, Frontend::ArenaLike)),
-        main_exprs : Array(Tuple(Frontend::ExprId, Frontend::ArenaLike)),
-        pending_annotations : Array(Tuple(Frontend::AnnotationNode, Frontend::ArenaLike)),
-        acyclic_types : Set(String),
-        flags : Set(String),
-        sources_by_arena : Hash(Frontend::ArenaLike, String),
-        depth : Int32
-      ) : Nil
-        expand_top_level_macro_for(node, arena, source, def_nodes, class_nodes, module_nodes, enum_nodes, macro_nodes, alias_nodes, lib_nodes, constant_exprs, main_exprs, pending_annotations, acyclic_types, flags, sources_by_arena, depth)
       end
 
       # Track macro variable assignments from raw text like {% nums = %w(Int8 Int16 ...) %}
@@ -2681,8 +2612,6 @@ module CrystalV2
           false
         when Frontend::MacroExpressionNode
           evaluate_macro_condition(arena, node.expression, flags)
-        when Frontend::GroupingNode
-          evaluate_macro_condition(arena, node.expression, flags)
         when Frontend::UnaryNode
           op = String.new(node.operator)
           return nil unless op == "!"
@@ -2751,11 +2680,9 @@ module CrystalV2
           # On macOS aarch64, resolve to lib_c/aarch64-darwin/c/*
           # TODO: Detect actual platform
           platform = "aarch64-darwin"
-          stdlib_search_paths.each do |stdlib_root|
-            platform_path = File.join(stdlib_root, "lib_c", platform, req_path)
-            result = try_require_path(platform_path)
-            return result if result
-          end
+          platform_path = File.join(STDLIB_PATH, "lib_c", platform, req_path)
+          result = try_require_path(platform_path)
+          return result if result
         end
 
         # Relative paths
@@ -2776,11 +2703,9 @@ module CrystalV2
           return result if result
 
           # Try stdlib
-          stdlib_search_paths.each do |stdlib_root|
-            stdlib_path = File.expand_path(req_path, stdlib_root)
-            result = try_require_path(stdlib_path)
-            return result if result
-          end
+          stdlib_path = File.expand_path(req_path, STDLIB_PATH)
+          result = try_require_path(stdlib_path)
+          return result if result
 
           # Try original Crystal compiler source (for compiler modules like lexer/parser)
           if File.directory?(CRYSTAL_SRC_PATH)
@@ -2840,44 +2765,15 @@ module CrystalV2
         # Handle relative paths
         if pattern.starts_with?("./") || pattern.starts_with?("../")
           full_dir = File.expand_path(pattern, base_dir)
-          return nil unless Dir.exists?(full_dir)
-
-          files = [] of String
-          gather_crystal_files(full_dir, files, recursive)
-          return files.empty? ? nil : files.sort
+        else
+          full_dir = File.expand_path(pattern, STDLIB_PATH)
         end
 
-        stdlib_search_paths.each do |stdlib_root|
-          full_dir = File.expand_path(pattern, stdlib_root)
-          next unless Dir.exists?(full_dir)
+        return nil unless Dir.exists?(full_dir)
 
-          files = [] of String
-          gather_crystal_files(full_dir, files, recursive)
-          return files.sort unless files.empty?
-        end
-
-        nil
-      end
-
-      private def resolve_stdlib_path(relative_path : String) : String
-        stdlib_search_paths.each do |root|
-          candidate = File.join(root, relative_path)
-          return candidate if File.exists?(candidate)
-        end
-        File.join(STDLIB_PATH, relative_path)
-      end
-
-      private def stdlib_search_paths : Array(String)
-        paths = [STDLIB_PATH]
-        if crystal_path = ENV["CRYSTAL_PATH"]?
-          separator = crystal_path.includes?(';') ? ';' : ':'
-          crystal_path.split(separator).each do |entry|
-            next if entry.empty?
-            expanded = File.expand_path(entry)
-            paths << expanded unless paths.includes?(expanded)
-          end
-        end
-        paths
+        files = [] of String
+        gather_crystal_files(full_dir, files, recursive)
+        files.empty? ? nil : files.sort  # Sort for deterministic order
       end
 
       # Gather all .cr files in a directory
@@ -3060,26 +2956,6 @@ module CrystalV2
         parts << "llvm_cache=#{@llvm_cache_hits} hit/#{@llvm_cache_misses} miss" if options.llvm_cache
         parts << "pipeline_cache=#{@pipeline_cache_hits} hit/#{@pipeline_cache_misses} miss" if options.pipeline_cache
         out_io.puts "Timing (ms): #{parts.join(" ")}"
-
-        if MIR::OptimizationPipeline.pass_timing_enabled?
-          pass_details = MIR::OptimizationPipeline.pass_timing_snapshot
-            .sort_by { |(_, total_ms, _)| -total_ms }
-            .map do |pass_name, total_ms, calls|
-              avg_ms = calls > 0 ? total_ms / calls : 0.0
-              "#{pass_name}=#{total_ms.round(1)}ms/#{calls}/#{avg_ms.round(4)}ms"
-            end
-          out_io.puts "MIR pass timing: #{pass_details.join(" ")}" unless pass_details.empty?
-        end
-
-        if MIR::CopyPropagationPass.cp_phase_timing_enabled?
-          cp_phase_details = MIR::CopyPropagationPass.cp_phase_timing_snapshot
-            .sort_by { |(_, total_ms, _)| -total_ms }
-            .map do |phase_name, total_ms, calls|
-              avg_ms = calls > 0 ? total_ms / calls : 0.0
-              "#{phase_name}=#{total_ms.round(1)}ms/#{calls}/#{avg_ms.round(4)}ms"
-            end
-          out_io.puts "CopyPropagation phase timing: #{cp_phase_details.join(" ")}" unless cp_phase_details.empty?
-        end
       end
 
       private def dump_symbols(program, table, out_io, indent = 0)
