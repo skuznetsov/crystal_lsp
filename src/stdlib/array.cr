@@ -2244,6 +2244,80 @@ class Array(T)
     super
   end
 
+  # Array-specialized find to avoid relying on non-local return inside
+  # Enumerable#find's internal each-block wrapper.
+  def find(& : T -> Bool) : T?
+    i = 0
+    while i < @size
+      elem = unsafe_fetch(i)
+      return elem if yield elem
+      i += 1
+    end
+    nil
+  end
+
+  def find(*, offset : Int, & : T -> Bool) : T?
+    i = offset.to_i
+    if i < 0
+      i += @size
+      return nil if i < 0
+    end
+
+    while i < @size
+      elem = unsafe_fetch(i)
+      return elem if yield elem
+      i += 1
+    end
+
+    nil
+  end
+
+  def find(if_none, & : T -> Bool)
+    i = 0
+    while i < @size
+      elem = unsafe_fetch(i)
+      return elem if yield elem
+      i += 1
+    end
+    if_none
+  end
+
+  def find(if_none, *, offset : Int, & : T -> Bool)
+    i = offset.to_i
+    if i < 0
+      i += @size
+      return if_none if i < 0
+    end
+
+    while i < @size
+      elem = unsafe_fetch(i)
+      return elem if yield elem
+      i += 1
+    end
+
+    if_none
+  end
+
+  def find!(& : T -> Bool) : T
+    find!(offset: 0) { |elem| yield elem }
+  end
+
+  def find!(*, offset : Int, & : T -> Bool) : T
+    i = offset.to_i
+    if i < 0
+      i += @size
+      i = 0 if i < 0
+    end
+
+    while i < @size
+      elem = unsafe_fetch(i)
+      return elem if yield elem
+      i += 1
+    end
+
+    raise Enumerable::NotFoundError.new
+  end
+
   private struct FlattenHelper(T)
     def self.flatten(ary)
       result = [] of T
