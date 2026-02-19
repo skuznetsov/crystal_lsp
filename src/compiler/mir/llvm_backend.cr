@@ -12303,14 +12303,8 @@ module Crystal::MIR
             if @current_return_type == "ptr"
               emit "ret ptr null"
             elsif @current_return_type.includes?(".union")
-              # Return nil union (type_id = 0)
-              c = @cond_counter
-              @cond_counter += 1
-              emit "%ret_nil.#{c}.ptr = alloca #{@current_return_type}, align 8"
-              emit "%ret_nil.#{c}.type_id_ptr = getelementptr #{@current_return_type}, ptr %ret_nil.#{c}.ptr, i32 0, i32 0"
-              emit "store i32 0, ptr %ret_nil.#{c}.type_id_ptr"
-              emit "%ret_nil.#{c}.val = load #{@current_return_type}, ptr %ret_nil.#{c}.ptr"
-              emit "ret #{@current_return_type} %ret_nil.#{c}.val"
+              # Return a fully zeroed nil union (type_id=0 + zero payload).
+              emit "ret #{@current_return_type} zeroinitializer"
             else
               # Use 0.0 for float types, 0 for others
               if @current_return_type == "double" || @current_return_type == "float"
@@ -12330,13 +12324,8 @@ module Crystal::MIR
             end
 
             if @current_return_type.includes?(".union") && val_ref == "null"
-              c = @cond_counter
-              @cond_counter += 1
-              emit "%ret_nil_union.#{c}.ptr = alloca #{@current_return_type}, align 8"
-              emit "%ret_nil_union.#{c}.type_id_ptr = getelementptr #{@current_return_type}, ptr %ret_nil_union.#{c}.ptr, i32 0, i32 0"
-              emit "store i32 0, ptr %ret_nil_union.#{c}.type_id_ptr"
-              emit "%ret_nil_union.#{c}.val = load #{@current_return_type}, ptr %ret_nil_union.#{c}.ptr"
-              emit "ret #{@current_return_type} %ret_nil_union.#{c}.val"
+              # Preserve nil semantics when returning union values as pointers later.
+              emit "ret #{@current_return_type} zeroinitializer"
               return
             end
 
@@ -12351,6 +12340,7 @@ module Crystal::MIR
             # Convention: Nil = variant 0 (type_id 0), non-nil = variant 1+ (type_id 1+)
             # Must match union variant table and IsA check convention.
             if val_llvm_type == "void" || val_ref == "null"
+              emit "store #{@current_return_type} zeroinitializer, ptr %ret#{c}.union_ptr"
               emit "store i32 0, ptr %ret#{c}.type_id_ptr"
               # Don't store payload for nil
             elsif @phi_nil_incoming_blocks.has_key?(val) && val_llvm_type.starts_with?('i')
