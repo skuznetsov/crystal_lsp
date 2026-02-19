@@ -537,14 +537,7 @@ module Enumerable(T)
   # [1, 2, 3, 4].find { |i| i > 8 }     # => nil
   # [1, 2, 3, 4].find(-1) { |i| i > 8 } # => -1
   # ```
-  def find(& : T -> Bool) : T?
-    each do |elem|
-      return elem if yield elem
-    end
-    nil
-  end
-
-  def find(if_none, & : T -> Bool)
+  def find(if_none = nil, & : T ->)
     each do |elem|
       return elem if yield elem
     end
@@ -558,15 +551,11 @@ module Enumerable(T)
   # [1, 2, 3, 4].find! { |i| i > 2 } # => 3
   # [1, 2, 3, 4].find! { |i| i > 8 } # => raises Enumerable::NotFoundError
   # ```
-  def find!(& : T -> Bool) : T
-    result = nil.as(T?)
+  def find!(& : T ->) : T
     each do |elem|
-      if yield elem
-        result = elem
-        break
-      end
+      return elem if yield elem
     end
-    result || raise Enumerable::NotFoundError.new
+    raise Enumerable::NotFoundError.new
   end
 
   # Yields each value until the first truthy block result and returns that result.
