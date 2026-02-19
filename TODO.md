@@ -5917,3 +5917,31 @@ crystal build -Ddebug_hooks src/crystal_v2.cr -o bin/crystal_v2 --no-debug
       - output: `neg=-7`, `EXIT 0`.
     - complex quick recheck:
       - `./regression_tests/run_complex.sh /tmp/crystal_v2_reconciled_sfix quick` => `5 passed, 0 failed`
+
+### 8.84 No-stdlib policy: move `find_nil_and_value` fix fully to compiler (2026-02-19)
+
+- [x] Revert stdlib workaround and fix `find_nil_and_value` in compiler pipeline only.
+  - Policy update:
+    - stdlib must stay aligned with original Crystal for compatibility; temporary `Array/Enumerable#find` changes were reverted.
+  - Revert:
+    - commit: `46c490b` (revert of stdlib `find/find!` specialization commit).
+  - Repro after stdlib revert (compiler-only baseline before new fix):
+    - `./regression_tests/run_complex.sh /tmp/crystal_v2_nostdlib test_find_nil_and_value`
+    - result: `FAIL (output)`, stdout `find_nil_and_value_bad`.
+  - Root cause evidence:
+    - generated LLVM for repro had `pick` returning `ptr` and union payload extraction on nilable return path.
+    - nil-union return construction left payload bytes uninitialized in return emission, so later `union -> ptr` extraction could read garbage for nil variant.
+  - Compiler-side fixes (no stdlib edits):
+    - `src/compiler/hir/ast_to_hir.cr`
+      - re-applied reachable-block return-type merge (`reachable_blocks(func)` + merge sites).
+    - `src/compiler/mir/llvm_backend.cr`
+      - return emission now uses `zeroinitializer` for nil-union returns in relevant branches,
+        ensuring payload is zeroed for nil variant.
+  - DoD / validation:
+    - build:
+      - `crystal build src/crystal_v2.cr -o /tmp/crystal_v2_nostdlib_hirfix2 --error-trace` => `EXIT 0`.
+    - targeted:
+      - `./regression_tests/run_complex.sh /tmp/crystal_v2_nostdlib_hirfix2 test_find_nil_and_value` => `1 passed, 0 failed`.
+      - `./regression_tests/run_complex.sh /tmp/crystal_v2_nostdlib_hirfix2 quick` => `5 passed, 0 failed`.
+      - `/tmp/crystal_v2_nostdlib_hirfix2 regression_tests/test_negative_int32_puts.cr && scripts/run_safe.sh regression_tests/test_negative_int32_puts 10 512` => stdout `neg=-7`, `EXIT 0`.
+      - `./regression_tests/run_complex.sh /tmp/crystal_v2_nostdlib_hirfix2 full` => `6 passed, 2 failed` (same known blockers: `channel_receive_state`, `option_parser_to_s`).
