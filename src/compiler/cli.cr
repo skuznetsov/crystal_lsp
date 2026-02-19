@@ -432,24 +432,7 @@ module CrystalV2
           sources_by_arena[arena] = source
           paths_by_arena[arena] = path
         end
-        force_inline_yield = case force = ENV["CRYSTAL_V2_FORCE_INLINE_YIELD"]?
-                             when nil, "", "0", "false", "False", "FALSE" then false
-                             else                                                true
-                             end
-        # Inline-yield lowering is currently unstable in full link mode for some stdlib paths
-        # (e.g., DWARF parsing callbacks). Keep it disabled by default for deterministic bootstrap.
-        auto_disable_inline_yield = !force_inline_yield
-        disable_inline_yield = ENV.has_key?("CRYSTAL_V2_DISABLE_INLINE_YIELD") || auto_disable_inline_yield
-        if auto_disable_inline_yield && !ENV.has_key?("CRYSTAL_V2_DISABLE_INLINE_YIELD")
-          log(options, out_io, "  Auto: disabling inline-yield by default (set CRYSTAL_V2_FORCE_INLINE_YIELD=1 to override)")
-        end
-        hir_converter = HIR::AstToHir.new(
-          first_arena,
-          input_file,
-          sources_by_arena,
-          paths_by_arena,
-          disable_inline_yield: disable_inline_yield
-        )
+        hir_converter = HIR::AstToHir.new(first_arena, input_file, sources_by_arena, paths_by_arena)
         link_libs.each { |lib_name| hir_converter.module.add_link_library(lib_name) }
 
         # Collect nodes by type
@@ -703,30 +686,16 @@ module CrystalV2
           STDERR.puts "[PHASE_STATS] AST analysis: #{ast_result[:defs].size}/#{hir_converter.function_defs_count} defs reachable, #{ast_result[:method_names].size} method names (analysis-only, #{(Time.instant - ast_filter_start).total_milliseconds.round(1)}ms)"
         end
 
-        force_safety_nets = case force = ENV["CRYSTAL_V2_FORCE_SAFETY_NETS"]?
-                            when nil, "", "0", "false", "False", "FALSE" then false
-                            else                                                 true
-                            end
-        skip_safety_nets = case skip = ENV["CRYSTAL_V2_SKIP_SAFETY_NETS"]?
-                           when nil, "", "0", "false", "False", "FALSE" then false
-                           else                                               true
-                           end
-        run_safety_nets = true
-        if skip_safety_nets && !force_safety_nets
-          run_safety_nets = false
-          log(options, out_io, "  Warning: skipping HIR safety-net lowering (experimental, may produce invalid IR)")
-        end
-
         # Ensure top-level `fun main` is lowered as a real entrypoint (C ABI).
         did_flush = false
         if fun_main = def_nodes.find { |(n, _)| n.receiver.try { |recv| String.new(recv) == HIR::AstToHir::FUN_DEF_RECEIVER } && String.new(n.name) == "main" }
           hir_converter.arena = fun_main[1]
           hir_converter.lower_def(fun_main[0])
           # Process any pending functions from fun main lowering (e.g., Crystal.init_runtime)
-          hir_converter.flush_pending_functions(run_safety_nets)
+          hir_converter.flush_pending_functions
           did_flush = true
         end
-        hir_converter.flush_pending_functions(run_safety_nets) unless did_flush
+        hir_converter.flush_pending_functions unless did_flush
         STDERR.puts "  Main function created" if options.progress
 
         # Refresh generic type params that were captured as VOID after lowering.
@@ -876,6 +845,7 @@ module CrystalV2
         mir_lowering.register_union_types(hir_converter.union_descriptors)
         mir_lowering.register_class_types(hir_converter.class_info)
         mir_lowering.register_enum_types(hir_converter.enum_names, hir_module.types)
+        mir_lowering.register_module_types(hir_module.types)
         mir_lowering.register_tuple_types(hir_module.types)
 
         STDERR.puts "  Lowering #{hir_module.functions.size} functions to MIR..." if options.progress
@@ -888,6 +858,12 @@ module CrystalV2
         if options.mir_opt
           log(options, out_io, "  Optimizing MIR...")
           mir_opt_start = Time.instant
+          if options.stats && MIR::OptimizationPipeline.pass_timing_enabled?
+            MIR::OptimizationPipeline.reset_pass_timing
+          end
+          if options.stats && MIR::CopyPropagationPass.cp_phase_timing_enabled?
+            MIR::CopyPropagationPass.reset_cp_phase_timing
+          end
           mir_module.functions.each_with_index do |func, idx|
             begin
               STDERR.puts "  Optimizing #{idx + 1}/#{mir_module.functions.size}: #{func.name}..." if options.progress
@@ -2956,6 +2932,26 @@ module CrystalV2
         parts << "llvm_cache=#{@llvm_cache_hits} hit/#{@llvm_cache_misses} miss" if options.llvm_cache
         parts << "pipeline_cache=#{@pipeline_cache_hits} hit/#{@pipeline_cache_misses} miss" if options.pipeline_cache
         out_io.puts "Timing (ms): #{parts.join(" ")}"
+
+        if MIR::OptimizationPipeline.pass_timing_enabled?
+          pass_details = MIR::OptimizationPipeline.pass_timing_snapshot
+            .sort_by { |(_, total_ms, _)| -total_ms }
+            .map do |pass_name, total_ms, calls|
+              avg_ms = calls > 0 ? total_ms / calls : 0.0
+              "#{pass_name}=#{total_ms.round(1)}ms/#{calls}/#{avg_ms.round(4)}ms"
+            end
+          out_io.puts "MIR pass timing: #{pass_details.join(" ")}" unless pass_details.empty?
+        end
+
+        if MIR::CopyPropagationPass.cp_phase_timing_enabled?
+          cp_phase_details = MIR::CopyPropagationPass.cp_phase_timing_snapshot
+            .sort_by { |(_, total_ms, _)| -total_ms }
+            .map do |phase_name, total_ms, calls|
+              avg_ms = calls > 0 ? total_ms / calls : 0.0
+              "#{phase_name}=#{total_ms.round(1)}ms/#{calls}/#{avg_ms.round(4)}ms"
+            end
+          out_io.puts "CopyPropagation phase timing: #{cp_phase_details.join(" ")}" unless cp_phase_details.empty?
+        end
       end
 
       private def dump_symbols(program, table, out_io, indent = 0)
