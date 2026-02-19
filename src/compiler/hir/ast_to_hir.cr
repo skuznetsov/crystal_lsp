@@ -8280,6 +8280,38 @@ module Crystal::HIR
       merged
     end
 
+    # Return only CFG-reachable blocks from function entry.
+    # Detached blocks (for example from helper/lambda lowering artifacts)
+    # must not participate in return-type inference.
+    private def reachable_blocks(func : Function) : Array(Block)
+      blocks = func.blocks
+      return [] of Block if blocks.empty?
+
+      by_id = Hash(BlockId, Block).new(initial_capacity: blocks.size)
+      blocks.each { |block| by_id[block.id] = block }
+
+      entry_id = blocks.first.id
+      visited = Set(BlockId).new(initial_capacity: blocks.size)
+      queue = [entry_id] of BlockId
+      result = [] of Block
+
+      until queue.empty?
+        block_id = queue.pop
+        next if visited.includes?(block_id)
+        visited.add(block_id)
+
+        block = by_id[block_id]?
+        next unless block
+        result << block
+
+        block.terminator.successors.each do |succ|
+          queue << succ unless visited.includes?(succ)
+        end
+      end
+
+      result
+    end
+
     private def noreturn_expr?(expr_id : ExprId) : Bool
       node = node_for_expr(expr_id)
       return false unless node
@@ -13435,7 +13467,7 @@ module Crystal::HIR
         inferred_types = [] of TypeRef
 
         # Collect types from all Return terminators
-        func.blocks.each do |block|
+        reachable_blocks(func).each do |block|
           term = block.terminator
           next unless term.is_a?(Return)
           if value = term.value
@@ -17673,7 +17705,7 @@ module Crystal::HIR
         inferred_types = [] of TypeRef
 
         # Collect types from all Return terminators
-        func.blocks.each do |block|
+        reachable_blocks(func).each do |block|
           term = block.terminator
           next unless term.is_a?(Return)
           if value = term.value
@@ -27960,7 +27992,7 @@ module Crystal::HIR
         # Prefer actual lowered return terminators over a separate AST-walk inference pass.
         # This avoids doubling work (and avoids triggering extra monomorphization while
         # lowering large pending queues during self-host).
-        func.blocks.each do |block|
+        reachable_blocks(func).each do |block|
           term = block.terminator
           next unless term.is_a?(Return)
           if value = term.value

@@ -1,14 +1,15 @@
 # Crystal v2 — Active Work (codegen branch)
 
 ## Known Bugs (codegen)
-- Confirmed repros in new complex regression suite:
-  - `regression_tests/complex/test_find_nil_and_value.cr`
-    - status: compiles/runs but returns wrong result (`find_nil_and_value_bad`)
-      in current `bin/crystal_v2`.
+- Confirmed repros in complex regression suite:
   - `regression_tests/complex/test_channel_receive_state.cr`
     - status: link failure (missing `_current` symbol in spawn/channel path).
   - `regression_tests/complex/test_option_parser_to_s.cr`
-    - status: compile timeout in current debug-stage compiler (>45s).
+    - status: runtime segfault (exit 139) with current work-in-progress backend.
+- Recently fixed repro:
+  - `regression_tests/complex/test_find_nil_and_value.cr`
+    - fixed by CFG-reachable return-type merge (dead blocks no longer pollute
+      function return type inference).
 - Existing targeted regressions remain in place:
   - `regression_tests/test_select_map_stress.cr`
   - `regression_tests/test_float_pow_var.cr`
@@ -29,6 +30,32 @@
 - Float64: arithmetic, ** on literals
 
 ## Recently completed
+- **Return-type inference: ignore unreachable blocks (2026-02-18)** —
+  fixed wrong union widening caused by detached dead blocks being included in
+  return-type merge (e.g., `pick` inferred as `Bool|Pointer` instead of
+  nilable string/pointer).
+  Changes:
+  - `src/compiler/hir/ast_to_hir.cr`
+    - added `reachable_blocks(func)` helper (CFG walk from entry);
+    - switched three return-type merge sites to use reachable blocks only.
+  Validation:
+  - build:
+    - `crystal build src/crystal_v2.cr -o /tmp/crystal_v2_reachable_retfix --error-trace`
+      => `EXIT 0`
+  - targeted:
+    - `./regression_tests/run_complex.sh /tmp/crystal_v2_reachable_retfix test_find_nil_and_value`
+      => `1 passed, 0 failed`
+    - `/tmp/crystal_v2_reachable_retfix /private/tmp/repro_find_nil_debug.cr -o /private/tmp/repro_find_nil_debug_fix_bin --no-debug`
+      + `./scripts/run_safe.sh /private/tmp/repro_find_nil_debug_fix_bin 10 512`
+      => `value_nil=false`, `none_nil=true`, `value_eq=true`, `EXIT 0`
+  - regression suites:
+    - `./regression_tests/run_complex.sh /tmp/crystal_v2_reachable_retfix quick`
+      => `5 passed, 0 failed`
+    - `./regression_tests/run_complex.sh /tmp/crystal_v2_reachable_retfix full`
+      => `6 passed, 2 failed` (`channel_receive_state`, `option_parser_to_s`)
+    - `./regression_tests/run_all.sh /tmp/crystal_v2_reachable_retfix`
+      => `44 passed, 0 failed`
+
 - **Complex regression suite for bootstrap blockers (2026-02-18)** —
   added a focused suite to catch high-cost codegen regressions before full
   bootstrap runs.
