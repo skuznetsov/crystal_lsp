@@ -5872,3 +5872,48 @@ crystal build -Ddebug_hooks src/crystal_v2.cr -o bin/crystal_v2 --no-debug
   - Insight:
     - the reported `~14s` local spike was a build-mode artifact, not solely a source-level regression.
     - there is still a real code-level slowdown vs `641b9c2` (roughly `+70..80%` on this step), dominated by `process_pending`.
+
+### 8.82 Crash recovery + commit split (2026-02-19)
+
+- [x] Recover from post-sync crash state and split fixes into atomic commits.
+  - Why:
+    - workspace after crash had mixed experimental changes and immediate segfaults in complex regressions.
+    - goal: restore a known-good compiler baseline, keep `find` behavior fix, then re-apply only proven LLVM signedness correction.
+  - Pre-fix evidence (mixed state):
+    - `crystal build src/crystal_v2.cr -o /tmp/crystal_v2_current --error-trace` => `real 6.51`
+    - `./regression_tests/run_complex.sh /tmp/crystal_v2_current quick` => `0 passed, 5 failed` (all `exit 139`).
+  - Restored baseline:
+    - rollback core compiler files to stable snapshot (`24b06e0` lineage):
+      - `src/compiler/cli.cr`
+      - `src/compiler/hir/ast_to_hir.cr`
+      - `src/compiler/mir/hir_to_mir.cr`
+      - `src/compiler/mir/llvm_backend.cr`
+    - kept stdlib `find/find!` fix:
+      - `src/stdlib/array.cr`
+      - `src/stdlib/enumerable.cr`
+  - DoD / validation:
+    - build:
+      - `crystal build src/crystal_v2.cr -o /tmp/crystal_v2_reconciled --error-trace` => `real 11.05`, `EXIT 0`
+    - targeted complex:
+      - `./regression_tests/run_complex.sh /tmp/crystal_v2_reconciled test_find_nil_and_value` => `1 passed, 0 failed`
+      - `./regression_tests/run_complex.sh /tmp/crystal_v2_reconciled quick` => `5 passed, 0 failed`
+      - `./regression_tests/run_complex.sh /tmp/crystal_v2_reconciled full` => `6 passed, 2 failed` (`test_channel_receive_state` link, `test_option_parser_to_s` exit 139; known blockers)
+    - signedness check on baseline:
+      - `/tmp/crystal_v2_reconciled regression_tests/test_negative_int32_puts.cr && scripts/run_safe.sh regression_tests/test_negative_int32_puts 10 512`
+      - output: `neg=-4294967289` (regression reproduced).
+
+### 8.83 LLVM signedness re-apply on restored baseline (2026-02-19)
+
+- [x] Re-apply narrow int-to-ptr signedness fix on top of restored baseline.
+  - Change:
+    - `src/compiler/mir/llvm_backend.cr`
+      - keep sign for `inttoptr` from narrow ints via explicit `sext/zext` to i64 before `inttoptr`.
+      - mirror same logic in fixed-arg conversion path.
+  - DoD / validation:
+    - build:
+      - `crystal build src/crystal_v2.cr -o /tmp/crystal_v2_reconciled_sfix --error-trace` => `real 7.13`, `EXIT 0`
+    - regression probe:
+      - `/tmp/crystal_v2_reconciled_sfix regression_tests/test_negative_int32_puts.cr && scripts/run_safe.sh regression_tests/test_negative_int32_puts 10 512`
+      - output: `neg=-7`, `EXIT 0`.
+    - complex quick recheck:
+      - `./regression_tests/run_complex.sh /tmp/crystal_v2_reconciled_sfix quick` => `5 passed, 0 failed`
