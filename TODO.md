@@ -5848,3 +5848,27 @@ crystal build -Ddebug_hooks src/crystal_v2.cr -o bin/crystal_v2 --no-debug
       - `/tmp/stage2_after_grouping.log` had `Undefined symbols for architecture arm64: _libiconv*`, `real 259.81`.
   - Note:
     - historical fast numbers in this file are cold no-cache stage1 values (e.g. `111.77s` at `8.51`, `115.23s` at `8.52`), not warm-cache runs.
+
+### 8.81 Benchmark sanity: apparent 14s regression was stale/non-release binary (2026-02-19)
+
+- [x] Re-validate `bootstrap_array` compile timing against `TODO.md` historical logs and isolate measurement drift.
+  - Why:
+    - historical logs in this file record `~8.177s..8.939s` (no-cache `bootstrap_array` step), but current local runs reported `~14..16s`.
+  - Root cause:
+    - local workspace `./bin/crystal_v2` was built in a slower configuration than current release baseline for this branch, so timing comparison was not apples-to-apples.
+    - same commit (`d22dac6`) with a clean release rebuild drops from ~15.6s to ~6.4-6.9s on the same command.
+  - DoD / evidence:
+    - stale local binary (`./bin/crystal_v2` before rebuild), no-cache run:
+      - `CRYSTAL_V2_AST_CACHE=0 CRYSTAL_V2_PIPELINE_CACHE=0 CRYSTAL_V2_LLVM_CACHE=0 CRYSTAL_V2_PHASE_STATS=1 ./bin/crystal_v2 examples/bootstrap_array.cr -o /tmp/bootstrap_array_perf_current_bin`
+      - result: `real 15.57` (`process_pending 8648.4ms`, `emit_tracked_sigs 1236.8ms`, `lower_missing 178.1ms`).
+    - rebuilt local release binary:
+      - `/usr/bin/time -p ./scripts/build.sh release` => `real 72.23`.
+    - same no-cache run after rebuild:
+      - run1: `real 6.94` (`process_pending 3518.1ms`, `emit_tracked_sigs 468.5ms`, `lower_missing 63.9ms`);
+      - run2: `real 6.43` (`process_pending 3425.7ms`, `emit_tracked_sigs 448.6ms`, `lower_missing 63.4ms`).
+    - comparator builds in isolated worktrees (same command/flags):
+      - `641b9c2` (`origin/bootstrap-benchmark`): `real 3.85` / `3.45`;
+      - `d22dac6`: `real 6.27` / `6.24`.
+  - Insight:
+    - the reported `~14s` local spike was a build-mode artifact, not solely a source-level regression.
+    - there is still a real code-level slowdown vs `641b9c2` (roughly `+70..80%` on this step), dominated by `process_pending`.
