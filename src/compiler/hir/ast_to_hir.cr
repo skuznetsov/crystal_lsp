@@ -1895,6 +1895,7 @@ module Crystal::HIR
     @lower_method_debug_total : Int32
     @lower_method_ns_counts : Hash(String, Int32)
     @method_inheritance_cache_function_size : Int32
+    @method_inheritance_cache_function_defs_size : Int32
     @method_inheritance_cache_class_info_version : Int32
     @method_inheritance_cache_module_version : Int32
 
@@ -2272,6 +2273,7 @@ module Crystal::HIR
       @lower_method_debug_total = 0
       @lower_method_ns_counts = {} of String => Int32
       @method_inheritance_cache_function_size = 0
+      @method_inheritance_cache_function_defs_size = 0
       @method_inheritance_cache_class_info_version = 0
       @method_inheritance_cache_module_version = 0
       @type_param_map = Hash(String, String).new(initial_capacity: 4096)
@@ -19878,11 +19880,13 @@ module Crystal::HIR
 
     private def ensure_method_inheritance_cache
       if @method_inheritance_cache_function_size != @function_types.size ||
+         @method_inheritance_cache_function_defs_size != @function_defs.size ||
          @method_inheritance_cache_class_info_version != @class_info_version ||
          @method_inheritance_cache_module_version != @module_includers_version
         @method_inheritance_cache.clear
         @class_method_inheritance_cache.clear
         @method_inheritance_cache_function_size = @function_types.size
+        @method_inheritance_cache_function_defs_size = @function_defs.size
         @method_inheritance_cache_class_info_version = @class_info_version
         @method_inheritance_cache_module_version = @module_includers_version
       end
@@ -20933,8 +20937,12 @@ module Crystal::HIR
       body = node.body
       return nil unless body && body.size == 1
 
+      # Resolve the correct arena for this DefNode (may differ from @arena
+      # when called via lower_super with a parent class's DefNode)
+      def_arena = resolve_arena_for_def(node, @arena)
+
       # Single expression in body - check if it's an ivar access
-      body_node = @arena[body[0]]
+      body_node = def_arena[body[0]]
       case body_node
       when CrystalV2::Compiler::Frontend::InstanceVarNode
         # Body is just "@x" - find the ivar type
@@ -26232,15 +26240,17 @@ module Crystal::HIR
           has_base = has_function_base?(test_name)
           STDERR.puts "[ENTRY_HASH_CHECK] current=#{current} test=#{test_name} has_func=#{has_func} has_base=#{has_base}"
         end
-        # O(1) lookup: check exact match first, then check if base name exists
-        if @function_types.has_key?(test_name) || has_function_base?(test_name)
+        # O(1) lookup: check exact match first, then check if base name exists.
+        # Also check @function_defs for methods that exist in AST but haven't been
+        # lowered yet (e.g., private methods defined after the call site).
+        if @function_types.has_key?(test_name) || has_function_base?(test_name) || @function_defs.has_key?(test_name)
           @method_inheritance_cache[cache_key] = test_name
           return test_name # Return base name - caller will mangle
         end
         current_base = strip_generic_args(current)
         if current_base != current
           base_test = "#{current_base}##{method_name}"
-          if @function_types.has_key?(base_test) || has_function_base?(base_test)
+          if @function_types.has_key?(base_test) || has_function_base?(base_test) || @function_defs.has_key?(base_test)
             @method_inheritance_cache[cache_key] = base_test
             return base_test
           end
@@ -26267,7 +26277,7 @@ module Crystal::HIR
             visited_modules << mod
             base_module = strip_generic_args(mod)
             module_method = "#{base_module}##{method_name}"
-            if @function_types.has_key?(module_method) || has_function_base?(module_method)
+            if @function_types.has_key?(module_method) || has_function_base?(module_method) || @function_defs.has_key?(module_method)
               # Return with class prefix so it gets lowered for this class
               resolved = current == origin ? test_name : "#{origin}##{method_name}"
               @method_inheritance_cache[cache_key] = resolved
@@ -26296,7 +26306,7 @@ module Crystal::HIR
       end
       if template_owner = primitive_template_owner(class_name)
         template_method = "#{template_owner}##{method_name}"
-        if @function_types.has_key?(template_method) || has_function_base?(template_method)
+        if @function_types.has_key?(template_method) || has_function_base?(template_method) || @function_defs.has_key?(template_method)
           resolved = "#{class_name}##{method_name}"
           @method_inheritance_cache[cache_key] = resolved
           return resolved
@@ -26304,7 +26314,7 @@ module Crystal::HIR
       end
       if class_name != "Object"
         object_method = "Object##{method_name}"
-        if @function_types.has_key?(object_method) || has_function_base?(object_method)
+        if @function_types.has_key?(object_method) || has_function_base?(object_method) || @function_defs.has_key?(object_method)
           if env_get("DEBUG_ENTRY_HASH") && method_name == "hash" && origin.includes?("Entry")
             STDERR.puts "[ENTRY_HASH_FALLBACK] origin=#{origin} falling back to Object#hash"
           end
@@ -32293,7 +32303,9 @@ module Crystal::HIR
         return void_lit.id
       end
 
-      # Find the method in parent class with proper mangling
+      # Find the method in parent class with proper mangling.
+      # Tag the Call with _super suffix so hir_to_mir skips force_virtual_dispatch
+      # (otherwise the vtable resolves back to the overriding child method → infinite loop).
       base_method_name = "#{parent_name}##{method_name}"
       super_method_name = mangle_function_name(base_method_name, arg_types)
 
@@ -32358,18 +32370,12 @@ module Crystal::HIR
       remember_callsite_arg_types(super_method_name, arg_types, nil, nil, false)
 
       # Ensure parent method is lowered
-      if env_has?("DEBUG_SUPER")
-        STDERR.puts "[DEBUG_SUPER] lower_super: class=#{class_name} method=#{method_name}"
-        STDERR.puts "[DEBUG_SUPER]   parent=#{parent_name}"
-        STDERR.puts "[DEBUG_SUPER]   base_method_name=#{base_method_name}"
-        STDERR.puts "[DEBUG_SUPER]   super_method_name=#{super_method_name}"
-        STDERR.puts "[DEBUG_SUPER]   function_defs.has_key?(super)=#{@function_defs.has_key?(super_method_name)}"
-        STDERR.puts "[DEBUG_SUPER]   function_defs.has_key?(base)=#{@function_defs.has_key?(base_method_name)}"
-      end
       lower_function_if_needed(super_method_name)
 
-      # Call parent method
-      call = Call.new(ctx.next_id, return_type, self_id, super_method_name, args)
+      # Tag the method name with _super so hir_to_mir knows to skip virtual dispatch.
+      # The actual function name remains unchanged; hir_to_mir will strip _super for lookup.
+      super_tagged_name = "#{super_method_name}_super"
+      call = Call.new(ctx.next_id, return_type, self_id, super_tagged_name, args)
       ctx.emit(call)
       ctx.register_type(call.id, return_type)
       call.id
@@ -35862,6 +35868,26 @@ module Crystal::HIR
             end
           end
 
+          # Special-case nil? on union/nilable types: emit intrinsic directly
+          # instead of a generic Call (which would become a dead-code stub).
+          if member_name == "nil?"
+            subject_type = ctx.type_of(subject_id)
+            if is_union_or_nilable_type?(subject_type)
+              return lower_nil_check_intrinsic(ctx, subject_id, subject_type)
+            elsif subject_type == TypeRef::NIL
+              lit = Literal.new(ctx.next_id, TypeRef::BOOL, true)
+              ctx.emit(lit)
+              ctx.register_type(lit.id, TypeRef::BOOL)
+              return lit.id
+            else
+              # Non-nilable type: nil? is always false
+              lit = Literal.new(ctx.next_id, TypeRef::BOOL, false)
+              ctx.emit(lit)
+              ctx.register_type(lit.id, TypeRef::BOOL)
+              return lit.id
+            end
+          end
+
           # Fall through: call the method on subject and use boolean result
           call = Call.new(ctx.next_id, TypeRef::BOOL, subject_id, member_name, [] of ValueId)
           ctx.emit(call)
@@ -35961,6 +35987,24 @@ module Crystal::HIR
                   ctx.register_type(cmp.id, TypeRef::BOOL)
                   return cmp.id
                 end
+              end
+            end
+
+            # Special-case nil? on union/nilable types: emit intrinsic directly
+            if member_name == "nil?"
+              obj_type2 = ctx.type_of(actual_object_id)
+              if is_union_or_nilable_type?(obj_type2)
+                return lower_nil_check_intrinsic(ctx, actual_object_id, obj_type2)
+              elsif obj_type2 == TypeRef::NIL
+                lit = Literal.new(ctx.next_id, TypeRef::BOOL, true)
+                ctx.emit(lit)
+                ctx.register_type(lit.id, TypeRef::BOOL)
+                return lit.id
+              else
+                lit = Literal.new(ctx.next_id, TypeRef::BOOL, false)
+                ctx.emit(lit)
+                ctx.register_type(lit.id, TypeRef::BOOL)
+                return lit.id
               end
             end
 
@@ -42452,7 +42496,7 @@ module Crystal::HIR
                                  end
                                  modules.each do |mod_name|
                                    mod_candidate = "#{mod_name}##{method_name}"
-                                   if @function_types.has_key?(mod_candidate) || has_function_base?(mod_candidate)
+                                   if @function_types.has_key?(mod_candidate) || has_function_base?(mod_candidate) || @function_defs.has_key?(mod_candidate)
                                      included_candidate = mod_candidate
                                      break
                                    end
@@ -42461,7 +42505,18 @@ module Crystal::HIR
                                  STDERR.puts "[INCLUDED_BASE] class=#{current} NO_MODULES"
                                end
                              end
-                             class_method_fallback || included_candidate || method_name
+                             # Last resort for instance methods: try qualifying with current class
+                            # before falling back to bare method_name.  This catches private
+                            # methods defined on the class that resolve_method_with_inheritance
+                            # might have missed due to cache timing.
+                            current_class_candidate : String? = nil
+                            if !@current_method_is_class
+                              cc = "#{current}##{method_name}"
+                              if @function_defs.has_key?(cc) || @function_types.has_key?(cc) || has_function_base?(cc)
+                                current_class_candidate = cc
+                              end
+                            end
+                            class_method_fallback || included_candidate || current_class_candidate || method_name
                            end
                          else
                            # receiver_id might be set but full_method_name is nil

@@ -28,6 +28,7 @@ quick_cases=(
   "complex/test_nilable_chain.cr"
   "complex/test_struct_value_semantics.cr"
   "complex/test_return_in_rescue.cr"
+  "complex/test_super_call.cr"
 )
 
 full_cases=(
