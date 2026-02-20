@@ -2588,6 +2588,8 @@ module CrystalV2
           false
         when Frontend::MacroExpressionNode
           evaluate_macro_condition(arena, node.expression, flags)
+        when Frontend::GroupingNode
+          evaluate_macro_condition(arena, node.expression, flags)
         when Frontend::UnaryNode
           op = String.new(node.operator)
           return nil unless op == "!"
