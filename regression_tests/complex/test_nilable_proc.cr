@@ -1,6 +1,8 @@
 # EXPECT: nilable_proc_ok
 # Tests nilable proc type (Proc | Nil).
 # Pattern: optional callback stored in instance variable.
+# Known bug: block-capture method (&block param) generates getter
+# instead of setter, so callback is never stored.
 
 class EventEmitter
   @on_event : Proc(String, Nil)?

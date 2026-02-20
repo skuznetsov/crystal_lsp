@@ -1,6 +1,8 @@
 # EXPECT: closure_escape_ok
 # Tests closure that escapes its creating function and is called later.
 # Pattern from original Crystal codegen/closure_spec.cr.
+# Known bug: closures use global variables for captures instead of
+# heap-allocated environments, so all closures share the same capture.
 
 def make_adder(n : Int32) : Proc(Int32, Int32)
   ->(x : Int32) { x + n }
