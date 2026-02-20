@@ -22,6 +22,11 @@ quick_cases=(
   "complex/test_array_map_select_chain.cr"
   "complex/test_hash_each_block.cr"
   "complex/test_multi_return_type_block.cr"
+  "complex/test_union_method_dispatch.cr"
+  "complex/test_nested_blocks_capture.cr"
+  "complex/test_while_loop_complex.cr"
+  "complex/test_nilable_chain.cr"
+  "complex/test_struct_value_semantics.cr"
 )
 
 full_cases=(
@@ -37,6 +42,24 @@ full_cases=(
   "complex/test_class_with_block_ivar.cr"
   "complex/test_string_builder_block.cr"
   "complex/test_begin_rescue_in_block.cr"
+  "complex/test_virtual_dispatch_chain.cr"
+  "complex/test_generic_container_ops.cr"
+  "complex/test_string_interpolation_complex.cr"
+  "complex/test_recursive_data_structure.cr"
+  "complex/test_case_when_types.cr"
+  "complex/test_enum_methods.cr"
+  "complex/test_hash_generic_operations.cr"
+  "complex/test_module_include_methods.cr"
+  "complex/test_exception_hierarchy.cr"
+  "complex/test_iterator_chain.cr"
+  "complex/test_proc_stored_in_ivar.cr"
+  "complex/test_multi_type_param_generic.cr"
+  "complex/test_case_when_type_dispatch.cr"
+  "complex/test_closure_escape.cr"
+  "complex/test_block_capture_and_call.cr"
+  "complex/test_nilable_proc.cr"
+  "complex/test_nested_closure.cr"
+  "complex/test_nilable_equality.cr"
 )
 
 if [ ! -x "$SAFE_RUN" ]; then
