@@ -166,17 +166,6 @@ module CrystalV2
           setup_debug_hooks
         {% end %}
 
-        if mm_stack_threshold_invalid
-          err_io.puts "Error: --mm-stack-threshold expects an integer"
-          err_io.puts parser
-          return 1
-        end
-        unless valid_mm_mode?(options.mm_mode)
-          err_io.puts "Error: Unknown --mm mode: #{options.mm_mode}"
-          err_io.puts parser
-          return 1
-        end
-
         if options.show_version
           out_io.puts "crystal_v2 #{VERSION}"
           return 0
@@ -185,6 +174,20 @@ module CrystalV2
         if options.show_help
           out_io.puts options.help_text
           return 0
+        end
+
+        if mm_stack_threshold_invalid
+          err_io.puts "Error: --mm-stack-threshold expects an integer"
+          err_io.puts parser
+          return 1
+        end
+        # Inlined valid_mm_mode? check (workaround: private methods defined
+        # after call site are not resolved as methods by the compiler)
+        mm = options.mm_mode
+        unless mm == "conservative" || mm == "balanced" || mm == "aggressive"
+          err_io.puts "Error: Unknown --mm mode: #{options.mm_mode}"
+          err_io.puts parser
+          return 1
         end
 
         if options.pgo_generate && !options.pgo_profile.empty?
@@ -737,7 +740,18 @@ module CrystalV2
         log(options, out_io, "\n[3/6] Escape analysis...")
         escape_start = Time.instant
         total_funcs = hir_module.functions.size
-        memory_config = memory_config_for(options)
+        # Inlined memory_config_for (workaround: private methods defined
+        # after call site are not resolved as methods by the compiler)
+        memory_config = begin
+          mm_config_mode = case options.mm_mode
+                           when "conservative" then HIR::MemoryConfig::Mode::Conservative
+                           when "balanced" then HIR::MemoryConfig::Mode::Balanced
+                           when "aggressive" then HIR::MemoryConfig::Mode::Aggressive
+                           else
+                             HIR::MemoryConfig::Mode::Balanced
+                           end
+          HIR::MemoryConfig.new(stack_threshold: options.mm_stack_threshold, mode: mm_config_mode)
+        end
         type_provider = HIR::ClassInfoTypeProvider.new(hir_module, hir_converter.class_info, acyclic_types)
         total_ms_stats = HIR::MemoryStrategyResult::Stats.new
         gc_functions = [] of Tuple(String, Int32)
