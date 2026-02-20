@@ -719,6 +719,9 @@ module Crystal::MIR
       STDERR.puts "  [LLVM] emit_string_constants..." if @progress
       emit_string_constants
 
+      # Emit varargs stubs for bare iterator methods not already defined
+      emit_bare_iterator_stubs
+
       # Emit declarations for undefined extern calls
       STDERR.puts "  [LLVM] emit_undefined_extern_declarations..." if @progress
       emit_undefined_extern_declarations
@@ -3904,11 +3907,19 @@ module Crystal::MIR
       emit_raw "  ret ptr %exc\n"
       emit_raw "}\n\n"
 
-      # Mark bare iterator method names as emitted to suppress forward declarations.
-      # These are yield-based methods that weren't lowered as intrinsics — the calls
-      # are suppressed at emit_call time (see BARE_ITERATOR_METHODS).
+    end
+
+    # Emit varargs stubs for bare iterator methods that weren't resolved as intrinsics.
+    # Called AFTER all regular functions are emitted so we can skip names that have
+    # concrete definitions (avoids the LLVM define/define conflict in Stage 2).
+    private def emit_bare_iterator_stubs
       BARE_ITERATOR_METHODS.each do |stub_name|
-        @emitted_functions << stub_name
+        unless @emitted_functions.includes?(stub_name)
+          @emitted_functions << stub_name
+          emit_raw "define void @#{stub_name}(...) {\n"
+          emit_raw "  ret void\n"
+          emit_raw "}\n\n"
+        end
       end
     end
 
@@ -9390,13 +9401,67 @@ module Crystal::MIR
 
       raw_callee_name = callee_func.try(&.name)
 
-      # Suppress bare iterator method calls (each, map, etc.) that weren't lowered
-      # as intrinsics. These are no-op stubs — skipping the call avoids LLVM type
-      # conflicts between define/declare with mismatched signatures.
-      if raw_callee_name && BARE_ITERATOR_METHODS.includes?(raw_callee_name)
-        # Emit a void placeholder — caller expects void return
-        @void_values << inst.id
-        return
+      # Detect self-recursive delegate functions (e.g., deprecated overloads that delegate
+      # via named parameters our compiler can't resolve). Redirect to a different overload
+      # with the same base name to avoid infinite recursion / stack overflow.
+      if callee_func && callee_func.id == func.id
+        mangled_self = mangle_function_name(func.name)
+        base_name = mangled_self.split("$$").first
+        alternatives = @module.functions.select do |f|
+          next false if f.id == func.id
+          alt_mangled = mangle_function_name(f.name)
+          alt_mangled.starts_with?(base_name + "$$") || alt_mangled == base_name
+        end
+        if alt = alternatives.find { |f| f.blocks.size > 2 || (f.blocks.size > 0 && f.blocks.any? { |b| b.instructions.size > 2 }) }
+          alt_mangled = mangle_function_name(alt.name)
+          alt_ret_type = @type_mapper.llvm_type(alt.return_type)
+          alt_ret_type = @emitted_function_return_types[alt_mangled]? || alt_ret_type
+          arg_strs = [] of String
+          alt.params.each_with_index do |param, i|
+            if i < inst.args.size
+              arg_val = value_ref(inst.args[i])
+              arg_type = lookup_value_llvm_type(inst.args[i])
+              expected_type = @type_mapper.llvm_type(param.type)
+              expected_type = "ptr" if expected_type == "void"
+              if arg_type != expected_type
+                c = @cond_counter
+                @cond_counter += 1
+                if arg_type == "ptr" && expected_type.starts_with?('i')
+                  emit "%selfrecur_cast.#{c} = ptrtoint ptr #{arg_val} to #{expected_type}"
+                  arg_val = "%selfrecur_cast.#{c}"
+                  arg_type = expected_type
+                elsif arg_type.starts_with?('i') && expected_type == "ptr"
+                  emit "%selfrecur_cast.#{c} = inttoptr #{arg_type} #{arg_val} to ptr"
+                  arg_val = "%selfrecur_cast.#{c}"
+                  arg_type = expected_type
+                elsif arg_type.starts_with?('i') && expected_type.starts_with?('i')
+                  actual_bits = arg_type[1..].to_i? || 32
+                  expected_bits = expected_type[1..].to_i? || 32
+                  if actual_bits < expected_bits
+                    emit "%selfrecur_cast.#{c} = sext #{arg_type} #{arg_val} to #{expected_type}"
+                  elsif actual_bits > expected_bits
+                    emit "%selfrecur_cast.#{c} = trunc #{arg_type} #{arg_val} to #{expected_type}"
+                  else
+                    emit "%selfrecur_cast.#{c} = bitcast #{arg_type} #{arg_val} to #{expected_type}"
+                  end
+                  arg_val = "%selfrecur_cast.#{c}"
+                  arg_type = expected_type
+                end
+              end
+              arg_strs << "#{arg_type} #{arg_val}"
+            end
+          end
+          # Track the redirected callee so it gets a declare/stub if not emitted
+          @called_crystal_functions[alt_mangled] ||= (alt_ret_type == "void" ? "ptr" : alt_ret_type)
+          if alt_ret_type == "void"
+            emit "call void @#{alt_mangled}(#{arg_strs.join(", ")})"
+            @void_values << inst.id
+          else
+            emit "#{name} = call #{alt_ret_type} @#{alt_mangled}(#{arg_strs.join(", ")})"
+            @value_types[inst.id] = alt.return_type
+          end
+          return
+        end
       end
 
       # Intercept Array#sum() with no args (only self) to avoid infinite recursion
