@@ -1,7 +1,7 @@
 # Crystal v2 — Active Work (codegen branch)
 
 ## Known Bugs (codegen)
-- Confirmed repros in complex regression suite (38/42 pass, 4 fail):
+- Confirmed repros in complex regression suite (still failing):
   - `regression_tests/complex/test_channel_receive_state.cr`
     - status: link failure (missing `_current` symbol in spawn/channel path).
   - `regression_tests/complex/test_option_parser_to_s.cr`
@@ -13,10 +13,17 @@
   - `regression_tests/complex/test_nilable_proc.cr`
     - status: block-capture method (`on_event(&block : String ->)`) generates a getter
       instead of a setter. The block parameter is never stored to the ivar.
-- Recently fixed repro:
+- Current regression suite status:
+  - Basic: 44/44 pass
+  - Complex quick: 14/14 pass (includes recently fixed tests)
+- Recently fixed repros:
   - `regression_tests/complex/test_find_nil_and_value.cr`
     - fixed by CFG-reachable return-type merge (dead blocks no longer pollute
       function return type inference).
+  - `regression_tests/complex/test_multi_return_type_block.cr`
+    - fixed by moving yield from statement-level to expression pipeline in parser.
+  - `regression_tests/complex/test_nilable_chain.cr`
+    - fixed by parser yield change (yield result can now be chained).
 - Existing targeted regressions remain in place:
   - `regression_tests/test_select_map_stress.cr`
   - `regression_tests/test_float_pow_var.cr`
@@ -37,6 +44,21 @@
 - Float64: arithmetic, ** on literals
 
 ## Recently completed
+- **Bootstrap Stage 2 stabilization (2026-02-19)** —
+  Fixed 5 bugs blocking Stage 2 self-hosting:
+  1. Proc#call argument forwarding — name-based Proc type detection instead of
+     TypeKind-only check (ast_to_hir.cr, hir_to_mir.cr).
+  2. Hash key_hash for value types — added overrides for UInt64/Int64/UInt32/Symbol
+     to avoid inttoptr crash on raw values (llvm_backend.cr).
+  3. Return inside rescue — terminator guards prevent Jump from overwriting
+     Return/Raise in rescue/else/body blocks (ast_to_hir.cr lower_begin).
+  4. String.new(UInt8*) — LLVM backend override calls strlen+copy instead of
+     auto-allocator that ignored the pointer argument. Fixes ARGV in Stage 2.
+  5. Reference#object_id — primitive ptrtoint override (llvm_backend.cr).
+  Also: moved yield to expression pipeline (parser.cr) so yield results can be
+  chained, and removed DEBUG_CLONE_INLINE logging.
+  Validation: 44/44 basic, 14/14 complex regression tests pass.
+
 - **case/when type narrowing for class unions (2026-02-19)** —
   Fixed `case x when Dog` on union variables (`Dog | Cat | Fish`) dispatching
   to the wrong method. Root cause: `lower_case` in ast_to_hir.cr skipped type

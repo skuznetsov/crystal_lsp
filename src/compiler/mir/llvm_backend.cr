@@ -951,6 +951,15 @@ module Crystal::MIR
                "}\n"
       end
 
+      # Reference#object_id — primitive: return pointer address as UInt64
+      if name.ends_with?("$Hobject_id") && return_type == "i64"
+        return "; Reference#object_id (primitive: ptrtoint)\n" \
+               "define i64 @#{name}(ptr %self) {\n" \
+               "  %addr = ptrtoint ptr %self to i64\n" \
+               "  ret i64 %addr\n" \
+               "}\n"
+      end
+
       # Float64#**(Int32) / Float32#**(Int32) — primitive power via llvm.powi intrinsic
       if name == "Float64$H$POW$$Int32"
         return "; Float64#**(Int32) via llvm.powi.f64\n" \
