@@ -4358,6 +4358,85 @@ module Crystal::MIR
         return true
       end
 
+      # Hash#key_hash for other integer key types — same vdispatch bypass.
+      # UInt64 keys: already i64, no sign-extend needed.
+      if mangled.ends_with?("$Hkey_hash$$UInt64") && mangled.includes?("Hash$L")
+        emit_raw "; #{mangled} — direct UInt64 hash override (bypass vdispatch)\n"
+        emit_raw "define i32 @#{mangled}(ptr %self, i64 %key) {\n"
+        emit_raw "entry:\n"
+        emit_raw "  %hasher = call ptr @Crystal$CCHasher$Dnew(i64 0, i64 0)\n"
+        emit_raw "  %hasher2 = call ptr @Crystal$CCHasher$Hpermute$$UInt64(ptr %hasher, i64 %key)\n"
+        emit_raw "  %hash64 = call i64 @Crystal$CCHasher$Hresult(ptr %hasher2)\n"
+        emit_raw "  %hash32 = trunc i64 %hash64 to i32\n"
+        emit_raw "  %is_zero = icmp eq i32 %hash32, 0\n"
+        emit_raw "  br i1 %is_zero, label %ret_max, label %ret_hash\n"
+        emit_raw "ret_max:\n"
+        emit_raw "  ret i32 -1\n"
+        emit_raw "ret_hash:\n"
+        emit_raw "  ret i32 %hash32\n"
+        emit_raw "}\n\n"
+        return true
+      end
+
+      # Int64 keys: already i64.
+      if mangled.ends_with?("$Hkey_hash$$Int64") && mangled.includes?("Hash$L")
+        emit_raw "; #{mangled} — direct Int64 hash override (bypass vdispatch)\n"
+        emit_raw "define i32 @#{mangled}(ptr %self, i64 %key) {\n"
+        emit_raw "entry:\n"
+        emit_raw "  %hasher = call ptr @Crystal$CCHasher$Dnew(i64 0, i64 0)\n"
+        emit_raw "  %hasher2 = call ptr @Crystal$CCHasher$Hpermute$$UInt64(ptr %hasher, i64 %key)\n"
+        emit_raw "  %hash64 = call i64 @Crystal$CCHasher$Hresult(ptr %hasher2)\n"
+        emit_raw "  %hash32 = trunc i64 %hash64 to i32\n"
+        emit_raw "  %is_zero = icmp eq i32 %hash32, 0\n"
+        emit_raw "  br i1 %is_zero, label %ret_max, label %ret_hash\n"
+        emit_raw "ret_max:\n"
+        emit_raw "  ret i32 -1\n"
+        emit_raw "ret_hash:\n"
+        emit_raw "  ret i32 %hash32\n"
+        emit_raw "}\n\n"
+        return true
+      end
+
+      # UInt32 keys: zext to i64.
+      if mangled.ends_with?("$Hkey_hash$$UInt32") && mangled.includes?("Hash$L")
+        emit_raw "; #{mangled} — direct UInt32 hash override (bypass vdispatch)\n"
+        emit_raw "define i32 @#{mangled}(ptr %self, i32 %key) {\n"
+        emit_raw "entry:\n"
+        emit_raw "  %hasher = call ptr @Crystal$CCHasher$Dnew(i64 0, i64 0)\n"
+        emit_raw "  %key64 = zext i32 %key to i64\n"
+        emit_raw "  %hasher2 = call ptr @Crystal$CCHasher$Hpermute$$UInt64(ptr %hasher, i64 %key64)\n"
+        emit_raw "  %hash64 = call i64 @Crystal$CCHasher$Hresult(ptr %hasher2)\n"
+        emit_raw "  %hash32 = trunc i64 %hash64 to i32\n"
+        emit_raw "  %is_zero = icmp eq i32 %hash32, 0\n"
+        emit_raw "  br i1 %is_zero, label %ret_max, label %ret_hash\n"
+        emit_raw "ret_max:\n"
+        emit_raw "  ret i32 -1\n"
+        emit_raw "ret_hash:\n"
+        emit_raw "  ret i32 %hash32\n"
+        emit_raw "}\n\n"
+        return true
+      end
+
+      # Symbol keys: symbols are i32 IDs.
+      if mangled.ends_with?("$Hkey_hash$$Symbol") && mangled.includes?("Hash$L")
+        emit_raw "; #{mangled} — direct Symbol hash override (bypass vdispatch)\n"
+        emit_raw "define i32 @#{mangled}(ptr %self, i32 %key) {\n"
+        emit_raw "entry:\n"
+        emit_raw "  %hasher = call ptr @Crystal$CCHasher$Dnew(i64 0, i64 0)\n"
+        emit_raw "  %key64 = sext i32 %key to i64\n"
+        emit_raw "  %hasher2 = call ptr @Crystal$CCHasher$Hpermute$$UInt64(ptr %hasher, i64 %key64)\n"
+        emit_raw "  %hash64 = call i64 @Crystal$CCHasher$Hresult(ptr %hasher2)\n"
+        emit_raw "  %hash32 = trunc i64 %hash64 to i32\n"
+        emit_raw "  %is_zero = icmp eq i32 %hash32, 0\n"
+        emit_raw "  br i1 %is_zero, label %ret_max, label %ret_hash\n"
+        emit_raw "ret_max:\n"
+        emit_raw "  ret i32 -1\n"
+        emit_raw "ret_hash:\n"
+        emit_raw "  ret i32 %hash32\n"
+        emit_raw "}\n\n"
+        return true
+      end
+
       # Hash#key_hash for String keys — bypass broken Object#hash vdispatch for String.
       # String#hash calls hasher.string(self) which uses @bytesize and raw bytes.
       # Override: directly call String's hash infrastructure.

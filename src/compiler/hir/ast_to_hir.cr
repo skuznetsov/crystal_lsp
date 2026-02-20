@@ -21495,8 +21495,17 @@ module Crystal::HIR
       base_name = parts.base
       return base_name if @yield_functions.includes?(base_name)
 
+      # Check base_name$block — block-accepting overloads are registered with $block suffix
+      # while call-site mangling uses $Type_block (e.g. $UInt64_block).
+      block_name = base_name + "$block"
+      return block_name if @yield_functions.includes?(block_name)
+
       stripped = strip_generic_receiver_from_base_name(base_name)
       return stripped if @yield_functions.includes?(stripped)
+
+      # Also check stripped$block
+      stripped_block = stripped + "$block"
+      return stripped_block if @yield_functions.includes?(stripped_block)
 
       # Use pre-built stripped name map instead of O(N) loop
       if @yield_functions.size != @yield_functions_stripped_map_size
@@ -29844,6 +29853,7 @@ module Crystal::HIR
           # Handle subtype check: {% if K < Number::Primitive %}
           left_type = macro_condition_type_name(cond_node.left)
           right_type = macro_condition_type_name(cond_node.right)
+          STDERR.puts "[MACRO_LT] left=#{left_type.inspect} right=#{right_type.inspect} class=#{@current_class} method=#{@current_method} tpm=#{@type_param_map}"
           if left_type && right_type
             return macro_is_subtype(left_type, right_type)
           end
@@ -29856,39 +29866,55 @@ module Crystal::HIR
     # Used for evaluating {% if F == Float32 %} where F is a type parameter.
     private def macro_condition_type_name(expr_id : ExprId) : String?
       node = @arena[expr_id]
-      case node
-      when CrystalV2::Compiler::Frontend::MacroExpressionNode
-        macro_condition_type_name(node.expression)
-      when CrystalV2::Compiler::Frontend::ConstantNode
-        name = String.new(node.name)
-        # Substitute type parameter if present
-        @type_param_map[name]? || name
-      when CrystalV2::Compiler::Frontend::IdentifierNode
-        name = String.new(node.name)
-        @type_param_map[name]? || name
-      when CrystalV2::Compiler::Frontend::PathNode
-        name = collect_path_string(node)
-        # Check if any part is a type param
-        @type_param_map[name]? || substitute_type_params_in_type_name(name)
-      when CrystalV2::Compiler::Frontend::GenericNode
-        base_name = macro_condition_type_name(node.base_type)
-        return nil unless base_name
-        type_arg_names = [] of String
-        node.type_args.each do |arg_id|
-          arg_name = macro_condition_type_name(arg_id)
-          return nil unless arg_name
-          type_arg_names << arg_name
-        end
-        "#{base_name}(#{type_arg_names.join(", ")})"
-      else
-        nil
+      name = case node
+             when CrystalV2::Compiler::Frontend::MacroExpressionNode
+               macro_condition_type_name(node.expression)
+             when CrystalV2::Compiler::Frontend::ConstantNode
+               n = String.new(node.name)
+               # Substitute type parameter if present
+               @type_param_map[n]? || n
+             when CrystalV2::Compiler::Frontend::IdentifierNode
+               n = String.new(node.name)
+               @type_param_map[n]? || n
+             when CrystalV2::Compiler::Frontend::PathNode
+               n = collect_path_string(node)
+               # Check if any part is a type param
+               @type_param_map[n]? || substitute_type_params_in_type_name(n)
+             when CrystalV2::Compiler::Frontend::GenericNode
+               base_name = macro_condition_type_name(node.base_type)
+               return nil unless base_name
+               type_arg_names = [] of String
+               node.type_args.each do |arg_id|
+                 arg_name = macro_condition_type_name(arg_id)
+                 return nil unless arg_name
+                 type_arg_names << arg_name
+               end
+               "#{base_name}(#{type_arg_names.join(", ")})"
+             else
+               nil
+             end
+      # Strip leading :: (top-level namespace prefix) — ::Bool is the same as Bool
+      if name && name.starts_with?("::")
+        name = name.lchop("::")
       end
+      name
     end
 
     # Check if left_type is a subtype of right_type for macro {% if K < SomeType %}.
     # Walks class hierarchy via @class_info and @module.class_parents,
     # with hardcoded fallback for Crystal's core type hierarchy.
     private def macro_is_subtype(left_type : String, right_type : String) : Bool
+      # Resolve type aliases for the left type only (the V parameter).
+      # The right type is a well-known constant from macro conditions
+      # (e.g. "Number::Primitive") and must NOT be resolved — its alias
+      # chain leads to "Int::Primitive | Float::Primitive" which breaks
+      # the hardcoded case matching below.
+      resolved_left = resolve_type_alias_chain(left_type)
+      if resolved_left != left_type
+        STDERR.puts "[MACRO_SUBTYPE] alias: #{left_type} → #{resolved_left}, right=#{right_type}"
+      end
+      left_type = resolved_left
+
       # Same type is not a strict subtype
       return false if left_type == right_type
 
@@ -29912,7 +29938,32 @@ module Crystal::HIR
                            "Float32", "Float64"}
       case right_type
       when "Number::Primitive"
-        return number_primitives.includes?(left_type)
+        STDERR.puts "[MACRO_SUBTYPE] Number::Primitive case hit, left=#{left_type}"
+        return true if number_primitives.includes?(left_type)
+        # For bootstrap safety: treat struct/value types as "primitive-like" so that
+        # Hash#clone (and similar) uses the simple non-recursive path.  This avoids
+        # exec_recursive_clone which has broken yield-inline behavior for nested blocks.
+        # Structs are value types and cannot form circular reference cycles.
+        # Check both full name and stripped name (without generic params).
+        check_names = [left_type]
+        if left_type.includes?('(')
+          base = left_type[0, left_type.index('(').not_nil!]
+          check_names << base
+        end
+        check_names.each do |name|
+          if info = @class_info[name]?
+            p = info.parent_name
+            return true if p == "Struct" || p == "Value" || p == "Enum"
+          end
+        end
+        # Also check known Crystal struct types that may not be in class_info
+        # at macro evaluation time
+        struct_types = {"Proc", "Tuple", "NamedTuple", "StaticArray",
+                        "Slice", "Range", "Regex", "Time", "UUID",
+                        "Pointer", "Set"}
+        base_name = left_type.includes?('(') ? left_type[0, left_type.index('(').not_nil!] : left_type
+        return true if struct_types.includes?(base_name)
+        return false
       when "Number"
         return number_primitives.includes?(left_type) ||
           left_type == "Number::Primitive" ||
@@ -40113,7 +40164,7 @@ module Crystal::HIR
           proc_recv_id = lower_expr(ctx, obj_expr)
           proc_recv_type = ctx.type_of(proc_recv_id)
           if proc_recv_desc = @module.get_type_descriptor(proc_recv_type)
-            if proc_recv_desc.kind == TypeKind::Proc
+            if proc_recv_desc.kind == TypeKind::Proc || proc_recv_desc.name == "Proc" || proc_recv_desc.name.starts_with?("Proc(")
               # Lower each arg individually
               proc_call_args = call_args.map { |arg_expr| lower_expr(ctx, arg_expr) }
               # Append captured values as hidden extra args
@@ -42790,6 +42841,9 @@ module Crystal::HIR
       end
 
       disable_inline_yield = env_has?("CRYSTAL_V2_DISABLE_INLINE_YIELD")
+      if env_has?("DEBUG_CLONE_INLINE") && (method_name == "fetch" || method_name == "exec_recursive_clone")
+        STDERR.puts "[CLONE_INLINE] call #{method_name} mangled=#{mangled_method_name} base=#{base_method_name} block_for_inline=#{!!block_for_inline} proc_for_inline=#{!!proc_for_inline} inline_stack=#{@inline_yield_name_stack.size} current=#{@current_class || ""}"
+      end
       if (block_for_inline || proc_for_inline) && !disable_inline_yield
         try_inline_allowed = env_has?("CRYSTAL_V2_INLINE_TRY") || !env_has?("CRYSTAL_V2_DISABLE_TRY_INLINE")
         if method_name == "try"
@@ -42881,6 +42935,8 @@ module Crystal::HIR
             # This keeps correctness (fallback call emits a block) while reducing lowering cost.
             # However, do NOT skip for yield functions — they may use typeof(yield ...) internally
             # which requires inline expansion to resolve the block return type correctly.
+            # Also don't skip if the callee contains yield — the block-to-proc fallback loses
+            # closure capture context, causing null dereferences (e.g. Hash#fetch in clone).
             is_known_yield = @yield_functions.includes?(mangled_method_name) ||
                              @yield_functions.includes?(base_method_name)
             unless is_known_yield || yield_return_function_for_call(mangled_method_name, base_method_name)
@@ -42889,10 +42945,29 @@ module Crystal::HIR
                 receiver_hint = resolved_receiver_type == TypeRef::VOID ? nil : resolved_receiver_type
                 if inferred = resolve_return_type_from_def(mangled_method_name, base_method_name, receiver_hint)
                   if inferred != TypeRef::VOID && inferred != TypeRef::NIL
-                    skip_inline = true
-                    debug_hook("call.inline.skip", "callee=#{mangled_method_name} reason=return_type_known")
+                    # When inside an already-inlined yield function, don't skip —
+                    # block-to-proc conversion would lose access to the inlined scope's
+                    # variables, causing null dereferences in the proc body.
+                    # Example: exec_recursive_clone inlined → hash.fetch { yield(hash) }
+                    if @inline_yield_name_stack.size > 0
+                      if env_has?("DEBUG_CLONE_INLINE")
+                        STDERR.puts "[CLONE_INLINE] NOT skipping #{mangled_method_name} because inside inline stack: #{@inline_yield_name_stack.join(" -> ")}"
+                      end
+                    else
+                      skip_inline = true
+                      debug_hook("call.inline.skip", "callee=#{mangled_method_name} reason=return_type_known")
+                    end
                   end
                 end
+              else
+                if env_has?("DEBUG_CLONE_INLINE") && method_name == "fetch"
+                  brtp = block_return_type_param_name(mangled_method_name, base_method_name)
+                  STDERR.puts "[CLONE_SKIP_DETAIL] block_return_type_param_name=#{brtp} (not nil, skipped return_type check)"
+                end
+              end
+            else
+              if env_has?("DEBUG_CLONE_INLINE") && method_name == "fetch"
+                STDERR.puts "[CLONE_SKIP_DETAIL] is_known_yield=#{is_known_yield} yield_return_fn=#{!!yield_return_function_for_call(mangled_method_name, base_method_name)} (skipped return_type check)"
               end
             end
           end
@@ -42900,6 +42975,11 @@ module Crystal::HIR
                             !block_return_type_param_name(mangled_method_name, base_method_name).nil? ||
                             @yield_functions.includes?(mangled_method_name) ||
                             @yield_functions.includes?(base_method_name)
+          # When inside an already-inlined yield function, force inline_required to prevent
+          # block-to-proc conversion which would lose access to inlined scope variables.
+          if !inline_required && @inline_yield_name_stack.size > 0
+            inline_required = true
+          end
           if !skip_inline && !inline_required
             if block_param_types_inline
               skip_inline = true
@@ -42918,10 +42998,33 @@ module Crystal::HIR
             end
           end
 
-          if !skip_inline && @yield_functions.includes?(mangled_method_name)
+          if env_has?("DEBUG_CLONE_INLINE") && method_name == "fetch"
+            STDERR.puts "[CLONE_GATE] skip_inline=#{skip_inline} mangled_in_yield=#{@yield_functions.includes?(mangled_method_name)} base_in_yield=#{@yield_functions.includes?(base_method_name)}"
+            if @inline_yield_name_stack.size > 0
+              # Dump all fetch-related entries in yield_functions and function_defs
+              fetch_in_yf = @yield_functions.select { |n| n.includes?("fetch") && n.includes?("Hash") }
+              STDERR.puts "[CLONE_GATE] yield_functions matching Hash+fetch: #{fetch_in_yf.join(", ")}"
+              fetch_in_fd = @function_defs.keys.select { |n| n.includes?("fetch") && n.includes?("Hash") && n.includes?("UInt64") }
+              STDERR.puts "[CLONE_GATE] function_defs matching Hash+fetch+UInt64: #{fetch_in_fd.join(", ")}"
+            end
+          end
+          # Determine the effective yield function name: the mangled name may have
+          # type-specialized suffixes (e.g. $UInt64_block) while yield_functions uses
+          # the generic $block suffix.  Try: mangled → base$block → base.
+          effective_yield_key = if @yield_functions.includes?(mangled_method_name)
+                                  mangled_method_name
+                                else
+                                  block_variant = base_method_name + "$block"
+                                  if @yield_functions.includes?(block_variant)
+                                    block_variant
+                                  else
+                                    nil
+                                  end
+                                end
+          if !skip_inline && effective_yield_key
             if receiver_id
               recv_name = get_type_name_from_ref(ctx.type_of(receiver_id))
-              owner_part = strip_type_suffix(mangled_method_name)
+              owner_part = strip_type_suffix(effective_yield_key)
               owner_name = method_owner(owner_part)
               if owner_name && owner_name.includes?('(') && recv_name.includes?('(')
                 owner_base = split_generic_base_and_args(owner_name).try(&.[](:base)) || owner_name
@@ -42934,10 +43037,13 @@ module Crystal::HIR
               end
             end
             if !skip_inline
-              if func_def = @function_defs[mangled_method_name]?
-                debug_hook("call.inline.yield", "callee=#{mangled_method_name} current=#{@current_class || ""}")
-                callee_arena = @function_def_arenas[mangled_method_name]? || @arena
-                return inline_yield_function(ctx, func_def, mangled_method_name, receiver_id, call_arg_values, block_cast, block_param_types_inline, callee_arena)
+              # Try function_defs with effective key first, then mangled name
+              func_def = @function_defs[effective_yield_key]? || @function_defs[mangled_method_name]?
+              if func_def
+                use_key = @function_defs.has_key?(effective_yield_key) ? effective_yield_key : mangled_method_name
+                debug_hook("call.inline.yield", "callee=#{use_key} current=#{@current_class || ""}")
+                callee_arena = @function_def_arenas[use_key]? || @arena
+                return inline_yield_function(ctx, func_def, use_key, receiver_id, call_arg_values, block_cast, block_param_types_inline, callee_arena)
               end
             end
           end
@@ -42948,10 +43054,17 @@ module Crystal::HIR
           end
           if !skip_inline
             if yield_name = yield_function_name_for(base_method_name)
+              if env_has?("DEBUG_CLONE_INLINE") && method_name == "fetch"
+                STDERR.puts "[CLONE_GATE1] yield_name=#{yield_name} in_function_defs=#{@function_defs.has_key?(yield_name)}"
+              end
               if func_def = @function_defs[yield_name]?
                 debug_hook("call.inline.yield", "callee=#{yield_name} current=#{@current_class || ""}")
                 callee_arena = @function_def_arenas[yield_name]? || @arena
                 return inline_yield_function(ctx, func_def, yield_name, receiver_id, call_arg_values, block_cast, block_param_types_inline, callee_arena)
+              end
+            else
+              if env_has?("DEBUG_CLONE_INLINE") && method_name == "fetch"
+                STDERR.puts "[CLONE_GATE1] yield_function_name_for returned nil for base=#{base_method_name}"
               end
             end
           end
@@ -42971,18 +43084,24 @@ module Crystal::HIR
             fb_entry = lookup_block_function_def_for_call(base_method_name, call_args.size, arg_types, receiver_base)
             STDERR.puts "[YIELD_INLINE]   lookup_block_entry=#{fb_entry ? fb_entry[0] : "nil"}"
           end
-          if !skip_inline && (entry = lookup_block_function_def_for_call(base_method_name, call_args.size, arg_types, receiver_base))
-            yield_name, yield_def = entry
-            callee_arena = @function_def_arenas[yield_name]? || @arena
-            # Check @yield_functions first - it was populated during registration when arena context was correct.
-            # This is more reliable than re-analyzing the DefNode which may fail for stdlib arenas.
-            callee_in_yield_set = @yield_functions.includes?(yield_name)
-            callee_has_yield = callee_in_yield_set || def_contains_yield?(yield_def, callee_arena)
-            callee_has_block_call = def_contains_block_call?(yield_def, callee_arena)
-            if callee_has_yield || callee_has_block_call
-              @yield_functions.add(yield_name) if callee_has_yield
-              debug_hook("call.inline.yield", "callee=#{yield_name} current=#{@current_class || ""}")
-              return inline_yield_function(ctx, yield_def, yield_name, receiver_id, call_arg_values, block_cast, block_param_types_inline, callee_arena)
+          if !skip_inline
+            entry = lookup_block_function_def_for_call(base_method_name, call_args.size, arg_types, receiver_base)
+            if env_has?("DEBUG_CLONE_INLINE") && method_name == "fetch"
+              STDERR.puts "[CLONE_GATE2] lookup_block=#{entry ? entry[0] : "nil"} receiver_base=#{receiver_base || "nil"} arg_count=#{call_args.size}"
+            end
+            if entry
+              yield_name, yield_def = entry
+              callee_arena = @function_def_arenas[yield_name]? || @arena
+              # Check @yield_functions first - it was populated during registration when arena context was correct.
+              # This is more reliable than re-analyzing the DefNode which may fail for stdlib arenas.
+              callee_in_yield_set = @yield_functions.includes?(yield_name)
+              callee_has_yield = callee_in_yield_set || def_contains_yield?(yield_def, callee_arena)
+              callee_has_block_call = def_contains_block_call?(yield_def, callee_arena)
+              if callee_has_yield || callee_has_block_call
+                @yield_functions.add(yield_name) if callee_has_yield
+                debug_hook("call.inline.yield", "callee=#{yield_name} current=#{@current_class || ""}")
+                return inline_yield_function(ctx, yield_def, yield_name, receiver_id, call_arg_values, block_cast, block_param_types_inline, callee_arena)
+              end
             end
           end
 
@@ -42991,6 +43110,9 @@ module Crystal::HIR
           # Example: `fd.tap { |x| x.something }` where tap is defined in Object.
           if !skip_inline && receiver_id
             if yield_key = find_yield_method_fallback(method_name, call_args.size, receiver_base)
+              if env_has?("DEBUG_CLONE_INLINE") && method_name == "fetch"
+                STDERR.puts "[CLONE_GATE3] yield_key=#{yield_key} in_function_defs=#{@function_defs.has_key?(yield_key)}"
+              end
               if func_def = @function_defs[yield_key]?
                 debug_hook("call.inline.yield", "callee=#{yield_key} current=#{@current_class || ""}")
                 callee_arena = @function_def_arenas[yield_key]? || @arena
@@ -49935,10 +50057,32 @@ module Crystal::HIR
                        next unless idx < yield_args.size
                        arg_id = yield_args[idx]
                        if param_types && (param_type = param_types[idx]?) && param_type != TypeRef::VOID
+                         # When the yield arg already has a concrete type, prefer it over the
+                         # pre-computed hint from block_param_types_for_call. The hint can be
+                         # wrong for methods like exec_recursive_clone where the block param
+                         # type doesn't correspond to the receiver's element type.
+                         arg_actual_type = ctx.type_of(arg_id)
+                         if env_has?("DEBUG_CLONE_INLINE") && param_name == "hash"
+                           arg_desc = @module.get_type_descriptor(arg_actual_type)
+                           pdesc = @module.get_type_descriptor(param_type)
+                           STDERR.puts "[CLONE_BIND] param=#{param_name} arg_id=#{arg_id} arg_type=#{arg_actual_type} arg_desc=#{arg_desc.try(&.name) || "nil"} (kind=#{arg_desc.try(&.kind) || "nil"}) param_type=#{param_type} param_desc=#{pdesc.try(&.name) || "nil"} (kind=#{pdesc.try(&.kind) || "nil"}) inline_stack=#{@inline_yield_name_stack.size}"
+                         end
+                         # Prefer the actual type from the yield arg over the pre-computed
+                         # hint when both are concrete but different. The flowing type is
+                         # authoritative (e.g., Hash(UInt64, UInt64) vs fallback Tuple(String, Box)).
+                         use_type = if arg_actual_type != TypeRef::VOID && arg_actual_type != param_type
+                                      arg_actual_type
+                                    else
+                                      param_type
+                                    end
+                         if env_has?("DEBUG_CLONE_INLINE") && param_name == "hash"
+                           use_desc = @module.get_type_descriptor(use_type)
+                           STDERR.puts "[CLONE_BIND] chose use_type=#{use_type} desc=#{use_desc.try(&.name) || "nil"}"
+                         end
                          ctx.register_local(param_name, arg_id)
-                         ctx.register_type(arg_id, param_type)
-                         update_typeof_local(param_name, param_type)
-                         update_typeof_local_name(param_name, get_type_name_from_ref(param_type))
+                         ctx.register_type(arg_id, use_type)
+                         update_typeof_local(param_name, use_type)
+                         update_typeof_local_name(param_name, get_type_name_from_ref(use_type))
                        else
                          ctx.register_local(param_name, arg_id)
                          ctx.register_type(arg_id, ctx.type_of(arg_id))
@@ -50681,7 +50825,7 @@ module Crystal::HIR
         proc_recv_id = lower_expr(ctx, node.object)
         proc_recv_type = ctx.type_of(proc_recv_id)
         if proc_recv_desc = @module.get_type_descriptor(proc_recv_type)
-          if proc_recv_desc.kind == TypeKind::Proc
+          if proc_recv_desc.kind == TypeKind::Proc || proc_recv_desc.name == "Proc" || proc_recv_desc.name.starts_with?("Proc(")
             proc_call_args = [] of ValueId
             # Append captured values as hidden extra args
             if capture_ids = @proc_captures_by_value[proc_recv_id]?
@@ -52512,6 +52656,12 @@ module Crystal::HIR
           all_args = index_ids + [value_id]
           arg_types = all_args.map { |arg| ctx.type_of(arg) }
           method_name = resolve_method_call(ctx, object_id, "[]=", arg_types, false)
+          if env_has?("DEBUG_CLONE_INLINE") && (method_name.includes?("Tuple") || method_name.includes?("Hash") && method_name.includes?("IDXS"))
+            recv_type = ctx.type_of(object_id)
+            recv_desc = @module.get_type_descriptor(recv_type)
+            hash_local = ctx.lookup_local("hash")
+            STDERR.puts "[CLONE_IDXS] resolved []=  to #{method_name} recv_type=#{recv_type} recv_desc=#{recv_desc.try(&.name) || "nil"} object_id=#{object_id} hash_local=#{hash_local || "nil"} inline_stack=#{@inline_yield_name_stack.size} current=#{@current_class}"
+          end
           return_type = get_function_return_type(method_name)
           # Ensure the []= method is lowered
           remember_callsite_arg_types(method_name, arg_types)

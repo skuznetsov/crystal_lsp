@@ -1188,7 +1188,7 @@ module Crystal
         recv_type = @hir_value_types[call.receiver.not_nil!]?
         recv_desc = recv_type ? @hir_module.get_type_descriptor(recv_type) : nil
         if recv_type
-          if recv_desc && recv_desc.kind == HIR::TypeKind::Proc
+          if recv_desc && (recv_desc.kind == HIR::TypeKind::Proc || recv_desc.name == "Proc" || recv_desc.name.starts_with?("Proc("))
             # Proc is a function pointer - emit indirect call
             # args[0] = receiver (func ptr), args[1..] = actual arguments
             filtered_args = [] of ValueId
