@@ -53747,15 +53747,25 @@ module Crystal::HIR
         end
       end
 
+      # Detect which captures are written inside the proc body so that the
+      # enclosing scope reads them back through the closure cell (not stale locals).
+      capture_names = captures.map { |name, _, _| name }.to_set
+      written_captures = detect_written_captures(node.body, capture_names, @arena)
+      previous_capture_cells = {} of String => {String, String, TypeRef}
+      new_capture_cells = Set(String).new
+      previous_prefer_cell = {} of String => Bool
+
       # Proc literals that escape their defining function currently lose hidden
       # capture args at call-sites (ABI mismatch: function expects captures but
       # Proc#call invokes with runtime args only). Until full closure-data ABI is
       # implemented, route captured locals through closure cells so proc bodies
       # have stable access without hidden parameters.
       captures.each do |cap_name, parent_vid, cap_type|
+        previous_prefer_cell[cap_name] = @closure_ref_prefer_cell.includes?(cap_name)
         if existing = @closure_ref_cells[cap_name]?
           # Reuse existing alias cell for this local if already established.
           # This keeps multiple procs over the same local consistent.
+          previous_capture_cells[cap_name] = existing
           existing_type = existing[2]
           if existing_type != cap_type
             # Type mismatch is unexpected for one lexical local name, but keep
@@ -53763,6 +53773,7 @@ module Crystal::HIR
             @closure_ref_cells[cap_name] = {existing[0], existing[1], cap_type}
           end
         else
+          new_capture_cells.add(cap_name)
           cell_name = "__closure_cell_#{@closure_cell_counter}"
           @closure_cell_counter += 1
           class_name = "__closure"
@@ -53771,6 +53782,7 @@ module Crystal::HIR
           ctx.register_type(set.id, cap_type)
           @closure_ref_cells[cap_name] = {class_name, cell_name, cap_type}
         end
+        @closure_ref_prefer_cell.add(cap_name) if written_captures.includes?(cap_name)
       end
 
       # Add parameters to the standalone function
@@ -53821,6 +53833,23 @@ module Crystal::HIR
       last_value = begin
         lower_body(proc_ctx, node.body)
       ensure
+        # Restore closure cell state: keep written captures in prefer_cell so
+        # the enclosing scope reads them through the cell, not stale locals.
+        captures.each do |cap_name, _, _|
+          next if written_captures.includes?(cap_name)
+          if previous = previous_capture_cells[cap_name]?
+            @closure_ref_cells[cap_name] = previous
+          elsif new_capture_cells.includes?(cap_name)
+            @closure_ref_cells.delete(cap_name)
+          end
+          if prev_prefer = previous_prefer_cell[cap_name]?
+            if prev_prefer
+              @closure_ref_prefer_cell.add(cap_name)
+            else
+              @closure_ref_prefer_cell.delete(cap_name)
+            end
+          end
+        end
         @inline_yield_proc_depth -= 1
         @inline_yield_return_stack = saved_return_stack_pl
         @inline_yield_return_override_stack = saved_override_stack_pl

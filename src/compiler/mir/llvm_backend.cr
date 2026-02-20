@@ -4880,6 +4880,27 @@ module Crystal::MIR
         end
       end
 
+      # Proc#call fallback — when HIR/MIR didn't detect the receiver as Proc type,
+      # the call goes through normal dispatch to an empty primitive body.
+      # A Proc in our compiler is just a function pointer (Proc.new returns the block
+      # pointer as-is). So Proc#call(self, args) must invoke self as a function pointer.
+      if mangled_name.starts_with?("Proc$Hcall")
+        emit_raw "define #{return_type} @#{mangled_name}(#{param_types.join(", ")}) {\n"
+        emit_raw "entry:\n"
+        # %self (param 0) IS the function pointer — invoke it directly.
+        # For zero-arg procs, call with no args. The return value (if any) is
+        # discarded when return_type is void, or returned otherwise.
+        if return_type == "void"
+          emit_raw "  call void %self()\n"
+          emit_raw "  ret void\n"
+        else
+          emit_raw "  %result = call #{return_type} %self()\n"
+          emit_raw "  ret #{return_type} %result\n"
+        end
+        emit_raw "}\n\n"
+        return
+      end
+
       emit_raw "define #{return_type} @#{mangled_name}(#{param_types.join(", ")}) {\n"
 
       # Emit entry block with hoisted allocas for dominance correctness
