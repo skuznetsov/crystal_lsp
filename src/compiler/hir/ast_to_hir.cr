@@ -36036,14 +36036,15 @@ module Crystal::HIR
         ctx.current_block = when_block
         ctx.restore_locals(pre_case_locals)
 
-        # Apply type narrowing for when branches with type checks (case e when NumE)
-        # Only narrow for class/abstract class subjects (ptr type), NOT for union types.
-        # Union types (Float32|Float64 etc.) already handle dispatch correctly without narrowing.
+        # Apply type narrowing for when branches with type checks (case e when Dog)
+        # For union subjects with class-type targets, emit UnionUnwrap to narrow.
+        # For non-union subjects (abstract class hierarchies), emit Cast.
+        # Value-type unions (Float32|Float64) are NOT narrowed to avoid payload type mismatches.
         if svn = subject_var_name
           subj_local_id = ctx.lookup_local(svn)
           subj_type = subj_local_id ? ctx.type_of(subj_local_id) : nil
-          should_narrow = subj_type && !is_union_type?(subj_type)
-          if should_narrow
+          subj_is_union = subj_type && is_union_type?(subj_type)
+          if subj_type
             when_branch.conditions.each do |cond_expr|
               cond_node = @arena[cond_expr]
               type_name = case cond_node
@@ -36057,7 +36058,19 @@ module Crystal::HIR
                             nil
                           end
               if type_name
-                apply_is_a_narrowing(ctx, [{svn, type_ref_for_name(type_name)}])
+                target_ref = type_ref_for_name(type_name)
+                target_desc = @module.get_type_descriptor(target_ref)
+                # For union subjects, only narrow if target is a class (pointer payload).
+                # Value types (Int32, Float32, structs) in unions break with UnionUnwrap
+                # because the payload contains raw bytes, not a pointer.
+                should_narrow = if subj_is_union
+                                  target_desc && target_desc.kind == HIR::TypeKind::Class
+                                else
+                                  true
+                                end
+                if should_narrow
+                  apply_is_a_narrowing(ctx, [{svn, target_ref}])
+                end
               end
             end
           end
