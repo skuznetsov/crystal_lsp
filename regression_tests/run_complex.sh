@@ -19,6 +19,9 @@ quick_cases=(
   "complex/test_yield_three_args.cr"
   "complex/test_while_yield_method.cr"
   "complex/test_string_to_u64_like.cr"
+  "complex/test_array_map_select_chain.cr"
+  "complex/test_hash_each_block.cr"
+  "complex/test_multi_return_type_block.cr"
 )
 
 full_cases=(
@@ -26,6 +29,14 @@ full_cases=(
   "complex/test_channel_receive_state.cr"
   "complex/test_option_parser_to_s.cr"
   "complex/test_generic_nil_return.cr"
+  "complex/test_block_proc_callback.cr"
+  "complex/test_closure_capture_multi.cr"
+  "complex/test_nested_yield_block.cr"
+  "complex/test_proc_stored_callback.cr"
+  "complex/test_generic_block_yield.cr"
+  "complex/test_class_with_block_ivar.cr"
+  "complex/test_string_builder_block.cr"
+  "complex/test_begin_rescue_in_block.cr"
 )
 
 if [ ! -x "$SAFE_RUN" ]; then
