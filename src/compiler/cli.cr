@@ -20,6 +20,54 @@ require "./lsp/ast_cache"
 {% end %}
 require "../runtime"
 
+# Monkey-patch: replace regex-based parse_flag_definition with string operations.
+# Regex is not yet functional in the v2 compiler (Regex#initialize from pcre2.cr
+# is never discovered/compiled), so this avoids the dependency entirely.
+class OptionParser
+  def parse_flag_definition(flag : String)
+    STDERR.puts "MONKEY-PATCH parse_flag_definition: #{flag}"
+    if flag.starts_with?("--")
+      # Find end of flag name (first space or '=' after --)
+      sep = -1
+      i = 2
+      while i < flag.size
+        b = flag.byte_at(i)
+        if b == 32_u8 || b == 61_u8 # ' ' or '='
+          sep = i
+          break
+        end
+        i += 1
+      end
+
+      if sep < 0
+        # --flag (no value argument)
+        return {flag, FlagValue::None}
+      end
+
+      name = flag[0...sep]
+      rest = flag[sep..]
+      if rest.includes?('[')
+        return {name, FlagValue::Optional}
+      end
+      return {name, FlagValue::Required}
+
+    elsif flag.starts_with?("-") && flag.size >= 2
+      short = flag[0..1]
+      if flag.size == 2
+        return {short, FlagValue::None}
+      end
+
+      rest = flag[2..]
+      if rest.includes?('[')
+        return {short, FlagValue::Optional}
+      end
+      return {short, FlagValue::Required}
+    end
+
+    {flag, FlagValue::None}
+  end
+end
+
 # Module aliases for convenience
 alias HIR = Crystal::HIR
 alias MIR = Crystal::MIR
