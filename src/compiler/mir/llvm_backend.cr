@@ -3898,6 +3898,24 @@ module Crystal::MIR
     private def emit_builtin_override(func : Function) : Bool
       mangled = mangle_function_name(func.name)
       case mangled
+      when "String$Dnew$$Pointer$LUInt8$R"
+        # String.new(chars : UInt8*) — calls strlen then delegates to 3-arg version.
+        # The auto-allocator ignores the argument; this override implements the
+        # stdlib's self.new(UInt8*) which copies data from the C string.
+        emit_raw "; String.new(UInt8*) — runtime override (strlen + copy)\n"
+        emit_raw "define ptr @#{mangled}(ptr %chars) {\n"
+        emit_raw "entry:\n"
+        emit_raw "  %is_null = icmp eq ptr %chars, null\n"
+        emit_raw "  br i1 %is_null, label %ret_empty, label %do_strlen\n"
+        emit_raw "ret_empty:\n"
+        emit_raw "  ret ptr @.str.empty\n"
+        emit_raw "do_strlen:\n"
+        emit_raw "  %len64 = call i64 @strlen(ptr %chars)\n"
+        emit_raw "  %len = trunc i64 %len64 to i32\n"
+        emit_raw "  %result = call ptr @String$Dnew$$Pointer$LUInt8$R_Int32_Int32(ptr %chars, i32 %len, i32 %len)\n"
+        emit_raw "  ret ptr %result\n"
+        emit_raw "}\n\n"
+        return true
       when "String$Dnew$$Pointer$LUInt8$R_Int32_Int32"
         # String.new(chars : UInt8*, bytesize : Int32, size : Int32)
         # Allocates a Crystal String, copies data from chars pointer.
@@ -4976,6 +4994,16 @@ module Crystal::MIR
           emit_raw "  %result = call #{return_type} %self()\n"
           emit_raw "  ret #{return_type} %result\n"
         end
+        emit_raw "}\n\n"
+        return
+      end
+
+      # Reference#object_id — primitive: return ptrtoint of self pointer as UInt64
+      if mangled_name.ends_with?("$Hobject_id") && return_type == "i64" && param_types.size == 1
+        emit_raw "define #{return_type} @#{mangled_name}(#{param_types.join(", ")}) {\n"
+        emit_raw "entry:\n"
+        emit_raw "  %addr = ptrtoint ptr %self to i64\n"
+        emit_raw "  ret i64 %addr\n"
         emit_raw "}\n\n"
         return
       end
