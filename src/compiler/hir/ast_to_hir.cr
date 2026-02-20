@@ -27093,9 +27093,32 @@ module Crystal::HIR
       mir_union_ref = hir_to_mir_type_ref(union_type)
       if descriptor = @union_descriptors[mir_union_ref]?
         mir_value_ref = hir_to_mir_type_ref(value_type)
+        # First: exact TypeRef match
         descriptor.variants.each_with_index do |variant, idx|
           if variant.type_ref == mir_value_ref
             return idx
+          end
+        end
+        # Second: name-based match (handles duplicate TypeRefs for same logical type,
+        # e.g. Proc registered at class declaration vs Proc at method lowering)
+        value_name = get_type_name_from_ref(value_type)
+        unless value_name.empty?
+          descriptor.variants.each_with_index do |variant, idx|
+            if variant.full_name == value_name
+              return idx
+            end
+          end
+          # Third: strip generic args and compare base names
+          value_base = value_name.includes?('(') ? value_name[0, value_name.index('(').not_nil!] : value_name
+          unless value_name.includes?(" | ") || value_name.includes?("___")
+            descriptor.variants.each_with_index do |variant, idx|
+              vname = variant.full_name
+              next if vname == "Nil" || vname == "Void"
+              vbase = vname.includes?('(') ? vname[0, vname.index('(').not_nil!] : vname
+              if vbase == value_base && !vbase.empty?
+                return idx
+              end
+            end
           end
         end
       end
