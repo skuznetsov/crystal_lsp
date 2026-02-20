@@ -20996,8 +20996,16 @@ module Crystal::HIR
             return info.size
           end
         end
-        # Check for StaticArray(T, N) by type name
+        # Fallback: check by name (type_id may differ due to aliases or lib type resolution)
         type_name = get_type_name_from_ref(type)
+        if type_name != "Unknown"
+          if info = @class_info[type_name]?
+            if info.is_struct && info.size > 0
+              return info.size
+            end
+          end
+        end
+        # Check for StaticArray(T, N) by type name
         if type_name.starts_with?("StaticArray(")
           if sa_size = compute_static_array_byte_size(type_name, c_context)
             return sa_size
@@ -21050,6 +21058,46 @@ module Crystal::HIR
       return offset if alignment <= 1
       remainder = offset % alignment
       remainder == 0 ? offset : offset + (alignment - remainder)
+    end
+
+    # Recompute sizes for C lib structs that may have been registered with
+    # incorrect field sizes due to dependency ordering. For example, LibC::Stat
+    # may be registered before LibC::Timespec, causing Timespec fields to be
+    # sized as pointers (8 bytes) instead of their actual struct size (16 bytes).
+    # This must be called after all lib blocks have been processed.
+    def recompute_c_struct_sizes
+      changed = true
+      iterations = 0
+      while changed && iterations < 10
+        changed = false
+        iterations += 1
+        @lib_structs.each do |struct_name|
+          info = @class_info[struct_name]?
+          next unless info && info.is_struct && !info.ivars.empty?
+
+          # Recompute size from fields using current (possibly updated) type sizes
+          offset = 0_i32
+          new_ivars = [] of IVarInfo
+          info.ivars.each do |ivar|
+            offset = align_offset(offset, type_alignment(ivar.type, true))
+            new_ivars << IVarInfo.new(ivar.name, ivar.type, offset, ivar.default_expr_id, ivar.default_arena)
+            offset += type_size(ivar.type, true)
+          end
+
+          if !new_ivars.empty?
+            max_align = new_ivars.max_of { |iv| type_alignment(iv.type, true) }
+            offset = align_offset(offset, max_align)
+          end
+
+          if offset != info.size
+            new_info = ClassInfo.new(info.name, info.type_ref, new_ivars, info.class_vars, offset, info.is_struct, info.parent_name)
+            @class_info[struct_name] = new_info
+            @class_info_by_type_id[info.type_ref.id] = new_info
+            @class_info_version += 1
+            changed = true
+          end
+        end
+      end
     end
 
     # Register a function signature (for forward reference support)
@@ -41943,10 +41991,18 @@ module Crystal::HIR
                 end
                 # When type_name is a module (e.g. Crystal::System::Time), resolve to
                 # the actual class (e.g. Time) if the short name exists in class_info.
+                # BUT: only shorten if the module doesn't define the method itself.
+                # Otherwise Crystal::System::File.info? would resolve to File.info?
+                # instead of the module's own implementation, causing infinite recursion.
                 if @module_defs.has_key?(type_name) && !@class_info.has_key?(type_name)
-                  short = last_namespace_component(type_name)
-                  if @class_info.has_key?(short)
-                    type_name = short
+                  module_method_name = "#{type_name}.#{method_name}"
+                  module_has_method = @function_defs.has_key?(module_method_name) ||
+                                     class_method_overload_exists?(module_method_name)
+                  unless module_has_method
+                    short = last_namespace_component(type_name)
+                    if @class_info.has_key?(short)
+                      type_name = short
+                    end
                   end
                 end
                 if env_get("DEBUG_TYPEDESC_FALLBACK")

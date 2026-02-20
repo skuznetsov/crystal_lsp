@@ -633,6 +633,7 @@ module CrystalV2
         enum_nodes.each { |n, a| hir_converter.arena = a; hir_converter.register_enum(n) }
         log(options, out_io, "    Libs: #{lib_nodes.size}")
         lib_nodes.each { |n, a, annotations| hir_converter.arena = a; hir_converter.register_lib(n, annotations) }
+        hir_converter.recompute_c_struct_sizes
         log(options, out_io, "    Aliases: #{alias_nodes.size}")
         alias_nodes.each { |n, a| hir_converter.arena = a; hir_converter.register_alias(n) }
         log(options, out_io, "    Macros: #{macro_nodes.size}")
