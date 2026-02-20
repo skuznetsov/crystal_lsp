@@ -14856,9 +14856,11 @@ module Crystal::HIR
       end
 
       # Set up type parameter substitutions: T => Int32, etc.
+      # Resolve type aliases so that e.g. `alias Handler = Proc(String, Nil)`
+      # stores "Proc(String, Nil)" instead of "Handler" in the map.
       old_map = @type_param_map.dup
       template.type_params.each_with_index do |param, i|
-        @type_param_map[param] = type_args[i]
+        @type_param_map[param] = resolve_type_alias_chain(type_args[i])
       end
       @subst_cache_gen &+= 1
 
@@ -15014,7 +15016,7 @@ module Crystal::HIR
       old_map = @type_param_map.dup
       if type_params = template_def.type_params
         type_params.each_with_index do |param, i|
-          @type_param_map[String.new(param)] = type_args[i]
+          @type_param_map[String.new(param)] = resolve_type_alias_chain(type_args[i])
         end
         @subst_cache_gen &+= 1
       end
@@ -29853,7 +29855,6 @@ module Crystal::HIR
           # Handle subtype check: {% if K < Number::Primitive %}
           left_type = macro_condition_type_name(cond_node.left)
           right_type = macro_condition_type_name(cond_node.right)
-          STDERR.puts "[MACRO_LT] left=#{left_type.inspect} right=#{right_type.inspect} class=#{@current_class} method=#{@current_method} tpm=#{@type_param_map}"
           if left_type && right_type
             return macro_is_subtype(left_type, right_type)
           end
@@ -29910,9 +29911,6 @@ module Crystal::HIR
       # chain leads to "Int::Primitive | Float::Primitive" which breaks
       # the hardcoded case matching below.
       resolved_left = resolve_type_alias_chain(left_type)
-      if resolved_left != left_type
-        STDERR.puts "[MACRO_SUBTYPE] alias: #{left_type} → #{resolved_left}, right=#{right_type}"
-      end
       left_type = resolved_left
 
       # Same type is not a strict subtype
@@ -29938,7 +29936,6 @@ module Crystal::HIR
                            "Float32", "Float64"}
       case right_type
       when "Number::Primitive"
-        STDERR.puts "[MACRO_SUBTYPE] Number::Primitive case hit, left=#{left_type}"
         return true if number_primitives.includes?(left_type)
         # For bootstrap safety: treat struct/value types as "primitive-like" so that
         # Hash#clone (and similar) uses the simple non-recursive path.  This avoids
@@ -36613,9 +36610,13 @@ module Crystal::HIR
       body_value_block = ctx.current_block
 
       # After body, jump to else (if exists) or ensure (if exists) or exit
+      # Only if the body didn't already terminate (e.g., via return/raise)
       after_body_target = else_block || ensure_block || exit_block
-      ctx.terminate(Jump.new(after_body_target))
-      body_exit_block = after_body_target
+      body_flows = ctx.get_block(ctx.current_block).terminator.is_a?(Unreachable)
+      if body_flows
+        ctx.terminate(Jump.new(after_body_target))
+        body_exit_block = after_body_target
+      end
 
       # Lower rescue clauses if any
       if has_rescue
@@ -36708,12 +36709,13 @@ module Crystal::HIR
             rescue_result = lower_expr(ctx, expr_id)
           end
 
-          # Track clause exit for PHI merging
-          clause_exit_block = ctx.current_block
-          rescue_clause_exits << {clause_exit_block, rescue_result}
-
-          # Jump to rescue_done after body
-          ctx.terminate(Jump.new(rescue_done_block))
+          # Track clause exit for PHI merging and jump to rescue_done
+          # Only if the rescue body didn't already terminate (e.g., via return/raise)
+          if ctx.get_block(ctx.current_block).terminator.is_a?(Unreachable)
+            clause_exit_block = ctx.current_block
+            rescue_clause_exits << {clause_exit_block, rescue_result}
+            ctx.terminate(Jump.new(rescue_done_block))
+          end
 
           if has_type_check && idx < rescue_clauses.size - 1
             # Switch to the next check block for the next iteration
@@ -36747,10 +36749,12 @@ module Crystal::HIR
         rescue_locals = ctx.save_locals
 
         # Capture rescue value block (rescue_done_block is where rescue values arrive)
-        rescue_value_block = rescue_done_block
-
-        ctx.terminate(Jump.new(after_rescue_target))
-        rescue_exit_block = after_rescue_target
+        # Only set if at least one clause flows to rescue_done_block
+        if rescue_clause_exits.size > 0
+          rescue_value_block = rescue_done_block
+          ctx.terminate(Jump.new(after_rescue_target))
+          rescue_exit_block = after_rescue_target
+        end
       end
 
       # Lower else block if any
@@ -36761,7 +36765,9 @@ module Crystal::HIR
           result_id = lower_expr(ctx, expr_id)
         end
         after_else_target = ensure_block || exit_block
-        ctx.terminate(Jump.new(after_else_target))
+        if ctx.get_block(ctx.current_block).terminator.is_a?(Unreachable)
+          ctx.terminate(Jump.new(after_else_target))
+        end
       end
 
       # Lower ensure block if any
@@ -49922,6 +49928,15 @@ module Crystal::HIR
     ) : ValueId
       @inline_yield_block_body_depth += 1
       pushed_override = false
+
+      begin
+        callee_name = @inline_yield_name_stack.last? || ""
+        if callee_name.includes?("fetch") || callee_name.includes?("clone") || callee_name.includes?("exec_recursive")
+          body_exprs = block.body.reject(&.invalid?)
+          STDERR.puts "[CLONE_BLOCK_BODY] size=#{body_exprs.size} callee=#{callee_name} depth=#{@inline_yield_block_body_depth} class=#{@current_class || "nil"} method=#{@current_method || "nil"}"
+        end
+      end
+
       begin
         # When a block is lexically defined in the function being lowered (ctx.function),
         # a `return` inside it should exit the function entirely (real Return), not jump to
@@ -50090,6 +50105,19 @@ module Crystal::HIR
                      end
 
                      # Ensure block body is lowered in the caller arena, even when the callee comes from another file.
+                     if env_has?("DEBUG_CLONE_INLINE")
+                       block_arena_for_debug = resolve_arena_for_block(block, @arena) || @arena
+                       body_exprs = block.body.reject(&.invalid?)
+                       body_node_types = body_exprs.map { |eid|
+                         begin
+                           n = block_arena_for_debug[eid]
+                           n.class.name.split("::").last
+                         rescue
+                           "nil"
+                         end
+                       }
+                       STDERR.puts "[CLONE_BLOCK_BODY] block_body_size=#{body_exprs.size} node_types=#{body_node_types} callee=#{@inline_yield_name_stack.last? || ""}"
+                     end
                      body_result = begin
                        # The block body belongs to the *caller* and may itself contain `yield`.
                        # Temporarily disable the current inlined-yield substitution so nested `yield`
@@ -50113,6 +50141,20 @@ module Crystal::HIR
                          chosen_arena = block_arena || popped_arena || @inline_yield_block_arena_stack.last? || old_arena
                          @arena = chosen_arena
                          begin
+                           callee_dbg = @inline_yield_name_stack.last? || ""
+                           if callee_dbg.includes?("fetch") || callee_dbg.includes?("clone")
+                             body_ids = block.body.reject(&.invalid?)
+                             arena_path = source_path_for(@arena) || "unknown"
+                             STDERR.puts "[LOWER_BODY_PRE] callee=#{callee_dbg} body_ids=#{body_ids.map(&.index)} arena_size=#{@arena.size} arena_file=#{arena_path} depth=#{@inline_yield_block_body_depth}"
+                             body_ids.each do |eid|
+                               if eid.index >= 0 && eid.index < @arena.size
+                                 n = @arena[eid]
+                                 STDERR.puts "[LOWER_BODY_PRE]   expr[#{eid.index}] = #{n.class.name.split("::").last}"
+                               else
+                                 STDERR.puts "[LOWER_BODY_PRE]   expr[#{eid.index}] = OOB (arena size #{@arena.size})"
+                               end
+                             end
+                           end
                            lower_body(ctx, block.body)
                          ensure
                            @arena = old_arena
