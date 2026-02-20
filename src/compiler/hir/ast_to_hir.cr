@@ -23291,13 +23291,10 @@ module Crystal::HIR
         @arena = arena
         val_node = @arena[value_id]
         needs_deferred = val_node.is_a?(CrystalV2::Compiler::Frontend::StringNode)
-        # Also defer constructor calls: CallNode where callee is X.new(...)
+        # Also defer any call expression — runtime function calls need to run at startup.
+        # This catches constructors (X.new), class methods (File.expand_path), etc.
         if !needs_deferred && val_node.is_a?(CrystalV2::Compiler::Frontend::CallNode)
-          callee_n = @arena[val_node.callee]
-          if callee_n.is_a?(CrystalV2::Compiler::Frontend::MemberAccessNode)
-            member_n = String.new(callee_n.member)
-            needs_deferred = true if member_n == "new"
-          end
+          needs_deferred = true
         end
         @arena = old_a2
         if needs_deferred
@@ -27930,6 +27927,13 @@ module Crystal::HIR
         @deferred_classvar_inits.clear
 
         # Constants stay EAGER — process them now (same as eager mode)
+        # Reorder: STDOUT/STDERR/STDIN first so Crystal.exit can report errors
+        # even if later constant inits (e.g. CRYSTAL_SRC_PATH) raise exceptions.
+        @deferred_constant_inits.sort_by! do |(_, cn, _, _)|
+          case cn
+          when "STDIN" then 0; when "STDOUT" then 1; when "STDERR" then 2; else 3
+          end
+        end
         @deferred_constant_inits.each do |(owner, const_name, value_id, init_arena)|
           @arena = init_arena
           old_class = @current_class
@@ -27941,6 +27945,8 @@ module Crystal::HIR
             storage_owner, storage_name = constant_storage_info(full_name)
             set = ClassVarSet.new(ctx.next_id, value_type, storage_owner, storage_name, value)
             ctx.emit(set)
+          rescue ex
+            STDERR.puts "[DEFERRED_CONST_ERROR] Failed to lower #{owner}::#{const_name}: #{ex.message}"
           ensure
             @current_class = old_class
           end
@@ -27990,6 +27996,13 @@ module Crystal::HIR
         @deferred_classvar_inits.clear
 
         # Process deferred constant initializations (string literals, etc.)
+        # Reorder: STDOUT/STDERR/STDIN first so Crystal.exit can report errors
+        # even if later constant inits (e.g. CRYSTAL_SRC_PATH) raise exceptions.
+        @deferred_constant_inits.sort_by! do |(_, cn, _, _)|
+          case cn
+          when "STDIN" then 0; when "STDOUT" then 1; when "STDERR" then 2; else 3
+          end
+        end
         if env_has?("DEBUG_DEFERRED_CONST")
           STDERR.puts "[DEFERRED_CONST] Processing #{@deferred_constant_inits.size} deferred constant inits"
           @deferred_constant_inits.each do |(owner, const_name, value_id, init_arena)|
@@ -28007,6 +28020,8 @@ module Crystal::HIR
             storage_owner, storage_name = constant_storage_info(full_name)
             set = ClassVarSet.new(ctx.next_id, value_type, storage_owner, storage_name, value)
             ctx.emit(set)
+          rescue ex
+            STDERR.puts "[DEFERRED_CONST_ERROR] Failed to lower #{owner}::#{const_name}: #{ex.message}"
           ensure
             @current_class = old_class
           end
@@ -30781,6 +30796,9 @@ module Crystal::HIR
         ctx.emit(nil_lit)
         return nil_lit.id
       end
+      if env_get("DEBUG_TUPLE_IDX") && expanded.includes?("self[")
+        STDERR.puts "[TUPLE_MACRO_EXPANDED] text=#{expanded.strip.inspect} current_class=#{@current_class || "nil"}"
+      end
 
       if parsed = parse_macro_literal_for_context(expanded)
         return lower_parsed_macro_body(ctx, parsed)
@@ -30799,6 +30817,24 @@ module Crystal::HIR
       body_node = @arena[body_id]
       case body_node
       when CrystalV2::Compiler::Frontend::MacroLiteralNode
+        # FIRST: Check if pieces contain control structures ({% for %}, {% if %}).
+        # Must happen before raw_text/expression expansion which would skip controls
+        # and produce incomplete text (e.g. "{ }" instead of the full expanded loop).
+        pieces = body_node.pieces
+        has_control = pieces.any? { |p| p.kind == CrystalV2::Compiler::Frontend::MacroPiece::Kind::ControlStart }
+        if has_control
+          full_expanded = expand_macro_literal_with_controls(ctx, pieces)
+          if full_expanded && !full_expanded.strip.empty?
+            # Transform Tuple.new(...) to tuple literal {...} since our compiler
+            # doesn't support Tuple.new with splat args yet
+            text = full_expanded.strip
+            text = transform_tuple_new_to_literal(text)
+            if parsed = parse_macro_literal_for_context(text)
+              return lower_parsed_macro_body(ctx, parsed)
+            end
+          end
+        end
+
         if raw_text = macro_literal_raw_text(body_node)
           if parsed = parse_macro_literal_for_context(raw_text)
             return lower_parsed_macro_body(ctx, parsed)
@@ -30832,6 +30868,11 @@ module Crystal::HIR
             when CrystalV2::Compiler::Frontend::MacroPiece::Kind::Text
               # Text piece - skip (just literal text, not code)
               nil
+            when CrystalV2::Compiler::Frontend::MacroPiece::Kind::ControlStart
+              # Control piece with expression - lower the macro control
+              if expr_id = piece.expr
+                last_value = lower_expr(ctx, expr_id)
+              end
             else
               # Other control pieces - skip
               nil
@@ -31093,6 +31134,205 @@ module Crystal::HIR
 
       text = builder.to_s.strip
       text.empty? ? nil : text
+    end
+
+    # Expand a MacroLiteralNode that contains nested control structures ({% for %}, {% if %})
+    # Transform "Tuple.new(a, b, c)" to "{a, b, c}" tuple literal syntax.
+    # Our compiler doesn't support Tuple.new with splat args yet,
+    # but tuple literals work fine.
+    private def transform_tuple_new_to_literal(text : String) : String
+      # Match "Tuple.new(" at the start (possibly with whitespace)
+      stripped = text.strip
+      if stripped.starts_with?("Tuple.new(") && stripped.ends_with?(")")
+        inner = stripped[10...-1].strip  # Everything inside Tuple.new(...)
+        # Remove trailing comma if present
+        inner = inner.chomp(",").strip
+        "{#{inner}}"
+      else
+        text
+      end
+    end
+
+    # This builds the fully expanded text by processing all pieces including control structures.
+    private def expand_macro_literal_with_controls(
+      ctx : LoweringContext,
+      pieces : Array(CrystalV2::Compiler::Frontend::MacroPiece),
+    ) : String?
+      vars = macro_vars_for_current_context(ctx)
+      owner_type = @current_class ? macro_owner_type_for(@current_class.not_nil!) : nil
+      expander = macro_expander_for_current_context
+      expand_pieces_with_vars(pieces, vars, owner_type, expander, ctx)
+    end
+
+    # Expand an array of MacroPieces to text, handling Text, Expression,
+    # and control structures ({% for %}, {% if %}, {% unless %}).
+    # For loops use iter_vars/iterable from the ControlStart piece directly,
+    # with the body being the subsequent pieces until matching ControlEnd.
+    private def expand_pieces_with_vars(
+      pieces : Array(CrystalV2::Compiler::Frontend::MacroPiece),
+      vars : Hash(String, CrystalV2::Compiler::Semantic::MacroValue),
+      owner_type : CrystalV2::Compiler::Semantic::ClassSymbol?,
+      expander : CrystalV2::Compiler::Semantic::MacroExpander,
+      ctx : LoweringContext,
+    ) : String?
+      source = @sources_by_arena[@arena]?
+      bytesize = source ? source.bytesize : 0
+      builder = String::Builder.new
+      i = 0
+
+      while i < pieces.size
+        piece = pieces[i]
+
+        case piece.kind
+        when CrystalV2::Compiler::Frontend::MacroPiece::Kind::Text
+          if source && (span = piece.span)
+            start = span.start_offset
+            length = span.end_offset - span.start_offset
+            if length > 0 && start >= 0 && start < bytesize
+              length = bytesize - start if start + length > bytesize
+              builder << source.byte_slice(start, length)
+            end
+          elsif text = piece.text
+            builder << text
+          end
+          i += 1
+
+        when CrystalV2::Compiler::Frontend::MacroPiece::Kind::Expression
+          if expr_id = piece.expr
+            output = expander.expand_expression(expr_id, variables: vars, owner_type: owner_type)
+            builder << output
+          end
+          i += 1
+
+        when CrystalV2::Compiler::Frontend::MacroPiece::Kind::ControlStart
+          keyword = piece.control_keyword
+          # Find the matching ControlEnd and collect body pieces
+          body_start = i + 1
+          depth = 1
+          j = body_start
+          while j < pieces.size && depth > 0
+            case pieces[j].kind
+            when CrystalV2::Compiler::Frontend::MacroPiece::Kind::ControlStart
+              depth += 1
+            when CrystalV2::Compiler::Frontend::MacroPiece::Kind::ControlEnd
+              depth -= 1
+            else
+              # keep scanning
+            end
+            j += 1 if depth > 0
+          end
+          # j now points to the ControlEnd piece (or past end)
+          body_end = (depth == 0) ? j : pieces.size
+          body_pieces = pieces[body_start...body_end]
+
+          if keyword == "for"
+            expand_for_pieces(piece, body_pieces, vars, owner_type, expander, ctx, builder)
+          elsif keyword == "if" || keyword == "unless"
+            expand_if_pieces(piece, body_pieces, pieces, body_start, body_end, vars, owner_type, expander, ctx, builder)
+          end
+
+          # Skip past the ControlEnd
+          i = body_end + 1
+
+        when CrystalV2::Compiler::Frontend::MacroPiece::Kind::ControlEnd
+          # Stray end - skip
+          i += 1
+
+        else
+          i += 1
+        end
+      end
+
+      text = builder.to_s
+      text.strip.empty? ? nil : text
+    end
+
+    # Expand a {% for %} control piece. iter_vars and iterable come from the piece,
+    # and body_pieces are the pieces between ControlStart and ControlEnd.
+    private def expand_for_pieces(
+      piece : CrystalV2::Compiler::Frontend::MacroPiece,
+      body_pieces : Array(CrystalV2::Compiler::Frontend::MacroPiece),
+      vars : Hash(String, CrystalV2::Compiler::Semantic::MacroValue),
+      owner_type : CrystalV2::Compiler::Semantic::ClassSymbol?,
+      expander : CrystalV2::Compiler::Semantic::MacroExpander,
+      ctx : LoweringContext,
+      builder : String::Builder,
+    ) : Nil
+      iter_var_names = piece.iter_vars
+      iterable_id = piece.iterable
+      return unless iter_var_names && iterable_id
+
+      values = macro_for_iterable_values(iterable_id)
+      if values.nil?
+        values = macro_for_iterable_values_with_context(iterable_id, vars, owner_type, expander)
+      end
+      return unless values
+
+      values.each_with_index do |value, idx|
+        loop_vars = vars.dup
+        assign_macro_iter_vars(loop_vars, iter_var_names, value, idx)
+        if body_text = expand_pieces_with_vars(body_pieces, loop_vars, owner_type, expander, ctx)
+          builder << body_text
+        end
+      end
+    end
+
+    # Expand a {% if %} / {% unless %} control piece.
+    private def expand_if_pieces(
+      piece : CrystalV2::Compiler::Frontend::MacroPiece,
+      body_pieces : Array(CrystalV2::Compiler::Frontend::MacroPiece),
+      all_pieces : Array(CrystalV2::Compiler::Frontend::MacroPiece),
+      body_start : Int32,
+      body_end : Int32,
+      vars : Hash(String, CrystalV2::Compiler::Semantic::MacroValue),
+      owner_type : CrystalV2::Compiler::Semantic::ClassSymbol?,
+      expander : CrystalV2::Compiler::Semantic::MacroExpander,
+      ctx : LoweringContext,
+      builder : String::Builder,
+    ) : Nil
+      keyword = piece.control_keyword
+      is_unless = keyword == "unless"
+
+      if expr_id = piece.expr
+        if_node = @arena[expr_id]
+        if if_node.is_a?(CrystalV2::Compiler::Frontend::MacroIfNode)
+          result = try_evaluate_macro_condition(if_node.condition)
+          take_branch = is_unless ? (result == false) : (result == true)
+          if take_branch
+            if body_text = expand_pieces_with_vars(body_pieces, vars, owner_type, expander, ctx)
+              builder << body_text
+            end
+          end
+        end
+      end
+    end
+
+    # Expand a MacroForNode to text (without parsing/lowering)
+    private def expand_macro_for_to_text(
+      node : CrystalV2::Compiler::Frontend::MacroForNode,
+      vars : Hash(String, CrystalV2::Compiler::Semantic::MacroValue),
+      owner_type : CrystalV2::Compiler::Semantic::ClassSymbol?,
+      expander : CrystalV2::Compiler::Semantic::MacroExpander,
+    ) : String
+      iter_vars = node.iter_vars.map { |name| String.new(name) }
+      return "" if iter_vars.empty?
+
+      values = macro_for_iterable_values(node.iterable)
+      if values.nil?
+        values = macro_for_iterable_values_with_context(node.iterable, vars, owner_type, expander)
+      end
+      return "" unless values
+
+      String.build do |io|
+        values.each_with_index do |value, idx|
+          loop_vars = vars.dup
+          assign_macro_iter_vars(loop_vars, iter_vars, value, idx)
+          if body_output = expander.expand_literal(node.body, variables: loop_vars, owner_type: owner_type)
+            io << body_output
+            io << "\n"
+          end
+        end
+      end
     end
 
     private def macro_literal_raw_text(node : CrystalV2::Compiler::Frontend::MacroLiteralNode) : String?
@@ -43332,15 +43572,11 @@ module Crystal::HIR
               end
             end
           end
-          # Avoid inlining Tuple#map/map_with_index until macro-expanded bodies are reliable.
-          # Inline-yield with macro bodies can produce empty returns and drop to Nil.
-          if receiver_id && (method_name == "map" || method_name == "map_with_index")
-            if recv_desc = @module.get_type_descriptor(ctx.type_of(receiver_id))
-              if recv_desc.kind == TypeKind::Tuple || recv_desc.name.starts_with?("Tuple(")
-                skip_inline = true
-              end
-            end
-          end
+          # NOTE: Previously avoided inlining Tuple#map/map_with_index because macro bodies
+          # could produce empty returns. However, NOT inlining is worse: generic Tuple methods
+          # have completely broken macro expansion (T.size resolves to 0). Inlining at the call
+          # site allows macro expansion with the concrete Tuple type, which is essential for
+          # self-hosting. The "empty returns" issue is the lesser evil vs totally broken methods.
           if !skip_inline && method_name == "try" && receiver_id
             if env_get("DEBUG_TRY_INLINE")
               recv_type = ctx.type_of(receiver_id)
@@ -44420,6 +44656,54 @@ module Crystal::HIR
           ctx.emit(load_node)
           ctx.register_type(load_node.id, deref_type)
           return load_node.id
+        end
+      end
+
+      # tuple[index] or tuple.at(index) -> IndexGet
+      # Intercept to avoid generic Tuple#[]/Tuple#at which rely on T.size macro
+      # that can't resolve for generic Tuple types. This mirrors the IndexNode
+      # handler at lower_index but for CallNode AST paths (e.g. macro-expanded
+      # `self[0]` parsed as a method call).
+      if receiver_id && (method_name == "[]" || method_name == "at") && args.size == 1
+        receiver_type = ctx.type_of(receiver_id)
+        recv_type_desc = @module.get_type_descriptor(receiver_type)
+        is_tuple = recv_type_desc && (recv_type_desc.kind == TypeKind::Tuple ||
+                                       recv_type_desc.name.starts_with?("Tuple(") ||
+                                       recv_type_desc.name == "Tuple")
+        if is_tuple
+          td = recv_type_desc.not_nil!
+          type_params = td.type_params.reject { |p| p == TypeRef::VOID }
+          # When the descriptor is a bare "Tuple" (generic), try to get concrete
+          # type params from @current_class (set during inline expansion).
+          if type_params.empty? && (current = @current_class)
+            if current.starts_with?("Tuple(")
+              if info = split_generic_base_and_args(current)
+                param_names = split_generic_type_args(info[:args]).map(&.strip)
+                type_params = param_names.compact_map { |n| r = type_ref_for_name(n); r == TypeRef::VOID ? nil : r }
+              end
+            end
+          end
+          unless type_params.empty?
+            element_type = TypeRef::INT32 # default fallback
+            arg_id = args[0]
+            # Try to get concrete element type from a literal index value
+            idx_val : Int32? = nil
+            if hir_val = ctx.value_for(arg_id)
+              if hir_val.is_a?(Literal) && hir_val.value.is_a?(Int64)
+                idx_val = hir_val.value.as(Int64).to_i
+              end
+            end
+            if idx_val && idx_val >= 0 && idx_val < type_params.size
+              element_type = type_params[idx_val]
+            else
+              element_type = type_params.first
+            end
+            element_type = TypeRef::INT32 if element_type == TypeRef::VOID
+            index_get = IndexGet.new(ctx.next_id, element_type, receiver_id, arg_id)
+            ctx.emit(index_get)
+            ctx.register_type(index_get.id, element_type)
+            return index_get.id
+          end
         end
       end
 
@@ -51378,20 +51662,37 @@ module Crystal::HIR
         index_get.id
         # Check if this is a tuple type — intercept to avoid calling Tuple#[]
         # which relies on T.size macro (resolves to 0) causing infinite recursion.
-      elsif type_desc && (type_desc.kind == TypeKind::Tuple || type_desc.name.starts_with?("Tuple(")) && index_ids.size == 1
+      elsif type_desc && (type_desc.kind == TypeKind::Tuple || type_desc.name.starts_with?("Tuple(") ||
+            type_desc.name == "Tuple") && index_ids.size == 1
         td = type_desc.not_nil!
+        type_params = td.type_params.reject { |p| p == TypeRef::VOID }
+        # When the descriptor is bare "Tuple" (generic), resolve concrete type params
+        # from @current_class which is set to the concrete Tuple type during inline expansion.
+        if type_params.empty? && (current = @current_class)
+          tuple_source = current
+          # Also check @type_param_map for T__tuple
+          if tuple_list = @type_param_map["T__tuple"]?
+            tuple_source = "Tuple(#{tuple_list})"
+          end
+          if tuple_source.starts_with?("Tuple(")
+            if info = split_generic_base_and_args(tuple_source)
+              param_names = split_generic_type_args(info[:args]).map(&.strip)
+              type_params = param_names.compact_map { |n| r = type_ref_for_name(n); r == TypeRef::VOID ? nil : r }
+            end
+          end
+        end
         # Determine element type from literal index or use first element type
         element_type = TypeRef::INT32 # default fallback
         idx_node = @arena[node.indexes.first]
         if idx_node.is_a?(CrystalV2::Compiler::Frontend::NumberNode)
           idx_val = String.new(idx_node.value).to_i?
-          if idx_val && idx_val >= 0 && idx_val < td.type_params.size
-            element_type = td.type_params[idx_val]
-          elsif !td.type_params.empty?
-            element_type = td.type_params.first
+          if idx_val && idx_val >= 0 && idx_val < type_params.size
+            element_type = type_params[idx_val]
+          elsif !type_params.empty?
+            element_type = type_params.first
           end
-        elsif !td.type_params.empty?
-          element_type = td.type_params.first
+        elsif !type_params.empty?
+          element_type = type_params.first
         end
         element_type = TypeRef::INT32 if element_type == TypeRef::VOID
 
