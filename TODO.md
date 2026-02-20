@@ -1,11 +1,18 @@
 # Crystal v2 — Active Work (codegen branch)
 
 ## Known Bugs (codegen)
-- Confirmed repros in complex regression suite:
+- Confirmed repros in complex regression suite (38/42 pass, 4 fail):
   - `regression_tests/complex/test_channel_receive_state.cr`
     - status: link failure (missing `_current` symbol in spawn/channel path).
   - `regression_tests/complex/test_option_parser_to_s.cr`
     - status: runtime segfault (exit 139) with current work-in-progress backend.
+  - `regression_tests/complex/test_closure_escape.cr`
+    - status: closures use global variables for captured values instead of heap-allocated
+      environments. All closures from the same function share captures. Needs closure env
+      architecture (fat pointers: fn_ptr + env_ptr).
+  - `regression_tests/complex/test_nilable_proc.cr`
+    - status: block-capture method (`on_event(&block : String ->)`) generates a getter
+      instead of a setter. The block parameter is never stored to the ivar.
 - Recently fixed repro:
   - `regression_tests/complex/test_find_nil_and_value.cr`
     - fixed by CFG-reachable return-type merge (dead blocks no longer pollute
@@ -30,6 +37,32 @@
 - Float64: arithmetic, ** on literals
 
 ## Recently completed
+- **case/when type narrowing for class unions (2026-02-19)** —
+  Fixed `case x when Dog` on union variables (`Dog | Cat | Fish`) dispatching
+  to the wrong method. Root cause: `lower_case` in ast_to_hir.cr skipped type
+  narrowing for ALL union types. Now narrows for class-type union variants
+  (pointer payloads) while still skipping value-type unions (Float32|Float64)
+  to avoid payload type mismatches.
+  Changes:
+  - `src/compiler/hir/ast_to_hir.cr` line ~36039: replace blanket
+    `!is_union_type?` guard with targeted check `target_desc.kind == Class`.
+  Validation:
+  - `test_case_when_type_dispatch`: PASS (was FAIL)
+  - `test_case_when_types`: PASS (if/is_a? workaround still works)
+  - Full regression: 44/44 basic, 38/42 complex (no regressions)
+  Also fixed by this change:
+  - `test_generic_container_ops`: PASS (was segfault)
+  - `test_exception_hierarchy`: PASS (was memory explosion)
+
+- **23 new complex regression tests (2026-02-19)** —
+  Added tests covering: virtual dispatch chain, union method dispatch,
+  generic containers, nested blocks, string interpolation, recursive data
+  structures, case/when types, enums, hash generics, module includes,
+  exception hierarchy, iterator chain, struct value semantics, while loops,
+  nilable chain, nilable equality, multi-type-param generics, case/when type
+  dispatch, closure escape, block capture, nilable proc, nested closure.
+  Quick suite: 13 tests. Full suite: 42 tests.
+
 - **Return-type inference: ignore unreachable blocks (2026-02-18)** —
   fixed wrong union widening caused by detached dead blocks being included in
   return-type merge (e.g., `pick` inferred as `Bool|Pointer` instead of
