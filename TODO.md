@@ -44,8 +44,41 @@
 - Float64: arithmetic, ** on literals
 
 ## Recently completed
-- **Bootstrap benchmark (2026-02-20)** —
-  Stage 2 self-hosting compilation succeeds. Benchmark results:
+- **Tuple#map macro expansion fix + bootstrap re-benchmark (2026-02-20)** —
+  Fixed {% begin %}{% for %}{% end %}{% end %} nested macro expansion that
+  was causing IndexError crash during Stage 2 compilation. Root cause:
+  lower_macro_body tried raw_text/expression expansion first, which produced
+  incomplete text ("{ }") by skipping ControlStart pieces, then returned
+  early before the control expansion code was reached.
+
+  Fix: Move ControlStart detection first in lower_macro_body. Rewrite
+  piece-based for-loop expansion to read iter_vars/iterable from MacroPiece
+  directly (not from piece.expr which is nil for for-loops). Transform
+  Tuple.new(...) to tuple literal {...} syntax.
+
+  Updated benchmark results:
+
+  | Stage | Binary | Input | User Time | Wall Clock | Output Size |
+  |-------|--------|-------|-----------|------------|-------------|
+  | Stage 1 | Crystal --release | crystal_v2.cr | 408.84s | 6:53 | ~27 MB |
+  | Stage 2 | crystal_v2_stage1 | crystal_v2.cr | 84.79s | 1:28 | 27.4 MB |
+
+  Stage 2 speedup vs Stage 1: **4.7x** (Stage 1 includes LLVM --release;
+  Stage 2 uses -O0).
+
+  Stage 2 binary builds successfully but has pre-existing String codegen
+  issue: Dir.current returns a string with null byte, crashing
+  check_no_null_byte in ArgumentError. All 44 regression tests fail at
+  compile time (String contains null byte). Root cause: String.new from
+  C pointer (getcwd) produces incorrect String objects in V2-compiled code.
+  This is a String struct layout or memcpy codegen issue.
+
+  Regression tests with Stage 1: 43/44 pass (test_byteformat_decode_u32
+  crash is pre-existing).
+
+- **Previous bootstrap benchmark (2026-02-20)** —
+  Stage 2 self-hosting compilation succeeds. Earlier results before
+  Tuple#map fix:
 
   | Stage | Binary | Input | User Time | Wall Clock | Output Size |
   |-------|--------|-------|-----------|------------|-------------|
@@ -54,15 +87,8 @@
   | Stage 2 | crystal_v2 debug | crystal_v2.cr | 564.91s | 10:40 | 27.6 MB |
 
   Release vs debug speedup: 5.66x.
-  Stage 2 is 4.24x faster than Stage 1 (Stage 1 includes LLVM --release
-  optimization passes; Stage 2 uses -O0).
 
-  Stage 2 binary crashes at runtime (null IO in Crystal.exit — global init
-  order issue). Compilation succeeds but the produced binary is not yet
-  functional. Key remaining issues: bare iterator stubs (each, map, etc.
-  are no-ops), global object initialization order.
-
-  Changes in this session:
+  Changes in that session:
   1. Deferred bare iterator stubs — emit after function emission to avoid
      suppressing concrete function definitions (llvm_backend.cr).
   2. Arg-count tracking for forward declarations — typed parameter lists
