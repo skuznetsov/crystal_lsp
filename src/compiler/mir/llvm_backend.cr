@@ -1567,7 +1567,9 @@ module Crystal::MIR
         defined_globals << @type_mapper.mangle_name(name)
       end
 
-      # Collect all referenced globals from GlobalLoad/GlobalStore instructions
+      # Collect all referenced globals from GlobalLoad/GlobalStore instructions.
+      # For each global, prefer the most specific (non-pointer) type — union types
+      # from closure cells must not be downgraded to ptr by later GlobalLoad/Store.
       referenced_globals = Hash(String, TypeRef).new
       @module.functions.each do |func|
         func.blocks.each do |block|
@@ -1576,13 +1578,26 @@ module Crystal::MIR
             when GlobalLoad
               mangled = @type_mapper.mangle_name(inst.global_name)
               unless defined_globals.includes?(mangled)
-                referenced_globals[mangled] = inst.type
+                new_type = inst.type
+                existing = referenced_globals[mangled]?
+                if existing.nil?
+                  referenced_globals[mangled] = new_type
+                elsif new_type != TypeRef::VOID && new_type != TypeRef::POINTER
+                  # Prefer non-pointer types (e.g., union types for closure cells)
+                  referenced_globals[mangled] = new_type
+                end
               end
             when GlobalStore
               mangled = @type_mapper.mangle_name(inst.global_name)
               unless defined_globals.includes?(mangled)
-                # For GlobalStore, we use value type if available, else ptr
-                referenced_globals[mangled] ||= TypeRef::POINTER
+                new_type = inst.type
+                existing = referenced_globals[mangled]?
+                if existing.nil?
+                  referenced_globals[mangled] = (new_type != TypeRef::VOID ? new_type : TypeRef::POINTER)
+                elsif new_type != TypeRef::VOID && new_type != TypeRef::POINTER
+                  # Prefer non-pointer types (e.g., union types for closure cells)
+                  referenced_globals[mangled] = new_type
+                end
               end
             end
           end
@@ -8803,6 +8818,7 @@ module Crystal::MIR
         end
         append_missing.call(incoming, "ptr")
         emit "#{name} = phi ptr #{incoming.join(", ")}"
+        record_emitted_type(name, "ptr")
         # @value_types already set by prepass
         @in_phi_mode = false
         return
@@ -8816,6 +8832,7 @@ module Crystal::MIR
         end
         append_missing.call(incoming, "ptr")
         emit "#{name} = phi ptr #{incoming.join(", ")}"
+        record_emitted_type(name, "ptr")
         @value_types[inst.id] = TypeRef::POINTER
         @in_phi_mode = false
         return
@@ -8873,6 +8890,7 @@ module Crystal::MIR
           end
           append_missing.call(incoming, "i1")
           emit "#{name} = phi i1 #{incoming.join(", ")}"
+          record_emitted_type(name, "i1")
           @value_types[inst.id] = TypeRef::BOOL
           @in_phi_mode = false
           return
@@ -8960,6 +8978,7 @@ module Crystal::MIR
           end
           append_missing.call(incoming, phi_type)
           emit "#{name} = phi #{phi_type} #{incoming.join(", ")}"
+          record_emitted_type(name, phi_type)
           @value_types[inst.id] = inst.type
           @in_phi_mode = false
           return
@@ -9018,6 +9037,7 @@ module Crystal::MIR
           end
           append_missing.call(incoming, "ptr")
           emit "#{name} = phi ptr #{incoming.join(", ")}"
+          record_emitted_type(name, "ptr")
           @value_types[inst.id] = TypeRef::POINTER
           @in_phi_mode = false
           return
@@ -9096,6 +9116,7 @@ module Crystal::MIR
           end
           append_missing.call(incoming, "ptr")
           emit "#{name} = phi ptr #{incoming.join(", ")}"
+          record_emitted_type(name, "ptr")
           @value_types[inst.id] = TypeRef::POINTER
           @in_phi_mode = false
           return
@@ -9169,6 +9190,7 @@ module Crystal::MIR
           end
           append_missing.call(incoming, phi_type)
           emit "#{name} = phi #{phi_type} #{incoming.join(", ")}"
+          record_emitted_type(name, phi_type)
           @value_types[inst.id] = inst.type
           @in_phi_mode = false
           return
@@ -9312,6 +9334,7 @@ module Crystal::MIR
       end
       append_missing.call(incoming, phi_type)
       emit "#{name} = phi #{phi_type} #{incoming.join(", ")}"
+      record_emitted_type(name, phi_type)
       @value_types[inst.id] = inst.type
       @in_phi_mode = false
     end
@@ -11060,7 +11083,16 @@ module Crystal::MIR
       else
         @value_types[inst.id] = inst.type
       end
-      emit "#{name} = load #{llvm_type}, ptr @#{actual_global}"
+      # If the global is declared as a union but we want to load as ptr,
+      # GEP to the payload field (index 1) and load the pointer from there.
+      decl_type = @global_declared_types[actual_global]? || @global_declared_types[mangled_global]?
+      if decl_type && decl_type.includes?(".union") && llvm_type == "ptr"
+        base_name = name.lstrip('%')
+        emit "%#{base_name}.pay_ptr = getelementptr #{decl_type}, ptr @#{actual_global}, i32 0, i32 1"
+        emit "#{name} = load ptr, ptr %#{base_name}.pay_ptr, align 4"
+      else
+        emit "#{name} = load #{llvm_type}, ptr @#{actual_global}"
+      end
     end
 
     private def emit_global_store(inst : GlobalStore, name : String)
@@ -11079,6 +11111,19 @@ module Crystal::MIR
         val = "null" if val == "null" || val.starts_with?("%r") # likely void value
       end
 
+      # Early check: if the value is a union and the global is declared as the same
+      # union type, upgrade llvm_type to match. This prevents the union→ptr extraction
+      # below from destroying union values that should be stored whole (e.g., closure cells).
+      if llvm_type == "ptr" && actual_val_type && actual_val_type.includes?(".union")
+        mangled_check = @type_mapper.mangle_name(inst.global_name)
+        actual_check = @global_name_mapping[mangled_check]? || mangled_check
+        decl_check = @global_declared_types[actual_check]? || @global_declared_types[mangled_check]?
+        if decl_check && decl_check.includes?(".union")
+          # Global is declared as union — use the union type for the store
+          llvm_type = decl_check
+        end
+      end
+
       # Handle type mismatches for union types
       if llvm_type.includes?(".union")
         if actual_val_type && actual_val_type.includes?(".union") && actual_val_type != llvm_type
@@ -11095,6 +11140,18 @@ module Crystal::MIR
         end
         # Union stores cannot use scalar null/0 literals directly.
         val = normalize_union_value(val, llvm_type)
+      end
+
+      # Reconcile union→ptr: value is union-typed but global expects ptr — extract payload
+      if llvm_type == "ptr" && actual_val_type && actual_val_type.includes?(".union") && val.starts_with?('%')
+        c = @cond_counter
+        @cond_counter += 1
+        emit "%gs_u2p.#{c}.ptr = alloca #{actual_val_type}, align 8"
+        emit "store #{actual_val_type} #{normalize_union_value(val, actual_val_type)}, ptr %gs_u2p.#{c}.ptr"
+        emit "%gs_u2p.#{c}.pay = getelementptr #{actual_val_type}, ptr %gs_u2p.#{c}.ptr, i32 0, i32 1"
+        emit "%gs_u2p.#{c}.val = load ptr, ptr %gs_u2p.#{c}.pay, align 4"
+        val = "%gs_u2p.#{c}.val"
+        actual_val_type = "ptr"
       end
 
       # Reconcile scalar pointer/integer mismatches using emitted SSA type.
