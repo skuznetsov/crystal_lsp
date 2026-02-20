@@ -42847,9 +42847,6 @@ module Crystal::HIR
       end
 
       disable_inline_yield = env_has?("CRYSTAL_V2_DISABLE_INLINE_YIELD")
-      if env_has?("DEBUG_CLONE_INLINE") && (method_name == "fetch" || method_name == "exec_recursive_clone")
-        STDERR.puts "[CLONE_INLINE] call #{method_name} mangled=#{mangled_method_name} base=#{base_method_name} block_for_inline=#{!!block_for_inline} proc_for_inline=#{!!proc_for_inline} inline_stack=#{@inline_yield_name_stack.size} current=#{@current_class || ""}"
-      end
       if (block_for_inline || proc_for_inline) && !disable_inline_yield
         try_inline_allowed = env_has?("CRYSTAL_V2_INLINE_TRY") || !env_has?("CRYSTAL_V2_DISABLE_TRY_INLINE")
         if method_name == "try"
@@ -42956,24 +42953,12 @@ module Crystal::HIR
                     # variables, causing null dereferences in the proc body.
                     # Example: exec_recursive_clone inlined → hash.fetch { yield(hash) }
                     if @inline_yield_name_stack.size > 0
-                      if env_has?("DEBUG_CLONE_INLINE")
-                        STDERR.puts "[CLONE_INLINE] NOT skipping #{mangled_method_name} because inside inline stack: #{@inline_yield_name_stack.join(" -> ")}"
-                      end
                     else
                       skip_inline = true
                       debug_hook("call.inline.skip", "callee=#{mangled_method_name} reason=return_type_known")
                     end
                   end
                 end
-              else
-                if env_has?("DEBUG_CLONE_INLINE") && method_name == "fetch"
-                  brtp = block_return_type_param_name(mangled_method_name, base_method_name)
-                  STDERR.puts "[CLONE_SKIP_DETAIL] block_return_type_param_name=#{brtp} (not nil, skipped return_type check)"
-                end
-              end
-            else
-              if env_has?("DEBUG_CLONE_INLINE") && method_name == "fetch"
-                STDERR.puts "[CLONE_SKIP_DETAIL] is_known_yield=#{is_known_yield} yield_return_fn=#{!!yield_return_function_for_call(mangled_method_name, base_method_name)} (skipped return_type check)"
               end
             end
           end
@@ -43004,16 +42989,6 @@ module Crystal::HIR
             end
           end
 
-          if env_has?("DEBUG_CLONE_INLINE") && method_name == "fetch"
-            STDERR.puts "[CLONE_GATE] skip_inline=#{skip_inline} mangled_in_yield=#{@yield_functions.includes?(mangled_method_name)} base_in_yield=#{@yield_functions.includes?(base_method_name)}"
-            if @inline_yield_name_stack.size > 0
-              # Dump all fetch-related entries in yield_functions and function_defs
-              fetch_in_yf = @yield_functions.select { |n| n.includes?("fetch") && n.includes?("Hash") }
-              STDERR.puts "[CLONE_GATE] yield_functions matching Hash+fetch: #{fetch_in_yf.join(", ")}"
-              fetch_in_fd = @function_defs.keys.select { |n| n.includes?("fetch") && n.includes?("Hash") && n.includes?("UInt64") }
-              STDERR.puts "[CLONE_GATE] function_defs matching Hash+fetch+UInt64: #{fetch_in_fd.join(", ")}"
-            end
-          end
           # Determine the effective yield function name: the mangled name may have
           # type-specialized suffixes (e.g. $UInt64_block) while yield_functions uses
           # the generic $block suffix.  Try: mangled → base$block → base.
@@ -43060,17 +43035,10 @@ module Crystal::HIR
           end
           if !skip_inline
             if yield_name = yield_function_name_for(base_method_name)
-              if env_has?("DEBUG_CLONE_INLINE") && method_name == "fetch"
-                STDERR.puts "[CLONE_GATE1] yield_name=#{yield_name} in_function_defs=#{@function_defs.has_key?(yield_name)}"
-              end
               if func_def = @function_defs[yield_name]?
                 debug_hook("call.inline.yield", "callee=#{yield_name} current=#{@current_class || ""}")
                 callee_arena = @function_def_arenas[yield_name]? || @arena
                 return inline_yield_function(ctx, func_def, yield_name, receiver_id, call_arg_values, block_cast, block_param_types_inline, callee_arena)
-              end
-            else
-              if env_has?("DEBUG_CLONE_INLINE") && method_name == "fetch"
-                STDERR.puts "[CLONE_GATE1] yield_function_name_for returned nil for base=#{base_method_name}"
               end
             end
           end
@@ -43092,9 +43060,6 @@ module Crystal::HIR
           end
           if !skip_inline
             entry = lookup_block_function_def_for_call(base_method_name, call_args.size, arg_types, receiver_base)
-            if env_has?("DEBUG_CLONE_INLINE") && method_name == "fetch"
-              STDERR.puts "[CLONE_GATE2] lookup_block=#{entry ? entry[0] : "nil"} receiver_base=#{receiver_base || "nil"} arg_count=#{call_args.size}"
-            end
             if entry
               yield_name, yield_def = entry
               callee_arena = @function_def_arenas[yield_name]? || @arena
@@ -43116,9 +43081,6 @@ module Crystal::HIR
           # Example: `fd.tap { |x| x.something }` where tap is defined in Object.
           if !skip_inline && receiver_id
             if yield_key = find_yield_method_fallback(method_name, call_args.size, receiver_base)
-              if env_has?("DEBUG_CLONE_INLINE") && method_name == "fetch"
-                STDERR.puts "[CLONE_GATE3] yield_key=#{yield_key} in_function_defs=#{@function_defs.has_key?(yield_key)}"
-              end
               if func_def = @function_defs[yield_key]?
                 debug_hook("call.inline.yield", "callee=#{yield_key} current=#{@current_class || ""}")
                 callee_arena = @function_def_arenas[yield_key]? || @arena
@@ -49930,14 +49892,6 @@ module Crystal::HIR
       pushed_override = false
 
       begin
-        callee_name = @inline_yield_name_stack.last? || ""
-        if callee_name.includes?("fetch") || callee_name.includes?("clone") || callee_name.includes?("exec_recursive")
-          body_exprs = block.body.reject(&.invalid?)
-          STDERR.puts "[CLONE_BLOCK_BODY] size=#{body_exprs.size} callee=#{callee_name} depth=#{@inline_yield_block_body_depth} class=#{@current_class || "nil"} method=#{@current_method || "nil"}"
-        end
-      end
-
-      begin
         # When a block is lexically defined in the function being lowered (ctx.function),
         # a `return` inside it should exit the function entirely (real Return), not jump to
         # an intermediate inline-yield exit block. We detect this by comparing the block's
@@ -50077,11 +50031,6 @@ module Crystal::HIR
                          # wrong for methods like exec_recursive_clone where the block param
                          # type doesn't correspond to the receiver's element type.
                          arg_actual_type = ctx.type_of(arg_id)
-                         if env_has?("DEBUG_CLONE_INLINE") && param_name == "hash"
-                           arg_desc = @module.get_type_descriptor(arg_actual_type)
-                           pdesc = @module.get_type_descriptor(param_type)
-                           STDERR.puts "[CLONE_BIND] param=#{param_name} arg_id=#{arg_id} arg_type=#{arg_actual_type} arg_desc=#{arg_desc.try(&.name) || "nil"} (kind=#{arg_desc.try(&.kind) || "nil"}) param_type=#{param_type} param_desc=#{pdesc.try(&.name) || "nil"} (kind=#{pdesc.try(&.kind) || "nil"}) inline_stack=#{@inline_yield_name_stack.size}"
-                         end
                          # Prefer the actual type from the yield arg over the pre-computed
                          # hint when both are concrete but different. The flowing type is
                          # authoritative (e.g., Hash(UInt64, UInt64) vs fallback Tuple(String, Box)).
@@ -50090,10 +50039,6 @@ module Crystal::HIR
                                     else
                                       param_type
                                     end
-                         if env_has?("DEBUG_CLONE_INLINE") && param_name == "hash"
-                           use_desc = @module.get_type_descriptor(use_type)
-                           STDERR.puts "[CLONE_BIND] chose use_type=#{use_type} desc=#{use_desc.try(&.name) || "nil"}"
-                         end
                          ctx.register_local(param_name, arg_id)
                          ctx.register_type(arg_id, use_type)
                          update_typeof_local(param_name, use_type)
@@ -50104,20 +50049,6 @@ module Crystal::HIR
                        end
                      end
 
-                     # Ensure block body is lowered in the caller arena, even when the callee comes from another file.
-                     if env_has?("DEBUG_CLONE_INLINE")
-                       block_arena_for_debug = resolve_arena_for_block(block, @arena) || @arena
-                       body_exprs = block.body.reject(&.invalid?)
-                       body_node_types = body_exprs.map { |eid|
-                         begin
-                           n = block_arena_for_debug[eid]
-                           n.class.name.split("::").last
-                         rescue
-                           "nil"
-                         end
-                       }
-                       STDERR.puts "[CLONE_BLOCK_BODY] block_body_size=#{body_exprs.size} node_types=#{body_node_types} callee=#{@inline_yield_name_stack.last? || ""}"
-                     end
                      body_result = begin
                        # The block body belongs to the *caller* and may itself contain `yield`.
                        # Temporarily disable the current inlined-yield substitution so nested `yield`
@@ -50141,20 +50072,6 @@ module Crystal::HIR
                          chosen_arena = block_arena || popped_arena || @inline_yield_block_arena_stack.last? || old_arena
                          @arena = chosen_arena
                          begin
-                           callee_dbg = @inline_yield_name_stack.last? || ""
-                           if callee_dbg.includes?("fetch") || callee_dbg.includes?("clone")
-                             body_ids = block.body.reject(&.invalid?)
-                             arena_path = source_path_for(@arena) || "unknown"
-                             STDERR.puts "[LOWER_BODY_PRE] callee=#{callee_dbg} body_ids=#{body_ids.map(&.index)} arena_size=#{@arena.size} arena_file=#{arena_path} depth=#{@inline_yield_block_body_depth}"
-                             body_ids.each do |eid|
-                               if eid.index >= 0 && eid.index < @arena.size
-                                 n = @arena[eid]
-                                 STDERR.puts "[LOWER_BODY_PRE]   expr[#{eid.index}] = #{n.class.name.split("::").last}"
-                               else
-                                 STDERR.puts "[LOWER_BODY_PRE]   expr[#{eid.index}] = OOB (arena size #{@arena.size})"
-                               end
-                             end
-                           end
                            lower_body(ctx, block.body)
                          ensure
                            @arena = old_arena
@@ -52698,12 +52615,6 @@ module Crystal::HIR
           all_args = index_ids + [value_id]
           arg_types = all_args.map { |arg| ctx.type_of(arg) }
           method_name = resolve_method_call(ctx, object_id, "[]=", arg_types, false)
-          if env_has?("DEBUG_CLONE_INLINE") && (method_name.includes?("Tuple") || method_name.includes?("Hash") && method_name.includes?("IDXS"))
-            recv_type = ctx.type_of(object_id)
-            recv_desc = @module.get_type_descriptor(recv_type)
-            hash_local = ctx.lookup_local("hash")
-            STDERR.puts "[CLONE_IDXS] resolved []=  to #{method_name} recv_type=#{recv_type} recv_desc=#{recv_desc.try(&.name) || "nil"} object_id=#{object_id} hash_local=#{hash_local || "nil"} inline_stack=#{@inline_yield_name_stack.size} current=#{@current_class}"
-          end
           return_type = get_function_return_type(method_name)
           # Ensure the []= method is lowered
           remember_callsite_arg_types(method_name, arg_types)

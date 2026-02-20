@@ -407,11 +407,14 @@ module CrystalV2
             return parse_postfix_if_modifier(stmt)
           end
 
-          # Phase 10: yield statements
-          if current_token.kind == Token::Kind::Yield
-            stmt = parse_yield
-            return parse_postfix_if_modifier(stmt)
-          end
+          # Phase 10: yield as statement (removed)
+          # Same rationale as super (Phase 39 below): yield is an expression
+          # whose result can be chained, e.g. `yield(hash).object_id`.
+          # Special-casing yield here short-circuits statement parsing and
+          # prevents the postfix loop in parse_expression from seeing the
+          # following `.` operator. We let yield flow through the regular
+          # expression/infix pipeline via parse_op_assign -> parse_expression.
+          # Postfix modifiers (if/unless) are still handled in parse_prefix.
 
           # Phase 39: super as statement (removed)
           # Upstream Crystal treats `super` as an expression, which allows
