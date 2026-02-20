@@ -154,13 +154,17 @@ module CrystalV2
           p.on("-h", "--help", "Show this message") { options.show_help = true; options.help_text = p.to_s }
         end
 
+        STDERR.puts "A"
         begin
           parser.parse(@args)
+          STDERR.puts "B"
         rescue ex : OptionParser::InvalidOption
+          STDERR.puts "C"
           err_io.puts "Error: #{ex.message}"
           err_io.puts parser
           return 1
         end
+        STDERR.puts "D"
 
         {% if flag?(:debug_hooks) %}
           setup_debug_hooks
@@ -199,8 +203,10 @@ module CrystalV2
           return 1
         end
 
+        STDERR.puts "E"
         # Get input file from remaining args
         input_file = @args.find { |a| !a.starts_with?("-") && a.ends_with?(".cr") }
+        STDERR.puts "F"
         unless input_file
           err_io.puts "Error: No input file specified"
           err_io.puts parser

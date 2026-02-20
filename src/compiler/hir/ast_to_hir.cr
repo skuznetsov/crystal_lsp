@@ -21525,6 +21525,44 @@ module Crystal::HIR
         return found
       end
 
+      # Walk the receiver's module include chain (BFS, most-specific first).
+      # When method resolution rebases a module method onto the class (e.g.
+      # "Array(Int32)#first" from Indexable#first), the yield_functions set
+      # only contains the module-qualified name. Walk the module chain to find
+      # the most-specific module that has this yield function.
+      if (method_short = parts.method) && !parts.owner.empty?
+        owner = parts.owner
+        owner_base = strip_generic_args(owner)
+        queue = [] of String
+        if mods = @class_included_modules[owner]?
+          mods.each { |m| queue << m }
+        end
+        if owner_base != owner
+          if mods = @class_included_modules[owner_base]?
+            mods.each { |m| queue << m unless queue.includes?(m) }
+          end
+        end
+        visited_mods = Set(String).new
+        while mod = queue.shift?
+          next if visited_mods.includes?(mod)
+          visited_mods << mod
+          mod_base = strip_generic_args(mod)
+          mod_method = "#{mod_base}##{method_short}"
+          return mod_method if @yield_functions.includes?(mod_method)
+          mod_block = "#{mod_base}##{method_short}$block"
+          return mod_block if @yield_functions.includes?(mod_block)
+          # Enqueue sub-modules
+          if submods = @class_included_modules[mod]?
+            submods.each { |m| queue << m }
+          end
+          if mod_base != mod
+            if submods = @class_included_modules[mod_base]?
+              submods.each { |m| queue << m }
+            end
+          end
+        end
+      end
+
       nil
     end
 
@@ -33154,6 +33192,86 @@ module Crystal::HIR
       if !is_primitive && (op_str == "+" || op_str == "-" || op_str == "*" || op_str == "/" || op_str == "%" ||
          op_str == "===" || op_str == "==" || op_str == "!=" ||
          op_str == "<" || op_str == "<=" || op_str == ">" || op_str == ">=")
+        # Nilable numeric comparison: e.g., Int32? == Int32
+        # Must check type_id before comparing to avoid nil payload matching 0.
+        if is_union_or_nilable_type?(left_type) && is_comparison_op?(op_str)
+          nil_vid = get_union_variant_id(left_type, TypeRef::NIL)
+          if nil_vid >= 0
+            non_nil_type : TypeRef? = nil
+            non_nil_vid = -1
+            if desc = @module.get_type_descriptor(left_type)
+              split_union_type_name(desc.name).each do |vn|
+                next if vn == "Nil"
+                vr = type_ref_for_name(vn)
+                if numeric_primitive?(vr)
+                  non_nil_type = vr
+                  non_nil_vid = get_union_variant_id(left_type, vr)
+                  break
+                end
+              end
+            end
+            if non_nil_type && non_nil_vid >= 0
+              bin_op = case op_str
+                       when "==", "===" then BinaryOp::Eq
+                       when "!="        then BinaryOp::Ne
+                       when "<"         then BinaryOp::Lt
+                       when "<="        then BinaryOp::Le
+                       when ">"         then BinaryOp::Gt
+                       when ">="        then BinaryOp::Ge
+                       else nil
+                       end
+              if bin_op
+                is_eq = bin_op == BinaryOp::Eq
+                is_ne = bin_op == BinaryOp::Ne
+                pre_branch = ctx.save_locals
+                nil_check = UnionIs.new(ctx.next_id, left_id, nil_vid)
+                ctx.emit(nil_check)
+                ctx.register_type(nil_check.id, TypeRef::BOOL)
+
+                nil_block = ctx.create_block
+                non_nil_block = ctx.create_block
+                merge_block = ctx.create_block
+                ctx.terminate(Branch.new(nil_check.id, nil_block, non_nil_block))
+
+                # Nil branch: when union holds nil, check if other side is also nil
+                ctx.current_block = nil_block
+                ctx.restore_locals(pre_branch)
+                right_is_nil = ctx.type_of(right_id) == TypeRef::NIL
+                nil_result_val = if right_is_nil
+                                   # nil == nil → true, nil != nil → false
+                                   is_eq ? 1_i64 : 0_i64
+                                 else
+                                   # nil == non_nil → false, nil != non_nil → true
+                                   is_ne ? 1_i64 : 0_i64
+                                 end
+                nil_lit = Literal.new(ctx.next_id, TypeRef::BOOL, nil_result_val)
+                ctx.emit(nil_lit)
+                ctx.register_type(nil_lit.id, TypeRef::BOOL)
+                nil_exit = ctx.current_block
+                ctx.terminate(Jump.new(merge_block))
+
+                # Non-nil branch: unwrap and compare
+                ctx.current_block = non_nil_block
+                ctx.restore_locals(pre_branch)
+                unwrapped = UnionUnwrap.new(ctx.next_id, non_nil_type, left_id, non_nil_vid, false)
+                ctx.emit(unwrapped)
+                ctx.register_type(unwrapped.id, non_nil_type)
+                cmp = BinaryOperation.new(ctx.next_id, TypeRef::BOOL, bin_op, unwrapped.id, right_id)
+                ctx.emit(cmp)
+                ctx.register_type(cmp.id, TypeRef::BOOL)
+                non_nil_exit = ctx.current_block
+                ctx.terminate(Jump.new(merge_block))
+
+                ctx.current_block = merge_block
+                phi = Phi.new(ctx.next_id, TypeRef::BOOL,
+                  [{nil_exit, nil_lit.id}, {non_nil_exit, cmp.id}])
+                ctx.emit(phi)
+                ctx.register_type(phi.id, TypeRef::BOOL)
+                return phi.id
+              end
+            end
+          end
+        end
         return emit_binary_call(ctx, left_id, op_str, right_id)
       end
 
@@ -34676,7 +34794,9 @@ module Crystal::HIR
           merge_branch_locals(ctx, pre_branch_locals, then_locals, else_locals,
             then_exit, else_exit)
 
-          phi_type = ctx.type_of(then_value)
+          then_type = ctx.type_of(then_value)
+          else_type = ctx.type_of(else_value)
+          phi_type = union_type_for_values(then_type, else_type)
 
           # Don't create phi for void types - LLVM doesn't allow phi void
           if phi_type == TypeRef::VOID || phi_type == TypeRef::NIL
@@ -34685,10 +34805,35 @@ module Crystal::HIR
             return nil_lit.id
           end
 
+          incoming = [{then_exit, then_value}, {else_exit, else_value}]
+          coerced_incoming = incoming.map do |(blk, val)|
+            val_type = ctx.type_of(val)
+            if val_type == phi_type
+              {blk, val}
+            elsif is_union_type?(phi_type)
+              variant_id = get_union_variant_id(phi_type, val_type)
+              if variant_id >= 0
+                wrap = UnionWrap.new(ctx.next_id, phi_type, val, variant_id)
+                ctx.emit_to_block(blk, wrap)
+                {blk, wrap.id}
+              else
+                {blk, val}
+              end
+            elsif numeric_primitive?(val_type) && numeric_primitive?(phi_type)
+              cast = Cast.new(ctx.next_id, phi_type, val, phi_type, safe: false)
+              ctx.emit_to_block(blk, cast)
+              {blk, cast.id}
+            else
+              {blk, val}
+            end
+          end
+
           phi = Phi.new(ctx.next_id, phi_type)
-          phi.add_incoming(then_exit, then_value)
-          phi.add_incoming(else_exit, else_value)
+          coerced_incoming.each do |exit_block, value|
+            phi.add_incoming(exit_block, value)
+          end
           ctx.emit(phi)
+          ctx.register_type(phi.id, phi_type)
           return phi.id
         elsif then_flows_to_merge
           # Only then flows - use then_value, then_locals
@@ -35597,7 +35742,9 @@ module Crystal::HIR
           merge_branch_locals(ctx, pre_branch_locals, then_locals, else_locals,
             then_exit, else_exit)
 
-          phi_type = ctx.type_of(then_value)
+          then_type = ctx.type_of(then_value)
+          else_type = ctx.type_of(else_value)
+          phi_type = union_type_for_values(then_type, else_type)
 
           # Don't create phi for void types - LLVM doesn't allow phi void
           if phi_type == TypeRef::VOID || phi_type == TypeRef::NIL
@@ -35606,10 +35753,35 @@ module Crystal::HIR
             return nil_lit.id
           end
 
+          incoming = [{then_exit, then_value}, {else_exit, else_value}]
+          coerced_incoming = incoming.map do |(blk, val)|
+            val_type = ctx.type_of(val)
+            if val_type == phi_type
+              {blk, val}
+            elsif is_union_type?(phi_type)
+              variant_id = get_union_variant_id(phi_type, val_type)
+              if variant_id >= 0
+                wrap = UnionWrap.new(ctx.next_id, phi_type, val, variant_id)
+                ctx.emit_to_block(blk, wrap)
+                {blk, wrap.id}
+              else
+                {blk, val}
+              end
+            elsif numeric_primitive?(val_type) && numeric_primitive?(phi_type)
+              cast = Cast.new(ctx.next_id, phi_type, val, phi_type, safe: false)
+              ctx.emit_to_block(blk, cast)
+              {blk, cast.id}
+            else
+              {blk, val}
+            end
+          end
+
           phi = Phi.new(ctx.next_id, phi_type)
-          phi.add_incoming(then_exit, then_value)
-          phi.add_incoming(else_exit, else_value)
+          coerced_incoming.each do |exit_block, value|
+            phi.add_incoming(exit_block, value)
+          end
           ctx.emit(phi)
+          ctx.register_type(phi.id, phi_type)
           return phi.id
         elsif then_flows_to_merge
           then_locals.each { |name, val| ctx.register_local(name, val) }
@@ -35669,11 +35841,50 @@ module Crystal::HIR
            CrystalV2::Compiler::Frontend::BoolNode,
            CrystalV2::Compiler::Frontend::NilNode,
            CrystalV2::Compiler::Frontend::CharNode
-        # Primitive literals: direct equality comparison (optimized)
-        cond_val = lower_expr(ctx, cond_expr)
-        eq = BinaryOperation.new(ctx.next_id, TypeRef::BOOL, BinaryOp::Eq, subject_id, cond_val)
-        ctx.emit(eq)
-        eq.id
+        # Primitive literals: when subject is a union, unwrap before comparing
+        subject_type = ctx.type_of(subject_id)
+        if is_union_type?(subject_type)
+          cond_val = lower_expr(ctx, cond_expr)
+          cond_type = ctx.type_of(cond_val)
+          if cond_node.is_a?(CrystalV2::Compiler::Frontend::NilNode)
+            nil_vid = get_union_variant_id(subject_type, TypeRef::NIL)
+            if nil_vid >= 0
+              uis = UnionIs.new(ctx.next_id, subject_id, nil_vid)
+              ctx.emit(uis)
+              ctx.register_type(uis.id, TypeRef::BOOL)
+              uis.id
+            else
+              fl = Literal.new(ctx.next_id, TypeRef::BOOL, false)
+              ctx.emit(fl)
+              fl.id
+            end
+          else
+            vid = get_union_variant_id(subject_type, cond_type)
+            if vid >= 0
+              uis = UnionIs.new(ctx.next_id, subject_id, vid)
+              ctx.emit(uis)
+              ctx.register_type(uis.id, TypeRef::BOOL)
+              uw = UnionUnwrap.new(ctx.next_id, cond_type, subject_id, vid, false)
+              ctx.emit(uw)
+              ctx.register_type(uw.id, cond_type)
+              eq = BinaryOperation.new(ctx.next_id, TypeRef::BOOL, BinaryOp::Eq, uw.id, cond_val)
+              ctx.emit(eq)
+              ctx.register_type(eq.id, TypeRef::BOOL)
+              ao = BinaryOperation.new(ctx.next_id, TypeRef::BOOL, BinaryOp::And, uis.id, eq.id)
+              ctx.emit(ao)
+              ao.id
+            else
+              fl = Literal.new(ctx.next_id, TypeRef::BOOL, false)
+              ctx.emit(fl)
+              fl.id
+            end
+          end
+        else
+          cond_val = lower_expr(ctx, cond_expr)
+          eq = BinaryOperation.new(ctx.next_id, TypeRef::BOOL, BinaryOp::Eq, subject_id, cond_val)
+          ctx.emit(eq)
+          eq.id
+        end
       when CrystalV2::Compiler::Frontend::ConstantNode
         # Could be a type name (Int32, String) → is_a? check
         # Or a constant value → equality
@@ -35908,11 +36119,12 @@ module Crystal::HIR
           obj_node = @arena[callee_node.object]
           member_name = String.new(callee_node.member)
 
-          # Check for implicit receiver OR explicit receiver that's an identifier or member access
-          is_implicit = obj_node.is_a?(CrystalV2::Compiler::Frontend::ImplicitObjNode)
-          is_identifier = obj_node.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode)
-          is_member_access = obj_node.is_a?(CrystalV2::Compiler::Frontend::MemberAccessNode)
-          if (is_implicit || is_identifier || is_member_access) && member_name.ends_with?('?')
+          # Check for implicit receiver OR explicit receiver that matches the case subject.
+          # The parser (parse_case) sets the case subject expression as the MemberAccessNode's
+          # object for `when .method?` patterns. The obj_node can be ImplicitObjNode, IdentifierNode,
+          # MemberAccessNode, AssignNode (case pos = expr when .nil?), or CallNode (case obj.method when .nil?).
+          # All of these represent the same expression as the case subject → use subject_id.
+          if member_name.ends_with?('?')
             # Implicit receiver call OR explicit subject call: .data1?(), c.red?(), format.format.data1?()
             # The parser expands "when .data1?" to "subject.data1?()" so the callee's object
             # represents the SAME expression as the case subject. Use subject_id directly.
@@ -36079,18 +36291,26 @@ module Crystal::HIR
                      nil
                    end
 
-      # Extract subject variable name for type narrowing in when branches
+      # Extract subject variable name for type narrowing in when branches.
+      # Handles both `case x` (IdentifierNode) and `case x = expr` (AssignNode).
       subject_var_name : String? = nil
       if subj = node.value
         subj_node = @arena[subj]
         if subj_node.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode)
           subject_var_name = String.new(subj_node.name)
+        elsif subj_node.is_a?(CrystalV2::Compiler::Frontend::AssignNode)
+          target_node = @arena[subj_node.target]
+          if target_node.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode)
+            subject_var_name = String.new(target_node.name)
+          end
         end
       end
+
 
       merge_block = ctx.create_block
       incoming = [] of Tuple(BlockId, ValueId)
       branch_locals = [] of Tuple(BlockId, Hash(String, ValueId)) # Track locals for each branch
+      nil_was_checked = false # Track if any when branch checks .nil? (for else narrowing)
 
       # Combine when_branches and in_branches (case/in exhaustive matching)
       all_branches = node.when_branches.dup
@@ -36127,11 +36347,17 @@ module Crystal::HIR
         # When body - restore locals before each branch
         ctx.current_block = when_block
         ctx.restore_locals(pre_case_locals)
+        # Re-register the subject variable if it was assigned in `case var = expr`.
+        # restore_locals wipes locals back to pre-case state, losing the assignment.
+        if svn = subject_var_name
+          if subject_id
+            ctx.register_local(svn, subject_id)
+          end
+        end
 
         # Apply type narrowing for when branches with type checks (case e when Dog)
         # For union subjects with class-type targets, emit UnionUnwrap to narrow.
         # For non-union subjects (abstract class hierarchies), emit Cast.
-        # Value-type unions (Float32|Float64) are NOT narrowed to avoid payload type mismatches.
         if svn = subject_var_name
           subj_local_id = ctx.lookup_local(svn)
           subj_type = subj_local_id ? ctx.type_of(subj_local_id) : nil
@@ -36152,16 +36378,84 @@ module Crystal::HIR
               if type_name
                 target_ref = type_ref_for_name(type_name)
                 target_desc = @module.get_type_descriptor(target_ref)
-                # For union subjects, only narrow if target is a class (pointer payload).
-                # Value types (Int32, Float32, structs) in unions break with UnionUnwrap
-                # because the payload contains raw bytes, not a pointer.
+                is_known_primitive = target_ref == TypeRef::INT32 ||
+                                    target_ref == TypeRef::INT64 ||
+                                    target_ref == TypeRef::FLOAT32 ||
+                                    target_ref == TypeRef::FLOAT64 ||
+                                    target_ref == TypeRef::BOOL ||
+                                    target_ref == TypeRef::CHAR ||
+                                    target_ref == TypeRef::UINT8 ||
+                                    target_ref == TypeRef::UINT32 ||
+                                    target_ref == TypeRef::UINT64 ||
+                                    target_ref == TypeRef::NIL
                 should_narrow = if subj_is_union
-                                  target_desc && target_desc.kind == HIR::TypeKind::Class
+                                  is_known_primitive ||
+                                  (target_desc && (target_desc.kind == HIR::TypeKind::Class ||
+                                                   target_desc.kind == HIR::TypeKind::Primitive))
                                 else
                                   true
                                 end
                 if should_narrow
                   apply_is_a_narrowing(ctx, [{svn, target_ref}])
+                end
+                if target_ref == TypeRef::NIL
+                  nil_was_checked = true
+                end
+              elsif subj_is_union
+                # Value-based narrowing: for union subjects with literal conditions,
+                # narrow the subject to the value's type. Also handles .nil? predicate.
+                # E.g., `case pos when 0` narrows pos (Int32?) to Int32 inside the body.
+                narrow_type = case cond_node
+                              when CrystalV2::Compiler::Frontend::NumberNode
+                                val_str = String.new(cond_node.value)
+                                if val_str.includes?('.')
+                                  TypeRef::FLOAT64
+                                elsif val_str.ends_with?("i64") || val_str.ends_with?("_i64")
+                                  TypeRef::INT64
+                                elsif val_str.ends_with?("u8") || val_str.ends_with?("_u8")
+                                  TypeRef::UINT8
+                                elsif val_str.ends_with?("u32") || val_str.ends_with?("_u32")
+                                  TypeRef::UINT32
+                                elsif val_str.ends_with?("u64") || val_str.ends_with?("_u64")
+                                  TypeRef::UINT64
+                                else
+                                  TypeRef::INT32
+                                end
+                              when CrystalV2::Compiler::Frontend::CharNode
+                                TypeRef::CHAR
+                              when CrystalV2::Compiler::Frontend::BoolNode
+                                TypeRef::BOOL
+                              when CrystalV2::Compiler::Frontend::NilNode
+                                nil_was_checked = true
+                                TypeRef::NIL
+                              when CrystalV2::Compiler::Frontend::MemberAccessNode
+                                obj = @arena[cond_node.object]
+                                member = String.new(cond_node.member)
+                                if obj.is_a?(CrystalV2::Compiler::Frontend::ImplicitObjNode) && member == "nil?"
+                                  nil_was_checked = true
+                                  TypeRef::NIL
+                                else
+                                  nil
+                                end
+                              when CrystalV2::Compiler::Frontend::CallNode
+                                # Handle `.nil?()` parsed as CallNode with MemberAccessNode callee
+                                callee = @arena[cond_node.callee]
+                                if callee.is_a?(CrystalV2::Compiler::Frontend::MemberAccessNode)
+                                  member = String.new(callee.member)
+                                  if member == "nil?"
+                                    nil_was_checked = true
+                                    TypeRef::NIL
+                                  else
+                                    nil
+                                  end
+                                else
+                                  nil
+                                end
+                              else
+                                nil
+                              end
+                if narrow_type
+                  apply_is_a_narrowing(ctx, [{svn, narrow_type}])
                 end
               end
             end
@@ -36190,6 +36484,24 @@ module Crystal::HIR
 
       # Else branch - restore locals before else branch
       ctx.restore_locals(pre_case_locals)
+      # Re-register the subject variable (same as for when branches)
+      if svn = subject_var_name
+        if subject_id
+          ctx.register_local(svn, subject_id)
+        end
+      end
+      # Narrow the subject in the else branch: if .nil? was checked in a when branch,
+      # the else branch can narrow the subject to the non-nil type.
+      if nil_was_checked && subject_id
+        if svn = subject_var_name
+          subj_type = ctx.type_of(subject_id)
+          if is_union_type?(subj_type)
+            if non_nil = non_nil_type_for_union(subj_type)
+              apply_is_a_narrowing(ctx, [{svn, non_nil}])
+            end
+          end
+        end
+      end
       ctx.push_scope(ScopeKind::Block)
       else_result = if else_body = node.else_branch
                       if else_body.empty?
@@ -42996,7 +43308,8 @@ module Crystal::HIR
             # Also don't skip if the callee contains yield — the block-to-proc fallback loses
             # closure capture context, causing null dereferences (e.g. Hash#fetch in clone).
             is_known_yield = @yield_functions.includes?(mangled_method_name) ||
-                             @yield_functions.includes?(base_method_name)
+                             @yield_functions.includes?(base_method_name) ||
+                             !yield_function_name_for(base_method_name).nil?
             unless is_known_yield || yield_return_function_for_call(mangled_method_name, base_method_name)
               if block_return_type_param_name(mangled_method_name, base_method_name).nil?
                 resolved_receiver_type = receiver_id ? ctx.type_of(receiver_id) : TypeRef::VOID
@@ -43020,7 +43333,8 @@ module Crystal::HIR
           inline_required = yield_return_function_for_call(mangled_method_name, base_method_name) ||
                             !block_return_type_param_name(mangled_method_name, base_method_name).nil? ||
                             @yield_functions.includes?(mangled_method_name) ||
-                            @yield_functions.includes?(base_method_name)
+                            @yield_functions.includes?(base_method_name) ||
+                            !yield_function_name_for(base_method_name).nil?
           # When inside an already-inlined yield function, force inline_required to prevent
           # block-to-proc conversion which would lose access to inlined scope variables.
           if !inline_required && @inline_yield_name_stack.size > 0
@@ -43057,6 +43371,31 @@ module Crystal::HIR
                                     nil
                                   end
                                 end
+          # When the effective yield key comes from a less-specific module (e.g. Enumerable#first)
+          # but a more-specific module (e.g. Indexable#first) also has this method, prefer
+          # the more-specific one. Walk the receiver's module chain (BFS, most specific first).
+          if effective_yield_key && receiver_id
+            recv_type_name = get_type_name_from_ref(ctx.type_of(receiver_id))
+            eff_owner = method_owner(strip_type_suffix(effective_yield_key))
+            eff_owner_base = eff_owner ? strip_generic_args(eff_owner) : nil
+            recv_base = strip_generic_args(recv_type_name)
+            if eff_owner_base && eff_owner_base != recv_base
+              # The yield key is from a module, not the receiver class itself.
+              # Walk the receiver's module chain to find a more specific yield function.
+              short_method = method_short_from_name(effective_yield_key)
+              if short_method
+                better = yield_function_name_for("#{recv_type_name}##{short_method}")
+                if better && better != effective_yield_key
+                  better_owner = method_owner(strip_type_suffix(better))
+                  better_owner_base = better_owner ? strip_generic_args(better_owner) : nil
+                  # Accept the better match only if it's from a different (more specific) module
+                  if better_owner_base && better_owner_base != eff_owner_base
+                    effective_yield_key = better
+                  end
+                end
+              end
+            end
+          end
           if !skip_inline && effective_yield_key
             if receiver_id
               recv_name = get_type_name_from_ref(ctx.type_of(receiver_id))
@@ -43073,10 +43412,17 @@ module Crystal::HIR
               end
             end
             if !skip_inline
-              # Try function_defs with effective key first, then mangled name
-              func_def = @function_defs[effective_yield_key]? || @function_defs[mangled_method_name]?
+              # Try function_defs with effective key first, then base name (without $block suffix), then mangled name
+              effective_base_key = strip_type_suffix(effective_yield_key)
+              func_def = @function_defs[effective_yield_key]? || @function_defs[effective_base_key]? || @function_defs[mangled_method_name]?
               if func_def
-                use_key = @function_defs.has_key?(effective_yield_key) ? effective_yield_key : mangled_method_name
+                use_key = if @function_defs.has_key?(effective_yield_key)
+                            effective_yield_key
+                          elsif @function_defs.has_key?(effective_base_key)
+                            effective_base_key
+                          else
+                            mangled_method_name
+                          end
                 debug_hook("call.inline.yield", "callee=#{use_key} current=#{@current_class || ""}")
                 callee_arena = @function_def_arenas[use_key]? || @arena
                 return inline_yield_function(ctx, func_def, use_key, receiver_id, call_arg_values, block_cast, block_param_types_inline, callee_arena)
@@ -43564,6 +43910,89 @@ module Crystal::HIR
               receiver_type = base
             end
             is_enum_receiver = true
+          end
+        end
+        # Nilable numeric comparison: e.g., Int32? == Int32, Int32? != Int32
+        # Must check type_id before comparing to avoid nil payload matching 0.
+        if !numeric_primitive?(receiver_type) && is_union_or_nilable_type?(receiver_type) &&
+           (method_name == "==" || method_name == "!=" || method_name == "===" || method_name == "<" ||
+            method_name == "<=" || method_name == ">" || method_name == ">=")
+          nil_vid = get_union_variant_id(receiver_type, TypeRef::NIL)
+          if nil_vid >= 0
+            # Find the non-nil numeric variant
+            non_nil_type : TypeRef? = nil
+            non_nil_vid = -1
+            if desc = @module.get_type_descriptor(receiver_type)
+              split_union_type_name(desc.name).each do |vn|
+                next if vn == "Nil"
+                vr = type_ref_for_name(vn)
+                if numeric_primitive?(vr)
+                  non_nil_type = vr
+                  non_nil_vid = get_union_variant_id(receiver_type, vr)
+                  break
+                end
+              end
+            end
+            if non_nil_type && non_nil_vid >= 0
+              bin_op = binary_op_for_method(method_name)
+              if bin_op
+                is_eq_ne = bin_op.in?(BinaryOp::Eq, BinaryOp::Ne)
+                # Emit: if receiver is nil -> false (eq)/true (ne), else unwrap and compare
+                pre_branch = ctx.save_locals
+                nil_check = UnionIs.new(ctx.next_id, receiver_id, nil_vid)
+                ctx.emit(nil_check)
+                ctx.register_type(nil_check.id, TypeRef::BOOL)
+
+                nil_block = ctx.create_block
+                non_nil_block = ctx.create_block
+                merge_block = ctx.create_block
+                ctx.terminate(Branch.new(nil_check.id, nil_block, non_nil_block))
+
+                # Nil branch: when union holds nil, check if the arg is also nil
+                ctx.current_block = nil_block
+                ctx.restore_locals(pre_branch)
+                arg_is_nil = args.size == 1 && ctx.type_of(args[0]) == TypeRef::NIL
+                nil_result_val = if arg_is_nil
+                                   # nil == nil → true, nil != nil → false
+                                   bin_op == BinaryOp::Eq ? 1_i64 : 0_i64
+                                 else
+                                   # nil == non_nil → false, nil != non_nil → true
+                                   is_eq_ne && bin_op == BinaryOp::Ne ? 1_i64 : 0_i64
+                                 end
+                nil_lit = Literal.new(ctx.next_id, TypeRef::BOOL, nil_result_val)
+                ctx.emit(nil_lit)
+                ctx.register_type(nil_lit.id, TypeRef::BOOL)
+                nil_exit = ctx.current_block
+                ctx.terminate(Jump.new(merge_block))
+
+                # Non-nil branch: unwrap and compare
+                ctx.current_block = non_nil_block
+                ctx.restore_locals(pre_branch)
+                unwrapped = UnionUnwrap.new(ctx.next_id, non_nil_type, receiver_id, non_nil_vid, false)
+                ctx.emit(unwrapped)
+                ctx.register_type(unwrapped.id, non_nil_type)
+                cmp_result_type = case bin_op
+                                  when BinaryOp::Eq, BinaryOp::Ne, BinaryOp::Lt, BinaryOp::Le,
+                                       BinaryOp::Gt, BinaryOp::Ge
+                                    TypeRef::BOOL
+                                  else
+                                    non_nil_type
+                                  end
+                cmp = BinaryOperation.new(ctx.next_id, cmp_result_type, bin_op, unwrapped.id, args[0])
+                ctx.emit(cmp)
+                ctx.register_type(cmp.id, cmp_result_type)
+                non_nil_exit = ctx.current_block
+                ctx.terminate(Jump.new(merge_block))
+
+                # Merge
+                ctx.current_block = merge_block
+                phi = Phi.new(ctx.next_id, TypeRef::BOOL,
+                  [{nil_exit, nil_lit.id}, {non_nil_exit, cmp.id}])
+                ctx.emit(phi)
+                ctx.register_type(phi.id, TypeRef::BOOL)
+                return phi.id
+              end
+            end
           end
         end
         if numeric_primitive?(receiver_type)
@@ -44809,6 +45238,26 @@ module Crystal::HIR
         end
       end
 
+      # Union arg dispatch: branch on union arg variant for distinct overloads
+      if receiver_id && !call_virtual && block_id.nil?
+        if uad = try_emit_union_arg_dispatch(ctx, receiver_id, base_method_name,
+             mangled_method_name, args, arg_types, return_type, has_block_call)
+          return uad
+        end
+      end
+      # Union receiver dispatch: branch on receiver variant for primitive unions
+      if receiver_id && call_virtual
+        rt = ctx.type_of(receiver_id)
+        rd = @module.get_type_descriptor(rt)
+        if rd && rd.kind == TypeKind::Union
+          if urd = try_emit_union_receiver_dispatch(ctx, receiver_id, rt, rd,
+               base_method_name, mangled_method_name, args, arg_types,
+               return_type, has_block_call, block_id)
+            return urd
+          end
+        end
+      end
+
       call = Call.new(ctx.next_id, return_type, receiver_id, mangled_method_name, args, block_id, call_virtual)
       ctx.emit(call)
       ctx.register_type(call.id, return_type)
@@ -44822,6 +45271,199 @@ module Crystal::HIR
         STDERR.puts "[CALL_TRACE] stage=after_emit method=#{method_name} mangled=#{mangled_method_name}"
       end
       call.id
+    end
+
+    # Union arg dispatch: when an arg is union with distinct typed overloads
+    private def try_emit_union_arg_dispatch(
+      ctx : LoweringContext, receiver_id : ValueId, base_method_name : String,
+      mangled_method_name : String, args : Array(ValueId), arg_types : Array(TypeRef),
+      return_type : TypeRef, has_block_call : Bool,
+    ) : ValueId?
+      ui = -1
+      ut = TypeRef::VOID
+      args.each_with_index do |_, idx|
+        next if idx >= arg_types.size
+        at = arg_types[idx]
+        next if at == TypeRef::VOID
+        if is_union_type?(at)
+          d = @module.get_type_descriptor(at)
+          next unless d
+          vs = split_union_type_name(d.name).reject { |v| v == "Nil" }
+          if vs.size >= 2
+            ui = idx; ut = at; break
+          end
+        end
+      end
+      return nil if ui < 0
+      d = @module.get_type_descriptor(ut)
+      return nil unless d
+      vs = split_union_type_name(d.name).reject { |v| v == "Nil" }
+      return nil if vs.size < 2
+      bfm = strip_type_suffix(base_method_name)
+      vo = [] of {String, TypeRef, Int32}
+      vs.each do |vn|
+        vr = type_ref_for_name(vn)
+        next if vr == TypeRef::VOID
+        vid = get_union_variant_id(ut, vr)
+        next if vid < 0
+        vat = arg_types.dup
+        vat[ui] = vr
+        vm = mangle_function_name(bfm, vat, has_block_call)
+        unless @function_types.has_key?(vm) || @function_defs.has_key?(vm) || @module.has_function?(vm)
+          if res = resolve_untyped_overload(bfm, arg_types.size, has_block_call)
+            rb = strip_type_suffix(res)
+            am = mangle_function_name(rb, vat, has_block_call)
+            if @function_types.has_key?(am) || @function_defs.has_key?(am) || @module.has_function?(am)
+              vm = am
+            else
+              lower_function_if_needed(am)
+              vm = am if @module.has_function?(am)
+            end
+          end
+          lower_function_if_needed(vm)
+        end
+        vo << {vm, vr, vid}
+      end
+      return nil if vo.size < 2
+      return nil if vo.map { |i| i[0] }.uniq.size < 2
+      vo.each { |m, _, _| lower_function_if_needed(m) }
+      ua = args[ui]
+      fm, fr, fv = vo[0]; sm, sr, sv = vo[1]
+      uis = UnionIs.new(ctx.next_id, ua, fv)
+      ctx.emit(uis); ctx.register_type(uis.id, TypeRef::BOOL)
+      pb = ctx.save_locals
+      tb = ctx.create_block; eb = ctx.create_block; mb = ctx.create_block
+      ctx.terminate(Branch.new(uis.id, tb, eb))
+      ctx.current_block = tb; ctx.restore_locals(pb)
+      uw1 = UnionUnwrap.new(ctx.next_id, fr, ua, fv, false)
+      ctx.emit(uw1); ctx.register_type(uw1.id, fr)
+      ta = args.dup; ta[ui] = uw1.id
+      c1 = Call.new(ctx.next_id, return_type, receiver_id, fm, ta)
+      ctx.emit(c1); ctx.register_type(c1.id, return_type)
+      te = ctx.current_block; ctx.terminate(Jump.new(mb))
+      ctx.current_block = eb; ctx.restore_locals(pb)
+      uw2 = UnionUnwrap.new(ctx.next_id, sr, ua, sv, false)
+      ctx.emit(uw2); ctx.register_type(uw2.id, sr)
+      ea = args.dup; ea[ui] = uw2.id
+      c2 = Call.new(ctx.next_id, return_type, receiver_id, sm, ea)
+      ctx.emit(c2); ctx.register_type(c2.id, return_type)
+      ee = ctx.current_block; ctx.terminate(Jump.new(mb))
+      ctx.current_block = mb
+      phi = Phi.new(ctx.next_id, return_type, [{te, c1.id}, {ee, c2.id}])
+      ctx.emit(phi); ctx.register_type(phi.id, return_type)
+      phi.id
+    end
+
+    # Union receiver dispatch: branch on receiver variant for primitive unions
+    private def try_emit_union_receiver_dispatch(
+      ctx : LoweringContext, receiver_id : ValueId, recv_type : TypeRef, recv_desc,
+      base_method_name : String, mangled_method_name : String, args : Array(ValueId),
+      arg_types : Array(TypeRef), return_type : TypeRef, has_block_call : Bool,
+      block_id : ValueId?,
+    ) : ValueId?
+      variants = split_union_type_name(recv_desc.name)
+      return nil if variants.size < 2
+      has_prim = variants.any? do |v|
+        r = type_ref_for_name(v)
+        next false if r == TypeRef::VOID
+        r.primitive? || v == "Nil" || begin
+          dd = @module.get_type_descriptor(r)
+          dd && dd.kind == TypeKind::Struct
+        end
+      end
+      return nil unless has_prim
+      mb = base_method_name.includes?('#') ? base_method_name.split('#', 2).last : base_method_name
+      vms = [] of {String, TypeRef, Int32}
+      variants.each do |vn|
+        vr = type_ref_for_name(vn)
+        next if vr == TypeRef::VOID
+        vid = get_union_variant_id(recv_type, vr)
+        next if vid < 0
+        vb = "#{vn}##{mb}"
+        vm = mangle_function_name(vb, arg_types, has_block_call)
+        unless @function_types.has_key?(vm) || @function_defs.has_key?(vm) || @module.has_function?(vm)
+          if res = resolve_untyped_overload(vb, arg_types.size, has_block_call)
+            vm = res
+          else
+            if inh = resolve_method_with_inheritance(vn, mb)
+              im = mangle_function_name(inh, arg_types, has_block_call)
+              if @function_types.has_key?(im) || @function_defs.has_key?(im) || @module.has_function?(im)
+                vm = im
+              elsif ir = resolve_untyped_overload(inh, arg_types.size, has_block_call)
+                vm = ir
+              else
+                lower_function_if_needed(im)
+                vm = im if @module.has_function?(im)
+              end
+            end
+          end
+        end
+        lower_function_if_needed(vm)
+        vms << {vm, vr, vid}
+      end
+      return nil if vms.size < 2
+      pb = ctx.save_locals
+      merge = ctx.create_block
+      inc = [] of {BlockId, ValueId}
+      vms.each_with_index do |info, idx|
+        vmn, vmr, vmvid = info
+        if idx == vms.size - 1
+          uw = UnionUnwrap.new(ctx.next_id, vmr, receiver_id, vmvid, false)
+          ctx.emit(uw); ctx.register_type(uw.id, vmr)
+          pi = primitive_intrinsic_for_dispatch(vmr, mb)
+          c = if pi
+            Call.new(ctx.next_id, pi[1], nil, pi[0], [uw.id] + args)
+          else
+            Call.new(ctx.next_id, return_type, uw.id, vmn, args)
+          end
+          ctx.emit(c); ctx.register_type(c.id, return_type)
+          inc << {ctx.current_block, c.id}
+          ctx.terminate(Jump.new(merge))
+        else
+          uis = UnionIs.new(ctx.next_id, receiver_id, vmvid)
+          ctx.emit(uis); ctx.register_type(uis.id, TypeRef::BOOL)
+          tb = ctx.create_block; nb = ctx.create_block
+          ctx.terminate(Branch.new(uis.id, tb, nb))
+          ctx.current_block = tb; ctx.restore_locals(pb)
+          uw = UnionUnwrap.new(ctx.next_id, vmr, receiver_id, vmvid, false)
+          ctx.emit(uw); ctx.register_type(uw.id, vmr)
+          pi2 = primitive_intrinsic_for_dispatch(vmr, mb)
+          c = if pi2
+            Call.new(ctx.next_id, pi2[1], nil, pi2[0], [uw.id] + args)
+          else
+            Call.new(ctx.next_id, return_type, uw.id, vmn, args)
+          end
+          ctx.emit(c); ctx.register_type(c.id, return_type)
+          inc << {ctx.current_block, c.id}
+          ctx.terminate(Jump.new(merge))
+          ctx.current_block = nb; ctx.restore_locals(pb)
+        end
+      end
+      ctx.current_block = merge
+      phi = Phi.new(ctx.next_id, return_type, inc)
+      ctx.emit(phi); ctx.register_type(phi.id, return_type)
+      phi.id
+    end
+
+    # Returns {intrinsic_name, return_type} for known primitive intrinsics,
+    # or nil if the method should use normal dispatch.
+    private def primitive_intrinsic_for_dispatch(variant_type : TypeRef, method_name : String) : {String, TypeRef}?
+      if variant_type == TypeRef::CHAR
+        case method_name
+        when "to_s" then return {"__crystal_v2_char_to_string", TypeRef::STRING}
+        end
+      elsif variant_type == TypeRef::FLOAT64
+        case method_name
+        when "to_s" then return {"__crystal_v2_f64_to_string", TypeRef::STRING}
+        when "to_i", "to_i32" then return {"__crystal_v2_f64_to_i32", TypeRef::INT32}
+        when "to_i64" then return {"__crystal_v2_f64_to_i64", TypeRef::INT64}
+        end
+      elsif variant_type == TypeRef::BOOL
+        case method_name
+        when "to_s" then return {"__crystal_v2_bool_to_string", TypeRef::STRING}
+        end
+      end
+      nil
     end
 
     # Expand splat arguments in a call
@@ -49735,6 +50377,16 @@ module Crystal::HIR
             @current_method_is_class = true
           end
         end
+        # When inlining a module method (e.g. Indexable#last), override @current_class
+        # with the receiver's actual type (e.g. Array(Int32)). Without this, method
+        # lookups for implicit self calls (like `size`) resolve to the module's abstract
+        # stubs instead of the concrete implementation on the receiver type.
+        if receiver_id && !parts.is_class
+          receiver_type_name = get_type_name_from_ref(ctx.type_of(receiver_id))
+          if !receiver_type_name.empty? && receiver_type_name != "Nil"
+            @current_class = receiver_type_name
+          end
+        end
         inline_param_map = type_param_map_for_receiver_name(base_inline_name)
         if receiver_id
           receiver_type_map = type_param_map_for_receiver_type(ctx.type_of(receiver_id))
@@ -50325,6 +50977,32 @@ module Crystal::HIR
             begin_id = lower_expr(ctx, idx_node.begin_expr)
             end_id = lower_expr(ctx, idx_node.end_expr)
             exclusive = idx_node.exclusive
+
+            # Handle negative indices: adjust by adding string bytesize.
+            # e.g., s[6..-1] → end = bytesize + (-1) = bytesize - 1
+            range_end_may_be_negative = begin
+              end_node = @arena[idx_node.end_expr]
+              if end_node.is_a?(CrystalV2::Compiler::Frontend::UnaryNode) &&
+                 String.new(end_node.operator) == "-"
+                true
+              elsif end_node.is_a?(CrystalV2::Compiler::Frontend::NumberNode)
+                val = String.new(end_node.value)
+                val.starts_with?("-")
+              else
+                false
+              end
+            end
+            if range_end_may_be_negative
+              # Get bytesize and adjust: end = bytesize + end (end is negative)
+              bytesize_call = ExternCall.new(ctx.next_id, TypeRef::INT32, "__crystal_v2_string_bytesize", [object_id])
+              ctx.emit(bytesize_call)
+              ctx.register_type(bytesize_call.id, TypeRef::INT32)
+              adjusted_end = BinaryOperation.new(ctx.next_id, TypeRef::INT32, BinaryOp::Add, bytesize_call.id, end_id)
+              ctx.emit(adjusted_end)
+              ctx.register_type(adjusted_end.id, TypeRef::INT32)
+              end_id = adjusted_end.id
+            end
+
             # Calculate length: for inclusive range (0..4), length = end - begin + 1
             # For exclusive range (0...4), length = end - begin
             len_raw = BinaryOperation.new(ctx.next_id, TypeRef::INT32, BinaryOp::Sub, end_id, begin_id)
@@ -50425,7 +51103,13 @@ module Crystal::HIR
       end
 
       # IndexNode has indexes (Array) - can be multi-dimensional like arr[1, 2]
-      index_ids = node.indexes.map { |idx| lower_expr(ctx, idx) }
+      # Check for splat args: s[*t] where t is a Tuple should expand to s[t[0], t[1]]
+      has_index_splat = node.indexes.any? { |idx| @arena[idx].is_a?(CrystalV2::Compiler::Frontend::SplatNode) }
+      index_ids = if has_index_splat
+                    expand_splat_args(ctx, node.indexes, @arena)
+                  else
+                    node.indexes.map { |idx| lower_expr(ctx, idx) }
+                  end
 
       # Check if this is an array by looking at the object node (ArrayLiteral check)
       # This is necessary because arrays are typed as POINTER but should use IndexGet
@@ -52396,6 +53080,20 @@ module Crystal::HIR
       if debug_env_filter_match?("DEBUG_MEMBER_CALL", member_name, actual_name)
         STDERR.puts "[MEMBER_CALL] name=#{actual_name} return_id=#{return_type.id} return=#{get_type_name_from_ref(return_type)}"
       end
+      # Union receiver dispatch for member access calls
+      if object_id && call_virtual
+        _rt = ctx.type_of(object_id)
+        _rd = @module.get_type_descriptor(_rt)
+        if _rd && _rd.kind == TypeKind::Union
+          _bmn = actual_name.includes?('#') ? actual_name : (base_method_name || actual_name)
+          if _urd = try_emit_union_receiver_dispatch(ctx, object_id, _rt, _rd,
+               _bmn, actual_name, args, arg_types,
+               return_type, false, nil)
+            return _urd
+          end
+        end
+      end
+
       call = Call.new(ctx.next_id, return_type, object_id, actual_name, args, nil, call_virtual)
       ctx.emit(call)
       ctx.register_type(call.id, return_type)
@@ -55484,6 +56182,28 @@ module Crystal::HIR
 
     private def type_ref_for_name(name : String) : TypeRef
       return TypeRef::VOID if name == "_"
+
+      # Strip outer grouping parentheses: (Char | String) → Char | String
+      # Crystal allows parenthesized union types in annotations: def foo(x : (A | B))
+      # These must be treated identically to the non-parenthesized form.
+      if name.bytesize > 2 && name.byte_at(0) == '('.ord && name.byte_at(name.bytesize - 1) == ')'.ord
+        depth = 0
+        outer_matches_end = true
+        i = 0
+        while i < name.bytesize - 1
+          ch = name.byte_at(i)
+          depth += 1 if ch == '('.ord
+          depth -= 1 if ch == ')'.ord
+          if depth == 0
+            outer_matches_end = false
+            break
+          end
+          i += 1
+        end
+        if outer_matches_end
+          name = name[1..-2].strip
+        end
+      end
 
       raw_name = name
       pre_resolved_lookup_name : String? = nil

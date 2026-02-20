@@ -4636,8 +4636,8 @@ module Crystal::MIR
         nil_variant_id = nil_variant.type_id
         value_union_name = @type_mapper.llvm_type(func.return_type)
         value_llvm_type = @type_mapper.llvm_type(value_ref)
-        # Complex payloads are handled by the normal lowering path.
-        return false if value_llvm_type.starts_with?("%") || value_llvm_type.starts_with?("[")
+        # Complex payloads (structs, tuples, void) are handled by the normal lowering path.
+        return false if value_llvm_type.starts_with?("%") || value_llvm_type.starts_with?("[") || value_llvm_type == "void"
 
         # Compute value offset in Entry body: after @key field, aligned to value type.
         # Entry struct layout: @key at 0, @value at aligned(key_size, value_align), @hash after.
@@ -6395,7 +6395,26 @@ module Crystal::MIR
           emit "store i8 0, ptr %#{base_name}.payload_ptr, align 4"
         else
           val_ref = "null" if val_llvm_type == "ptr" && val_ref == "0"
-          emit "store #{val_llvm_type} #{val_ref}, ptr %#{base_name}.payload_ptr, align 4"
+          # For tuple types (stack-allocated value types), copy data instead of storing pointer
+          phi_variant_vt = false
+          phi_variant_size = 0_u64
+          if val_llvm_type == "ptr" && val_ref != "null"
+            union_mir = @module.type_registry.get(union_type_ref)
+            if union_mir && (uvars = union_mir.variants)
+              if variant_type_id >= 0 && variant_type_id < uvars.size
+                vtype = uvars[variant_type_id]
+                if vtype.name.starts_with?("Tuple(") && vtype.is_value_type? && vtype.size > 0
+                  phi_variant_vt = true
+                  phi_variant_size = vtype.size
+                end
+              end
+            end
+          end
+          if phi_variant_vt
+            emit "call void @llvm.memcpy.p0.p0.i64(ptr %#{base_name}.payload_ptr, ptr #{val_ref}, i64 #{phi_variant_size}, i1 false)"
+          else
+            emit "store #{val_llvm_type} #{val_ref}, ptr %#{base_name}.payload_ptr, align 4"
+          end
         end
         emit "%#{wrap_name} = load #{union_type}, ptr %#{base_name}.ptr"
       end
@@ -7402,23 +7421,78 @@ module Crystal::MIR
         end
       end
 
-      # Handle union types in comparisons - check type_id for nil comparison
-      if is_comparison && operand_type_str.includes?(".union")
-        base_name = name.lstrip('%')
-        # Union comparison: compare type_id (0=non-nil concrete, 1=nil)
-        # For nilable checks, compare type_id to 1 (nil variant)
-        emit "%#{base_name}.union_ptr = alloca #{operand_type_str}, align 8"
-        emit "store #{operand_type_str} #{normalize_union_value(left, operand_type_str)}, ptr %#{base_name}.union_ptr"
-        emit "%#{base_name}.type_id_ptr = getelementptr #{operand_type_str}, ptr %#{base_name}.union_ptr, i32 0, i32 0"
-        emit "%#{base_name}.type_id = load i32, ptr %#{base_name}.type_id_ptr"
-        # type_id 0 = non-nil (concrete variant), type_id 1 = nil (matches UnionWrap convention)
-        if inst.op.eq?
-          emit "#{name} = icmp eq i32 %#{base_name}.type_id, 1"  # Check if nil (type_id == 1)
-        else
-          emit "#{name} = icmp ne i32 %#{base_name}.type_id, 1"  # Check if not nil (type_id != 1)
+      # Handle nilable union types in comparisons (e.g., Int32 == Int32?, Int32? == 0)
+      # Must check type_id to distinguish nil from concrete values in the union.
+      if is_comparison
+        left_is_union = operand_type_str.includes?(".union")
+        right_is_union = right_type_str.includes?(".union")
+
+        if (left_is_union || right_is_union) && !(left_is_union && right_is_union)
+          # One side is union, the other is concrete
+          union_type_str = left_is_union ? operand_type_str : right_type_str
+          union_val = left_is_union ? left : right
+          concrete_val = left_is_union ? right : left
+          concrete_type_str = left_is_union ? right_type_str : operand_type_str
+          concrete_type_ref = left_is_union ? right_type : left_type
+
+          nil_vid = nil_variant_id_for_union_type(union_type_str)
+
+          if nil_vid != nil
+            base_name = name.lstrip('%')
+
+            # Store union to stack and extract type_id
+            emit "%#{base_name}.union_ptr = alloca #{union_type_str}, align 8"
+            emit "store #{union_type_str} #{normalize_union_value(union_val, union_type_str)}, ptr %#{base_name}.union_ptr"
+            emit "%#{base_name}.type_id_ptr = getelementptr #{union_type_str}, ptr %#{base_name}.union_ptr, i32 0, i32 0"
+            emit "%#{base_name}.type_id = load i32, ptr %#{base_name}.type_id_ptr"
+
+            # Check if union holds nil
+            emit "%#{base_name}.is_nil = icmp eq i32 %#{base_name}.type_id, #{nil_vid}"
+
+            # Is the concrete side nil?
+            concrete_is_nil = concrete_val == "null" || concrete_type_ref == TypeRef::NIL
+
+            if concrete_is_nil
+              # nil == union or union == nil: result is whether union is nil
+              if inst.op.eq?
+                emit "#{name} = icmp eq i32 %#{base_name}.type_id, #{nil_vid}"
+              else
+                emit "#{name} = icmp ne i32 %#{base_name}.type_id, #{nil_vid}"
+              end
+            else
+              # Concrete non-nil vs nilable union: extract payload and compare
+              emit "%#{base_name}.payload_ptr = getelementptr #{union_type_str}, ptr %#{base_name}.union_ptr, i32 0, i32 1"
+
+              # Determine comparison type from concrete side
+              cmp_type = if concrete_type_str.starts_with?('i') && !concrete_type_str.includes?('.')
+                           concrete_type_str
+                         elsif concrete_type_str == "ptr"
+                           "i64"
+                         else
+                           "i32"
+                         end
+
+              emit "%#{base_name}.payload = load #{cmp_type}, ptr %#{base_name}.payload_ptr, align 4"
+
+              # Coerce concrete value if ptr
+              cmp_concrete = concrete_val
+              if concrete_type_str == "ptr"
+                emit "%#{base_name}.concrete_int = ptrtoint ptr #{concrete_val} to #{cmp_type}"
+                cmp_concrete = "%#{base_name}.concrete_int"
+              end
+
+              cmp_op = inst.op.eq? ? "eq" : "ne"
+              emit "%#{base_name}.payload_cmp = icmp #{cmp_op} #{cmp_type} %#{base_name}.payload, #{cmp_concrete}"
+
+              # If union is nil: eq→false, ne→true. Otherwise use payload comparison.
+              nil_result = inst.op.eq? ? "0" : "1"
+              emit "#{name} = select i1 %#{base_name}.is_nil, i1 #{nil_result}, i1 %#{base_name}.payload_cmp"
+            end
+
+            @value_types[inst.id] = TypeRef::BOOL
+            return
+          end
         end
-        @value_types[inst.id] = TypeRef::BOOL  # Comparisons return i1
-        return
       end
 
       # Guard: arithmetic/shift ops can't use ptr or void type
@@ -9037,8 +9111,24 @@ module Crystal::MIR
         has_different_union_incoming = incoming_pairs.any? do |(block, val)|
           val_type = @value_types[val]?
           val_llvm_type = val_type ? @type_mapper.llvm_type(val_type) : nil
-          # Value is a union but different from phi type
-          val_llvm_type && val_llvm_type.includes?(".union") && val_llvm_type != phi_type
+          # Check MIR-mapped type
+          if val_llvm_type && val_llvm_type.includes?(".union") && val_llvm_type != phi_type
+            next true
+          end
+          # Also check actual emitted type — function call results may have a different
+          # LLVM union type name than what the MIR type mapper produces (e.g., ClassInfo|Void
+          # vs Nil|ClassInfo for nilable returns from Hash#[]?)
+          emitted = @emitted_value_types["%r#{val}"]?
+          if emitted && emitted.includes?(".union") && emitted != phi_type
+            next true
+          end
+          # Check cross-block slot type — when value crosses blocks, its slot stores the
+          # actual emitted type which may differ from the MIR-mapped type
+          slot_type = @cross_block_slot_types[val]?
+          if slot_type && slot_type.includes?(".union") && slot_type != phi_type
+            next true
+          end
+          false
         end
         if has_non_union_incoming || has_different_union_incoming
           # Emit union phi with proper conversion for mismatched incoming values
@@ -9663,13 +9753,9 @@ module Crystal::MIR
                      "#{expected_llvm_type} #{val}"
                    end
                 elsif expected_llvm_type == "ptr" && actual_llvm_type.starts_with?('%') && actual_llvm_type.includes?(".union")
-                  # Coerce union to ptr: pass pointer to entire union on stack.
-                  # The callee will load the union struct and dispatch based on type_id.
-                  # Do NOT extract payload as ptr — for value-type unions (e.g., Nil | Int32),
-                  # the payload is not a pointer and would be garbage if loaded as one.
+                  # Coerce union to ptr: two strategies depending on context.
                   c = @cond_counter
                   @cond_counter += 1
-                  temp_alloca = "%alloca.#{c}"
                   val_ref = value_ref(a)
                   emitted_actual_llvm = @emitted_value_types[val_ref]? || actual_llvm_type
                   union_storage_type = emitted_actual_llvm.includes?(".union") ? emitted_actual_llvm : actual_llvm_type
@@ -9677,7 +9763,25 @@ module Crystal::MIR
                   inst_llvm_type = def_inst ? @type_mapper.llvm_type(def_inst.type) : nil
                   if inst_llvm_type == "ptr" || @cross_block_slot_types[a]? == "ptr"
                     "ptr #{val_ref}"
+                  elsif @current_func_name.starts_with?("__vdispatch__")
+                    # Inside vdispatch: extract the payload pointer from the union.
+                    # Vdispatch forwards union-typed args to concrete target methods that
+                    # expect a concrete object pointer. The payload contains the object ptr
+                    # for class types (e.g., Nil | String), or null for Nil variant.
+                    temp_alloca = "%u2p.#{c}"
+                    payload_ptr = "%u2p.#{c}.pay"
+                    extracted = "%u2p.#{c}.ptr"
+                    emit "#{temp_alloca} = alloca #{union_storage_type}, align 8"
+                    emit "store #{union_storage_type} #{normalize_union_value(val_ref, union_storage_type)}, ptr #{temp_alloca}"
+                    emit "#{payload_ptr} = getelementptr #{union_storage_type}, ptr #{temp_alloca}, i32 0, i32 1"
+                    emit "#{extracted} = load ptr, ptr #{payload_ptr}, align 4"
+                    "ptr #{extracted}"
                   else
+                    # Outside vdispatch: pass pointer to entire union on stack.
+                    # The callee loads the union struct and dispatches based on type_id.
+                    # Do NOT extract payload as ptr — for value-type unions (e.g., Nil | Int32),
+                    # the payload is not a pointer and would be garbage if loaded as one.
+                    temp_alloca = "%alloca.#{c}"
                     emit "#{temp_alloca} = alloca #{union_storage_type}, align 8"
                     emit "store #{union_storage_type} #{normalize_union_value(val_ref, union_storage_type)}, ptr #{temp_alloca}"
                     "ptr #{temp_alloca}"
@@ -11070,7 +11174,27 @@ module Crystal::MIR
         emit "store i8 0, ptr %#{base_name}.payload_ptr, align 4"
       else
         val = "null" if val_type_str == "ptr" && val == "0"
-        emit "store #{val_type_str} #{val}, ptr %#{base_name}.payload_ptr, align 4"
+        # For tuple types (stack-allocated value types stored via ptr), copy data instead of storing pointer.
+        # Only tuples need this — other structs are heap-allocated so their pointer IS the value.
+        variant_is_value_type = false
+        variant_size = 0_u64
+        if val_type_str == "ptr" && val != "null"
+          union_mir_type = @module.type_registry.get(inst.union_type)
+          if union_mir_type && (uvariants = union_mir_type.variants)
+            if inst.variant_type_id >= 0 && inst.variant_type_id < uvariants.size
+              vtype = uvariants[inst.variant_type_id]
+              if vtype.name.starts_with?("Tuple(") && vtype.is_value_type? && vtype.size > 0
+                variant_is_value_type = true
+                variant_size = vtype.size
+              end
+            end
+          end
+        end
+        if variant_is_value_type
+          emit "call void @llvm.memcpy.p0.p0.i64(ptr %#{base_name}.payload_ptr, ptr #{val}, i64 #{variant_size}, i1 false)"
+        else
+          emit "store #{val_type_str} #{val}, ptr %#{base_name}.payload_ptr, align 4"
+        end
       end
 
       # 4. Load the completed union value from stack
@@ -11111,19 +11235,48 @@ module Crystal::MIR
                     end
         emit "store #{union_type} #{store_val}, ptr %#{base_name}.union_ptr"
 
+        # Check if variant is a tuple type (stack-allocated value type) that needs memcpy from payload
+        unwrap_vt = false
+        unwrap_vt_size = 0_u64
+        if result_type == "ptr"
+          union_mir = @module.type_registry.get(union_type_ref)
+          if union_mir && (uvars = union_mir.variants)
+            if inst.variant_type_id >= 0 && inst.variant_type_id < uvars.size
+              vtype = uvars[inst.variant_type_id]
+              if vtype.name.starts_with?("Tuple(") && vtype.is_value_type? && vtype.size > 0
+                unwrap_vt = true
+                unwrap_vt_size = vtype.size
+              end
+            end
+          end
+        end
+
         if inst.safe
           # Safe unwrap: check type_id first, return null/zero on mismatch
           emit "%#{base_name}.type_id_ptr = getelementptr #{union_type}, ptr %#{base_name}.union_ptr, i32 0, i32 0"
           emit "%#{base_name}.actual_type_id = load i32, ptr %#{base_name}.type_id_ptr"
           emit "%#{base_name}.type_match = icmp eq i32 %#{base_name}.actual_type_id, #{inst.variant_type_id}"
           emit "%#{base_name}.payload_ptr = getelementptr #{union_type}, ptr %#{base_name}.union_ptr, i32 0, i32 1"
-          emit "%#{base_name}.payload = load #{result_type}, ptr %#{base_name}.payload_ptr, align 4"
-          # Select null/zero if type doesn't match
-          emit "#{name} = select i1 %#{base_name}.type_match, #{result_type} %#{base_name}.payload, #{result_type} zeroinitializer"
+          if unwrap_vt
+            # Value type: alloca + memcpy from payload
+            emit "%#{base_name}.vt_alloca = alloca i8, i64 #{unwrap_vt_size}, align 8"
+            emit "call void @llvm.memcpy.p0.p0.i64(ptr %#{base_name}.vt_alloca, ptr %#{base_name}.payload_ptr, i64 #{unwrap_vt_size}, i1 false)"
+            emit "#{name} = select i1 %#{base_name}.type_match, ptr %#{base_name}.vt_alloca, ptr null"
+          else
+            emit "%#{base_name}.payload = load #{result_type}, ptr %#{base_name}.payload_ptr, align 4"
+            # Select null/zero if type doesn't match
+            emit "#{name} = select i1 %#{base_name}.type_match, #{result_type} %#{base_name}.payload, #{result_type} zeroinitializer"
+          end
         else
           # Unsafe unwrap: just load payload (UB if type_id doesn't match)
           emit "%#{base_name}.payload_ptr = getelementptr #{union_type}, ptr %#{base_name}.union_ptr, i32 0, i32 1"
-          emit "#{name} = load #{result_type}, ptr %#{base_name}.payload_ptr, align 4"
+          if unwrap_vt
+            # Value type: alloca + memcpy from payload
+            emit "#{name} = alloca i8, i64 #{unwrap_vt_size}, align 8"
+            emit "call void @llvm.memcpy.p0.p0.i64(ptr #{name}, ptr %#{base_name}.payload_ptr, i64 #{unwrap_vt_size}, i1 false)"
+          else
+            emit "#{name} = load #{result_type}, ptr %#{base_name}.payload_ptr, align 4"
+          end
         end
       else
         # Not a union struct - just use the value directly
@@ -12127,8 +12280,13 @@ module Crystal::MIR
               string_parts << "%#{base_name}.conv#{idx}"
               next
             end
+            # The actual emitted type of the value may differ from part_llvm_type
+            # (e.g., Hash#[] returns %String$_$OR$_UInt32.union but caller expects %Nil$_$OR$_String.union).
+            # Use the emitted type for the store to avoid LLVM type mismatch errors.
+            store_union_type = @emitted_value_types[part_ref]?
+            store_union_type = part_llvm_type unless store_union_type && store_union_type.includes?(".union")
             emit "%#{base_name}.union_ptr#{idx} = alloca #{part_llvm_type}, align 8"
-            emit "store #{part_llvm_type} #{normalize_union_value(part_ref, part_llvm_type)}, ptr %#{base_name}.union_ptr#{idx}"
+            emit "store #{store_union_type} #{normalize_union_value(part_ref, store_union_type)}, ptr %#{base_name}.union_ptr#{idx}"
             emit "%#{base_name}.tid_ptr#{idx} = getelementptr #{part_llvm_type}, ptr %#{base_name}.union_ptr#{idx}, i32 0, i32 0"
             emit "%#{base_name}.tid#{idx} = load i32, ptr %#{base_name}.tid_ptr#{idx}"
             emit "%#{base_name}.payload_ptr#{idx} = getelementptr #{part_llvm_type}, ptr %#{base_name}.union_ptr#{idx}, i32 0, i32 1"
@@ -12493,7 +12651,22 @@ module Crystal::MIR
               # Non-nil value - set type_id=1 and store payload
               emit "store i32 1, ptr %ret#{c}.type_id_ptr"
               emit "%ret#{c}.payload_ptr = getelementptr #{@current_return_type}, ptr %ret#{c}.union_ptr, i32 0, i32 1"
-              emit "store #{val_llvm_type} #{val_ref}, ptr %ret#{c}.payload_ptr, align 4"
+              # For tuple types, copy data instead of storing pointer
+              ret_vt_size = 0_u64
+              if val_llvm_type == "ptr"
+                union_mir = @module.type_registry.get(@current_return_type_ref)
+                if union_mir && (uvars = union_mir.variants) && uvars.size > 1
+                  vtype = uvars[1] # variant 1 = non-nil (matches type_id=1)
+                  if vtype.name.starts_with?("Tuple(") && vtype.is_value_type? && vtype.size > 0
+                    ret_vt_size = vtype.size
+                  end
+                end
+              end
+              if ret_vt_size > 0
+                emit "call void @llvm.memcpy.p0.p0.i64(ptr %ret#{c}.payload_ptr, ptr #{val_ref}, i64 #{ret_vt_size}, i1 false)"
+              else
+                emit "store #{val_llvm_type} #{val_ref}, ptr %ret#{c}.payload_ptr, align 4"
+              end
             end
             emit "%ret#{c}.union = load #{@current_return_type}, ptr %ret#{c}.union_ptr"
             emit "ret #{@current_return_type} %ret#{c}.union"
@@ -12993,6 +13166,20 @@ module Crystal::MIR
       else
         val
       end
+    end
+
+    # Find the variant index (type_id) for Nil within a union LLVM type name.
+    # Union type names list variants alphabetically separated by $_$OR$_.
+    # Returns nil if the union doesn't contain a Nil variant.
+    private def nil_variant_id_for_union_type(llvm_type : String) : Int32?
+      name = llvm_type.lstrip('%').chomp(".union")
+      variants = name.split("$_$OR$_")
+      variants.each_with_index do |v, i|
+        # Strip generic args ($L...$R) and namespace separators ($CC)
+        base = v.split("$L").first.split("$CC").last
+        return i if base == "Nil"
+      end
+      nil
     end
 
     # Coerce a union value to a specific union LLVM type when the emitted source type

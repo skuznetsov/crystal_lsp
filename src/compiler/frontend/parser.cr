@@ -3993,8 +3993,9 @@ module CrystalV2
           # Check if there's a break value
           # break without value if: newline, EOF, end, else, elsif, postfix modifiers
           token = current_token
-          if token.kind.in?(Token::Kind::Newline, Token::Kind::EOF, Token::Kind::End, Token::Kind::Else, Token::Kind::Elsif, Token::Kind::If, Token::Kind::Unless, Token::Kind::While, Token::Kind::Until)
-            # Break without value (returns nil from loop)
+          if token.kind.in?(Token::Kind::Newline, Token::Kind::EOF, Token::Kind::End, Token::Kind::Else, Token::Kind::Elsif, Token::Kind::If, Token::Kind::Unless, Token::Kind::While, Token::Kind::Until) ||
+             (token.kind == Token::Kind::Colon && @no_type_declaration > 0)
+            # Break without value (colon check handles ternary: flag ? break : else_val)
             @arena.add_typed(BreakNode.new(break_token.span, nil))
           else
             # Break with value
@@ -4083,8 +4084,9 @@ module CrystalV2
             # Macro expression terminator: yield with no args
             return @arena.add_typed(YieldNode.new(yield_token.span, nil))
           end
-          if token.kind.in?(Token::Kind::Newline, Token::Kind::EOF, Token::Kind::End, Token::Kind::Else, Token::Kind::Elsif, Token::Kind::If, Token::Kind::Unless, Token::Kind::While, Token::Kind::Until, Token::Kind::Do, Token::Kind::RBrace, Token::Kind::RParen, Token::Kind::Semicolon)
-            # Yield without args
+          if token.kind.in?(Token::Kind::Newline, Token::Kind::EOF, Token::Kind::End, Token::Kind::Else, Token::Kind::Elsif, Token::Kind::If, Token::Kind::Unless, Token::Kind::While, Token::Kind::Until, Token::Kind::Do, Token::Kind::RBrace, Token::Kind::RParen, Token::Kind::Semicolon) ||
+             (token.kind == Token::Kind::Colon && @no_type_declaration > 0)
+            # Yield without args (colon check handles ternary: flag ? yield : else_val)
             @arena.add_typed(YieldNode.new(yield_token.span, nil))
           else
             args_b = SmallVec(ExprId, 2).new

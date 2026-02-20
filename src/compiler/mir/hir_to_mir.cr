@@ -2320,15 +2320,9 @@ module Crystal
           if arg_type != param_type && is_param_union && !is_arg_union
             # Wrap concrete value in union type
             variant_id = get_union_variant_id(arg_type, param_type)
-            # Debug disabled for performance:
-            # STDERR.puts "[MIR-COERCE] Wrapping arg #{mir_arg} type #{arg_type.id} into union type #{param_type.id} (variant #{variant_id})"
             wrapped = builder.union_wrap(mir_arg, variant_id, param_type)
             result << wrapped
           else
-            # Debug disabled for performance:
-            # if func.name.includes?("format_gutter")
-            #   STDERR.puts "[MIR-COERCE] No wrap: arg_type=#{arg_type.id} param_type=#{param_type.id} is_param_union=#{is_param_union}"
-            # end
             result << mir_arg
           end
         rescue ex : IndexError
