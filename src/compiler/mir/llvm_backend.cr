@@ -11647,6 +11647,13 @@ module Crystal::MIR
               emit "store #{actual_elem_type_str} #{normalize_union_value(elem_val, actual_elem_type_str)}, ptr %#{base_name}.elem#{idx}_u2u_ptr"
               emit "%#{base_name}.elem#{idx}_u2u = load #{element_type}, ptr %#{base_name}.elem#{idx}_u2u_ptr"
               elem_val = "%#{base_name}.elem#{idx}_u2u"
+            elsif is_elem_int && actual_elem_type_str.includes?(".union")
+              # union → int: extract scalar payload from union
+              emit "%#{base_name}.elem#{idx}_u2i_ptr = alloca #{actual_elem_type_str}, align 8"
+              emit "store #{actual_elem_type_str} #{normalize_union_value(elem_val, actual_elem_type_str)}, ptr %#{base_name}.elem#{idx}_u2i_ptr"
+              emit "%#{base_name}.elem#{idx}_pay_ptr = getelementptr #{actual_elem_type_str}, ptr %#{base_name}.elem#{idx}_u2i_ptr, i32 0, i32 1"
+              emit "%#{base_name}.elem#{idx}_u2i = load #{element_type}, ptr %#{base_name}.elem#{idx}_pay_ptr, align 4"
+              elem_val = "%#{base_name}.elem#{idx}_u2i"
             end
           end
           # For ptr type, convert 0 to null

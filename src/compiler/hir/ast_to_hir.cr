@@ -33192,8 +33192,9 @@ module Crystal::HIR
       if !is_primitive && (op_str == "+" || op_str == "-" || op_str == "*" || op_str == "/" || op_str == "%" ||
          op_str == "===" || op_str == "==" || op_str == "!=" ||
          op_str == "<" || op_str == "<=" || op_str == ">" || op_str == ">=")
-        # Nilable numeric comparison: e.g., Int32? == Int32
-        # Must check type_id before comparing to avoid nil payload matching 0.
+        # Nilable union comparison: e.g., Int32? == Int32, String? == String
+        # Must check type_id before comparing to avoid nil payload matching 0
+        # or passing union struct ptr where unwrapped value is expected.
         if is_union_or_nilable_type?(left_type) && is_comparison_op?(op_str)
           nil_vid = get_union_variant_id(left_type, TypeRef::NIL)
           if nil_vid >= 0
@@ -33203,14 +33204,18 @@ module Crystal::HIR
               split_union_type_name(desc.name).each do |vn|
                 next if vn == "Nil"
                 vr = type_ref_for_name(vn)
-                if numeric_primitive?(vr)
-                  non_nil_type = vr
-                  non_nil_vid = get_union_variant_id(left_type, vr)
-                  break
-                end
+                non_nil_type = vr
+                non_nil_vid = get_union_variant_id(left_type, vr)
+                break
               end
             end
             if non_nil_type && non_nil_vid >= 0
+              is_eq_or_ne = (op_str == "==" || op_str == "===" || op_str == "!=")
+              is_eq = (op_str == "==" || op_str == "===")
+              is_ne = (op_str == "!=")
+
+              # For numeric primitives, use BinaryOp; for others (String etc), use method call
+              use_primitive = numeric_primitive?(non_nil_type)
               bin_op = case op_str
                        when "==", "===" then BinaryOp::Eq
                        when "!="        then BinaryOp::Ne
@@ -33220,9 +33225,8 @@ module Crystal::HIR
                        when ">="        then BinaryOp::Ge
                        else nil
                        end
-              if bin_op
-                is_eq = bin_op == BinaryOp::Eq
-                is_ne = bin_op == BinaryOp::Ne
+              # Non-numeric types only support == and != via method dispatch
+              if bin_op && (use_primitive || is_eq_or_ne)
                 pre_branch = ctx.save_locals
                 nil_check = UnionIs.new(ctx.next_id, left_id, nil_vid)
                 ctx.emit(nil_check)
@@ -33238,10 +33242,8 @@ module Crystal::HIR
                 ctx.restore_locals(pre_branch)
                 right_is_nil = ctx.type_of(right_id) == TypeRef::NIL
                 nil_result_val = if right_is_nil
-                                   # nil == nil → true, nil != nil → false
                                    is_eq ? 1_i64 : 0_i64
                                  else
-                                   # nil == non_nil → false, nil != non_nil → true
                                    is_ne ? 1_i64 : 0_i64
                                  end
                 nil_lit = Literal.new(ctx.next_id, TypeRef::BOOL, nil_result_val)
@@ -33256,15 +33258,23 @@ module Crystal::HIR
                 unwrapped = UnionUnwrap.new(ctx.next_id, non_nil_type, left_id, non_nil_vid, false)
                 ctx.emit(unwrapped)
                 ctx.register_type(unwrapped.id, non_nil_type)
-                cmp = BinaryOperation.new(ctx.next_id, TypeRef::BOOL, bin_op, unwrapped.id, right_id)
-                ctx.emit(cmp)
-                ctx.register_type(cmp.id, TypeRef::BOOL)
+
+                cmp_id : ValueId
+                if use_primitive
+                  cmp = BinaryOperation.new(ctx.next_id, TypeRef::BOOL, bin_op, unwrapped.id, right_id)
+                  ctx.emit(cmp)
+                  ctx.register_type(cmp.id, TypeRef::BOOL)
+                  cmp_id = cmp.id
+                else
+                  # Non-primitive: use method call (e.g., String#==)
+                  cmp_id = emit_binary_call(ctx, unwrapped.id, op_str, right_id)
+                end
                 non_nil_exit = ctx.current_block
                 ctx.terminate(Jump.new(merge_block))
 
                 ctx.current_block = merge_block
                 phi = Phi.new(ctx.next_id, TypeRef::BOOL,
-                  [{nil_exit, nil_lit.id}, {non_nil_exit, cmp.id}])
+                  [{nil_exit, nil_lit.id}, {non_nil_exit, cmp_id}])
                 ctx.emit(phi)
                 ctx.register_type(phi.id, TypeRef::BOOL)
                 return phi.id
@@ -43912,31 +43922,34 @@ module Crystal::HIR
             is_enum_receiver = true
           end
         end
-        # Nilable numeric comparison: e.g., Int32? == Int32, Int32? != Int32
-        # Must check type_id before comparing to avoid nil payload matching 0.
+        # Nilable union comparison: e.g., Int32? == Int32, String? == String
+        # Must check type_id before comparing to avoid nil payload matching 0
+        # or passing union struct ptr where unwrapped value is expected.
         if !numeric_primitive?(receiver_type) && is_union_or_nilable_type?(receiver_type) &&
            (method_name == "==" || method_name == "!=" || method_name == "===" || method_name == "<" ||
             method_name == "<=" || method_name == ">" || method_name == ">=")
           nil_vid = get_union_variant_id(receiver_type, TypeRef::NIL)
           if nil_vid >= 0
-            # Find the non-nil numeric variant
+            # Find the non-nil variant (any type, not just numeric)
             non_nil_type : TypeRef? = nil
             non_nil_vid = -1
             if desc = @module.get_type_descriptor(receiver_type)
               split_union_type_name(desc.name).each do |vn|
                 next if vn == "Nil"
                 vr = type_ref_for_name(vn)
-                if numeric_primitive?(vr)
-                  non_nil_type = vr
-                  non_nil_vid = get_union_variant_id(receiver_type, vr)
-                  break
-                end
+                non_nil_type = vr
+                non_nil_vid = get_union_variant_id(receiver_type, vr)
+                break
               end
             end
             if non_nil_type && non_nil_vid >= 0
+              use_primitive = numeric_primitive?(non_nil_type)
               bin_op = binary_op_for_method(method_name)
-              if bin_op
-                is_eq_ne = bin_op.in?(BinaryOp::Eq, BinaryOp::Ne)
+              is_eq_or_ne = (method_name == "==" || method_name == "===" || method_name == "!=")
+              is_eq = (method_name == "==" || method_name == "===")
+              is_ne = (method_name == "!=")
+              # Non-numeric types only support == and != via method dispatch
+              if bin_op && (use_primitive || is_eq_or_ne)
                 # Emit: if receiver is nil -> false (eq)/true (ne), else unwrap and compare
                 pre_branch = ctx.save_locals
                 nil_check = UnionIs.new(ctx.next_id, receiver_id, nil_vid)
@@ -43953,11 +43966,9 @@ module Crystal::HIR
                 ctx.restore_locals(pre_branch)
                 arg_is_nil = args.size == 1 && ctx.type_of(args[0]) == TypeRef::NIL
                 nil_result_val = if arg_is_nil
-                                   # nil == nil → true, nil != nil → false
-                                   bin_op == BinaryOp::Eq ? 1_i64 : 0_i64
+                                   is_eq ? 1_i64 : 0_i64
                                  else
-                                   # nil == non_nil → false, nil != non_nil → true
-                                   is_eq_ne && bin_op == BinaryOp::Ne ? 1_i64 : 0_i64
+                                   is_ne ? 1_i64 : 0_i64
                                  end
                 nil_lit = Literal.new(ctx.next_id, TypeRef::BOOL, nil_result_val)
                 ctx.emit(nil_lit)
@@ -43971,23 +43982,31 @@ module Crystal::HIR
                 unwrapped = UnionUnwrap.new(ctx.next_id, non_nil_type, receiver_id, non_nil_vid, false)
                 ctx.emit(unwrapped)
                 ctx.register_type(unwrapped.id, non_nil_type)
-                cmp_result_type = case bin_op
-                                  when BinaryOp::Eq, BinaryOp::Ne, BinaryOp::Lt, BinaryOp::Le,
-                                       BinaryOp::Gt, BinaryOp::Ge
-                                    TypeRef::BOOL
-                                  else
-                                    non_nil_type
-                                  end
-                cmp = BinaryOperation.new(ctx.next_id, cmp_result_type, bin_op, unwrapped.id, args[0])
-                ctx.emit(cmp)
-                ctx.register_type(cmp.id, cmp_result_type)
+
+                cmp_id : ValueId
+                if use_primitive
+                  cmp_result_type = case bin_op
+                                    when BinaryOp::Eq, BinaryOp::Ne, BinaryOp::Lt, BinaryOp::Le,
+                                         BinaryOp::Gt, BinaryOp::Ge
+                                      TypeRef::BOOL
+                                    else
+                                      non_nil_type
+                                    end
+                  cmp = BinaryOperation.new(ctx.next_id, cmp_result_type, bin_op, unwrapped.id, args[0])
+                  ctx.emit(cmp)
+                  ctx.register_type(cmp.id, cmp_result_type)
+                  cmp_id = cmp.id
+                else
+                  # Non-primitive: use method call (e.g., String#==)
+                  cmp_id = emit_binary_call(ctx, unwrapped.id, method_name, args[0])
+                end
                 non_nil_exit = ctx.current_block
                 ctx.terminate(Jump.new(merge_block))
 
                 # Merge
                 ctx.current_block = merge_block
                 phi = Phi.new(ctx.next_id, TypeRef::BOOL,
-                  [{nil_exit, nil_lit.id}, {non_nil_exit, cmp.id}])
+                  [{nil_exit, nil_lit.id}, {non_nil_exit, cmp_id}])
                 ctx.emit(phi)
                 ctx.register_type(phi.id, TypeRef::BOOL)
                 return phi.id
