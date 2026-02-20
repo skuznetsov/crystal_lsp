@@ -1006,6 +1006,24 @@ module Crystal
       obj_ptr = get_value(field.object)
       value = get_value(field.value)
 
+      # Check if the field is a union type but the value being stored is not.
+      # If so, wrap the value in a union before storing (e.g., storing a Proc
+      # into a (Proc | Nil) ivar).
+      field_mir_type = convert_type(field.type)
+      if is_union_type?(field_mir_type)
+        value_hir_type = @hir_value_types[field.value]?
+        if value_hir_type
+          value_mir_type = convert_type(value_hir_type)
+          if !is_union_type?(value_mir_type)
+            if descriptor = @mir_module.get_union_descriptor(field_mir_type)
+              if variant = descriptor.variants.find { |v| v.type_ref == value_mir_type }
+                value = builder.union_wrap(value, variant.type_id, field_mir_type)
+              end
+            end
+          end
+        end
+      end
+
       # GEP to field address + store
       field_ptr = builder.gep(obj_ptr, [field.field_offset.to_u32], TypeRef::POINTER)
       builder.store(field_ptr, value)

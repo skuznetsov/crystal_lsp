@@ -42473,6 +42473,24 @@ module Crystal::HIR
         end
       end
 
+      # Handle Array#map_with_index { |elem, idx| expr } intrinsic
+      if method_name == "map_with_index"
+        if receiver_id
+          if blk_expr = block_expr
+            blk_node = @arena[blk_expr]
+            if blk_node.is_a?(CrystalV2::Compiler::Frontend::BlockNode)
+              is_array = array_intrinsic_receiver?(ctx, receiver_id)
+              if !is_array && callee_node.is_a?(CrystalV2::Compiler::Frontend::MemberAccessNode)
+                is_array = check_and_fix_array_receiver_type(ctx, callee_node, receiver_id)
+              end
+              if is_array
+                return lower_array_map_with_index_dynamic(ctx, receiver_id, blk_node)
+              end
+            end
+          end
+        end
+      end
+
       # Handle Array#select { |x| condition } intrinsic
       if method_name == "select"
         if callee_node.is_a?(CrystalV2::Compiler::Frontend::MemberAccessNode)
@@ -48577,6 +48595,105 @@ module Crystal::HIR
       ctx.emit(set_size)
 
       # Update array type registration based on block return type (like intrinsic version)
+      if result_value
+        result_element_type = ctx.type_of(result_value)
+        if array_type = array_type_for_element_type(result_element_type)
+          ctx.register_type(new_array.id, array_type)
+        end
+      end
+
+      new_array.id
+    end
+
+    # Array map_with_index intrinsic — maps elements with index parameter
+    private def lower_array_map_with_index_dynamic(
+      ctx : LoweringContext,
+      array_id : ValueId,
+      block : CrystalV2::Compiler::Frontend::BlockNode,
+    ) : ValueId
+      elem_param_name = "__mwi_elem"
+      index_param_name = "__mwi_idx"
+      if params = block.params
+        if first_param = params[0]?
+          if pname = first_param.name
+            elem_param_name = String.new(pname)
+          end
+        end
+        if second_param = params[1]?
+          if pname = second_param.name
+            index_param_name = String.new(pname)
+          end
+        end
+      end
+
+      element_type = array_element_type_for_value(ctx, array_id, TypeRef::INT32)
+      source_type = ctx.type_of(array_id)
+
+      size_val = ArraySize.new(ctx.next_id, TypeRef::INT32, array_id)
+      ctx.emit(size_val)
+
+      new_array = ArrayNew.new(ctx.next_id, element_type, size_val.id)
+      ctx.emit(new_array)
+      ctx.register_type(new_array.id, source_type)
+
+      entry_block = ctx.current_block
+      zero = Literal.new(ctx.next_id, TypeRef::INT32, 0_i64)
+      ctx.emit(zero)
+
+      cond_block = ctx.create_block
+      body_block = ctx.create_block
+      incr_block = ctx.create_block
+      exit_block = ctx.create_block
+
+      ctx.terminate(Jump.new(cond_block))
+
+      ctx.current_block = cond_block
+      index_phi = Phi.new(ctx.next_id, TypeRef::INT32)
+      index_phi.add_incoming(entry_block, zero.id)
+      ctx.emit(index_phi)
+
+      cmp = BinaryOperation.new(ctx.next_id, TypeRef::BOOL, BinaryOp::Lt, index_phi.id, size_val.id)
+      ctx.emit(cmp)
+      ctx.terminate(Branch.new(cmp.id, body_block, exit_block))
+
+      ctx.current_block = body_block
+      ctx.push_scope(ScopeKind::Block)
+
+      index_get = IndexGet.new(ctx.next_id, element_type, array_id, index_phi.id)
+      ctx.emit(index_get)
+      ctx.register_type(index_get.id, element_type)
+      ctx.register_local(elem_param_name, index_get.id)
+
+      ctx.register_local(index_param_name, index_phi.id)
+      ctx.register_type(index_phi.id, TypeRef::INT32)
+
+      result_value = lower_body(ctx, block.body)
+      ctx.pop_scope
+
+      if result_value
+        result_element_type = ctx.type_of(result_value)
+        set_type = result_element_type
+        if set_type.id == 0 || set_type == TypeRef::VOID || set_type == TypeRef::NIL
+          set_type = element_type
+        end
+        index_set = IndexSet.new(ctx.next_id, set_type, new_array.id, index_phi.id, result_value)
+        ctx.emit(index_set)
+      end
+
+      ctx.terminate(Jump.new(incr_block))
+
+      ctx.current_block = incr_block
+      one = Literal.new(ctx.next_id, TypeRef::INT32, 1_i64)
+      ctx.emit(one)
+      new_i = BinaryOperation.new(ctx.next_id, TypeRef::INT32, BinaryOp::Add, index_phi.id, one.id)
+      ctx.emit(new_i)
+      index_phi.add_incoming(incr_block, new_i.id)
+      ctx.terminate(Jump.new(cond_block))
+
+      ctx.current_block = exit_block
+      set_size = ArraySetSize.new(ctx.next_id, TypeRef::VOID, new_array.id, size_val.id)
+      ctx.emit(set_size)
+
       if result_value
         result_element_type = ctx.type_of(result_value)
         if array_type = array_type_for_element_type(result_element_type)

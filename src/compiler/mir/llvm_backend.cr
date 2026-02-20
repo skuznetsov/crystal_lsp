@@ -339,6 +339,15 @@ module Crystal::MIR
   # LLVM IR TEXT GENERATOR
   # ═══════════════════════════════════════════════════════════════════════════
 
+  # Bare iterator method names that are suppressed at call sites.
+  # These are yield-based Enumerable/Indexable methods that weren't lowered
+  # as intrinsics. The calls pass block procs but the methods are empty stubs —
+  # suppressing the calls is safe and avoids LLVM type conflicts.
+  BARE_ITERATOR_METHODS = Set{
+    "each", "map", "map_with_index", "each_with_index",
+    "each_with_index$Int32", "each_entry_with_index", "sum",
+  }
+
   class LLVMIRGenerator
     @module : Module
     @type_mapper : LLVMTypeMapper
@@ -3894,6 +3903,13 @@ module Crystal::MIR
       emit_raw "  %exc = load ptr, ptr @__crystal_exc_ptr\n"
       emit_raw "  ret ptr %exc\n"
       emit_raw "}\n\n"
+
+      # Mark bare iterator method names as emitted to suppress forward declarations.
+      # These are yield-based methods that weren't lowered as intrinsics — the calls
+      # are suppressed at emit_call time (see BARE_ITERATOR_METHODS).
+      BARE_ITERATOR_METHODS.each do |stub_name|
+        @emitted_functions << stub_name
+      end
     end
 
     private def emit_entrypoint_if_needed(functions_to_emit : Array(Function))
@@ -9373,6 +9389,15 @@ module Crystal::MIR
                     end
 
       raw_callee_name = callee_func.try(&.name)
+
+      # Suppress bare iterator method calls (each, map, etc.) that weren't lowered
+      # as intrinsics. These are no-op stubs — skipping the call avoids LLVM type
+      # conflicts between define/declare with mismatched signatures.
+      if raw_callee_name && BARE_ITERATOR_METHODS.includes?(raw_callee_name)
+        # Emit a void placeholder — caller expects void return
+        @void_values << inst.id
+        return
+      end
 
       # Intercept Array#sum() with no args (only self) to avoid infinite recursion
       # from overload name collision (sum() and sum(initial) get same mangled name)
