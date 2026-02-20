@@ -360,6 +360,7 @@ module Crystal::MIR
     @undefined_externs : Hash(String, String) = {} of String => String  # Track undefined extern calls (name => return_type)
     @called_crystal_functions : Hash(String, String) = {} of String => String  # Track called Crystal functions (name => return_type) for missing declaration generation
     @global_name_mapping : Hash(String, String) = {} of String => String  # Map original global names to renamed names
+    @global_declared_types : Hash(String, String) = {} of String => String  # Global name -> declared LLVM type
     @alloc_element_types : Hash(ValueId, TypeRef)  # For GEP element type lookup
     @array_info : Hash(ValueId, {String, Int32})  # Array element_type and size
     @string_constants : Hash(String, String)  # String value -> global name
@@ -1612,6 +1613,7 @@ module Crystal::MIR
         next if emitted_globals.includes?(mangled_name)
         emitted_globals << mangled_name
         actual_name = mangled_name
+        @global_declared_types[mangled_name] = llvm_type
         # Check for constant initial value override
         const_val = @constant_initial_values[mangled_name]?
         # Avoid conflict with function names by prefixing with .global
@@ -1649,6 +1651,7 @@ module Crystal::MIR
         next if function_names.includes?(name)
         llvm_type = @type_mapper.llvm_type(type_ref)
         llvm_type = "ptr" if llvm_type == "void"
+        @global_declared_types[name] = llvm_type
         # Check for constant initial value (e.g., Math::PI = 3.14159...)
         const_val = @constant_initial_values[name]?
         if llvm_type == "ptr"
@@ -11123,6 +11126,36 @@ module Crystal::MIR
       mangled_global = @type_mapper.mangle_name(inst.global_name)
       # Use renamed global if it was renamed to avoid function name conflict
       actual_global = @global_name_mapping[mangled_global]? || mangled_global
+
+      # Reconcile store type with global's declared type to prevent type mismatches
+      declared_type = @global_declared_types[actual_global]? || @global_declared_types[mangled_global]?
+      if declared_type && declared_type != llvm_type
+        if declared_type == "ptr" && llvm_type.includes?(".union")
+          # Store type is union but global is ptr — extract pointer payload
+          c = @cond_counter
+          @cond_counter += 1
+          emit "%gs_decl_u2p.#{c}.ptr = alloca #{llvm_type}, align 8"
+          emit "store #{llvm_type} #{normalize_union_value(val, llvm_type)}, ptr %gs_decl_u2p.#{c}.ptr"
+          emit "%gs_decl_u2p.#{c}.pay = getelementptr #{llvm_type}, ptr %gs_decl_u2p.#{c}.ptr, i32 0, i32 1"
+          emit "%gs_decl_u2p.#{c}.val = load ptr, ptr %gs_decl_u2p.#{c}.pay, align 4"
+          val = "%gs_decl_u2p.#{c}.val"
+          llvm_type = "ptr"
+        elsif declared_type.includes?(".union") && llvm_type == "ptr"
+          # Store type is ptr but global is union — wrap into union
+          llvm_type = declared_type
+          val = normalize_union_value(val, declared_type)
+        elsif declared_type.includes?(".union") && llvm_type.includes?(".union")
+          # Both unions but different — reinterpret through memory
+          c = @cond_counter
+          @cond_counter += 1
+          emit "%gs_decl_u2u.#{c}.ptr = alloca #{llvm_type}, align 8"
+          emit "store #{llvm_type} #{normalize_union_value(val, llvm_type)}, ptr %gs_decl_u2u.#{c}.ptr"
+          emit "%gs_decl_u2u.#{c}.val = load #{declared_type}, ptr %gs_decl_u2u.#{c}.ptr"
+          val = "%gs_decl_u2u.#{c}.val"
+          llvm_type = declared_type
+        end
+      end
+
       emit "store #{llvm_type} #{val}, ptr @#{actual_global}"
     end
 
