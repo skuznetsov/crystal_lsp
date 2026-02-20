@@ -14,8 +14,8 @@
     - status: block-capture method (`on_event(&block : String ->)`) generates a getter
       instead of a setter. The block parameter is never stored to the ivar.
 - Current regression suite status:
-  - Basic: 44/44 pass
-  - Complex quick: 14/14 pass (includes recently fixed tests)
+  - Basic: 43/44 pass (test_byteformat_decode_u32 crash — pre-existing)
+  - Complex quick: 15/15 pass
 - Recently fixed repros:
   - `regression_tests/complex/test_find_nil_and_value.cr`
     - fixed by CFG-reachable return-type merge (dead blocks no longer pollute
@@ -44,6 +44,33 @@
 - Float64: arithmetic, ** on literals
 
 ## Recently completed
+- **Bootstrap benchmark (2026-02-20)** —
+  Stage 2 self-hosting compilation succeeds. Benchmark results:
+
+  | Stage | Binary | Input | User Time | Wall Clock | Output Size |
+  |-------|--------|-------|-----------|------------|-------------|
+  | Stage 1 | Crystal --release | crystal_v2.cr | 423.67s | 7:08 | 21.4 MB |
+  | Stage 2 | crystal_v2 release | crystal_v2.cr | 99.74s | 1:53 | 27.6 MB |
+  | Stage 2 | crystal_v2 debug | crystal_v2.cr | 564.91s | 10:40 | 27.6 MB |
+
+  Release vs debug speedup: 5.66x.
+  Stage 2 is 4.24x faster than Stage 1 (Stage 1 includes LLVM --release
+  optimization passes; Stage 2 uses -O0).
+
+  Stage 2 binary crashes at runtime (null IO in Crystal.exit — global init
+  order issue). Compilation succeeds but the produced binary is not yet
+  functional. Key remaining issues: bare iterator stubs (each, map, etc.
+  are no-ops), global object initialization order.
+
+  Changes in this session:
+  1. Deferred bare iterator stubs — emit after function emission to avoid
+     suppressing concrete function definitions (llvm_backend.cr).
+  2. Arg-count tracking for forward declarations — typed parameter lists
+     instead of varargs (...) to prevent LLVM type mismatches.
+  3. Name-based union variant matching — fallback when TypeRef IDs differ
+     for the same logical type (ast_to_hir.cr).
+  4. map_with_index intrinsic for Array receivers (ast_to_hir.cr).
+
 - **Bootstrap Stage 2 stabilization (2026-02-19)** —
   Fixed 5 bugs blocking Stage 2 self-hosting:
   1. Proc#call argument forwarding — name-based Proc type detection instead of
