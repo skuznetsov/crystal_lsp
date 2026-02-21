@@ -1056,6 +1056,8 @@ module Crystal::HIR
     @yield_return_checked : Set(String)
     # Values produced by as?() — need null checks in lower_truthy_check
     @as_question_results : Set(ValueId)
+    # Values produced by __crystal_v2_regex_match — for intercepting [] on match results
+    @regex_match_results : Set(ValueId)
 
     # Cache for def_contains_yield? keyed by DefNode object_id → Bool.
     # Same DefNode always yields the same result regardless of fallback arena.
@@ -2241,6 +2243,7 @@ module Crystal::HIR
       @yield_return_functions = Set(String).new
       @yield_return_checked = Set(String).new
       @as_question_results = Set(ValueId).new
+      @regex_match_results = Set(ValueId).new
       # Note: @lowered_functions and @lowering_functions removed.
       # Use @function_lowering_states with FunctionLoweringState enum instead.
       @pending_arg_types = {} of String => CallsiteArgs
@@ -19529,6 +19532,27 @@ module Crystal::HIR
         end
       end
 
+      # When the exact mangled name isn't found directly, check if included modules
+      # have a matching method. If so, return the mangled name — lower_function_if_needed_impl
+      # will find the method through deferred module lookup.
+      # This prevents incorrect overload selection (e.g., Array#[]?(Range) instead of
+      # Indexable#[]?(Int32)) when the correct overload comes from an included module.
+      if !class_name.empty? && arg_types.any? { |t| t != TypeRef::VOID }
+        owner_base = strip_generic_args(class_name)
+        modules_to_check = @class_included_modules[class_name]?
+        modules_to_check = @class_included_modules[owner_base]? if modules_to_check.nil? && owner_base != class_name
+        if modules_to_check
+          modules_to_check.each do |mod_name|
+            base_module = strip_generic_args(mod_name)
+            visited = Set(String).new
+            if find_module_def_recursive(base_module, method_name, effective_arg_count, visited)
+              debug_hook("method.resolve", "base=#{base_method_name} resolved=#{mangled_name} reason=module_deferred_match")
+              return cache_method_resolution(cache_key, mangled_name)
+            end
+          end
+        end
+      end
+
       if !class_name.empty? && method_name.ends_with?('=')
         info = @class_info[class_name]?
         accessor_owner = class_name
@@ -22939,6 +22963,28 @@ module Crystal::HIR
       end
 
       if existing_type.nil?
+        # For nilable query methods ([]?, first?, last?, etc.), the base return type
+        # cache may contain a wrong type from a different overload. E.g., Array#[]?$Range
+        # returns Nil | Array(T), but Array#[]?$Int32 (from Indexable) returns Nil | T.
+        # Use infer_unannotated_query_return_type which is suffix-specific.
+        if name.includes?('#') && name.includes?('?')
+          method_part_idx = name.rindex('#')
+          if method_part_idx
+            method_with_suffix = name[(method_part_idx + 1)..]
+            dollar_idx = method_with_suffix.index('$')
+            method_bare = dollar_idx ? method_with_suffix[0, dollar_idx] : method_with_suffix
+            if method_bare.ends_with?('?') && NILABLE_QUERY_METHODS.includes?(method_bare)
+              receiver_part = name[0, method_part_idx]
+              receiver_ref = type_ref_for_name(receiver_part)
+              if receiver_ref != TypeRef::VOID
+                if inferred_q = infer_unannotated_query_return_type(method_bare, receiver_ref)
+                  set_function_type_entry(name, inferred_q)
+                  return inferred_q
+                end
+              end
+            end
+          end
+        end
         # Check base_name cache early.
         if base_rt = @function_base_return_types[base_name]?
           if base_rt != TypeRef::VOID
@@ -29536,13 +29582,22 @@ module Crystal::HIR
     end
 
     private def lower_regex(ctx : LoweringContext, node : CrystalV2::Compiler::Frontend::RegexNode) : ValueId
-      # Regex literal /pattern/
-      # For now, store as a string pattern - full regex support requires PCRE bindings
+      # Regex literal /pattern/ → compile via PCRE2 runtime
       pattern = String.new(node.pattern)
       regex_type = ctx.get_type("Regex")
-      lit = Literal.new(ctx.next_id, regex_type, pattern)
-      ctx.emit(lit)
-      lit.id
+      # Create string literal for the pattern text
+      str_lit = Literal.new(ctx.next_id, TypeRef::STRING, pattern)
+      ctx.emit(str_lit)
+      ctx.register_type(str_lit.id, TypeRef::STRING)
+      # Options = 0 (RegexNode has no options field yet)
+      opts_lit = Literal.new(ctx.next_id, TypeRef::INT32, 0_i64)
+      ctx.emit(opts_lit)
+      ctx.register_type(opts_lit.id, TypeRef::INT32)
+      # Call runtime: __crystal_v2_regex_new(pattern_str, options) → Regex*
+      ext_call = ExternCall.new(ctx.next_id, regex_type, "__crystal_v2_regex_new", [str_lit.id, opts_lit.id])
+      ctx.emit(ext_call)
+      ctx.register_type(ext_call.id, regex_type)
+      ext_call.id
     end
 
     private def lower_type_declaration(ctx : LoweringContext, node : CrystalV2::Compiler::Frontend::TypeDeclarationNode) : ValueId
@@ -34597,6 +34652,36 @@ module Crystal::HIR
       # Qualify method name with receiver's class
       right_type = ctx.type_of(right)
       left_type = ctx.type_of(left)
+
+      # Intercept =~ with Regex → runtime regex match (returns Bool)
+      if op == "=~"
+        left_name = (left_type == TypeRef::VOID || left_type == TypeRef::STRING || left_type == TypeRef::POINTER) ? "" : get_type_name_from_ref(left_type)
+        right_name = (right_type == TypeRef::VOID || right_type == TypeRef::STRING || right_type == TypeRef::POINTER) ? "" : get_type_name_from_ref(right_type)
+        if right_name == "Regex" || right_name.includes?("Regex")
+          # String =~ Regex
+          ext_call = ExternCall.new(ctx.next_id, TypeRef::BOOL, "__crystal_v2_regex_match_q", [right, left])
+          ctx.emit(ext_call)
+          ctx.register_type(ext_call.id, TypeRef::BOOL)
+          return ext_call.id
+        elsif left_name == "Regex" || left_name.includes?("Regex")
+          # Regex =~ String
+          ext_call = ExternCall.new(ctx.next_id, TypeRef::BOOL, "__crystal_v2_regex_match_q", [left, right])
+          ctx.emit(ext_call)
+          ctx.register_type(ext_call.id, TypeRef::BOOL)
+          return ext_call.id
+        end
+      end
+
+      # Intercept === with Regex → runtime regex match (used in case/when)
+      if op == "==="
+        left_name = (left_type == TypeRef::VOID || left_type == TypeRef::STRING || left_type == TypeRef::POINTER) ? "" : get_type_name_from_ref(left_type)
+        if left_name == "Regex" || left_name.includes?("Regex")
+          ext_call = ExternCall.new(ctx.next_id, TypeRef::BOOL, "__crystal_v2_regex_match_q", [left, right])
+          ctx.emit(ext_call)
+          ctx.register_type(ext_call.id, TypeRef::BOOL)
+          return ext_call.id
+        end
+      end
       if env_get("DEBUG_COMPARE_OR_RAISE") && @current_method == "compare_or_raise"
         left_name = left_type == TypeRef::VOID ? "Void" : get_type_name_from_ref(left_type)
         right_name = right_type == TypeRef::VOID ? "Void" : get_type_name_from_ref(right_type)
@@ -38263,6 +38348,66 @@ module Crystal::HIR
       nil
     end
 
+    # Check if a template method's param type annotations are compatible with
+    # the call-site suffix types. Returns false if any typed param has a concrete
+    # type annotation that doesn't match the corresponding suffix type.
+    private def template_method_matches_suffix?(
+      def_node : CrystalV2::Compiler::Frontend::DefNode,
+      def_arena : CrystalV2::Compiler::Frontend::ArenaLike,
+      suffix : String,
+    ) : Bool
+      stripped = strip_mangled_suffix_flags(suffix)
+      return true if stripped.empty?
+      suffix_types = parse_types_from_suffix(stripped)
+      return true if suffix_types.empty?
+
+      params = def_node.params
+      return true unless params
+
+      regular_params = [] of CrystalV2::Compiler::Frontend::Parameter
+      params.each do |p|
+        next if p.is_block || p.is_splat || p.is_double_splat || named_only_separator?(p)
+        regular_params << p
+      end
+
+      # Different arity → not comparable, assume compatible
+      return true if regular_params.size != suffix_types.size
+
+      regular_params.each_with_index do |param, idx|
+        type_ann_slice = param.type_annotation
+        next unless type_ann_slice # Untyped param matches anything
+
+        ann_name = String.new(type_ann_slice)
+        next if ann_name.empty?
+        next if type_param_like?(ann_name) # Generic type param matches anything
+
+        suffix_type_name = get_type_name_from_ref(suffix_types[idx])
+        next if suffix_type_name == ann_name
+        next if suffix_type_name.starts_with?(ann_name) # e.g., Range(Int32, Int32) starts with Range
+        next if inherits_from?(suffix_type_name, ann_name)
+
+        # Incompatible — e.g., Int32 vs Range
+        return false
+      end
+
+      true
+    end
+
+    private def inherits_from?(child : String, parent : String) : Bool
+      return true if child == parent
+      # Check class hierarchy
+      current = child
+      visited = Set(String).new
+      while current && !visited.includes?(current)
+        visited << current
+        parent_name = @class_info[current]?.try(&.parent_name) || @module.class_parents[current]?
+        return false unless parent_name
+        return true if parent_name == parent
+        current = parent_name
+      end
+      false
+    end
+
     private def generic_owner_info(owner : String) : GenericOwnerInfo?
       if @generic_owner_info_cache_gen != @subst_cache_gen
         @generic_owner_info_cache.clear
@@ -39016,6 +39161,14 @@ module Crystal::HIR
                 unless func_def
                   if template = @generic_templates[info[:base]]?
                     found_in_template = find_method_in_generic_template(template, method_part)
+                    if found_in_template && name_parts.suffix
+                      # Verify the template method's param type annotations are compatible
+                      # with the suffix types. Without this, Array#[]?(Range) could be
+                      # selected for a call with $Int32 suffix, when the correct overload
+                      # is Indexable#[]?(Int32) from a deferred module lookup.
+                      found_in_template = nil unless template_method_matches_suffix?(
+                        found_in_template[0], found_in_template[1], name_parts.suffix.not_nil!)
+                    end
                     if found_in_template
                       func_def = found_in_template[0]
                       arena = found_in_template[1]
@@ -39027,6 +39180,10 @@ module Crystal::HIR
                       if reopenings = @generic_reopenings[info[:base]]?
                         reopenings.each do |reopen_template|
                           found_in_reopen = find_method_in_generic_template(reopen_template, method_part)
+                          if found_in_reopen && name_parts.suffix
+                            found_in_reopen = nil unless template_method_matches_suffix?(
+                              found_in_reopen[0], found_in_reopen[1], name_parts.suffix.not_nil!)
+                          end
                           if found_in_reopen
                             func_def = found_in_reopen[0]
                             arena = found_in_reopen[1]
@@ -39198,15 +39355,27 @@ module Crystal::HIR
             end
             selected_key = best_untyped_key || first_key
             if selected_key
-              if env_has?("DEBUG_LOOKUP")
-                STDERR.puts "[DEBUG_LOOKUP]   Found match: '#{selected_key}' (untyped=#{!!best_untyped_key})"
+              candidate_def = @function_defs[selected_key]
+              candidate_arena = @function_def_arenas[selected_key]
+              # Verify the selected overload's param types are compatible with the suffix.
+              # Without this, Array#[]?$Range could be selected for a call with $Int32 suffix.
+              if candidate_def && name_parts.suffix && !best_untyped_key &&
+                 !template_method_matches_suffix?(candidate_def, candidate_arena, name_parts.suffix.not_nil!)
+                # Incompatible types — skip, let deferred module lookup handle it
+                if env_has?("DEBUG_LOOKUP")
+                  STDERR.puts "[DEBUG_LOOKUP]   Rejected '#{selected_key}' (suffix type mismatch)"
+                end
+              else
+                if env_has?("DEBUG_LOOKUP")
+                  STDERR.puts "[DEBUG_LOOKUP]   Found match: '#{selected_key}' (untyped=#{!!best_untyped_key})"
+                end
+                func_def = candidate_def
+                arena = candidate_arena
+                # If we selected the generic base name, use the mangled name as target
+                # so the function gets created with the call-site types
+                target_name = (selected_key == base_name) ? name : selected_key
+                lookup_branch = best_untyped_key ? "mangled_prefix_untyped" : "mangled_prefix"
               end
-              func_def = @function_defs[selected_key]
-              arena = @function_def_arenas[selected_key]
-              # If we selected the generic base name, use the mangled name as target
-              # so the function gets created with the call-site types
-              target_name = (selected_key == base_name) ? name : selected_key
-              lookup_branch = best_untyped_key ? "mangled_prefix_untyped" : "mangled_prefix"
             end
           end
           if env_has?("DEBUG_LOOKUP") && !func_def
@@ -39332,6 +39501,11 @@ module Crystal::HIR
                   end
                   # Register type params from deferred module context (lazy registration)
                   register_deferred_module_type_params(owner, base_module, name, base_name)
+                  # Override the arena mapping with the correct one from find_module_def_recursive.
+                  # apply_deferred_module_context may have stored the wrong arena (the arena
+                  # from the module include site, not the arena where the method is defined).
+                  set_function_def_arena(name, arena)
+                  set_function_def_arena(base_name, arena)
                   # When the call site already carries a mangled name, preserve it so
                   # overloads don't collapse onto the base during deferred lookup.
                   target_name = name.includes?('$') ? name : base_name
@@ -42772,7 +42946,32 @@ module Crystal::HIR
             ctx.emit(ext_call)
             ctx.register_type(ext_call.id, TypeRef::STRING)
             return ext_call.id
+          else
+            # gsub(Regex, String) → __crystal_v2_string_gsub_regex
+            arg0_name = get_type_name_from_ref(arg0_type)
+            if (arg0_name == "Regex" || arg0_name.includes?("Regex")) &&
+               (arg1_type == TypeRef::STRING || arg1_type == TypeRef::POINTER)
+              ext_call = ExternCall.new(ctx.next_id, TypeRef::STRING, "__crystal_v2_string_gsub_regex", [receiver_id, args[0], args[1]])
+              ctx.emit(ext_call)
+              ctx.register_type(ext_call.id, TypeRef::STRING)
+              return ext_call.id
+            end
           end
+        end
+      end
+
+      # NOTE: String#match(Regex) and Regex#match(String) are handled at the LLVM level
+      # by fixing match_impl to call PCRE2 directly. See emit_regex_match_impl_override.
+
+      # Regex#matches?(String) → runtime regex match (bool)
+      if method_name == "matches?" && receiver_id && args.size == 1 && block_expr.nil?
+        recv_type = ctx.type_of(receiver_id)
+        recv_name = (recv_type == TypeRef::STRING || recv_type == TypeRef::POINTER || recv_type == TypeRef::VOID) ? "" : get_type_name_from_ref(recv_type)
+        if recv_name == "Regex" || recv_name.includes?("Regex")
+          ext_call = ExternCall.new(ctx.next_id, TypeRef::BOOL, "__crystal_v2_regex_match_q", [receiver_id, args[0]])
+          ctx.emit(ext_call)
+          ctx.register_type(ext_call.id, TypeRef::BOOL)
+          return ext_call.id
         end
       end
 
@@ -51630,17 +51829,12 @@ module Crystal::HIR
         block_owned_by_current_fn = @block_owner_function_ids[block.object_id]? == ctx.function.id
         base_override = nil
         if block_owned_by_current_fn
-          # Block is from the same logical method. When multiple yield functions are
-          # nested-inlined into the same top-level function, all blocks share the same
-          # function_id (the top-level function). In this case, `return` inside the block
-          # should NOT do a real Return from the top-level function — it should jump to
-          # the inline return context of the CALLER (the method that defined the block).
-          # The caller's context is at stack[-2] (the entry before the current yield
-          # function's inline return context).
-          if @inline_yield_return_stack.size >= 2
-            base_override = @inline_yield_return_stack[-2]
-          end
-          # If stack < 2, base_override stays nil → real Return (top-level block)
+          # Block is from the same logical method — `return` inside it should exit
+          # the method entirely (real Return). Keep base_override = nil so that
+          # lower_return falls through to ctx.terminate(Return.new(value_id)).
+          # Previously this routed to @inline_yield_return_stack[-2], which jumped
+          # to an intermediate exit block instead of doing a real return, causing
+          # the return value to be lost in nested yield scenarios (e.g. Hash#find_entry).
         else
           if active_entry = @inline_yield_return_override_stack.reverse.find(&.active)
             base_override = active_entry.context
@@ -51814,11 +52008,32 @@ module Crystal::HIR
                          block_arena = resolve_arena_for_block(block, old_arena)
                          chosen_arena = block_arena || popped_arena || @inline_yield_block_arena_stack.last? || old_arena
                          @arena = chosen_arena
-                         begin
+                         # When inlining a block body inside a loop, push a continuation
+                         # block onto @loop_cond_stack so that `next` inside the block
+                         # jumps to post-yield code (e.g., @pos advance in each), not
+                         # directly to the enclosing loop condition.
+                         yield_cont_block : BlockId? = nil
+                         pushed_yield_loop = false
+                         if @loop_cond_stack.size > 0
+                           yield_cont_block = ctx.create_block
+                           @loop_cond_stack << yield_cont_block
+                           @loop_phi_stack << {} of String => HIR::Phi
+                           pushed_yield_loop = true
+                         end
+                         block_body_lr = begin
                            lower_body(ctx, block.body)
                          ensure
+                           if pushed_yield_loop
+                             @loop_cond_stack.pop?
+                             @loop_phi_stack.pop?
+                           end
                            @arena = old_arena
                          end
+                         if ycb = yield_cont_block
+                           ctx.terminate(Jump.new(ycb))
+                           ctx.switch_to_block(ycb)
+                         end
+                         block_body_lr
                        ensure
                          if popped_block
                            @inline_yield_block_stack << popped_block
@@ -54291,6 +54506,10 @@ module Crystal::HIR
           if @as_question_results.includes?(value_id)
             @as_question_results.add(copy.id)
           end
+          # Propagate regex match result marking through copies
+          if @regex_match_results.includes?(value_id)
+            @regex_match_results.add(copy.id)
+          end
           update_typeof_local(name, value_type)
           if concrete_name = concrete_type_name_for(value_type)
             existing_name = lookup_typeof_local_name(name)
@@ -54320,6 +54539,10 @@ module Crystal::HIR
           # Propagate as? nullable marking through copies
           if @as_question_results.includes?(value_id)
             @as_question_results.add(copy.id)
+          end
+          # Propagate regex match result marking through copies
+          if @regex_match_results.includes?(value_id)
+            @regex_match_results.add(copy.id)
           end
           update_typeof_local(name, value_type)
           if concrete_name = concrete_type_name_for(value_type)
