@@ -43026,6 +43026,40 @@ module Crystal::HIR
         return result_id.not_nil!
       end
 
+      # When in? is called with a single collection arg and the collection is a struct
+      # (Tuple, NamedTuple, etc.), virtual dispatch won't work because structs don't
+      # have type_id headers. Instead, emit a direct static call to collection.includes?(self).
+      if method_name == "in?" && receiver_id && args.size == 1
+        collection_id = args[0]
+        collection_type = ctx.type_of(collection_id)
+        collection_type_name = get_type_name_from_ref(collection_type)
+        if collection_type_name != "" && !collection_type_name.starts_with?("Nil")
+          is_struct_type = @class_info[collection_type_name]?.try(&.is_struct) || collection_type_name.starts_with?("Tuple")
+          if is_struct_type
+            # Direct static call: collection.includes?(self) → Tuple#includes?(Object)
+            includes_method = "#{collection_type_name}#includes?"
+            self_type = ctx.type_of(receiver_id)
+            self_type_name = get_type_name_from_ref(self_type)
+            # Try to find includes? with specific arg type first, then Object
+            includes_candidates = [
+              mangle_function_name("#{collection_type_name}#includes?", [self_type], false),
+              "#{collection_type_name}#includes?$#{self_type_name}",
+              "#{collection_type_name}#includes?$Object",
+            ]
+            resolved_includes = includes_candidates.find { |c|
+              lower_function_if_needed(c)
+              @module.has_function?(c)
+            }
+            if resolved_includes
+              call = Call.new(ctx.next_id, TypeRef::BOOL, collection_id, resolved_includes, [receiver_id])
+              ctx.emit(call)
+              ctx.register_type(call.id, TypeRef::BOOL)
+              return call.id
+            end
+          end
+        end
+      end
+
       pack_result = pack_splat_args_for_call(ctx, args, method_name, full_method_name, has_block_call, has_named_args, receiver_id, has_splat)
       args = pack_result[0]
       splat_packed = pack_result[1]
