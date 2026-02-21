@@ -629,10 +629,11 @@ module CrystalV2
           end
         end
         log(options, out_io, "  Pass 1: Registering types...")
-        log(options, out_io, "    Enums: #{enum_nodes.size}")
-        enum_nodes.each { |n, a| hir_converter.arena = a; hir_converter.register_enum(n) }
         log(options, out_io, "    Libs: #{lib_nodes.size}")
         lib_nodes.each { |n, a, annotations| hir_converter.arena = a; hir_converter.register_lib(n, annotations) }
+        log(options, out_io, "    Enums: #{enum_nodes.size}")
+        enum_nodes.each { |n, a| hir_converter.arena = a; hir_converter.register_enum(n) }
+        hir_converter.resolve_pending_enum_constants
         hir_converter.recompute_c_struct_sizes
         log(options, out_io, "    Aliases: #{alias_nodes.size}")
         alias_nodes.each { |n, a| hir_converter.arena = a; hir_converter.register_alias(n) }
