@@ -42779,6 +42779,30 @@ module Crystal::HIR
       # String#sub(String, String) intercept → similar to gsub but only first occurrence
       # For now, route through gsub (will replace all — TODO: implement proper sub)
 
+      # Inline variadic Object#in?(*values) — when in? is called with multiple args,
+      # expand to (self == arg0 || self == arg1 || ...) instead of packing into a
+      # Tuple and calling the broken collection overload which dispatches includes?
+      # on a typeid-less Tuple.
+      if method_name == "in?" && receiver_id && args.size > 1
+        self_id = receiver_id
+        # Build chain of == comparisons OR'd together
+        result_id : ValueId? = nil
+        args.each do |arg_id|
+          cmp = HIR::BinaryOperation.new(ctx.next_id, TypeRef::BOOL, HIR::BinaryOp::Eq, self_id, arg_id)
+          ctx.emit(cmp)
+          ctx.register_type(cmp.id, TypeRef::BOOL)
+          if prev = result_id
+            or_op = HIR::BinaryOperation.new(ctx.next_id, TypeRef::BOOL, HIR::BinaryOp::Or, prev, cmp.id)
+            ctx.emit(or_op)
+            ctx.register_type(or_op.id, TypeRef::BOOL)
+            result_id = or_op.id
+          else
+            result_id = cmp.id
+          end
+        end
+        return result_id.not_nil!
+      end
+
       pack_result = pack_splat_args_for_call(ctx, args, method_name, full_method_name, has_block_call, has_named_args, receiver_id, has_splat)
       args = pack_result[0]
       splat_packed = pack_result[1]
@@ -54561,7 +54585,24 @@ module Crystal::HIR
                   ivar_info = ci.ivars.find { |iv| iv.name == field_name }
                 end
                 if ivar_info
-                  field_set = FieldSet.new(ctx.next_id, TypeRef::VOID, ptr_id, ivar_info.name, value_id, ivar_info.offset)
+                  store_val = value_id
+                  # For C/lib struct fields, if the value is a union but the field
+                  # type is simpler (e.g., Nil|Pointer(Void) → Void*), extract the
+                  # payload to match the C field size and prevent buffer overflow.
+                  if ci.is_struct && @lib_structs.includes?(element_class_name)
+                    value_type = ctx.type_of(store_val)
+                    field_type = ivar_info.type
+                    if value_type != TypeRef::VOID && field_type != TypeRef::VOID &&
+                       is_union_type?(value_type) && !is_union_type?(field_type)
+                      variant_id = get_union_variant_id(value_type, field_type)
+                      variant_id = 0 if variant_id < 0
+                      unwrap = UnionUnwrap.new(ctx.next_id, field_type, store_val, variant_id, safe: false)
+                      ctx.emit(unwrap)
+                      ctx.register_type(unwrap.id, field_type)
+                      store_val = unwrap.id
+                    end
+                  end
+                  field_set = FieldSet.new(ctx.next_id, TypeRef::VOID, ptr_id, ivar_info.name, store_val, ivar_info.offset)
                   ctx.emit(field_set)
                   return field_set.id
                 end
@@ -54618,7 +54659,20 @@ module Crystal::HIR
             return field_set.id
           elsif class_info.is_struct && @lib_structs.includes?(class_name)
             if ivar_info = class_info.ivars.find { |iv| iv.name == field_name }
-              field_set = FieldSet.new(ctx.next_id, TypeRef::VOID, object_id, field_name, value_id, ivar_info.offset)
+              store_val = value_id
+              # For C/lib struct fields, extract union payload to match C field size
+              value_type = ctx.type_of(store_val)
+              field_type = ivar_info.type
+              if value_type != TypeRef::VOID && field_type != TypeRef::VOID &&
+                 is_union_type?(value_type) && !is_union_type?(field_type)
+                variant_id = get_union_variant_id(value_type, field_type)
+                variant_id = 0 if variant_id < 0
+                unwrap = UnionUnwrap.new(ctx.next_id, field_type, store_val, variant_id, safe: false)
+                ctx.emit(unwrap)
+                ctx.register_type(unwrap.id, field_type)
+                store_val = unwrap.id
+              end
+              field_set = FieldSet.new(ctx.next_id, TypeRef::VOID, object_id, field_name, store_val, ivar_info.offset)
               ctx.emit(field_set)
               return field_set.id
             end
