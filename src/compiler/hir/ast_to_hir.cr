@@ -19545,12 +19545,12 @@ module Crystal::HIR
         end
       end
 
-      # When the exact mangled name isn't found directly, check if included modules
-      # have a matching method. If so, return the mangled name — lower_function_if_needed_impl
-      # will find the method through deferred module lookup.
-      # This prevents incorrect overload selection (e.g., Array#[]?(Range) instead of
-      # Indexable#[]?(Int32)) when the correct overload comes from an included module.
-      if !class_name.empty? && arg_types.any? { |t| t != TypeRef::VOID }
+      # Module deferred match: When exact mangled name isn't found, check if included
+      # modules have a matching method. This prevents incorrect overload selection
+      # (e.g., Array#[]?(Range) instead of Indexable#[]?(Int32)).
+      # IMPORTANT: Only use this for nilable query methods ([]?, first?, etc.) to avoid
+      # generating incorrect function bodies for non-query methods like Array(T)#[](Int32).
+      if !class_name.empty? && arg_types.any? { |t| t != TypeRef::VOID } && method_name.ends_with?('?')
         owner_base = strip_generic_args(class_name)
         modules_to_check = @class_included_modules[class_name]?
         modules_to_check = @class_included_modules[owner_base]? if modules_to_check.nil? && owner_base != class_name
