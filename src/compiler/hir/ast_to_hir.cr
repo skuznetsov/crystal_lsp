@@ -1913,6 +1913,9 @@ module Crystal::HIR
 
     # Current method name being lowered (for super calls)
     @current_method : String?
+    # Declared return type of the function currently being lowered.
+    # Used by lower_tuple_literal to coerce elements to match tuple return types.
+    @current_def_return_type : TypeRef = TypeRef::VOID
     # Track whether the current method is a class/module method (self.)
     @current_method_is_class : Bool
     # Track which module provided the current _super body (to avoid infinite recursion)
@@ -2364,6 +2367,7 @@ module Crystal::HIR
       @deferred_classvar_inits = [] of Tuple(CrystalV2::Compiler::Frontend::ExprId, CrystalV2::Compiler::Frontend::ArenaLike, String)
       @deferred_constant_inits = [] of Tuple(String, String, CrystalV2::Compiler::Frontend::ExprId, CrystalV2::Compiler::Frontend::ArenaLike)
       @pending_offsetof_constants = [] of Tuple(String, CrystalV2::Compiler::Frontend::ExprId, CrystalV2::Compiler::Frontend::ArenaLike, String?)
+      @pending_enum_constant_resolutions = [] of Tuple(String, String, String)  # (enum_name, member_name, constant_key)
     end
 
     private def with_debug_callsite(label : String?, &)
@@ -3125,11 +3129,9 @@ module Crystal::HIR
 
       node.members.each do |member|
         member_name = String.new(member.name)
-        # If member has explicit value, use it
         if val_id = member.value
-          val_node = @arena[val_id]
-          if val_node.is_a?(CrystalV2::Compiler::Frontend::NumberNode)
-            current_value = String.new(val_node.value).to_i64? || current_value
+          if resolved = resolve_enum_member_value(val_id)
+            current_value = resolved
           end
         end
         members[member_name] = current_value
@@ -3137,7 +3139,7 @@ module Crystal::HIR
       end
 
       # Extract members from macro conditionals in body (e.g., {% if flag?(:unix) %})
-      extract_enum_members_from_body(node, members)
+      extract_enum_members_from_body(node, members, enum_name)
 
       @enum_info.not_nil![enum_name] = members
       invalidate_type_cache_for_namespace(enum_name)
@@ -3147,6 +3149,68 @@ module Crystal::HIR
       enum_list = @class_included_modules[enum_name] ||= [] of String
       push_unique_module_name(enum_list, "Enum")
       attach_enum_instance_methods(enum_name)
+    end
+
+    # Resolve an enum member value expression to an Int64.
+    # Handles: NumberNode literals, PathNode constant references (e.g., LibC::ENOENT),
+    # and negation CallNode (e.g., -1).
+    private def resolve_enum_member_value(val_id : ExprId) : Int64?
+      val_node = @arena[val_id]
+      case val_node
+      when CrystalV2::Compiler::Frontend::NumberNode
+        String.new(val_node.value).to_i64?
+      when CrystalV2::Compiler::Frontend::PathNode
+        path_str = collect_path_string(val_node)
+        result = resolve_constant_to_i64(path_str)
+        result
+      when CrystalV2::Compiler::Frontend::ConstantNode
+        const_name = String.new(val_node.name)
+        # Try with current context prefix (e.g., inside LibC, "ENOENT" → "LibC::ENOENT")
+        if @current_class
+          full = "#{@current_class}::#{const_name}"
+          if v = resolve_constant_to_i64(full)
+            return v
+          end
+        end
+        resolve_constant_to_i64(const_name)
+      when CrystalV2::Compiler::Frontend::CallNode
+        # Handle negation: -value (callee is the operand for unary -)
+        callee_node = @arena[val_node.callee]
+        if callee_node.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode) &&
+           String.new(callee_node.name) == "-" && val_node.args.size == 1
+          if inner = resolve_enum_member_value(val_node.args[0])
+            return -inner
+          end
+        end
+        nil
+      else
+        nil
+      end
+    end
+
+    # Look up a constant name in @constant_literal_values and return its i64 value.
+    private def resolve_constant_to_i64(name : String) : Int64?
+      if literal = @constant_literal_values[name]?
+        case literal
+        when CrystalV2::Compiler::Semantic::MacroNumberValue
+          return literal.value.to_i64
+        end
+      end
+      # Try enum values too (e.g., Errno::ENOENT referencing another enum)
+      if name.includes?("::")
+        if idx = name.rindex("::")
+          enum_name = name[0, idx]
+          member_name = name[idx + 2..]
+          if enum_info = @enum_info
+            if members = enum_info[enum_name]?
+              if v = members[member_name]?
+                return v
+              end
+            end
+          end
+        end
+      end
+      nil
     end
 
     # Register an enum type with explicit name (for nested enums)
@@ -3169,11 +3233,9 @@ module Crystal::HIR
 
       node.members.each do |member|
         member_name = String.new(member.name)
-        # If member has explicit value, use it
         if val_id = member.value
-          val_node = @arena[val_id]
-          if val_node.is_a?(CrystalV2::Compiler::Frontend::NumberNode)
-            current_value = String.new(val_node.value).to_i64? || current_value
+          if resolved = resolve_enum_member_value(val_id)
+            current_value = resolved
           end
         end
         members[member_name] = current_value
@@ -3181,7 +3243,7 @@ module Crystal::HIR
       end
 
       # Extract members from macro conditionals in body (e.g., {% if flag?(:unix) %})
-      extract_enum_members_from_body(node, members)
+      extract_enum_members_from_body(node, members, full_enum_name)
 
       @enum_info.not_nil![full_enum_name] = members
       invalidate_type_cache_for_namespace(full_enum_name)
@@ -7004,7 +7066,9 @@ module Crystal::HIR
                     # registration during monomorphization and resolve methods on demand.
                     # Keep this guard before name materialization to avoid hot-path
                     # String allocations for methods that will be skipped anyway.
-                    next if @lazy_module_methods
+                    if @lazy_module_methods
+                      next
+                    end
 
                     method_name = String.new(member.name)
                     base_name = join_owner_method_name(class_name, '#', method_name)
@@ -11321,7 +11385,7 @@ module Crystal::HIR
     end
 
     # Extract enum members from macro conditionals in enum body
-    private def extract_enum_members_from_body(node : CrystalV2::Compiler::Frontend::EnumNode, members : Hash(String, Int64))
+    private def extract_enum_members_from_body(node : CrystalV2::Compiler::Frontend::EnumNode, members : Hash(String, Int64), enum_name : String? = nil)
       return unless body = node.body
       body.each do |expr_id|
         body_node = @arena[expr_id]
@@ -11330,6 +11394,8 @@ module Crystal::HIR
           extract_enum_members_from_macro_if(body_node, members)
         when CrystalV2::Compiler::Frontend::MacroLiteralNode
           extract_enum_members_from_macro_literal(body_node, members)
+        when CrystalV2::Compiler::Frontend::MacroForNode
+          extract_enum_members_from_macro_for(body_node, members, enum_name)
         end
       end
     end
@@ -11343,15 +11409,7 @@ module Crystal::HIR
             if program = parse_macro_literal_program(expanded)
               with_arena(program.arena) do
                 program.roots.each do |expr_id|
-                  expr_node = @arena[expr_id]
-                  case expr_node
-                  when CrystalV2::Compiler::Frontend::ConstantNode
-                    extract_member_from_constant(expr_node, members)
-                  when CrystalV2::Compiler::Frontend::MacroIfNode
-                    extract_enum_members_from_macro_if(expr_node, members)
-                  when CrystalV2::Compiler::Frontend::MacroLiteralNode
-                    extract_enum_members_from_macro_literal(expr_node, members)
-                  end
+                  extract_enum_member_from_parsed_expr(expr_id, members)
                 end
               end
               return
@@ -11387,12 +11445,110 @@ module Crystal::HIR
       body_node = @arena[body_id]
       case body_node
       when CrystalV2::Compiler::Frontend::MacroLiteralNode
-        extract_enum_members_from_macro_literal(body_node, members)
+        # If the literal contains {% for %} or {{ }}, try expanding via MacroExpander first
+        raw_text = macro_literal_raw_text(body_node)
+        if raw_text && (raw_text.includes?("{% for") || raw_text.includes?("{%for"))
+          expand_and_extract_enum_members(body_id, members)
+        else
+          extract_enum_members_from_macro_literal(body_node, members)
+        end
       when CrystalV2::Compiler::Frontend::MacroIfNode
         extract_enum_members_from_macro_if(body_node, members)
+      when CrystalV2::Compiler::Frontend::MacroForNode
+        extract_enum_members_from_macro_for(body_node, members)
       when CrystalV2::Compiler::Frontend::ConstantNode
         extract_member_from_constant(body_node, members)
       end
+    end
+
+    # Use the MacroExpander to fully expand a macro literal (handling {% for %}, {{ }}, etc.)
+    # then parse the expanded text and extract enum members.
+    private def expand_and_extract_enum_members(body_id : ExprId, members : Hash(String, Int64))
+      source = @sources_by_arena[@arena]?
+      program = CrystalV2::Compiler::Frontend::Program.new(@arena, [] of ExprId)
+      expander = CrystalV2::Compiler::Semantic::MacroExpander.new(
+        program,
+        @arena,
+        CrystalV2::Runtime.target_flags,
+        recovery_mode: true,
+        macro_source: source
+      )
+      expanded = expander.expand_literal(body_id, variables: {} of String => CrystalV2::Compiler::Semantic::MacroValue, owner_type: nil)
+      return if expanded.empty?
+
+      if parsed_program = parse_macro_literal_program(expanded)
+        with_arena(parsed_program.arena) do
+          parsed_program.roots.each do |expr_id|
+            extract_enum_member_from_parsed_expr(expr_id, members)
+          end
+        end
+      end
+    end
+
+    private def extract_enum_members_from_macro_for(node : CrystalV2::Compiler::Frontend::MacroForNode, members : Hash(String, Int64), enum_name : String? = nil)
+      iter_vars = node.iter_vars.map { |name| String.new(name) }
+      return if iter_vars.empty?
+
+      values = macro_for_iterable_values(node.iterable)
+      return unless values
+
+      # Get the body template text to detect the pattern
+      body_text = macro_for_body_source_text(node)
+
+      # Pattern: {{value.id}} = LibC::{{value.id}} or similar constant assignment
+      # Detect what namespace prefix the body references (e.g., "LibC::")
+      namespace_prefix : String? = nil
+      if body_text
+        if match = body_text.match(/=\s*(\w+(?:::\w+)*)::/)
+          namespace_prefix = match[1]
+        end
+      end
+
+      values.each do |value|
+        val_str = value.to_id
+        next if val_str.empty?
+        next if members.has_key?(val_str)
+
+        resolved_value : Int64? = nil
+        if namespace_prefix
+          full_key = "#{namespace_prefix}::#{val_str}"
+          resolved_value = resolve_constant_to_i64(full_key)
+        end
+        resolved_value ||= resolve_constant_to_i64(val_str)
+
+        if resolved_value
+          members[val_str] = resolved_value
+        elsif enum_name && namespace_prefix
+          # Constant not yet available (e.g., LibC constants not registered yet).
+          # Store for deferred resolution after all libs are processed.
+          full_key = "#{namespace_prefix}::#{val_str}"
+          @pending_enum_constant_resolutions << {enum_name, val_str, full_key}
+        end
+      end
+    end
+
+    # Extract the source text of a MacroForNode's body from the original source.
+    private def macro_for_body_source_text(node : CrystalV2::Compiler::Frontend::MacroForNode) : String?
+      body_node = @arena[node.body]
+      return nil unless body_node.is_a?(CrystalV2::Compiler::Frontend::MacroLiteralNode)
+      source = @sources_by_arena[@arena]?
+      return nil unless source
+
+      text = String.build do |io|
+        body_node.pieces.each do |piece|
+          if span = piece.span
+            start = span.start_offset
+            length = span.end_offset - span.start_offset
+            next if length <= 0 || start < 0 || start >= source.bytesize
+            length = source.bytesize - start if start + length > source.bytesize
+            io << source.byte_slice(start, length)
+          elsif piece_text = piece.text
+            io << piece_text
+          end
+        end
+      end
+      result = text
+      result.strip.empty? ? nil : result
     end
 
     private def extract_enum_members_from_macro_literal(node : CrystalV2::Compiler::Frontend::MacroLiteralNode, members : Hash(String, Int64))
@@ -11401,15 +11557,7 @@ module Crystal::HIR
         if program = parse_macro_literal_program(expanded)
           with_arena(program.arena) do
             program.roots.each do |expr_id|
-              expr_node = @arena[expr_id]
-              case expr_node
-              when CrystalV2::Compiler::Frontend::ConstantNode
-                extract_member_from_constant(expr_node, members)
-              when CrystalV2::Compiler::Frontend::MacroIfNode
-                extract_enum_members_from_macro_if(expr_node, members)
-              when CrystalV2::Compiler::Frontend::MacroLiteralNode
-                extract_enum_members_from_macro_literal(expr_node, members)
-              end
+              extract_enum_member_from_parsed_expr(expr_id, members)
             end
           end
           return
@@ -11421,33 +11569,36 @@ module Crystal::HIR
       if program = parse_macro_literal_program(combined)
         with_arena(program.arena) do
           program.roots.each do |expr_id|
-            expr_node = @arena[expr_id]
-            case expr_node
-            when CrystalV2::Compiler::Frontend::ConstantNode
-              extract_member_from_constant(expr_node, members)
-            when CrystalV2::Compiler::Frontend::MacroIfNode
-              extract_enum_members_from_macro_if(expr_node, members)
-            when CrystalV2::Compiler::Frontend::MacroLiteralNode
-              extract_enum_members_from_macro_literal(expr_node, members)
-            end
+            extract_enum_member_from_parsed_expr(expr_id, members)
           end
         end
       end
     end
 
+    private def extract_enum_member_from_parsed_expr(expr_id : ExprId, members : Hash(String, Int64))
+      expr_node = @arena[expr_id]
+      case expr_node
+      when CrystalV2::Compiler::Frontend::ConstantNode
+        extract_member_from_constant(expr_node, members)
+      when CrystalV2::Compiler::Frontend::MacroIfNode
+        extract_enum_members_from_macro_if(expr_node, members)
+      when CrystalV2::Compiler::Frontend::MacroLiteralNode
+        extract_enum_members_from_macro_literal(expr_node, members)
+      when CrystalV2::Compiler::Frontend::MacroForNode
+        extract_enum_members_from_macro_for(expr_node, members)
+      end
+    end
+
     private def extract_member_from_constant(node : CrystalV2::Compiler::Frontend::ConstantNode, members : Hash(String, Int64))
       member_name = String.new(node.name)
-      # Try to extract value if it's a number
       value = members.values.max? || -1_i64
       value += 1
       begin
         val_node = @arena[node.value]
-        case val_node
-        when CrystalV2::Compiler::Frontend::NumberNode
-          value = String.new(val_node.value).to_i64? || value
+        if resolved = resolve_enum_member_value(node.value)
+          value = resolved
         end
-      rescue
-        # Value not accessible, use default
+      rescue ex
       end
       members[member_name] = value unless members.has_key?(member_name)
     end
@@ -13277,6 +13428,8 @@ module Crystal::HIR
       @inline_yield_block_return_stack = [] of String?
       @inline_yield_name_stack = [] of String
       @inline_arenas = nil
+      saved_def_return_type = @current_def_return_type
+      @current_def_return_type = return_type
       last_value : ValueId? = nil
       begin
         body_exprs = node.body
@@ -13318,6 +13471,17 @@ module Crystal::HIR
         @inline_yield_block_return_stack = saved_yield_return_stack
         @inline_yield_name_stack = saved_yield_name_stack
         @inline_arenas = saved_inline_arenas
+        @current_def_return_type = saved_def_return_type
+      end
+
+      # Coerce return value to match declared return type if needed.
+      if return_type != TypeRef::VOID
+        if (lv = last_value)
+          last_type = ctx.type_of(lv)
+          if last_type != return_type && last_type != TypeRef::VOID
+            last_value = coerce_value_to_type(ctx, lv, return_type)
+          end
+        end
       end
 
       # Infer return type from all Return terminators + last expression.
@@ -14607,6 +14771,27 @@ module Crystal::HIR
         end
       end
       @pending_offsetof_constants.clear
+    end
+
+    # Resolve enum members that referenced constants not yet available during
+    # initial enum registration (e.g., Errno members referencing LibC constants).
+    # Must be called after all lib constants are registered.
+    def resolve_pending_enum_constants : Nil
+      return if @pending_enum_constant_resolutions.empty?
+      enum_info = @enum_info
+      return unless enum_info
+      resolved_count = 0
+      @pending_enum_constant_resolutions.each do |(enum_name, member_name, constant_key)|
+        members = enum_info[enum_name]?
+        next unless members
+        # Only resolve if the member currently has value 0 (unresolved default)
+        # or doesn't exist yet
+        if resolved_value = resolve_constant_to_i64(constant_key)
+          members[member_name] = resolved_value
+          resolved_count += 1
+        end
+      end
+      @pending_enum_constant_resolutions.clear
     end
 
     # Generate allocators that were deferred because the class had empty ivars
@@ -17348,6 +17533,8 @@ module Crystal::HIR
       @inline_yield_block_return_stack = [] of String?
       @inline_yield_name_stack = [] of String
       @inline_arenas = nil
+      saved_def_return_type = @current_def_return_type
+      @current_def_return_type = return_type
       last_value : ValueId? = nil
       begin
         if body = node.body
@@ -17502,9 +17689,22 @@ module Crystal::HIR
         @inline_yield_block_return_stack = saved_yield_return_stack
         @inline_yield_name_stack = saved_yield_name_stack
         @inline_arenas = saved_inline_arenas
+        @current_def_return_type = saved_def_return_type
       end
 
       fixup_module_receiver_calls(ctx)
+
+      # Coerce return value to match declared return type if needed.
+      # This handles cases like returning {nil, 0} (Tuple(Nil, Int32))
+      # from a function with return type {Int32?, Int32?} (Tuple(Int32|Nil, Int32|Nil)).
+      if return_type != TypeRef::VOID
+        if (lv = last_value)
+          last_type = ctx.type_of(lv)
+          if last_type != return_type && last_type != TypeRef::VOID
+            last_value = coerce_value_to_type(ctx, lv, return_type)
+          end
+        end
+      end
 
       # Infer return type from all Return terminators + last expression.
       # Functions with explicit `return` inside conditionals (e.g., check_downcase_ascii)
@@ -17898,23 +18098,42 @@ module Crystal::HIR
       return param_type if param_type == call_type
 
       param_desc = @module.get_type_descriptor(param_type)
-      call_desc = @module.get_type_descriptor(call_type)
-      return param_type unless param_desc && call_desc
+      return param_type unless param_desc
 
-      if param_desc.kind == TypeKind::Module && call_desc.kind == TypeKind::Module
-        param_name = resolve_type_alias_chain(param_desc.name)
-        call_name = resolve_type_alias_chain(call_desc.name)
-        return call_type if param_name == call_name
-        includers = @module_includers[param_name]?
-        if includers.nil? || includers.empty?
-          short_name = last_namespace_component(param_name)
-          includers = @module_includers[short_name]?
-        end
-        if includers
-          return call_type if includers.includes?(call_name) ||
-                              includers.any? { |inc| inc.ends_with?("::#{call_name}") }
+      call_desc = @module.get_type_descriptor(call_type)
+
+      if call_desc
+        if param_desc.kind == TypeKind::Module && call_desc.kind == TypeKind::Module
+          param_name = resolve_type_alias_chain(param_desc.name)
+          call_name = resolve_type_alias_chain(call_desc.name)
+          return call_type if param_name == call_name
+          includers = @module_includers[param_name]?
+          if includers.nil? || includers.empty?
+            short_name = last_namespace_component(param_name)
+            includers = @module_includers[short_name]?
+          end
+          if includers
+            return call_type if includers.includes?(call_name) ||
+                                includers.any? { |inc| inc.ends_with?("::#{call_name}") }
+          end
         end
       end
+
+      # When the annotation type is a union (e.g., Path | String) and the
+      # call-site provides a specific variant (e.g., String), narrow the param
+      # to the call-site type.  This ensures monomorphized function bodies use
+      # the concrete type, matching the function name suffix ($String_Bool).
+      # Use get_type_name_from_ref as fallback when call_desc is nil (type ref
+      # exists but has no registered descriptor).
+      if param_desc.kind == TypeKind::Union
+        call_name = call_desc.try(&.name) || get_type_name_from_ref(call_type)
+        variants = split_union_type_name(param_desc.name)
+        if variants.includes?(call_name)
+          return call_type
+        end
+      end
+
+      return param_type unless call_desc
 
       param_name = param_desc.name
       return param_type if param_name.includes?('(')
@@ -24640,8 +24859,10 @@ module Crystal::HIR
       begin
         # Replace 'self' with @current_class in type annotations
         # e.g., "(self, K -> V)?" becomes "(Hash(String, Int32), String -> Int32)?"
-        if name == "self" && (current = @current_class)
-          return @subst_cache[name] = current
+        if name == "self"
+          if current = @current_class
+            return @subst_cache[name] = current
+          end
         end
         type_param_map = @type_param_map
         fallback_map : Hash(String, String)? = nil
@@ -27834,6 +28055,8 @@ module Crystal::HIR
       @inline_yield_block_return_stack = [] of String?
       @inline_yield_name_stack = [] of String
       @inline_arenas = nil
+      saved_def_return_type = @current_def_return_type
+      @current_def_return_type = return_type
       last_value : ValueId? = nil
       begin
         if body = node.body
@@ -27862,6 +28085,19 @@ module Crystal::HIR
         @inline_yield_block_return_stack = saved_yield_return_stack
         @inline_yield_name_stack = saved_yield_name_stack
         @inline_arenas = saved_inline_arenas
+        @current_def_return_type = saved_def_return_type
+      end
+
+      # Coerce return value to match declared return type if needed.
+      # This handles cases like returning {nil, 1} (Tuple(Nil, Int32))
+      # from a function with return type {Int32?, Int32?} (Tuple(Int32|Nil, Int32|Nil)).
+      if return_type != TypeRef::VOID
+        if (lv = last_value)
+          last_type = ctx.type_of(lv)
+          if last_type != return_type && last_type != TypeRef::VOID
+            last_value = coerce_value_to_type(ctx, lv, return_type)
+          end
+        end
       end
 
       # Add implicit return if not already terminated
@@ -29925,7 +30161,8 @@ module Crystal::HIR
               arg_node = @arena[cond_node.args[0]]
               name_arg = case arg_node
                          when CrystalV2::Compiler::Frontend::SymbolNode
-                           String.new(arg_node.name)
+                           raw = String.new(arg_node.name)
+                           raw.starts_with?(':') ? raw[1..] : raw
                          when CrystalV2::Compiler::Frontend::StringNode
                            String.new(arg_node.value)
                          else
@@ -34850,11 +35087,14 @@ module Crystal::HIR
             branch_values << {block, val}
           elsif pre_val
             branch_values << {block, pre_val}
+          else
+            # Variable was newly created in another branch but not this one.
+            # In Crystal, the variable is nil when this branch executes.
+            nil_lit = Literal.new(ctx.next_id, TypeRef::NIL, nil)
+            ctx.emit_to_block(block, nil_lit)
+            branch_values << {block, nil_lit.id}
           end
         end
-
-        # Variable must exist in ALL branches (or have pre-value fallback)
-        next if branch_values.size != branch_info.size
 
         # If all branches have the same value, no phi needed
         first_val = branch_values.first[1]
@@ -36998,6 +37238,17 @@ module Crystal::HIR
         end
       end
 
+      # Coerce return value to match declared return type if needed.
+      # This handles cases like returning {nil, 0} (Tuple(Nil, Int32))
+      # from a function with return type {Int32?, Int32?} (Tuple(Int32|Nil, Int32|Nil)).
+      ret_type = @current_def_return_type
+      if ret_type != TypeRef::VOID && (vid = value_id)
+        val_type = ctx.type_of(vid)
+        if val_type != ret_type && val_type != TypeRef::VOID
+          value_id = coerce_value_to_type(ctx, vid, ret_type)
+        end
+      end
+
       ctx.terminate(Return.new(value_id))
 
       # Return a dummy value (code after return is unreachable)
@@ -38567,6 +38818,33 @@ module Crystal::HIR
       end
       func_def = @function_defs[target_name]?
       arena = @function_def_arenas[target_name]?
+      # When an exact match isn't found for a module function with param suffix,
+      # try to find a compatible overload in the SAME module. This handles the case
+      # where Crystal::System::File.info?$String_Bool doesn't exist but
+      # Crystal::System::File.info?$Nil_OR_String_Bool does (registered from a
+      # different call site with a broader union param type).
+      if func_def.nil? && name.includes?("::")
+        if suffix = name_parts.suffix
+          if !suffix.empty? && (owner = name_parts.owner) && @module_defs.has_key?(owner)
+            overloads = function_def_overloads(base_name)
+            unless overloads.empty?
+              # Only consider overloads from the same owner (not module-included)
+              same_owner_overloads = overloads.select { |o| o.starts_with?(base_name) }
+              same_owner_overloads.each do |overload_name|
+                next unless @function_defs.has_key?(overload_name)
+                next if overload_name == name
+                func_def = @function_defs[overload_name]
+                arena = @function_def_arenas[overload_name]?
+                # DON'T change target_name here. Keep it as the original `name` so
+                # the LLVM function is created under the requested name and state
+                # tracking doesn't accidentally mark the overload as Completed
+                # (which would prevent it from being lowered under its own name).
+                break
+              end
+            end
+          end
+        end
+      end
       lookup_branch : String? = func_def ? "direct" : nil
       if env_get("DEBUG_ENTRY_MATCHES") && name.includes?("entry_matches")
         param_count = func_def.try { |fd| fd.params.try(&.size) || 0 } || -1
@@ -41985,10 +42263,15 @@ module Crystal::HIR
                 if @module_defs.has_key?(type_name) && !@class_info.has_key?(type_name)
                   module_method_name = "#{type_name}.#{method_name}"
                   module_has_method = @function_defs.has_key?(module_method_name) ||
+                                     has_function_base?(module_method_name) ||
                                      class_method_overload_exists?(module_method_name)
                   unless module_has_method
                     short = last_namespace_component(type_name)
-                    if @class_info.has_key?(short)
+                    # Never shorten if the short name matches the current class —
+                    # this would turn a module call into a self-call, causing
+                    # infinite recursion (e.g. File.info? calling Crystal::System::File.info?
+                    # must NOT resolve to File.info? again).
+                    if @class_info.has_key?(short) && short != @current_class
                       type_name = short
                     end
                   end
@@ -42988,10 +43271,6 @@ module Crystal::HIR
 
       # Collect argument types for name mangling (overloading support)
       arg_types = args.map { |arg_id| ctx.type_of(arg_id) }
-      if env_get("DEBUG_MATH_MIN") && (method_name == "min" || method_name == "max") && (full_method_name.try(&.includes?("Math")) || (static_class_name && static_class_name.includes?("Math")))
-        arg_type_names = arg_types.map { |t| get_type_name_from_ref(t) }
-        STDERR.puts "[MATH_MIN_MANGLE] method=#{method_name} arg_types_at_mangle=#{arg_type_names.join(",")} func=#{ctx.function.name} static=#{static_class_name || "nil"} full=#{full_method_name || "nil"}"
-      end
       # Refine VOID arg types by tracing back to their source Call instructions
       # This handles cases where a call result is used before the called function is lowered
       arg_types = refine_void_args_from_source_calls(ctx, args, arg_types)
@@ -45766,11 +46045,125 @@ module Crystal::HIR
         next false if r == TypeRef::VOID
         r.primitive? || v == "Nil" || begin
           dd = @module.get_type_descriptor(r)
-          dd && dd.kind == TypeKind::Struct
+          dd && (dd.kind == TypeKind::Struct || dd.kind == TypeKind::Tuple || dd.kind == TypeKind::NamedTuple)
         end
       end
       return nil unless has_prim
       mb = base_method_name.includes?('#') ? base_method_name.split('#', 2).last : base_method_name
+
+      # For includes?/any? on unions of different-sized tuples, inline the check
+      # directly instead of dispatching to methods. Tuple methods like each/size
+      # are macro-expanded per concrete type, and our compiler compiles them once
+      # for one tuple size, so union dispatch to the same generic method fails.
+      if (mb == "includes?" || mb == "any?") && args.size >= 1
+        all_tuples = true
+        tuple_descs = [] of {TypeRef, Int32, Crystal::HIR::TypeDescriptor}
+        variants.each do |vn|
+          vr = type_ref_for_name(vn)
+          next if vr == TypeRef::VOID
+          vid = get_union_variant_id(recv_type, vr)
+          if vid < 0
+            all_tuples = false
+            break
+          end
+          vd = @module.get_type_descriptor(vr)
+          if vd && (vd.kind == TypeKind::Tuple || vd.name.starts_with?("Tuple("))
+            tuple_descs << {vr, vid, vd}
+          else
+            all_tuples = false
+            break
+          end
+        end
+        if all_tuples && tuple_descs.size >= 2
+          # Different-sized tuple union: inline element comparison
+          target_val = args[0]
+          pb = ctx.save_locals
+          merge = ctx.create_block
+          inc = [] of {BlockId, ValueId}
+          next_variant_block : BlockId? = nil
+          tuple_descs.each_with_index do |(vr, vid, vd), idx|
+            elem_count = vd.type_params.try(&.size) || 0
+            if idx < tuple_descs.size - 1
+              uis = UnionIs.new(ctx.next_id, receiver_id, vid)
+              ctx.emit(uis); ctx.register_type(uis.id, TypeRef::BOOL)
+              tb = ctx.create_block; next_variant_block = ctx.create_block
+              ctx.terminate(Branch.new(uis.id, tb, next_variant_block))
+              ctx.current_block = tb; ctx.restore_locals(pb)
+            end
+            uw = UnionUnwrap.new(ctx.next_id, vr, receiver_id, vid, false)
+            ctx.emit(uw); ctx.register_type(uw.id, vr)
+            # Check each element for a match
+            if elem_count > 0
+              found_match_block = ctx.create_block
+              no_match_block = ctx.create_block
+              (0...elem_count).each do |ei|
+                elem_type = if vd.type_params && ei < vd.type_params.not_nil!.size
+                               tp = vd.type_params.not_nil![ei]
+                               tp
+                             else
+                               TypeRef::VOID
+                             end
+                # Compute byte offset for this tuple element
+                elem_byte_offset = 0
+                if vd.type_params
+                  (0...ei).each do |pi|
+                    pt = vd.type_params.not_nil![pi]
+                    pt_desc = @module.get_type_descriptor(pt)
+                    is_prim = pt_desc && (pt_desc.kind == TypeKind::Primitive)
+                    pt_size = if is_prim
+                                case get_type_name_from_ref(pt)
+                                when "Bool", "Int8", "UInt8" then 1
+                                when "Int16", "UInt16"       then 2
+                                when "Int32", "UInt32", "Float32", "Char" then 4
+                                when "Int64", "UInt64", "Float64" then 8
+                                else 8
+                                end
+                              else
+                                8 # pointer size
+                              end
+                    elem_byte_offset += pt_size
+                  end
+                end
+                elem_get = FieldGet.new(ctx.next_id, elem_type, uw.id, "@__#{ei}", elem_byte_offset)
+                ctx.emit(elem_get); ctx.register_type(elem_get.id, elem_type)
+                # Compare element with target using primitive equality
+                cmp = BinaryOperation.new(ctx.next_id, TypeRef::BOOL, BinaryOp::Eq, elem_get.id, target_val)
+                ctx.emit(cmp); ctx.register_type(cmp.id, TypeRef::BOOL)
+                if ei < elem_count - 1
+                  next_elem_block = ctx.create_block
+                  ctx.terminate(Branch.new(cmp.id, found_match_block, next_elem_block))
+                  ctx.current_block = next_elem_block
+                else
+                  ctx.terminate(Branch.new(cmp.id, found_match_block, no_match_block))
+                end
+              end
+              ctx.current_block = found_match_block
+              true_lit = Literal.new(ctx.next_id, TypeRef::BOOL, 1_i64)
+              ctx.emit(true_lit); ctx.register_type(true_lit.id, TypeRef::BOOL)
+              inc << {ctx.current_block, true_lit.id}
+              ctx.terminate(Jump.new(merge))
+              ctx.current_block = no_match_block
+              false_lit = Literal.new(ctx.next_id, TypeRef::BOOL, 0_i64)
+              ctx.emit(false_lit); ctx.register_type(false_lit.id, TypeRef::BOOL)
+              inc << {ctx.current_block, false_lit.id}
+              ctx.terminate(Jump.new(merge))
+            else
+              false_lit = Literal.new(ctx.next_id, TypeRef::BOOL, 0_i64)
+              ctx.emit(false_lit); ctx.register_type(false_lit.id, TypeRef::BOOL)
+              inc << {ctx.current_block, false_lit.id}
+              ctx.terminate(Jump.new(merge))
+            end
+            if idx < tuple_descs.size - 1 && (nvb = next_variant_block)
+              ctx.current_block = nvb; ctx.restore_locals(pb)
+            end
+          end
+          ctx.current_block = merge
+          phi = Phi.new(ctx.next_id, TypeRef::BOOL, inc)
+          ctx.emit(phi); ctx.register_type(phi.id, TypeRef::BOOL)
+          return phi.id
+        end
+      end
+
       vms = [] of {String, TypeRef, Int32}
       variants.each do |vn|
         vr = type_ref_for_name(vn)
@@ -46463,7 +46856,117 @@ module Crystal::HIR
         end
       end
 
+      # Tuple-to-tuple coercion: Tuple(A, B) → Tuple(A', B') where element types differ
+      # This handles cases like Tuple(Nil, Int32) → Tuple(Int32?, Int32?) where elements
+      # need to be wrapped in union types.
+      coerced = try_coerce_tuple_to_tuple(ctx, value_id, value_type, target_type)
+      return coerced if coerced
+
+      # Union-to-concrete coercion: if the value is a union containing the target type
+      # as a variant, unwrap it. This handles cases where if/elsif/else creates spurious
+      # Nil | T union types when the function always returns T.
+      if is_union_or_nilable_type?(value_type) && !is_union_or_nilable_type?(target_type)
+        variant_id = get_union_variant_id(value_type, target_type)
+        if variant_id >= 0
+          unwrap = UnionUnwrap.new(ctx.next_id, target_type, value_id, variant_id)
+          ctx.emit(unwrap)
+          ctx.register_type(unwrap.id, target_type)
+          return unwrap.id
+        end
+      end
+
       value_id
+    end
+
+    # Attempt to coerce one tuple type to another by wrapping individual elements.
+    # Returns nil if the types are not compatible tuples.
+    private def try_coerce_tuple_to_tuple(
+      ctx : LoweringContext,
+      value_id : ValueId,
+      source_type : TypeRef,
+      target_type : TypeRef,
+    ) : ValueId?
+      source_desc = @module.get_type_descriptor(source_type)
+      target_desc = @module.get_type_descriptor(target_type)
+      return nil unless source_desc && target_desc
+
+      source_is_tuple = source_desc.kind == TypeKind::Tuple || source_desc.name.starts_with?("Tuple(")
+      target_is_tuple = target_desc.kind == TypeKind::Tuple || target_desc.name.starts_with?("Tuple(")
+      return nil unless source_is_tuple && target_is_tuple
+
+      source_params = source_desc.type_params
+      target_params = target_desc.type_params
+      return nil unless source_params.size == target_params.size && source_params.size > 0
+
+      # Check if any element types differ
+      any_differ = false
+      source_params.each_with_index do |sp, i|
+        if sp != target_params[i]
+          any_differ = true
+          break
+        end
+      end
+      return nil unless any_differ
+
+      # Extract each element from source tuple, coerce to target element type,
+      # and build a new tuple with the target type.
+      coerced_elements = [] of ValueId
+      elem_byte_offset = 0
+      source_params.each_with_index do |sp, i|
+        tp = target_params[i]
+        # Extract element from source tuple
+        elem_get = FieldGet.new(ctx.next_id, sp, value_id, "@__#{i}", elem_byte_offset)
+        ctx.emit(elem_get)
+        ctx.register_type(elem_get.id, sp)
+
+        # Coerce element to target type if needed
+        coerced_elem = if sp != tp
+                         coerce_value_to_type(ctx, elem_get.id, tp)
+                       else
+                         elem_get.id
+                       end
+        coerced_elements << coerced_elem
+
+        # Advance byte offset using source element size
+        elem_byte_offset += hir_element_byte_size(sp)
+      end
+
+      # Create new tuple with target type and coerced elements
+      alloc = Allocate.new(ctx.next_id, target_type, coerced_elements)
+      ctx.emit(alloc)
+      ctx.register_type(alloc.id, target_type)
+      alloc.id
+    end
+
+    # Compute the byte size of an element in a tuple at the HIR level.
+    # Must match the MIR tuple layout logic in register_tuple_types.
+    private def hir_element_byte_size(type_ref : TypeRef) : Int32
+      desc = @module.get_type_descriptor(type_ref)
+      if desc
+        if desc.kind == TypeKind::Primitive
+          case desc.name
+          when "Bool", "Int8", "UInt8" then return 1
+          when "Int16", "UInt16"       then return 2
+          when "Int32", "UInt32", "Float32", "Char" then return 4
+          when "Int64", "UInt64", "Float64" then return 8
+          end
+        end
+        # Union types may be larger than pointer size
+        if desc.kind == TypeKind::Union
+          # The union layout is { i32 tag, [N x i32] payload }.
+          # Parse element types to compute max payload size.
+          max_payload = 0
+          desc.type_params.each do |param|
+            param_size = hir_element_byte_size(param)
+            max_payload = param_size if param_size > max_payload
+          end
+          # tag (4 bytes) + payload (aligned to 4 bytes, minimum 4 bytes)
+          payload_size = max_payload < 4 ? 4 : ((max_payload + 3) & ~3)
+          return 4 + payload_size
+        end
+      end
+      # Default: pointer size for reference types, structs, etc.
+      8
     end
 
     private def union_type_cached?(type : TypeRef) : Bool
@@ -51102,7 +51605,19 @@ module Crystal::HIR
         # registered function_id against ctx.function.id.
         block_owned_by_current_fn = @block_owner_function_ids[block.object_id]? == ctx.function.id
         base_override = nil
-        unless block_owned_by_current_fn
+        if block_owned_by_current_fn
+          # Block is from the same logical method. When multiple yield functions are
+          # nested-inlined into the same top-level function, all blocks share the same
+          # function_id (the top-level function). In this case, `return` inside the block
+          # should NOT do a real Return from the top-level function — it should jump to
+          # the inline return context of the CALLER (the method that defined the block).
+          # The caller's context is at stack[-2] (the entry before the current yield
+          # function's inline return context).
+          if @inline_yield_return_stack.size >= 2
+            base_override = @inline_yield_return_stack[-2]
+          end
+          # If stack < 2, base_override stays nil → real Return (top-level block)
+        else
           if active_entry = @inline_yield_return_override_stack.reverse.find(&.active)
             base_override = active_entry.context
           elsif @inline_yield_return_stack.size > 1
@@ -51716,7 +52231,7 @@ module Crystal::HIR
         index_get.id
         # Check if this is a tuple type — intercept to avoid calling Tuple#[]
         # which relies on T.size macro (resolves to 0) causing infinite recursion.
-      elsif type_desc && (type_desc.kind == TypeKind::Tuple || type_desc.name.starts_with?("Tuple(") ||
+      elsif type_desc && type_desc.kind != TypeKind::Union && (type_desc.kind == TypeKind::Tuple || type_desc.name.starts_with?("Tuple(") ||
             type_desc.name == "Tuple") && index_ids.size == 1
         td = type_desc.not_nil!
         type_params = td.type_params.reject { |p| p == TypeRef::VOID }
@@ -51754,6 +52269,69 @@ module Crystal::HIR
         ctx.emit(index_get)
         ctx.register_type(index_get.id, element_type)
         index_get.id
+      elsif type_desc && type_desc.kind == TypeKind::Union && index_ids.size == 1
+        # Union of tuples: e.g., Tuple(Char) | Tuple(Char, Char)
+        # Find tuple variants and determine element type at the given index.
+        tuple_params = [] of Array(TypeRef)
+        mir_ref = hir_to_mir_type_ref(object_type)
+        if union_desc = @union_descriptors[mir_ref]?
+          union_desc.variants.each do |v|
+            vref = mir_to_hir_type_ref(v.type_ref)
+            vdesc = @module.get_type_descriptor(vref)
+            next unless vdesc
+            if vdesc.kind == TypeKind::Tuple || vdesc.name.starts_with?("Tuple(")
+              tp = vdesc.type_params.reject { |p| p == TypeRef::VOID }
+              tuple_params << tp unless tp.empty?
+            end
+          end
+        end
+        if !tuple_params.empty?
+          element_type = TypeRef::INT32 # default fallback
+          idx_node = @arena[node.indexes.first]
+          idx_val = nil
+          if idx_node.is_a?(CrystalV2::Compiler::Frontend::NumberNode)
+            idx_val = String.new(idx_node.value).to_i?
+          end
+          # Collect element types from all tuple variants at the given index
+          elem_types = tuple_params.compact_map do |tp|
+            if idx_val && idx_val >= 0 && idx_val < tp.size
+              tp[idx_val]
+            elsif !tp.empty?
+              tp.first
+            else
+              nil
+            end
+          end
+          if !elem_types.empty?
+            unique_types = elem_types.uniq
+            if unique_types.size == 1
+              element_type = unique_types.first
+            else
+              # Different element types across variants: create a union type
+              names = unique_types.map { |t| get_type_name_from_ref(t) }
+              union_name = names.join(" | ")
+              element_type = type_ref_for_name(union_name)
+              element_type = TypeRef::INT32 if element_type == TypeRef::VOID
+            end
+          end
+          element_type = TypeRef::INT32 if element_type == TypeRef::VOID
+          index_get = IndexGet.new(ctx.next_id, element_type, object_id, index_ids.first)
+          ctx.emit(index_get)
+          ctx.register_type(index_get.id, element_type)
+          index_get.id
+        else
+          # Union doesn't have tuple variants — fall through to generic method call
+          arg_types = index_ids.map { |idx| ctx.type_of(idx) }
+          method_name = resolve_method_call(ctx, object_id, "[]", arg_types, false)
+          return_type = get_function_return_type(method_name)
+          if return_type == TypeRef::VOID
+            return_type = TypeRef::POINTER
+          end
+          call = Call.new(ctx.next_id, return_type, object_id, method_name, index_ids)
+          ctx.emit(call)
+          ctx.register_type(call.id, return_type)
+          call.id
+        end
       elsif ctx.type_of(object_id) == TypeRef::STRING && index_ids.size == 2
         # String#[](Int32, Int32) → substring extraction via runtime helper
         ext_call = ExternCall.new(ctx.next_id, TypeRef::STRING, "__crystal_v2_string_substring", [object_id, index_ids[0], index_ids[1]])
@@ -55630,6 +56208,35 @@ module Crystal::HIR
 
     private def lower_tuple_literal(ctx : LoweringContext, node : CrystalV2::Compiler::Frontend::TupleLiteralNode) : ValueId
       element_ids = node.elements.map { |e| lower_expr(ctx, e) }
+
+      # If the enclosing function has a tuple return type with the same arity,
+      # coerce each element to match the return type's element types.
+      # This handles cases like {nil, 1} in a function returning {Int32?, Int32?}.
+      ret_type = @current_def_return_type
+      if ret_type != TypeRef::VOID
+        ret_desc = @module.get_type_descriptor(ret_type)
+        if ret_desc && (ret_desc.kind == TypeKind::Tuple || ret_desc.name.starts_with?("Tuple("))
+          ret_params = ret_desc.type_params
+          if ret_params.size == element_ids.size
+            coerced_ids = element_ids.map_with_index do |eid, i|
+              elem_type = ctx.type_of(eid)
+              target_type = ret_params[i]
+              if elem_type != target_type && target_type != TypeRef::VOID
+                coerce_value_to_type(ctx, eid, target_type)
+              else
+                eid
+              end
+            end
+            alloc = Allocate.new(ctx.next_id, ret_type, coerced_ids)
+            # Tuple may be returned from this function — must heap-allocate
+            # to survive the function return (stack alloca would dangle).
+            alloc.lifetime = LifetimeTag::HeapEscape
+            ctx.emit(alloc)
+            record_allocation_location(ctx, alloc.id, @arena, node)
+            return alloc.id
+          end
+        end
+      end
 
       element_names = element_ids.map { |id| get_type_name_from_ref(ctx.type_of(id)) }
       normalized_names = element_names.map do |name|

@@ -129,6 +129,10 @@ module Crystal::HIR
         @users[value.value] << value.id
       when Allocate
         value.constructor_args.each { |arg| @users[arg] << value.id }
+      when UnionWrap
+        @users[value.value] << value.id
+      when UnionUnwrap
+        @users[value.union_value] << value.id
       end
     end
 
@@ -269,6 +273,14 @@ module Crystal::HIR
         # (handled in summary-based inter-proc analysis)
         nil
 
+      when UnionWrap
+        # If the source value escapes, the union wrapping it escapes too
+        mark_escape(user.id, lifetime)
+
+      when UnionUnwrap
+        # If the source union escapes, the unwrapped value escapes too
+        mark_escape(user.id, lifetime)
+
       when MakeClosure
         # Already handled in seeding
         nil
@@ -294,6 +306,14 @@ module Crystal::HIR
             mark_escape(arg, LifetimeTag::ArgEscape)
           end
         end
+
+      when UnionWrap
+        # If a union-wrapped value escapes, the original value must too
+        mark_escape(value.value, lifetime)
+
+      when UnionUnwrap
+        # If unwrapped value escapes, the source union must too
+        mark_escape(value.union_value, lifetime)
       end
     end
 

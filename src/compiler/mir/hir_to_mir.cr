@@ -224,8 +224,13 @@ module Crystal
           if variant_type = @mir_module.type_registry.get(v.type_ref)
             union_type.add_variant(variant_type)
           else
-            # Variant is a primitive type - create temporary Type for it
-            prim_type = Type.new(v.type_ref.id, TypeKind::Struct, v.full_name, v.size.to_u64, v.alignment.to_u32)
+            # Variant is not in the type registry - create temporary Type for it
+            variant_kind = if v.full_name.starts_with?("Tuple(")
+                             TypeKind::Tuple
+                           else
+                             TypeKind::Struct
+                           end
+            prim_type = Type.new(v.type_ref.id, variant_kind, v.full_name, v.size.to_u64, v.alignment.to_u32)
             union_type.add_variant(prim_type)
           end
         end
@@ -332,7 +337,7 @@ module Crystal
 
         hir_ref = Crystal::HIR::TypeRef.new(Crystal::HIR::TypeRef::FIRST_USER_TYPE + idx.to_u32)
         mir_ref = convert_type(hir_ref)
-        next if @mir_module.type_registry.get(mir_ref)
+        existing_mir_type = @mir_module.type_registry.get(mir_ref)
 
         element_refs = desc.type_params.map { |t| convert_type(t) }
 
@@ -363,16 +368,32 @@ module Crystal
         end
         size = align_u64(size, align)
 
-        mir_type = @mir_module.type_registry.create_type_with_id(
-          mir_ref.id,
-          TypeKind::Tuple,
-          desc.name,
-          size,
-          align
-        )
-        element_refs.each do |elem_ref|
-          elem_type = @mir_module.type_registry.get(elem_ref) || @mir_module.type_registry.get(TypeRef::POINTER)
-          mir_type.add_element_type(elem_type) if elem_type
+        # If the type was pre-registered with default pointer size, update it
+        # with the correct computed size and element info.
+        if existing_mir_type
+          if size > existing_mir_type.size
+            existing_mir_type.size = size
+            existing_mir_type.alignment = align
+          end
+          # Add element types if not already populated
+          if existing_mir_type.element_types.nil? || existing_mir_type.element_types.try(&.empty?)
+            element_refs.each do |elem_ref|
+              elem_type = @mir_module.type_registry.get(elem_ref) || @mir_module.type_registry.get(TypeRef::POINTER)
+              existing_mir_type.add_element_type(elem_type) if elem_type
+            end
+          end
+        else
+          mir_type = @mir_module.type_registry.create_type_with_id(
+            mir_ref.id,
+            TypeKind::Tuple,
+            desc.name,
+            size,
+            align
+          )
+          element_refs.each do |elem_ref|
+            elem_type = @mir_module.type_registry.get(elem_ref) || @mir_module.type_registry.get(TypeRef::POINTER)
+            mir_type.add_element_type(elem_type) if elem_type
+          end
         end
       end
     end

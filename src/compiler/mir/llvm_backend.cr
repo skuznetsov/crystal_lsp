@@ -12004,18 +12004,9 @@ module Crystal::MIR
         array_llvm_type = @type_mapper.llvm_type(array_value_type)
         actual_val_type = lookup_value_llvm_type(inst.array_value, "")
         if array_llvm_type.includes?(".union")
-          # Check if the union's non-nil variant is a tuple (value type stored inline)
-          # vs an array/class (reference type stored as pointer in payload).
-          # Tuples are stored inline in the union payload, so we must NOT dereference
-          # through the payload — the payload_ptr IS the pointer to the tuple data.
-          union_has_tuple_variant = false
-          if union_desc = @module.get_union_descriptor(array_value_type)
-            if union_desc.variants.any? { |v| (t = @module.type_registry.get(v.type_ref)) && t.kind.tuple? }
-              union_has_tuple_variant = true
-            end
-          end
-
-          # Extract value from union payload
+          # Extract value from union payload.
+          # Both tuples and arrays/classes are reference types in our compiler —
+          # the payload holds a pointer to the heap-allocated object.
           emit "%#{base_name}.union_ptr = alloca #{array_llvm_type}, align 8"
           union_val = array_ptr
           actual_val_type = lookup_value_llvm_type(inst.array_value, "")
@@ -12025,17 +12016,8 @@ module Crystal::MIR
           end
           emit "store #{array_llvm_type} #{normalize_union_value(union_val, array_llvm_type)}, ptr %#{base_name}.union_ptr"
           emit "%#{base_name}.payload_ptr = getelementptr #{array_llvm_type}, ptr %#{base_name}.union_ptr, i32 0, i32 1"
-
-          if union_has_tuple_variant
-            # Tuple data is stored inline in the union payload — the payload_ptr
-            # IS the pointer to the tuple struct. No extra load needed.
-            array_ptr = "%#{base_name}.payload_ptr"
-          else
-            # Array/class values are reference types — the payload holds a pointer
-            # to the heap-allocated object. Load the pointer.
-            emit "%#{base_name}.arr_ptr = load ptr, ptr %#{base_name}.payload_ptr, align 4"
-            array_ptr = "%#{base_name}.arr_ptr"
-          end
+          emit "%#{base_name}.arr_ptr = load ptr, ptr %#{base_name}.payload_ptr, align 4"
+          array_ptr = "%#{base_name}.arr_ptr"
         elsif array_llvm_type != "ptr" && !array_llvm_type.starts_with?('%') && !array_llvm_type.starts_with?('[') && actual_val_type != "ptr"
           # Non-ptr, non-struct type (e.g., i1, i32) - this is a MIR type inference issue
           # Use inttoptr conversion as fallback
@@ -12082,9 +12064,12 @@ module Crystal::MIR
                 elements.each_with_index do |elem, i|
                   # Reference types (classes, structs) are heap-allocated and stored
                   # as pointers in tuples — use pointer size, not full struct size.
+                  # Union types may need more than pointer size for their discriminated repr.
                   is_inline = elem.kind.primitive? || elem.kind.enum?
                   elem_size = if is_inline && elem.size > 0
                                 elem.size
+                              elsif elem.kind.union? && elem.size > 8
+                                elem.size.to_u64
                               else
                                 8_u64
                               end
@@ -12114,6 +12099,33 @@ module Crystal::MIR
               @value_types[inst.id] = inst.element_type
               return
             end
+          end
+        end
+      end
+
+      # Handle bare Tuple struct (generic Tuple without concrete type params in registry).
+      # When Tuple#includes? is compiled as a standalone method, self is typed as bare
+      # Struct(Tuple) instead of concrete Tuple(Char, Char). Use inline byte-offset access.
+      if array_value_type
+        bare_type = @module.type_registry.get(array_value_type)
+        if bare_type && bare_type.name == "Tuple" && bare_type.kind.struct?
+          idx_const = nil
+          if !index.starts_with?('%') && index != "null"
+            idx_const = index.to_i?
+          end
+          if idx_const
+            elem_size = case element_type
+                        when "i1", "i8" then 1
+                        when "i16"      then 2
+                        when "i32", "float" then 4
+                        when "i64", "double", "ptr" then 8
+                        else 8
+                        end
+            byte_offset = idx_const * elem_size
+            emit "%#{base_name}.elem_ptr = getelementptr i8, ptr #{array_ptr}, i32 #{byte_offset}"
+            emit "#{name} = load #{element_type}, ptr %#{base_name}.elem_ptr"
+            @value_types[inst.id] = inst.element_type
+            return
           end
         end
       end
