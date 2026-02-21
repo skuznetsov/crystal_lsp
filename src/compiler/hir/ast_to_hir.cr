@@ -13134,13 +13134,8 @@ module Crystal::HIR
         if !call_types.empty?
           remaining = call_types[call_index..-1]? || [] of TypeRef
           # Avoid re-wrapping: if single remaining arg is already a Tuple, use it directly
-          if remaining.size == 1
-            rname = get_type_name_from_ref(remaining[0])
-            if rname.starts_with?("Tuple")
-              splat_type = remaining[0]
-            else
-              splat_type = tuple_type_from_arg_types(remaining, allow_void: true)
-            end
+          if remaining.size == 1 && is_tuple_type_ref?(remaining[0])
+            splat_type = remaining[0]
           else
             splat_type = tuple_type_from_arg_types(remaining, allow_void: true)
           end
@@ -13149,8 +13144,7 @@ module Crystal::HIR
           if elem_type = param_type_map[splat_param_name.not_nil!]?
             if elem_type != TypeRef::VOID
               # Avoid re-wrapping: if elem_type is already a Tuple, use it directly
-              elem_name = get_type_name_from_ref(elem_type)
-              if elem_name.starts_with?("Tuple")
+              if is_tuple_type_ref?(elem_type)
                 splat_type = elem_type
               else
                 splat_type = tuple_type_from_arg_types([elem_type], allow_void: true)
@@ -17143,13 +17137,8 @@ module Crystal::HIR
         if !call_types.empty?
           remaining = call_types[call_index..-1]? || [] of TypeRef
           # Avoid re-wrapping: if single remaining arg is already a Tuple, use it directly
-          if remaining.size == 1
-            rname = get_type_name_from_ref(remaining[0])
-            if rname.starts_with?("Tuple")
-              splat_type = remaining[0]
-            else
-              splat_type = tuple_type_from_arg_types(remaining, allow_void: true)
-            end
+          if remaining.size == 1 && is_tuple_type_ref?(remaining[0])
+            splat_type = remaining[0]
           else
             splat_type = tuple_type_from_arg_types(remaining, allow_void: true)
           end
@@ -17158,8 +17147,7 @@ module Crystal::HIR
           if elem_type = param_type_map[splat_param_name.not_nil!]?
             if elem_type != TypeRef::VOID
               # Avoid re-wrapping: if elem_type is already a Tuple, use it directly
-              elem_name = get_type_name_from_ref(elem_type)
-              if elem_name.starts_with?("Tuple")
+              if is_tuple_type_ref?(elem_type)
                 splat_type = elem_type
               else
                 splat_type = tuple_type_from_arg_types([elem_type], allow_void: true)
@@ -57552,6 +57540,13 @@ module Crystal::HIR
 
       # Create the union type via the string-based method
       create_union_type(union_name)
+    end
+
+    # Check if a TypeRef refers to a Tuple type (by TypeKind, not name)
+    private def is_tuple_type_ref?(type_ref : TypeRef) : Bool
+      desc = @module.get_type_descriptor(type_ref)
+      return false unless desc
+      desc.kind == TypeKind::Tuple
     end
 
     # Get the type name from a TypeRef
