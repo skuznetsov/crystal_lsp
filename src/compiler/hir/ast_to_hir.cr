@@ -45714,6 +45714,16 @@ module Crystal::HIR
       end
       return nil if vo.size < 2
       return nil if vo.map { |i| i[0] }.uniq.size < 2
+      # Prevent mutual recursion: if none of the variant functions have their
+      # own explicit definition (they're all derived from the same union-param
+      # base def), dispatching creates trampolines that call each other.
+      # In that case, call the union function directly.
+      has_explicit_variant = vo.any? do |vm, _, _|
+        @function_defs.has_key?(vm) || @function_types.has_key?(vm)
+      end
+      unless has_explicit_variant
+        return nil
+      end
       vo.each { |m, _, _| lower_function_if_needed(m) }
       ua = args[ui]
       fm, fr, fv = vo[0]; sm, sr, sv = vo[1]
