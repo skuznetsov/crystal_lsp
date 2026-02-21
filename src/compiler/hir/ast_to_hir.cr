@@ -2687,6 +2687,19 @@ module Crystal::HIR
         return resolved
       end
 
+      # If the alias resolved to a short name (e.g. "PCRE2" from "Regex::Engine"),
+      # re-qualify under the original module's namespace (e.g. "Regex::PCRE2").
+      if resolved != module_name && !resolved.includes?("::") && module_name.includes?("::")
+        if ns_sep = module_name.rindex("::")
+          ns = module_name[0, ns_sep]
+          requalified = "#{ns}::#{resolved}"
+          if @module_defs.has_key?(requalified)
+            @module_include_alias_cache[cache_key] = requalified
+            return requalified
+          end
+        end
+      end
+
       if current = @current_class
         scope = current
         while scope.includes?("::")
@@ -26582,6 +26595,15 @@ module Crystal::HIR
         # Also check @function_defs for methods that exist in AST but haven't been
         # lowered yet (e.g., private methods defined after the call site).
         if @function_types.has_key?(test_name) || has_function_base?(test_name) || @function_defs.has_key?(test_name)
+          # For primitive value types (Int32, Float64, etc.), finding a parent class
+          # method (Int#to_s) is not enough — we need a specialized version with
+          # the correct calling convention (i32 %self vs ptr %self).
+          # Return origin#method to force proper specialization, like modules do.
+          if current != origin && primitive_template_owner(origin)
+            resolved = "#{origin}##{method_name}"
+            @method_inheritance_cache[cache_key] = resolved
+            return resolved
+          end
           @method_inheritance_cache[cache_key] = test_name
           return test_name # Return base name - caller will mangle
         end
@@ -30068,6 +30090,8 @@ module Crystal::HIR
       "release", "debug",
       # Crystal-specific
       "preview_mt",
+      # Regex backend: PCRE2 is the default on macOS/modern systems
+      "use_pcre2",
     }
 
     # Evaluate a macro flag condition at compile time
