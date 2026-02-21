@@ -3107,6 +3107,14 @@ module Crystal
         exc_type = @hir_value_types[exc]?
         if exc_type && exc_type.id == HIR::TypeRef::STRING.id
           builder.extern_call("__crystal_v2_raise_msg", [exc_val], TypeRef::VOID)
+        elsif exc_type.nil? || exc_type.id == HIR::TypeRef::VOID.id
+          # Exception creation wasn't properly compiled (e.g., File::Error.from_errno
+          # expands to complex macro/factory code our compiler can't fully handle).
+          # Fall back to __crystal_v2_raise_msg which heap-allocates a RuntimeError
+          # internally. This avoids passing a bogus stack alloca to __crystal_v2_raise,
+          # which crashes after longjmp because the stack frame is destroyed.
+          msg_val = builder.const_string("exception")
+          builder.extern_call("__crystal_v2_raise_msg", [msg_val], TypeRef::VOID)
         else
           builder.extern_call("__crystal_v2_raise", [exc_val], TypeRef::VOID)
         end

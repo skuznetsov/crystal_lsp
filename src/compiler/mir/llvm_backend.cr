@@ -367,7 +367,7 @@ module Crystal::MIR
     @emitted_functions : Set(String) = Set(String).new  # Track emitted function names to avoid duplicates
     @emitted_function_return_types : Hash(String, String) = {} of String => String  # Track emitted function return types for call-site consistency
     @undefined_externs : Hash(String, String) = {} of String => String  # Track undefined extern calls (name => return_type)
-    @called_crystal_functions : Hash(String, {String, Int32}) = {} of String => {String, Int32}  # Track called Crystal functions (name => {return_type, arg_count}) for missing declaration generation
+    @called_crystal_functions : Hash(String, {String, Int32, Array(String)}) = {} of String => {String, Int32, Array(String)}  # Track called Crystal functions (name => {return_type, arg_count, arg_types}) for missing declaration generation
     @global_name_mapping : Hash(String, String) = {} of String => String  # Map original global names to renamed names
     @global_declared_types : Hash(String, String) = {} of String => String  # Global name -> declared LLVM type
     @alloc_element_types : Hash(ValueId, TypeRef)  # For GEP element type lookup
@@ -376,6 +376,8 @@ module Crystal::MIR
     @module_singleton_globals : Hash(TypeRef, String)  # Module type -> singleton global name
     @emitted_value_types : Hash(String, String)  # SSA name -> LLVM type (per function)
     @emitted_allocas : Set(ValueId) = Set(ValueId).new  # Track pre-emitted allocas
+    @alloc_types : Hash(ValueId, TypeRef) = {} of ValueId => TypeRef  # Track original alloc_type for enum detection
+    @inttoptr_value_ids : Set(ValueId) = Set(ValueId).new  # Track values created by inttoptr (packed scalars)
     @addressable_allocas : Hash(ValueId, String) = {} of ValueId => String  # operand_id -> alloca SSA name
     @addressable_alloca_initialized : Set(ValueId) = Set(ValueId).new  # Track which addressable allocas have been stored to
     @pending_allocas : Array({String, String, Int32}) = [] of {String, String, Int32}  # name, type, align
@@ -919,13 +921,15 @@ module Crystal::MIR
       missing.each do |name, info|
         return_type = info[0]
         arg_count = info[1]
+        arg_types = info[2]
         # Emit a stub function that returns a zero/null value.
         # These are functions the RTA missed or that were skipped during emission.
-        if stub = emit_dead_code_stub(name, return_type, arg_count)
+        if stub = emit_dead_code_stub(name, return_type, arg_count, arg_types)
           emit_raw stub
         else
-          # Emit declare with matching arg count (all ptr) to avoid type mismatch
-          param_list = (0...arg_count).map { |i| "ptr" }.join(", ")
+          # Emit declare with matching arg count and types to avoid type mismatch
+          param_list = arg_types.map_with_index { |t, i| t }.join(", ")
+          param_list = (0...arg_count).map { |i| "ptr" }.join(", ") if param_list.empty?
           emit_raw "declare #{return_type} @#{name}(#{param_list})\n"
         end
       end
@@ -933,7 +937,7 @@ module Crystal::MIR
 
     # Emit a stub function body for methods called on Nil/Unknown/impossible receivers.
     # Returns the LLVM IR string for the stub, or nil if the name doesn't match.
-    private def emit_dead_code_stub(name : String, return_type : String, arg_count : Int32 = 0) : String?
+    private def emit_dead_code_stub(name : String, return_type : String, arg_count : Int32 = 0, arg_types : Array(String) = [] of String) : String?
       # Methods on Nil (e.g. Nil$Hzero, Nil$Hto_i, Nil$Hadditive_identity)
       # Methods on Unknown (e.g. Unknown$Hto_i, Unknown$Hto_u32)
       # Union dispatch on Nil|X (e.g. Nil$_$OR_...#call)
@@ -1105,9 +1109,13 @@ module Crystal::MIR
                    end
                  end
 
-      # Build parameter list with proper types instead of varargs (...)
+      # Build parameter list with proper types from call site instead of varargs (...)
       # This prevents LLVM type mismatches at call sites.
-      param_list = (0...arg_count).map { |i| "ptr %arg#{i}" }.join(", ")
+      param_list = if !arg_types.empty?
+                     arg_types.map_with_index { |t, i| "#{t} %arg#{i}" }.join(", ")
+                   else
+                     (0...arg_count).map { |i| "ptr %arg#{i}" }.join(", ")
+                   end
 
       "; stub for dead-code method: #{name}\n" \
       "define #{return_type} @#{name}(#{param_list}) {\n" \
@@ -1883,23 +1891,42 @@ module Crystal::MIR
       # Memory allocation - use calloc for zero-initialized memory
       # Crystal semantics require zero-init (like GC_MALLOC in original compiler).
       # The .new allocator only sets known fields; union/composite gaps need zeroing.
-      emit_raw "define ptr @__crystal_v2_malloc64(i64 %size) {\n"
-      emit_raw "  %ptr = call ptr @calloc(i64 1, i64 %size)\n"
+      #
+      # CRITICAL: We call calloc/malloc/realloc through volatile-loaded function pointers.
+      # This is necessary because LLVM's interprocedural Attributor pass can infer noalias
+      # on our return value (by seeing we call calloc, even through noinline boundaries).
+      # With noalias inferred, LLVM's heap-to-stack promotion converts calloc → alloca
+      # when the allocation only escapes through a noreturn call (__crystal_v2_raise/longjmp).
+      # After longjmp, the stack frame is destroyed and the exception pointer is garbage.
+      # Volatile function pointer loads are opaque to LLVM — it can't constant-fold them
+      # or infer allocation semantics from an indirect call to an unknown target.
+      # In the original Crystal compiler, GC_MALLOC is in a separate shared library (libgc)
+      # so LLVM can never see through it. This achieves the same opacity.
+      emit_raw "@__crystal_v2_calloc_fn = global ptr @calloc\n"
+      emit_raw "@__crystal_v2_malloc_fn = global ptr @malloc\n"
+      emit_raw "@__crystal_v2_realloc_fn = global ptr @realloc\n\n"
+
+      emit_raw "define ptr @__crystal_v2_malloc64(i64 %size) noinline {\n"
+      emit_raw "  %fn = load volatile ptr, ptr @__crystal_v2_calloc_fn\n"
+      emit_raw "  %ptr = call ptr %fn(i64 1, i64 %size)\n"
       emit_raw "  ret ptr %ptr\n"
       emit_raw "}\n\n"
 
-      emit_raw "define ptr @__crystal_v2_realloc64(ptr %old_ptr, i64 %size) {\n"
-      emit_raw "  %ptr = call ptr @realloc(ptr %old_ptr, i64 %size)\n"
+      emit_raw "define ptr @__crystal_v2_realloc64(ptr %old_ptr, i64 %size) noinline {\n"
+      emit_raw "  %fn = load volatile ptr, ptr @__crystal_v2_realloc_fn\n"
+      emit_raw "  %ptr = call ptr %fn(ptr %old_ptr, i64 %size)\n"
       emit_raw "  ret ptr %ptr\n"
       emit_raw "}\n\n"
 
-      emit_raw "define ptr @__crystal_malloc_atomic64(i64 %size) {\n"
-      emit_raw "  %ptr = call ptr @malloc(i64 %size)\n"
+      emit_raw "define ptr @__crystal_malloc_atomic64(i64 %size) noinline {\n"
+      emit_raw "  %fn = load volatile ptr, ptr @__crystal_v2_malloc_fn\n"
+      emit_raw "  %ptr = call ptr %fn(i64 %size)\n"
       emit_raw "  ret ptr %ptr\n"
       emit_raw "}\n\n"
 
-      emit_raw "define ptr @__crystal_realloc64(ptr %ptr, i64 %size) {\n"
-      emit_raw "  %new_ptr = call ptr @realloc(ptr %ptr, i64 %size)\n"
+      emit_raw "define ptr @__crystal_realloc64(ptr %ptr, i64 %size) noinline {\n"
+      emit_raw "  %fn = load volatile ptr, ptr @__crystal_v2_realloc_fn\n"
+      emit_raw "  %new_ptr = call ptr %fn(ptr %ptr, i64 %size)\n"
       emit_raw "  ret ptr %new_ptr\n"
       emit_raw "}\n\n"
 
@@ -3853,7 +3880,7 @@ module Crystal::MIR
       emit_raw "}\n"
       emit_raw "declare i32 @llvm.smax.i32(i32, i32)\n\n"
 
-      emit_raw "define void @__crystal_v2_raise(ptr %exc) {\n"
+      emit_raw "define void @__crystal_v2_raise(ptr %exc) noinline {\n"
       emit_raw "  store ptr %exc, ptr @__crystal_exc_ptr\n"
       emit_raw "  %depth = load i32, ptr @__crystal_exc_depth\n"
       emit_raw "  %has_handler = icmp sgt i32 %depth, 0\n"
@@ -3873,7 +3900,7 @@ module Crystal::MIR
       runtime_error_type_id = runtime_error_type.try(&.id.to_i32) || exception_type.try(&.id.to_i32) || 1_i32
       runtime_error_alloc_size = runtime_error_size + 8_i64 # + refcount header
 
-      emit_raw "define void @__crystal_v2_raise_msg(ptr %msg) {\n"
+      emit_raw "define void @__crystal_v2_raise_msg(ptr %msg) noinline {\n"
       emit_raw "  ; Build a minimal RuntimeError object: {type_id, message, ...}\n"
       emit_raw "  ; so rescue variables can safely call Exception#message.\n"
       emit_raw "  %raw = call ptr @__crystal_v2_malloc64(i64 #{runtime_error_alloc_size})\n"
@@ -3905,7 +3932,7 @@ module Crystal::MIR
       emit_raw "  unreachable\n"
       emit_raw "}\n\n"
 
-      emit_raw "define void @__crystal_v2_reraise() {\n"
+      emit_raw "define void @__crystal_v2_reraise() noinline {\n"
       emit_raw "  %exc = load ptr, ptr @__crystal_exc_ptr\n"
       emit_raw "  %depth = load i32, ptr @__crystal_exc_depth\n"
       emit_raw "  %has_handler = icmp sgt i32 %depth, 0\n"
@@ -4763,6 +4790,75 @@ module Crystal::MIR
         return true
       end
 
+      # ── Number comparison overrides ──
+      # Number#<=>, Number#>, Number#< have mutual recursion:
+      #   Number#<=> calls Number#> which calls Number#<=> → infinite loop
+      # Break the cycle by implementing these with direct icmp.
+      # Since Number values are stored as structs with the value at offset 0,
+      # we load i32 from both operands and compare directly.
+      if mangled == "Number$H$CMP$$Number"
+        # Number#<=>(other : Number) : Nil | Int32
+        # Returns -1, 0, or 1 (never nil for integer comparisons)
+        emit_raw "; Number#<=> — cycle-breaking builtin override\n"
+        emit_raw "define %Nil$_$OR$_Int32.union @#{mangled}(ptr %self, ptr %other) {\n"
+        emit_raw "entry:\n"
+        emit_raw "  %self_val = ptrtoint ptr %self to i32\n"
+        emit_raw "  %other_val = ptrtoint ptr %other to i32\n"
+        emit_raw "  %gt = icmp sgt i32 %self_val, %other_val\n"
+        emit_raw "  br i1 %gt, label %ret_pos, label %check_lt\n"
+        emit_raw "check_lt:\n"
+        emit_raw "  %lt = icmp slt i32 %self_val, %other_val\n"
+        emit_raw "  br i1 %lt, label %ret_neg, label %ret_zero\n"
+        emit_raw "ret_pos:\n"
+        emit_raw "  %pos_ptr = alloca %Nil$_$OR$_Int32.union, align 8\n"
+        emit_raw "  %pos_tid = getelementptr %Nil$_$OR$_Int32.union, ptr %pos_ptr, i32 0, i32 0\n"
+        emit_raw "  store i32 1, ptr %pos_tid\n"
+        emit_raw "  %pos_pay = getelementptr %Nil$_$OR$_Int32.union, ptr %pos_ptr, i32 0, i32 1\n"
+        emit_raw "  store i32 1, ptr %pos_pay, align 4\n"
+        emit_raw "  %pos = load %Nil$_$OR$_Int32.union, ptr %pos_ptr\n"
+        emit_raw "  ret %Nil$_$OR$_Int32.union %pos\n"
+        emit_raw "ret_neg:\n"
+        emit_raw "  %neg_ptr = alloca %Nil$_$OR$_Int32.union, align 8\n"
+        emit_raw "  %neg_tid = getelementptr %Nil$_$OR$_Int32.union, ptr %neg_ptr, i32 0, i32 0\n"
+        emit_raw "  store i32 1, ptr %neg_tid\n"
+        emit_raw "  %neg_pay = getelementptr %Nil$_$OR$_Int32.union, ptr %neg_ptr, i32 0, i32 1\n"
+        emit_raw "  store i32 -1, ptr %neg_pay, align 4\n"
+        emit_raw "  %neg = load %Nil$_$OR$_Int32.union, ptr %neg_ptr\n"
+        emit_raw "  ret %Nil$_$OR$_Int32.union %neg\n"
+        emit_raw "ret_zero:\n"
+        emit_raw "  %zero_ptr = alloca %Nil$_$OR$_Int32.union, align 8\n"
+        emit_raw "  %zero_tid = getelementptr %Nil$_$OR$_Int32.union, ptr %zero_ptr, i32 0, i32 0\n"
+        emit_raw "  store i32 1, ptr %zero_tid\n"
+        emit_raw "  %zero_pay = getelementptr %Nil$_$OR$_Int32.union, ptr %zero_ptr, i32 0, i32 1\n"
+        emit_raw "  store i32 0, ptr %zero_pay, align 4\n"
+        emit_raw "  %zero = load %Nil$_$OR$_Int32.union, ptr %zero_ptr\n"
+        emit_raw "  ret %Nil$_$OR$_Int32.union %zero\n"
+        emit_raw "}\n\n"
+        return true
+      elsif mangled == "Number$H$GT$$Number"
+        # Number#>(other : Number) : Bool — direct comparison
+        emit_raw "; Number#> — cycle-breaking builtin override\n"
+        emit_raw "define i1 @#{mangled}(ptr %self, ptr %other) {\n"
+        emit_raw "entry:\n"
+        emit_raw "  %self_val = ptrtoint ptr %self to i32\n"
+        emit_raw "  %other_val = ptrtoint ptr %other to i32\n"
+        emit_raw "  %result = icmp sgt i32 %self_val, %other_val\n"
+        emit_raw "  ret i1 %result\n"
+        emit_raw "}\n\n"
+        return true
+      elsif mangled == "Number$H$LT$$Number"
+        # Number#<(other : Number) : Bool — direct comparison
+        emit_raw "; Number#< — cycle-breaking builtin override\n"
+        emit_raw "define i1 @#{mangled}(ptr %self, ptr %other) {\n"
+        emit_raw "entry:\n"
+        emit_raw "  %self_val = ptrtoint ptr %self to i32\n"
+        emit_raw "  %other_val = ptrtoint ptr %other to i32\n"
+        emit_raw "  %result = icmp slt i32 %self_val, %other_val\n"
+        emit_raw "  ret i1 %result\n"
+        emit_raw "}\n\n"
+        return true
+      end
+
       false
     end
 
@@ -5142,6 +5238,8 @@ module Crystal::MIR
           @value_types[inst.id] = TypeRef::POINTER
           # Track element type for GEP
           @alloc_element_types[inst.id] = inst.alloc_type
+          # Track original alloc_type for enum/struct detection during argument conversion
+          @alloc_types[inst.id] = inst.alloc_type
         end
       end
 
@@ -6279,6 +6377,8 @@ module Crystal::MIR
       @value_types.clear
       @void_values.clear
       @array_info.clear
+      @alloc_types.clear
+      @inttoptr_value_ids.clear
       @phi_zext_conversions.clear
       @zext_value_names.clear
       @phi_nil_incoming_blocks.clear
@@ -6290,6 +6390,11 @@ module Crystal::MIR
         # Use POINTER for void params (void is not valid for values)
         param_type = param.type == TypeRef::VOID ? TypeRef::POINTER : param.type
         @value_types[param.index] = param_type
+        # Parameters typed as ptr may hold packed scalars (inttoptr'd at call site).
+        # Mark them so ptr→int conversion uses ptrtoint instead of load.
+        if @type_mapper.llvm_type(param_type) == "ptr"
+          @inttoptr_value_ids.add(param.index)
+        end
       end
 
       func.blocks.each do |block|
@@ -6806,8 +6911,18 @@ module Crystal::MIR
           end
           store_type = slot_llvm_type
         elsif llvm_type == "ptr" && slot_llvm_type.starts_with?('i')
-          emit "%#{base}.slot_ptrtoint = ptrtoint ptr #{name} to #{slot_llvm_type}"
-          store_val = "%#{base}.slot_ptrtoint"
+          # Decide: ptrtoint (packed scalar) vs load (pointer to data)
+          mir_val_type = val_type ? @type_mapper.llvm_type(val_type) : "ptr"
+          is_packed = (mir_val_type.starts_with?('i') && !mir_val_type.includes?(".union")) ||
+                      mir_val_type == "float" || mir_val_type == "double" ||
+                      @inttoptr_value_ids.includes?(inst_id)
+          if is_packed
+            emit "%#{base}.slot_ptrtoint = ptrtoint ptr #{name} to #{slot_llvm_type}"
+            store_val = "%#{base}.slot_ptrtoint"
+          else
+            emit "%#{base}.slot_load = load #{slot_llvm_type}, ptr #{name}"
+            store_val = "%#{base}.slot_load"
+          end
           store_type = slot_llvm_type
         elsif llvm_type.starts_with?('i') && slot_llvm_type == "ptr"
           emit "%#{base}.slot_inttoptr = inttoptr #{llvm_type} #{name} to ptr"
@@ -6928,6 +7043,7 @@ module Crystal::MIR
         # Must emit real instruction (not comment) so phi nodes can reference it
         emit "#{name} = inttoptr i64 0 to ptr"
         @value_types[inst.id] = TypeRef::POINTER
+        @inttoptr_value_ids.add(inst.id)
       elsif type == "double" || type == "float"
         # Float/double constants use fadd - ensure value is proper float literal
         float_value = value == "0" ? "0.0" : value
@@ -6982,6 +7098,8 @@ module Crystal::MIR
       end
       # Alloc always produces a pointer
       @value_types[inst.id] = TypeRef::POINTER
+      # Track original alloc_type for enum/struct detection during argument conversion
+      @alloc_types[inst.id] = inst.alloc_type
     end
 
     private def compute_size_class(size : UInt64) : Int32
@@ -7343,9 +7461,14 @@ module Crystal::MIR
           emit "#{name}.base_int = bitcast #{base_type_str} #{base} to i64"
           emit "#{name}.base_ptr = inttoptr i64 #{name}.base_int to ptr"
           base = "#{name}.base_ptr"
+        elsif base_type_str == "void"
+          # Void type (e.g., forward-declared call returning void) — treat as null pointer
+          base = "null"
         end
         # For other types, hope the value is already ptr (optimistic)
       end
+      # Final catch-all: literal "0" as GEP base must be "null" in opaque pointer LLVM IR
+      base = "null" if base == "0"
 
       # Check if index needs to be converted to i64 for GEP
       index_type = @value_types[inst.index]? || TypeRef::INT32
@@ -8038,6 +8161,7 @@ module Crystal::MIR
           emit "%binop#{inst.id}.int_result = #{op} #{result_type} #{left}, #{right}"
           emit "#{name} = inttoptr #{result_type} %binop#{inst.id}.int_result to ptr"
           @value_types[inst.id] = TypeRef::POINTER
+          @inttoptr_value_ids.add(inst.id)
           record_emitted_type(name, "ptr")
         else
           emit "#{name} = #{op} #{result_type} #{left}, #{right}"
@@ -8225,6 +8349,7 @@ module Crystal::MIR
           emit "%#{base_name}.xor = xor i64 %#{base_name}.ptr_to_int, -1"
           emit "#{name} = inttoptr i64 %#{base_name}.xor to ptr"
           @value_types[inst.id] = TypeRef::POINTER
+          @inttoptr_value_ids.add(inst.id)
         elsif operand_llvm_type == "void"
           # Void operand - use 0 as default value, ~0 = -1
           emit "#{name} = xor i64 0, -1"
@@ -8368,6 +8493,7 @@ module Crystal::MIR
           emit "#{name} = inttoptr i64 0 to ptr"
           record_emitted_type(name, "ptr")
           @value_types[inst.id] = TypeRef::POINTER
+          @inttoptr_value_ids.add(inst.id)
           return
         else
           # Non-ptr destination - use 0/0.0 as appropriate
@@ -8597,6 +8723,7 @@ module Crystal::MIR
             emit "#{name} = inttoptr i64 #{ext_name} to ptr"
             record_emitted_type(name, "ptr")
             @value_types[inst.id] = TypeRef::POINTER
+            @inttoptr_value_ids.add(inst.id)
             return
           end
         end
@@ -8616,6 +8743,10 @@ module Crystal::MIR
       record_emitted_type(name, dst_type)
       # Track actual destination type for downstream use
       @value_types[inst.id] = inst.type
+      # Track inttoptr results for ptr→int conversion decisions
+      if op == "inttoptr"
+        @inttoptr_value_ids.add(inst.id)
+      end
     end
 
     # Helper to get the phi incoming value reference, checking for predecessor loads first
@@ -9469,7 +9600,8 @@ module Crystal::MIR
             end
           end
           # Track the redirected callee so it gets a declare/stub if not emitted
-          @called_crystal_functions[alt_mangled] ||= {(alt_ret_type == "void" ? "ptr" : alt_ret_type), arg_strs.size}
+          alt_arg_types = arg_strs.map { |s| s.split(' ', 2).first }
+          @called_crystal_functions[alt_mangled] ||= {(alt_ret_type == "void" ? "ptr" : alt_ret_type), arg_strs.size, alt_arg_types}
           if alt_ret_type == "void"
             emit "call void @#{alt_mangled}(#{arg_strs.join(", ")})"
             @void_values << inst.id
@@ -9607,6 +9739,7 @@ module Crystal::MIR
           emit "#{name} = bitcast ptr #{arg} to ptr"
         elsif arg_type.starts_with?('i')
           emit "#{name} = inttoptr #{arg_type} #{arg} to ptr"
+          @inttoptr_value_ids.add(inst.id)
         else
           emit "#{name} = bitcast ptr #{arg} to ptr"
         end
@@ -9826,6 +9959,8 @@ module Crystal::MIR
                  expected_llvm_type = @type_mapper.llvm_type(param_type)
                  actual_type = @value_types[a]? || TypeRef::POINTER
                  actual_llvm_type = @type_mapper.llvm_type(actual_type)
+                 # Save MIR-derived type before emitted-type override (for ptr→int decisions)
+                 mir_llvm_type = actual_llvm_type
                  # If the slot is ptr but value_types maps to a non-ptr type,
                  # value_ref will load as ptr and then cast to the value type.
                  # Only override to ptr if value_types also agrees it's ptr (or is unknown).
@@ -10106,42 +10241,91 @@ module Crystal::MIR
                        end
                      end
                    else
+                     # Decide: ptrtoint (packed scalar) vs load (pointer to data).
+                     # Three signals identify packed scalars:
+                     # 1. MIR type is scalar (i32,i8,etc) but emitted as ptr → packed via inttoptr
+                     # 2. Value created by explicit inttoptr instruction
+                     # 3. Value from an alloc'd enum/struct (already tracked in @alloc_types)
+                     # Everything else (GEP results, allocas, loaded pointers) → load the data.
                      c = @cond_counter
                      @cond_counter += 1
-                     temp_int = "%ptrtoint.#{c}"
-                     emit "#{temp_int} = ptrtoint ptr #{val} to #{expected_llvm_type}"
+                     is_packed_scalar = (mir_llvm_type.starts_with?('i') && !mir_llvm_type.includes?(".union")) ||
+                                        mir_llvm_type == "float" || mir_llvm_type == "double" ||
+                                        @inttoptr_value_ids.includes?(a)
+                     if is_packed_scalar
+                       temp_int = "%ptrtoint.#{c}"
+                       emit "#{temp_int} = ptrtoint ptr #{val} to #{expected_llvm_type}"
+                     else
+                       # Pointer to data (GEP result, alloca, etc.) — load the value
+                       temp_int = "%load_from_ptr.#{c}"
+                       emit "#{temp_int} = load #{expected_llvm_type}, ptr #{val}"
+                     end
                      "#{expected_llvm_type} #{temp_int}"
                    end
                  elsif is_union_llvm_type?(expected_llvm_type) &&
                        (actual_llvm_type.starts_with?('i') || actual_llvm_type == "float" || actual_llvm_type == "double")
-                   # Scalar to union conversion - wrap scalar payload with type_id=0 (non-nil)
+                   # Scalar to union conversion - wrap scalar payload with correct variant type_id
                    val = value_ref(a)
                    c = @cond_counter
                    @cond_counter += 1
+                   # Look up correct variant type_id from union descriptor
+                   scalar_variant_type_id = if desc = @module.union_descriptors[param_type]?
+                     matching_variant = desc.variants.find { |v| v.type_ref == actual_type }
+                     if matching_variant
+                       matching_variant.type_id
+                     else
+                       # Fallback: find first non-Nil variant
+                       non_nil = desc.variants.find { |v| v.full_name != "Nil" }
+                       non_nil ? non_nil.type_id : 0
+                     end
+                   else
+                     0
+                   end
                    emit "%scalar_to_union.#{c}.ptr = alloca #{expected_llvm_type}, align 8"
                    emit "%scalar_to_union.#{c}.type_id_ptr = getelementptr #{expected_llvm_type}, ptr %scalar_to_union.#{c}.ptr, i32 0, i32 0"
-                   emit "store i32 0, ptr %scalar_to_union.#{c}.type_id_ptr"
+                   emit "store i32 #{scalar_variant_type_id}, ptr %scalar_to_union.#{c}.type_id_ptr"
                    emit "%scalar_to_union.#{c}.payload_ptr = getelementptr #{expected_llvm_type}, ptr %scalar_to_union.#{c}.ptr, i32 0, i32 1"
                    # Payload at offset 4, use align 4 for ARM64 compatibility
                    emit "store #{actual_llvm_type} #{val}, ptr %scalar_to_union.#{c}.payload_ptr, align 4"
                    emit "%scalar_to_union.#{c}.val = load #{expected_llvm_type}, ptr %scalar_to_union.#{c}.ptr"
                    "#{expected_llvm_type} %scalar_to_union.#{c}.val"
                  elsif is_union_llvm_type?(expected_llvm_type) && actual_llvm_type == "ptr"
-                   # Ptr to union conversion - wrap ptr in union with type_id=0 (non-nil)
+                   # Ptr to union conversion - wrap ptr in union with correct variant type_id
                    val = value_ref(a)
                    c = @cond_counter
                    @cond_counter += 1
-                   # Check for null - use nil union (type_id=0)
+                   # Look up correct variant type_id from union descriptor
+                   variant_type_id = if val == "null"
+                     if desc = @module.union_descriptors[param_type]?
+                       nil_variant = desc.variants.find { |v| v.full_name == "Nil" }
+                       nil_variant ? nil_variant.type_id : 0
+                     else
+                       0
+                     end
+                   else
+                     if desc = @module.union_descriptors[param_type]?
+                       matching_variant = desc.variants.find { |v| v.type_ref == actual_type }
+                       if matching_variant
+                         matching_variant.type_id
+                       else
+                         # Fallback: find first non-Nil variant
+                         non_nil = desc.variants.find { |v| v.full_name != "Nil" }
+                         non_nil ? non_nil.type_id : 1
+                       end
+                     else
+                       1
+                     end
+                   end
                    if val == "null"
                      emit "%ptr_to_union.#{c}.ptr = alloca #{expected_llvm_type}, align 8"
                      emit "%ptr_to_union.#{c}.type_id_ptr = getelementptr #{expected_llvm_type}, ptr %ptr_to_union.#{c}.ptr, i32 0, i32 0"
-                     emit "store i32 0, ptr %ptr_to_union.#{c}.type_id_ptr"
+                     emit "store i32 #{variant_type_id}, ptr %ptr_to_union.#{c}.type_id_ptr"
                      emit "%ptr_to_union.#{c}.val = load #{expected_llvm_type}, ptr %ptr_to_union.#{c}.ptr"
                      "#{expected_llvm_type} %ptr_to_union.#{c}.val"
                    else
                      emit "%ptr_to_union.#{c}.ptr = alloca #{expected_llvm_type}, align 8"
                      emit "%ptr_to_union.#{c}.type_id_ptr = getelementptr #{expected_llvm_type}, ptr %ptr_to_union.#{c}.ptr, i32 0, i32 0"
-                     emit "store i32 1, ptr %ptr_to_union.#{c}.type_id_ptr"
+                     emit "store i32 #{variant_type_id}, ptr %ptr_to_union.#{c}.type_id_ptr"
                      emit "%ptr_to_union.#{c}.payload_ptr = getelementptr #{expected_llvm_type}, ptr %ptr_to_union.#{c}.ptr, i32 0, i32 1"
                      # Use null instead of 0 for pointer types
                      ptr_val = val == "0" ? "null" : val
@@ -10302,9 +10486,9 @@ module Crystal::MIR
             end
           end
         else
-          # If the MIR type is a tuple, preserve it even if ABI uses ptr.
+          # If the MIR type is a tuple or StaticArray, preserve it even if ABI uses ptr.
           if tuple_type = @module.type_registry.get(inst.type)
-            if tuple_type.kind.tuple?
+            if tuple_type.kind.tuple? || tuple_type.name.starts_with?("StaticArray(")
               @value_types[inst.id] = inst.type
             else
               actual_type_ref = case return_type
@@ -10339,7 +10523,11 @@ module Crystal::MIR
         end
       end
       # Track called function for forward declaration if missing at end of IR gen
-      @called_crystal_functions[callee_name] ||= {(return_type == "void" ? "ptr" : return_type), inst.args.size}
+      arg_type_strs = inst.args.map do |a|
+        at = @value_types[a]?
+        at ? @type_mapper.llvm_type(at) : "ptr"
+      end.reject { |t| t == "void" }
+      @called_crystal_functions[callee_name] ||= {(return_type == "void" ? "ptr" : return_type), arg_type_strs.size, arg_type_strs}
     end
 
     private def emit_indirect_call(inst : IndirectCall, name : String)
@@ -10596,6 +10784,7 @@ module Crystal::MIR
           emit "#{name} = bitcast ptr #{arg} to ptr"
         elsif arg_type.starts_with?('i')
           emit "#{name} = inttoptr #{arg_type} #{arg} to ptr"
+          @inttoptr_value_ids.add(inst.id)
         else
           emit "#{name} = bitcast ptr #{arg} to ptr"
         end
@@ -11115,7 +11304,11 @@ module Crystal::MIR
       # Track called function for forward declaration if missing at end of IR gen.
       # This catches ExternCall targets that exist in @module.functions (so NOT added
       # to @undefined_externs) but whose bodies were never emitted by RTA.
-      @called_crystal_functions[mangled_extern_name] ||= {(return_type == "void" ? "ptr" : return_type), inst.args.size}
+      extern_arg_types = inst.args.map do |a|
+        at = @value_types[a]?
+        at ? @type_mapper.llvm_type(at) : "ptr"
+      end.reject { |t| t == "void" }
+      @called_crystal_functions[mangled_extern_name] ||= {(return_type == "void" ? "ptr" : return_type), extern_arg_types.size, extern_arg_types}
     end
 
     private def emit_address_of(inst : AddressOf, name : String)
@@ -11711,6 +11904,7 @@ module Crystal::MIR
           ctor_func = @module.functions.find { |f| mangle_function_name(f.name) == ctor_name }
           if ctor_func
             emit "#{name} = call ptr @#{ctor_name}(i32 0)"
+            @called_crystal_functions[ctor_name] ||= {"ptr", 1, ["i32"] of String}
             # Some constructor paths still leave array type_id as 0; patch it here
             # so module-method vdispatch on Indexable works for empty arrays.
             if array_type_id != 0
@@ -12170,12 +12364,26 @@ module Crystal::MIR
       # Guard against null index (MIR type mismatch) - default to 0
       index = "0" if index == "null"
 
-      # Load buffer pointer from Crystal Array layout (offset 16 = @buffer field)
-      emit "%#{base_name}.buf_addr = getelementptr i8, ptr #{array_ptr}, i32 16"
-      emit "%#{base_name}.buf = load ptr, ptr %#{base_name}.buf_addr"
-      # Get element from buffer
-      emit "%#{base_name}.elem_ptr = getelementptr #{element_type}, ptr %#{base_name}.buf, i32 #{index}"
-      emit "#{name} = load #{element_type}, ptr %#{base_name}.elem_ptr"
+      # StaticArray: data is inline (no buffer pointer), use direct element GEP
+      is_static_array = false
+      if array_value_type
+        sa_type = @module.type_registry.get(array_value_type)
+        if sa_type && sa_type.name.starts_with?("StaticArray(")
+          is_static_array = true
+        end
+      end
+      if is_static_array
+        # StaticArray stores elements inline at offset 0
+        emit "%#{base_name}.elem_ptr = getelementptr #{element_type}, ptr #{array_ptr}, i32 #{index}"
+        emit "#{name} = load #{element_type}, ptr %#{base_name}.elem_ptr"
+      else
+        # Load buffer pointer from Crystal Array layout (offset 16 = @buffer field)
+        emit "%#{base_name}.buf_addr = getelementptr i8, ptr #{array_ptr}, i32 16"
+        emit "%#{base_name}.buf = load ptr, ptr %#{base_name}.buf_addr"
+        # Get element from buffer
+        emit "%#{base_name}.elem_ptr = getelementptr #{element_type}, ptr %#{base_name}.buf, i32 #{index}"
+        emit "#{name} = load #{element_type}, ptr %#{base_name}.elem_ptr"
+      end
 
       # Update @value_types with actual emitted LLVM type (may differ from MIR type)
       # This is critical for phi nodes that reference this value
@@ -12346,12 +12554,27 @@ module Crystal::MIR
         value = "null"
       end
 
-      # Load buffer pointer from Crystal Array layout (offset 16 = @buffer field)
-      emit "%#{base_name}.buf_addr = getelementptr i8, ptr #{array_ptr}, i32 16"
-      emit "%#{base_name}.buf = load ptr, ptr %#{base_name}.buf_addr"
-      # Set element in buffer
-      emit "%#{base_name}.elem_ptr = getelementptr #{element_type}, ptr %#{base_name}.buf, i32 #{index}"
-      emit "store #{element_type} #{value}, ptr %#{base_name}.elem_ptr"
+      # Detect StaticArray — data is stored inline (no buffer pointer)
+      is_static_array = false
+      if array_value_type
+        sa_type = @module.type_registry.get(array_value_type)
+        if sa_type && sa_type.name.starts_with?("StaticArray(")
+          is_static_array = true
+        end
+      end
+
+      if is_static_array
+        # StaticArray stores elements inline at offset 0
+        emit "%#{base_name}.elem_ptr = getelementptr #{element_type}, ptr #{array_ptr}, i32 #{index}"
+        emit "store #{element_type} #{value}, ptr %#{base_name}.elem_ptr"
+      else
+        # Load buffer pointer from Crystal Array layout (offset 16 = @buffer field)
+        emit "%#{base_name}.buf_addr = getelementptr i8, ptr #{array_ptr}, i32 16"
+        emit "%#{base_name}.buf = load ptr, ptr %#{base_name}.buf_addr"
+        # Set element in buffer
+        emit "%#{base_name}.elem_ptr = getelementptr #{element_type}, ptr %#{base_name}.buf, i32 #{index}"
+        emit "store #{element_type} #{value}, ptr %#{base_name}.elem_ptr"
+      end
     end
 
     private def emit_string_interpolation(inst : StringInterpolation, name : String)
@@ -12897,11 +13120,22 @@ module Crystal::MIR
               emit "%ret_inttoptr.#{c} = inttoptr #{val_llvm_type} #{val_ref} to ptr"
               emit "ret ptr %ret_inttoptr.#{c}"
             elsif @current_return_type.starts_with?('i') && val_llvm_type == "ptr"
-              # Pointer to integer conversion needed (ptrtoint)
+              # Pointer to integer conversion — decide ptrtoint vs load.
+              # If MIR type is scalar or value was created by inttoptr → packed scalar → ptrtoint
+              # Otherwise (GEP, alloca, etc.) → pointer to data → load
               c = @cond_counter
               @cond_counter += 1
-              emit "%ret_ptrtoint.#{c} = ptrtoint ptr #{val_ref} to #{@current_return_type}"
-              emit "ret #{@current_return_type} %ret_ptrtoint.#{c}"
+              mir_ret_type = val_type ? @type_mapper.llvm_type(val_type) : "ptr"
+              is_packed = (mir_ret_type.starts_with?('i') && !mir_ret_type.includes?(".union")) ||
+                          mir_ret_type == "float" || mir_ret_type == "double" ||
+                          (val && @inttoptr_value_ids.includes?(val))
+              if is_packed
+                emit "%ret_ptrtoint.#{c} = ptrtoint ptr #{val_ref} to #{@current_return_type}"
+                emit "ret #{@current_return_type} %ret_ptrtoint.#{c}"
+              else
+                emit "%ret_load.#{c} = load #{@current_return_type}, ptr #{val_ref}"
+                emit "ret #{@current_return_type} %ret_load.#{c}"
+              end
             elsif @current_return_type.starts_with?('i') && val_llvm_type && val_llvm_type.includes?(".union")
               # Union to integer - extract payload as the integer type
               c = @cond_counter
