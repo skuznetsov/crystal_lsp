@@ -2983,7 +2983,9 @@ module CrystalV2
             @allow_in_operator = false
             val = parse_op_assign
             @allow_in_operator = old_allow_in
-            return PREFIX_ERROR if val.invalid?
+            if val.invalid?
+              return PREFIX_ERROR
+            end
             value = val
             skip_statement_end
           end
@@ -7874,10 +7876,12 @@ module CrystalV2
           # "puts (s unless s.empty?)". With parens, "puts(s unless s.empty?)" is valid.
 
           loop do
-            # Check if we're at a block instead of arguments
-            # Example: .tap { } or .each do |x|
-            # In this case, stop parsing arguments and let block parser handle it
-            if current_token.kind == Token::Kind::LBrace || current_token.kind == Token::Kind::Do
+            # Check if we're at a do...end block instead of arguments.
+            # do...end blocks bind to the outermost call, so stop parsing arguments
+            # and let the outer block parser handle it.
+            # Brace blocks {} bind to the innermost call (the argument expression),
+            # so they are NOT broken on here — the expression parser will attach them.
+            if current_token.kind == Token::Kind::Do
               break
             end
 
@@ -8313,7 +8317,9 @@ module CrystalV2
               # Phase 10: Block with {} syntax
               # Only attach a block if 'left' can accept one (call-like). Otherwise,
               # treat '{' as start of a new statement (e.g., a tuple/hash literal).
-              if can_attach_block_to?(left)
+              # Brace blocks bind to the innermost call, so pass brace_block: true
+              # to allow attachment even inside no-parens call arguments.
+              if can_attach_block_to?(left, brace_block: true)
                 debug { "parse_expression: attaching block to call" }
                 left = attach_block_to_call(left)
               else
@@ -10442,11 +10448,13 @@ module CrystalV2
         # Determine if an expression can accept a trailing block
         # Only calls and member accesses (and identifiers that can form calls)
         # are valid block receivers. Literals like Nil/Number/etc. are not.
-        private def can_attach_block_to?(expr : ExprId) : Bool
+        private def can_attach_block_to?(expr : ExprId, brace_block : Bool = false) : Bool
           # When parsing no-parens call arguments, a trailing `do` should bind
           # to the outer call, not to the last argument expression.
+          # Brace blocks `{}` always bind to the innermost call, so they are
+          # allowed even inside no-parens call arguments.
           # Allow block attachment inside parenthesized expressions.
-          return false if @parsing_call_args > 0 && @paren_depth == 0
+          return false if !brace_block && @parsing_call_args > 0 && @paren_depth == 0
           node = @arena[expr]
           case Frontend.node_kind(node)
           when Frontend::NodeKind::Call
@@ -11243,6 +11251,14 @@ current_token.kind == Token::Kind::Identifier &&
                       # &.method — block shorthand
                       arg = parse_block_shorthand(amp_token)
                     elsif current_token.kind == Token::Kind::Identifier || current_token.kind == Token::Kind::InstanceVar
+                      # Check if the identifier is followed by :: (path expression like LibC::S_IFMT)
+                      # In that case, & is binary AND, not block capture
+                      next_after_ident = peek_token
+                      if next_after_ident.kind == Token::Kind::ColonColon
+                        # & ident:: → binary AND with path expression, not block capture
+                        @index = saved_index
+                        break
+                      end
                       # &block — block capture argument
                       ident = current_token
                       advance
