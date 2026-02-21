@@ -43,6 +43,39 @@
 - String: size, includes?, starts_with?, ends_with?, []
 - Float64: arithmetic, ** on literals
 
+## Current Investigation (Stage 2 bootstrap crash)
+- **Stage 2 binary crashes with stack overflow (exit 139)**
+  - Infinite mutual recursion between `File.info?(String, Bool)` and
+    `File.info?(Path|String, Bool)`.
+  - Root cause analysis:
+    1. `File.info?(path : Path | String)` calls `Crystal::System::File.info?(path.to_s, ...)`.
+    2. In simple test programs, Stage 1 correctly resolves the call target as
+       `Crystal::System::File.info?` → calls LibC.stat. No recursion.
+    3. In full self-compilation (Stage 2), the call resolves INCORRECTLY to
+       `File.info?` instead of `Crystal::System::File.info?`.
+    4. This is caused by `try_emit_union_arg_dispatch` (ast_to_hir.cr:45665):
+       when `File.info?` is called with Path|String union arg, the dispatch
+       creates variant functions `File.info?(String, Bool)` and
+       `File.info?(Path, Bool)`. Neither has its own explicit definition —
+       both are lowered from the same union-param base def. The lowered body
+       wraps the arg back into a union and calls the other version → infinite
+       mutual recursion.
+    5. Additionally, `Crystal::System::File.info?` is registered with
+       `Nil|String` param (instead of `String`), so the String-typed call
+       fails to find it and falls back to `File.info?`.
+  - Fix attempt #1: commit b6733e1 added module method name shortening guard
+    (don't shorten `Crystal::System::File` to `File` when module defines the
+    method). This fixed direct resolution but NOT the union dispatch recursion.
+  - Fix attempt #2 (in progress): in `try_emit_union_arg_dispatch`, skip
+    dispatch when NONE of the variant functions have explicit definitions
+    (they're all derived from the same base def via base_name fallback).
+  - Related fixes:
+    - Commit d7c901e: replaced fragile `starts_with?("Tuple")` name checks
+      with `TypeKind::Tuple` in splat handling.
+  - Build times: Stage 1 --release: 421s user / 7:06 wall.
+    Stage 2: 80s user / 83s wall.
+  - Regression tests with current Stage 1: 43/44 basic pass.
+
 ## Recently completed
 - **Tuple#map macro expansion fix + bootstrap re-benchmark (2026-02-20)** —
   Fixed {% begin %}{% for %}{% end %}{% end %} nested macro expansion that
