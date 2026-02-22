@@ -13,17 +13,19 @@
   - `regression_tests/complex/test_nilable_proc.cr`
     - status: block-capture method (`on_event(&block : String ->)`) generates a getter
       instead of a setter. The block parameter is never stored to the ivar.
-- Current regression suite status:
+  - Current regression suite status:
   - Basic: 43/44 pass (test_byteformat_decode_u32 crash — pre-existing)
   - Complex quick: 15/15 pass
   - Stage2 self-hosted bootstrap (2026-02-22):
-    - stage1 (`crystal --release`): **real 463.64s**, stage2 (`/tmp/crystal_v2_stage1_rel --release`) **real 134.13s**
-    - `regression_tests/run_all.sh /tmp/crystal_v2_stage1_rel` => 43/44 passed, `test_byteformat_decode_u32` pre-existing segfault.
-    - `regression_tests/run_all.sh /tmp/crystal_v2_stage2_rel_default` => **0/44 passed** (all compile failures).
-    - `regression_tests/run_complex.sh /tmp/crystal_v2_stage1_rel quick` => **15/15 passed**.
-    - `regression_tests/run_complex.sh /tmp/crystal_v2_stage2_rel_default quick` => **0/15 passed** (all compile segfaults).
-    - Regression script (bootstrap target): `scripts/stage2_bootstrap_repro.sh /tmp/crystal_v2_stage2_rel_default`
-    - Minimal repro script (5-line source): `scripts/stage2_minimal_compile_repro.sh /tmp/crystal_v2_stage2_rel_default`
+    - latest run: stage1 (`crystal --release`): **real 404.99s**,
+      stage2 (`/tmp/stage1_rel_current --release`): **real 75.41s**.
+    - `regression_tests/run_all.sh /tmp/stage1_rel_current` => 43/44 passed,
+      `test_byteformat_decode_u32` pre-existing segfault.
+    - `regression_tests/run_all.sh /tmp/stage2_rel_current` => **0/44 passed** (all compile failures).
+    - `regression_tests/run_complex.sh /tmp/stage1_rel_current quick` => **15/15 passed**.
+    - `regression_tests/run_complex.sh /tmp/stage2_rel_current quick` => **0/15 passed** (all compile segfaults).
+    - Regression script (bootstrap target): `scripts/stage2_bootstrap_repro.sh /tmp/stage2_rel_current`
+    - Minimal repro script (5-line source): `regression_tests/stage2_bootstrap_minimal_repro.sh /tmp/stage2_rel_current`
 - Recently fixed repros:
   - `regression_tests/complex/test_find_nil_and_value.cr`
     - fixed by CFG-reachable return-type merge (dead blocks no longer pollute
@@ -52,6 +54,51 @@
 - Float64: arithmetic, ** on literals
 
 ## Current Investigation (Stage 2 bootstrap crash)
+- **2026-02-22 (latest): Stage 2 release bootstrap now compiles but crashes during parser initialization**
+  - Latest numbers:
+    - `/tmp/stage1_rel_current` build: **real 404.99s**
+    - `/tmp/stage2_rel_current` build: **real 75.41s**
+    - `stage2` is ~5.37x faster than `stage1` on this benchmark.
+  - Repro now localizes to minimal lexer/parser path:
+    - `regression_tests/stage2_bootstrap_minimal_repro.sh /tmp/stage2_rel_current`:
+      `default`, `--no-ast-cache`, `--no-codegen`, and `parser_stub` all reproduce
+      `exit 139` (segfault) with minimal `puts 1` source.
+    - `scripts/stage2_bootstrap_repro.sh /tmp/stage2_rel_current`
+      => `exit 139` for `regression_tests/basic_sanity.cr`.
+    - `regression_tests/stage2_cli_parser_repro.sh /tmp/stage2_rel_current`
+      => `exit 139` on bootstrap compile path.
+  - `lldb --batch -o run -k 'thread backtrace all' -- /tmp/stage2_rel_current --no-ast-cache --release /tmp/stage2_empty.cr -o /tmp/empty_stage2.bin`:
+    - `EXC_BAD_ACCESS` in `Indexable$Drange_to_index_and_count$$Range_Int32` ->
+      `Slice$LUInt8$R$IDX$$Range` ->
+      `CCLexer#next_token` ->
+      `CCParser#initialize`.
+- **2026-02-22: Stage2 now reaches compile path and crashes in CLI/check setup**
+  - After switching `run` to a manual flag parser, stage2 no longer fails early
+    on `--release` with parser blank errors for some argument mixes, and now
+    reaches compiler entry paths.
+  - Repro results with `/tmp/crystal_v2_stage2_rel_default`:
+    - `--version`, `--help`: OK.
+    - `regression_tests/basic_sanity.cr`, `--no-codegen`, and minimal
+      `puts "x"` source: immediate crash/abnormal exit (previously blank
+      `Error:` with old parser, now `EXC_BAD_ACCESS`/segfault).
+    - `lldb --batch -o run -k bt -- /tmp/crystal_v2_stage2_rel_default
+      /tmp/stage2_repro_small.cr -o /tmp/stage2_repro_small_bin`:
+      - crash in `CrystalV2::Compiler::CCCLI#compile` at instruction `+2812`;
+      - with `--no-codegen`, crash in
+        `CrystalV2::Compiler::CCFrontend::CCParser#initialize`.
+  - Regression scripts:
+    - `regression_tests/stage2_cli_parser_repro.sh /tmp/crystal_v2_stage2_rel_default`
+      (now failing with crash/abnormal exit for compile path)
+    - `scripts/stage2_bootstrap_repro.sh /tmp/crystal_v2_stage2_rel_default`
+      (now `exit 139` segfault on `basic_sanity`)
+- **2026-02-22: Stage2 bootstrap parse regression localized to CLI flag parsing**
+  - `OptionParser` in V2-compiled `CLI` treated `--release` as a flag that
+    expects an argument, which caused source files to be consumed as option values
+    and produced parser errors/blank `Error:` exits during `stage2 --release ...`.
+  - Reintroduced a bootstrap-safe `OptionParser#parse_flag_definition` in
+    `src/compiler/cli.cr` using byte scanning (no Regex dependency), preserving
+    `--flag`, `--flag VALUE`, `--flag VALUE`, `--flag [VALUE]`, and `--flag=VALUE`.
+  - Regression script added: `regression_tests/stage2_cli_parser_repro.sh`.
 - **2026-02-22: Stage2 bootstrap regressed from compile-time `EXC_BREAKPOINT`**
   - `__vdispatch__Enumerable$Heach` enters debug breakpoint during `CLI#compile`
     and exits before `after_parse`, causing all `run_all` and `run_complex` compile runs
