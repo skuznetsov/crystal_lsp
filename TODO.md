@@ -16,6 +16,13 @@
 - Current regression suite status:
   - Basic: 43/44 pass (test_byteformat_decode_u32 crash — pre-existing)
   - Complex quick: 15/15 pass
+  - Stage2 self-hosted bootstrap (2026-02-22):
+    - stage1 (`crystal --release`): **real 463.64s**, stage2 (`/tmp/crystal_v2_stage1_rel --release`) **real 134.13s**
+    - `regression_tests/run_all.sh /tmp/crystal_v2_stage1_rel` => 43/44 passed, `test_byteformat_decode_u32` pre-existing segfault.
+    - `regression_tests/run_all.sh /tmp/crystal_v2_stage2_rel_default` => **0/44 passed** (all compile failures).
+    - `regression_tests/run_complex.sh /tmp/crystal_v2_stage1_rel quick` => **15/15 passed**.
+    - `regression_tests/run_complex.sh /tmp/crystal_v2_stage2_rel_default quick` => **0/15 passed** (all compile segfaults).
+    - Regression script: `scripts/stage2_bootstrap_repro.sh /tmp/crystal_v2_stage2_rel_default`
 - Recently fixed repros:
   - `regression_tests/complex/test_find_nil_and_value.cr`
     - fixed by CFG-reachable return-type merge (dead blocks no longer pollute
@@ -44,30 +51,16 @@
 - Float64: arithmetic, ** on literals
 
 ## Current Investigation (Stage 2 bootstrap crash)
-- **Stage 2 binary crashes with SIGSEGV in CLI#compile**
-  - Null String pointer in `String#to_slice` called from `CLI#compile`.
-  - Backtrace: `main → __crystal_main → CLI#run → CLI#compile → String#to_slice → String#bytesize (addr 0x4)`
-  - The crash occurs during the file loading / AST cache digest computation phase.
-  - This is progress from previous issues:
-    - **RESOLVED (2026-02-21):** LLVM verification error — `Array(ArenaLike)#[](Int32)`
-      got wrong body (from `Regex::MatchData#[]`). Fixed by restricting module deferred
-      match to query methods only (commit e4d70bc).
-    - **RESOLVED (2026-02-21):** Infinite loop in `Path#dirname` — `byte.in?(separators)`
-      used virtual dispatch on `Tuple(Char)` which lacks type_id header, routing to
-      wrong `includes?` implementation. Fixed by static dispatch for struct collection
-      types in `Object#in?` (commit 94c5775).
-    - **RESOLVED (2026-02-21):** `File.info?` recursion — already fixed by commit b6733e1
-      (module method name shortening guard). Verified: Stage 2 IR now correctly calls
-      `Crystal::System::File.info?`.
-  - **RESOLVED (2026-02-21):** Module alias namespace re-qualification — `Regex::Engine`
-    alias resolving to short "PCRE2" now correctly re-qualifies to "Regex::PCRE2" for
-    module include chain (commit 9a9f62d).
-  - **RESOLVED (2026-02-21):** Primitive template owner specialization — `Int#to_s`
-    now correctly specializes for Int32 (i32 %self vs ptr %self) in Stage 1 binaries
-    (commit 9a9f62d).
-  - Build times: Stage 1 --release: ~7 min wall.
-    Stage 2 (debug): ~5 min wall.
-  - Regression tests: 43/44 basic pass (Stage 0 and Stage 1).
+- **2026-02-22: Stage2 bootstrap regressed from compile-time `EXC_BREAKPOINT`**
+  - `__vdispatch__Enumerable$Heach` enters debug breakpoint during `CLI#compile`
+    and exits before `after_parse`, causing all `run_all` and `run_complex` compile runs
+    to fail immediately.
+  - `lldb --batch -o run -k bt` on `basic_sanity` shows:
+    - `EXC_BREAKPOINT` at `__vdispatch__Enumerable$Heach$$block$$T1331`
+    - backtrace through `CLI#compile` (`CrystalV2::Compiler::CLI#compile`).
+  - This supersedes previous Stage 2 failure hypothesis. Current next step:
+    - narrow the vdispatch/Enumerable `each` call path in the stage2 binary and add
+      compile-time regression coverage before rerunning bootstrap.
 
 ## Recently completed
 - **Tuple#map macro expansion fix + bootstrap re-benchmark (2026-02-20)** —
