@@ -2732,11 +2732,10 @@ module Crystal::MIR
       emit_raw "  ret ptr %arr\n"
       emit_raw "}\n\n"
 
-      # Hash entry access helpers for Hash#each intrinsic
-      # Hash layout: offset 4=@first(i32), offset 8=@entries(ptr), offset 24=@size(i32), offset 28=@deleted_count(i32)
-      # entries is a pointer array: entries[i] is a pointer to an Entry
-      # Entry layout: offset 0=key(ptr), offset 8=value(varies), offset 12=hash_or_deleted(i32, 0=deleted)
-      emit_raw "define ptr @__crystal_v2_hash_get_entry_ptr(ptr %hash, i32 %index) {\n"
+      # Hash entry access helpers for Hash#each/keys intrinsics
+      # Hash layout: offset 8=@entries(ptr) where entries is a pointer table (Entry*[]).
+      # hash_offset is provided by HIR from Hash::Entry(K,V) ClassInfo.
+      emit_raw "define ptr @__crystal_v2_hash_get_entry_ptr(ptr %hash, i32 %index, i32 %entry_size) {\n"
       emit_raw "  %entries_addr = getelementptr i8, ptr %hash, i32 8\n"
       emit_raw "  %entries = load ptr, ptr %entries_addr\n"
       emit_raw "  %idx64 = sext i32 %index to i64\n"
@@ -2745,13 +2744,13 @@ module Crystal::MIR
       emit_raw "  ret ptr %entry\n"
       emit_raw "}\n\n"
 
-      emit_raw "define i1 @__crystal_v2_hash_entry_deleted(ptr %entry) {\n"
+      emit_raw "define i1 @__crystal_v2_hash_entry_deleted(ptr %entry, i32 %hash_offset) {\n"
       emit_raw "  %is_null = icmp eq ptr %entry, null\n"
       emit_raw "  br i1 %is_null, label %null_entry, label %check_flag\n"
       emit_raw "null_entry:\n"
       emit_raw "  ret i1 true\n"
       emit_raw "check_flag:\n"
-      emit_raw "  %flag_addr = getelementptr i8, ptr %entry, i32 12\n"
+      emit_raw "  %flag_addr = getelementptr i8, ptr %entry, i32 %hash_offset\n"
       emit_raw "  %flag = load i32, ptr %flag_addr\n"
       emit_raw "  %is_deleted = icmp eq i32 %flag, 0\n"
       emit_raw "  ret i1 %is_deleted\n"

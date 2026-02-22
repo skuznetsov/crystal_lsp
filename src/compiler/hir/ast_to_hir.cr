@@ -6808,7 +6808,7 @@ module Crystal::HIR
         ivars << IVarInfo.new(ivar_name, ivar_type, offset,
           default_expr_id: default_expr_id,
           default_arena: default_arena)
-        offset += type_size(ivar_type)
+        offset += field_storage_size(ivar_type)
       end
 
       if include_getter
@@ -6873,7 +6873,7 @@ module Crystal::HIR
             end
           else
             ivars << IVarInfo.new(ivar_name, param_type, offset_ptr.value)
-            offset_ptr.value += type_size(param_type)
+            offset_ptr.value += field_storage_size(param_type)
           end
           if owner_name && (ta = param.type_annotation)
             type_name = String.new(ta)
@@ -7045,7 +7045,7 @@ module Crystal::HIR
                       ivars << IVarInfo.new(ivar_name, ivar_type, offset,
                         default_expr_id: default_expr_id,
                         default_arena: default_arena)
-                      offset += type_size(ivar_type)
+                      offset += field_storage_size(ivar_type)
                     end
                   when CrystalV2::Compiler::Frontend::AssignNode
                     target_node = @arena[member.target]
@@ -7071,7 +7071,7 @@ module Crystal::HIR
                         ivars << IVarInfo.new(ivar_name, inferred, offset,
                           default_expr_id: needs_expr ? default_expr : nil,
                           default_arena: needs_expr ? @arena : nil)
-                        offset += type_size(inferred)
+                        offset += field_storage_size(inferred)
                       end
                     end
                   when CrystalV2::Compiler::Frontend::DefNode
@@ -7364,7 +7364,7 @@ module Crystal::HIR
                                     inferred = module_like_type_name?(rt_name) ? infer_concrete_return_type_from_body(member, class_name) : nil
                                     inferred || type_ref_for_name(rt_name)
                                   elsif method_name.ends_with?('?')
-                                    inferred = infer_unannotated_query_return_type(method_name, type_ref_for_name(class_name))
+                                    inferred = infer_unannotated_query_return_type(method_name, type_ref_for_name(class_name), count_non_block_params(member))
                                     inferred ||= infer_concrete_return_type_from_body(member, class_name)
                                     inferred || TypeRef::BOOL
                                   else
@@ -7775,7 +7775,7 @@ module Crystal::HIR
     # Some stdlib methods end in `?` but return a value (typically `T?` / `V?`) rather than `Bool`.
     # We need correct return types early (during signature registration) so callers lowered before the
     # callee body still get a stable type (avoids emitting `i1` where `i32`/union is expected).
-    private def infer_unannotated_query_return_type(method_name : String, self_type : TypeRef) : TypeRef?
+    private def infer_unannotated_query_return_type(method_name : String, self_type : TypeRef, arg_count : Int32 = 1) : TypeRef?
       return nil unless NILABLE_QUERY_METHODS.includes?(method_name)
 
       desc = @module.get_type_descriptor(self_type)
@@ -7783,6 +7783,9 @@ module Crystal::HIR
 
       case desc.kind
       when TypeKind::Array
+        if method_name == "[]?" && arg_count > 1
+          return create_union_type_for_nullable(self_type)
+        end
         elem = desc.type_params.first?
         return nil unless elem
         create_union_type_for_nullable(elem)
@@ -7800,7 +7803,11 @@ module Crystal::HIR
         short_base = last_namespace_component(base)
         case short_base
         when "Deque", "Slice", "StaticArray", "Set"
-          create_union_type_for_nullable(elem)
+          if method_name == "[]?" && arg_count > 1 && (short_base == "Deque" || short_base == "Slice" || short_base == "StaticArray")
+            create_union_type_for_nullable(self_type)
+          else
+            create_union_type_for_nullable(elem)
+          end
         when "PointerLinkedList"
           elem_name = get_type_name_from_ref(elem)
           if elem_name.empty? || elem_name == "Void" || elem_name == "Unknown"
@@ -9463,6 +9470,10 @@ module Crystal::HIR
         left_type = infer_type_from_expr(expr_node.left, self_type_name)
         right_type = infer_type_from_expr(expr_node.right, self_type_name)
         if left_type && right_type
+          if op == "<<" || op == ">>"
+            # Shift operations keep the left operand type.
+            return left_type
+          end
           integer_op = op == "+" || op == "-" || op == "*" || op == "&" || op == "|" ||
                        op == "^" || op == "<<" || op == ">>"
           if integer_op
@@ -12289,7 +12300,7 @@ module Crystal::HIR
               ivars << IVarInfo.new(ivar_name, ivar_type, offset_ref.value,
                 default_expr_id: spec.default_value,
                 default_arena: spec.default_value ? @arena : nil)
-              offset_ref.value += type_size(ivar_type)
+              offset_ref.value += field_storage_size(ivar_type)
             end
             getter_base = "#{class_name}##{getter_name}"
             full_name = mangle_function_name(getter_base, [] of TypeRef)
@@ -12312,7 +12323,7 @@ module Crystal::HIR
               ivars << IVarInfo.new(ivar_name, ivar_type, offset_ref.value,
                 default_expr_id: spec.default_value,
                 default_arena: spec.default_value ? @arena : nil)
-              offset_ref.value += type_size(ivar_type)
+              offset_ref.value += field_storage_size(ivar_type)
             end
             setter_name = "#{class_name}##{storage_name}="
             full_name = mangle_function_name(setter_name, [ivar_type])
@@ -12336,7 +12347,7 @@ module Crystal::HIR
               ivars << IVarInfo.new(ivar_name, ivar_type, offset_ref.value,
                 default_expr_id: spec.default_value,
                 default_arena: spec.default_value ? @arena : nil)
-              offset_ref.value += type_size(ivar_type)
+              offset_ref.value += field_storage_size(ivar_type)
             end
             getter_base = "#{class_name}##{getter_name}"
             getter_full = mangle_function_name(getter_base, [] of TypeRef)
@@ -13914,7 +13925,7 @@ module Crystal::HIR
               ivars << IVarInfo.new(ivar_name, ivar_type, offset,
                 default_expr_id: default_expr_id,
                 default_arena: default_arena)
-              offset += type_size(ivar_type, is_c_struct)
+              offset += field_storage_size(ivar_type, is_c_struct)
             when CrystalV2::Compiler::Frontend::TypeDeclarationNode
               # Lib struct field declaration: value : Type
               if is_struct
@@ -13924,7 +13935,7 @@ module Crystal::HIR
                 unless ivars.any? { |iv| iv.name == ivar_name }
                   offset = align_offset(offset, type_alignment(ivar_type, is_c_struct))
                   ivars << IVarInfo.new(ivar_name, ivar_type, offset)
-                  offset += type_size(ivar_type, is_c_struct)
+                  offset += field_storage_size(ivar_type, is_c_struct)
                 end
               end
             when CrystalV2::Compiler::Frontend::ClassVarDeclNode
@@ -14259,7 +14270,7 @@ module Crystal::HIR
                     ivars << IVarInfo.new(ivar_name, ivar_type, offset,
                       default_expr_id: spec.default_value,
                       default_arena: spec.default_value ? @arena : nil)
-                    offset += type_size(ivar_type, is_c_struct)
+                    offset += field_storage_size(ivar_type, is_c_struct)
                   end
                   # Register getter method: def name : Type
                   getter_base = "#{class_name}##{getter_name}"
@@ -14294,7 +14305,7 @@ module Crystal::HIR
                     ivars << IVarInfo.new(ivar_name, ivar_type, offset,
                       default_expr_id: spec.default_value,
                       default_arena: spec.default_value ? @arena : nil)
-                    offset += type_size(ivar_type, is_c_struct)
+                    offset += field_storage_size(ivar_type, is_c_struct)
                   end
                   # Register setter method: def name=(value : Type) : Type
                   setter_name = "#{class_name}##{storage_name}="
@@ -14331,7 +14342,7 @@ module Crystal::HIR
                     ivars << IVarInfo.new(ivar_name, ivar_type, offset,
                       default_expr_id: spec.default_value,
                       default_arena: spec.default_value ? @arena : nil)
-                    offset += type_size(ivar_type, is_c_struct)
+                    offset += field_storage_size(ivar_type, is_c_struct)
                   end
                   # Register getter method
                   getter_base = "#{class_name}##{getter_name}"
@@ -14366,7 +14377,7 @@ module Crystal::HIR
                   ivars << IVarInfo.new(ivar_name, ivar_type, offset,
                     default_expr_id: needs_expr ? default_expr : nil,
                     default_arena: needs_expr ? @arena : nil)
-                  offset += type_size(ivar_type, is_c_struct)
+                  offset += field_storage_size(ivar_type, is_c_struct)
                 end
               elsif target_node.is_a?(CrystalV2::Compiler::Frontend::ClassVarNode)
                 raw_name = String.new(target_node.name)
@@ -14503,7 +14514,7 @@ module Crystal::HIR
                   if ivar_type != TypeRef::VOID
                     offset = align_offset(offset, type_alignment(ivar_type, is_c_struct))
                     ivars << IVarInfo.new(ivar_name, ivar_type, offset)
-                    offset += type_size(ivar_type, is_c_struct)
+                    offset += field_storage_size(ivar_type, is_c_struct)
                   end
                 end
               end
@@ -14517,7 +14528,7 @@ module Crystal::HIR
                 end
                 offset = align_offset(offset, type_alignment(ivar_type, is_c_struct))
                 ivars << IVarInfo.new(ivar_name, ivar_type, offset)
-                offset += type_size(ivar_type, is_c_struct)
+                offset += field_storage_size(ivar_type, is_c_struct)
               end
             end
           end
@@ -14848,7 +14859,7 @@ module Crystal::HIR
             needs_fix = true
             break
           end
-          offset = aligned + type_size(ivar.type, is_c_struct)
+          offset = aligned + field_storage_size(ivar.type, is_c_struct)
         end
 
         if needs_fix
@@ -14858,7 +14869,7 @@ module Crystal::HIR
             offset = align_offset(offset, type_alignment(ivar.type, is_c_struct))
             new_ivars << IVarInfo.new(ivar.name, ivar.type, offset,
               default_expr_id: ivar.default_expr_id, default_arena: ivar.default_arena)
-            offset += type_size(ivar.type, is_c_struct)
+            offset += field_storage_size(ivar.type, is_c_struct)
           end
           # Align total size to max field alignment
           max_align = new_ivars.max_of { |iv| type_alignment(iv.type, is_c_struct) }
@@ -14886,7 +14897,7 @@ module Crystal::HIR
         offset = align_offset(offset, type_alignment(ivar.type, is_c_struct))
         new_ivars << IVarInfo.new(ivar.name, ivar.type, offset,
           default_expr_id: ivar.default_expr_id, default_arena: ivar.default_arena)
-        offset += type_size(ivar.type, is_c_struct)
+        offset += field_storage_size(ivar.type, is_c_struct)
       end
       max_align = new_ivars.max_of { |iv| type_alignment(iv.type, is_c_struct) }
       offset = align_offset(offset, max_align)
@@ -15893,7 +15904,7 @@ module Crystal::HIR
             if resolved_literal
               default_val = Literal.new(ctx.next_id, ivar.type, resolved_literal)
               ctx.emit(default_val)
-              ivar_store = FieldSet.new(ctx.next_id, TypeRef::VOID, alloc.id, ivar.name, default_val.id, ivar.offset)
+              ivar_store = FieldSet.new(ctx.next_id, ivar.type, alloc.id, ivar.name, default_val.id, ivar.offset)
               ctx.emit(ivar_store)
               next
             end
@@ -15909,7 +15920,7 @@ module Crystal::HIR
               struct_alloc = Allocate.new(ctx.next_id, ivar.type, [] of ValueId, false)
               ctx.emit(struct_alloc)
               ctx.register_type(struct_alloc.id, ivar.type)
-              ivar_store = FieldSet.new(ctx.next_id, TypeRef::VOID, alloc.id, ivar.name, struct_alloc.id, ivar.offset)
+              ivar_store = FieldSet.new(ctx.next_id, ivar.type, alloc.id, ivar.name, struct_alloc.id, ivar.offset)
               ctx.emit(ivar_store)
               next
             end
@@ -15920,14 +15931,14 @@ module Crystal::HIR
             @current_class = class_name
             begin
               default_id = lower_expr(ctx, default_expr_id)
-              ivar_store = FieldSet.new(ctx.next_id, TypeRef::VOID, alloc.id, ivar.name, default_id, ivar.offset)
+              ivar_store = FieldSet.new(ctx.next_id, ivar.type, alloc.id, ivar.name, default_id, ivar.offset)
               ctx.emit(ivar_store)
             rescue ex
               # Fallback to zero/nil if expression can't be lowered
               STDERR.puts "[ALLOC_DEFAULT_FAIL] #{class_name}##{ivar.name}: #{ex.message} (#{ex.class})"
               default_val = Literal.new(ctx.next_id, ivar.type, nil)
               ctx.emit(default_val)
-              ivar_store = FieldSet.new(ctx.next_id, TypeRef::VOID, alloc.id, ivar.name, default_val.id, ivar.offset)
+              ivar_store = FieldSet.new(ctx.next_id, ivar.type, alloc.id, ivar.name, default_val.id, ivar.offset)
               ctx.emit(ivar_store)
             ensure
               @arena = saved_arena
@@ -15949,7 +15960,7 @@ module Crystal::HIR
         end
         default_val = Literal.new(ctx.next_id, ivar.type, default_value)
         ctx.emit(default_val)
-        ivar_store = FieldSet.new(ctx.next_id, TypeRef::VOID, alloc.id, ivar.name, default_val.id, ivar.offset)
+        ivar_store = FieldSet.new(ctx.next_id, ivar.type, alloc.id, ivar.name, default_val.id, ivar.offset)
         ctx.emit(ivar_store)
       end
 
@@ -16160,7 +16171,7 @@ module Crystal::HIR
             if resolved_literal
               default_val = Literal.new(ctx.next_id, ivar.type, resolved_literal)
               ctx.emit(default_val)
-              ivar_store = FieldSet.new(ctx.next_id, TypeRef::VOID, alloc.id, ivar.name, default_val.id, ivar.offset)
+              ivar_store = FieldSet.new(ctx.next_id, ivar.type, alloc.id, ivar.name, default_val.id, ivar.offset)
               ctx.emit(ivar_store)
               next
             end
@@ -16171,7 +16182,7 @@ module Crystal::HIR
               struct_alloc = Allocate.new(ctx.next_id, ivar.type, [] of ValueId, false)
               ctx.emit(struct_alloc)
               ctx.register_type(struct_alloc.id, ivar.type)
-              ivar_store = FieldSet.new(ctx.next_id, TypeRef::VOID, alloc.id, ivar.name, struct_alloc.id, ivar.offset)
+              ivar_store = FieldSet.new(ctx.next_id, ivar.type, alloc.id, ivar.name, struct_alloc.id, ivar.offset)
               ctx.emit(ivar_store)
               next
             end
@@ -16182,12 +16193,12 @@ module Crystal::HIR
             @current_class = class_name
             begin
               default_id = lower_expr(ctx, default_expr_id)
-              ivar_store = FieldSet.new(ctx.next_id, TypeRef::VOID, alloc.id, ivar.name, default_id, ivar.offset)
+              ivar_store = FieldSet.new(ctx.next_id, ivar.type, alloc.id, ivar.name, default_id, ivar.offset)
               ctx.emit(ivar_store)
             rescue ex
               default_val = Literal.new(ctx.next_id, ivar.type, nil)
               ctx.emit(default_val)
-              ivar_store = FieldSet.new(ctx.next_id, TypeRef::VOID, alloc.id, ivar.name, default_val.id, ivar.offset)
+              ivar_store = FieldSet.new(ctx.next_id, ivar.type, alloc.id, ivar.name, default_val.id, ivar.offset)
               ctx.emit(ivar_store)
             ensure
               @arena = saved_arena
@@ -16203,7 +16214,7 @@ module Crystal::HIR
         default_value : (Int64 | Nil) = is_pointer ? nil : 0_i64
         default_val = Literal.new(ctx.next_id, ivar.type, default_value)
         ctx.emit(default_val)
-        ivar_store = FieldSet.new(ctx.next_id, TypeRef::VOID, alloc.id, ivar.name, default_val.id, ivar.offset)
+        ivar_store = FieldSet.new(ctx.next_id, ivar.type, alloc.id, ivar.name, default_val.id, ivar.offset)
         ctx.emit(ivar_store)
       end
 
@@ -16550,7 +16561,7 @@ module Crystal::HIR
       ctx.register_local("value", value_param.id)
       ctx.register_type(value_param.id, ivar_type)
 
-      field_set = FieldSet.new(ctx.next_id, TypeRef::VOID, self_param.id, ivar_info.name, value_param.id, ivar_info.offset)
+      field_set = FieldSet.new(ctx.next_id, ivar_type, self_param.id, ivar_info.name, value_param.id, ivar_info.offset)
       ctx.emit(field_set)
 
       ctx.terminate(Return.new(value_param.id))
@@ -17389,7 +17400,7 @@ module Crystal::HIR
                           type_ref_for_name(rt_name)
                         end
                       elsif method_name.ends_with?('?')
-                        inferred = infer_unannotated_query_return_type(method_name, class_info.type_ref)
+                        inferred = infer_unannotated_query_return_type(method_name, class_info.type_ref, count_non_block_params(node))
                         inferred ||= infer_concrete_return_type_from_body(node, class_name)
                         inferred || fallback_query_return_type(method_name)
                       else
@@ -17413,7 +17424,7 @@ module Crystal::HIR
                             type_ref_for_name(rt_name)
                           end
                         elsif method_name.ends_with?('?')
-                          inferred = infer_unannotated_query_return_type(method_name, class_info.type_ref)
+                          inferred = infer_unannotated_query_return_type(method_name, class_info.type_ref, count_non_block_params(node))
                           inferred || fallback_query_return_type(method_name)
                         else
                           # Try to infer return type from getter-style methods (single ivar access)
@@ -17529,7 +17540,10 @@ module Crystal::HIR
           end
           class_map[ivar_name] = enum_name
         end
-        field_set = FieldSet.new(ctx.next_id, TypeRef::VOID, self_id, ivar_name, param_id, offset)
+        field_type = get_ivar_type(ivar_name)
+        field_type = param_type if field_type.nil? || field_type == TypeRef::VOID
+        store_value = coerce_value_to_type(ctx, param_id, field_type)
+        field_set = FieldSet.new(ctx.next_id, field_type, self_id, ivar_name, store_value, offset)
         ctx.emit(field_set)
       end
 
@@ -20231,6 +20245,22 @@ module Crystal::HIR
       callsite.empty? ? resolved_name : callsite
     end
 
+    @[AlwaysInline]
+    private def prefer_primary_call_target(
+      resolved_method_name : String,
+      primary_mangled_name : String,
+      arg_types : Array(TypeRef),
+    ) : String
+      return resolved_method_name if resolved_method_name == primary_mangled_name
+      return resolved_method_name if arg_types.empty? || arg_types.all? { |t| t == TypeRef::VOID }
+
+      resolved_base = strip_type_suffix(resolved_method_name)
+      primary_base = strip_type_suffix(primary_mangled_name)
+      return primary_mangled_name if resolved_base == primary_base
+
+      resolved_method_name
+    end
+
     private def resolve_nilable_function_type_overload(
       base_method_name : String,
       arg_types : Array(TypeRef),
@@ -21297,6 +21327,12 @@ module Crystal::HIR
       end
     end
 
+    # Helper for field storage bytes (Nil still needs pointer-sized slot)
+    private def field_storage_size(type : TypeRef, c_context : Bool = false) : Int32
+      storage = type_size(type, c_context)
+      storage == 0 && type == TypeRef::NIL ? pointer_word_bytes_i32 : storage
+    end
+
     # Align offset to the given alignment boundary
     private def align_offset(offset : Int32, alignment : Int32) : Int32
       return offset if alignment <= 1
@@ -21325,7 +21361,7 @@ module Crystal::HIR
           info.ivars.each do |ivar|
             offset = align_offset(offset, type_alignment(ivar.type, true))
             new_ivars << IVarInfo.new(ivar.name, ivar.type, offset, ivar.default_expr_id, ivar.default_arena)
-            offset += type_size(ivar.type, true)
+            offset += field_storage_size(ivar.type, true)
           end
 
           if !new_ivars.empty?
@@ -21914,7 +21950,7 @@ module Crystal::HIR
               end
             else
               ivars << IVarInfo.new(ivar_name, inferred, offset_ref.value)
-              offset_ref.value += type_size(inferred)
+              offset_ref.value += field_storage_size(inferred)
               if class_name = @current_class
                 update_getter_return_types_for_ivar(class_name, ivar_name, inferred)
               end
@@ -33775,7 +33811,8 @@ module Crystal::HIR
             lower_function_if_needed(method_name)
           end
         end
-        call = Call.new(ctx.next_id, left_type, left_id, method_name, [right_id])
+        call_target_name = prefer_primary_call_target(method_name, primary_mangled_name, [right_type])
+        call = Call.new(ctx.next_id, left_type, left_id, call_target_name, [right_id])
         ctx.emit(call)
         ctx.register_type(call.id, left_type)
         return call.id
@@ -34733,8 +34770,9 @@ module Crystal::HIR
       if method_name != primary_mangled_name
         remember_callsite_arg_types(method_name, [right_type])
       end
+      call_target_name = prefer_primary_call_target(method_name, primary_mangled_name, [right_type])
       lower_function_if_needed(primary_mangled_name)
-      if method_name != primary_mangled_name
+      if method_name != primary_mangled_name && call_target_name == method_name
         lower_function_if_needed(method_name)
       end
       # Infer return type: comparison ops return Bool, arithmetic ops return left type
@@ -34746,7 +34784,7 @@ module Crystal::HIR
                     else
                       left_type
                     end
-      call = Call.new(ctx.next_id, return_type, left, method_name, [right])
+      call = Call.new(ctx.next_id, return_type, left, call_target_name, [right])
       ctx.emit(call)
       ctx.register_type(call.id, return_type)
       call.id
@@ -39958,7 +39996,7 @@ module Crystal::HIR
       if func_def && call_arg_types && call_arg_types.size > 0
         actual_arity = count_non_block_params(func_def)
         expected_arity = call_arg_types.size
-        if expected_arity > actual_arity
+        if expected_arity != actual_arity
           arity_key = "#{name_parts.base}$arity#{expected_arity}"
           if env_get("DEBUG_ENTRY_MATCHES") && name.includes?("entry_matches")
             STDERR.puts "[ARITY_FIX] name=#{name} base=#{name_parts.base} target=#{target_name} expected=#{expected_arity} actual=#{actual_arity} arity_key=#{arity_key} has_key=#{@function_defs.has_key?(arity_key)}"
@@ -49078,6 +49116,37 @@ module Crystal::HIR
       {key_type, value_type}
     end
 
+    # Resolve Hash::Entry(K, V) layout from class metadata.
+    # Returns: {entry_size, key_offset, value_offset, hash_offset}
+    # Fallback values keep compatibility if metadata is unavailable.
+    private def hash_entry_layout(key_type : TypeRef, value_type : TypeRef) : {Int32, Int32, Int32, Int32}
+      entry_size = 24_i32
+      key_offset = 0_i32
+      value_offset = 8_i32
+      hash_offset = 12_i32
+
+      return {entry_size, key_offset, value_offset, hash_offset} if key_type == TypeRef::VOID || value_type == TypeRef::VOID
+
+      key_name = get_type_name_from_ref(key_type)
+      value_name = get_type_name_from_ref(value_type)
+      entry_name = "Hash::Entry(#{key_name}, #{value_name})"
+
+      if entry_info = @class_info[entry_name]?
+        entry_size = entry_info.size
+        if key_ivar = entry_info.ivars.find { |iv| iv.name == "@key" || iv.name == "key" }
+          key_offset = key_ivar.offset
+        end
+        if value_ivar = entry_info.ivars.find { |iv| iv.name == "@value" || iv.name == "value" }
+          value_offset = value_ivar.offset
+        end
+        if hash_ivar = entry_info.ivars.find { |iv| iv.name == "@hash" || iv.name == "hash" }
+          hash_offset = hash_ivar.offset
+        end
+      end
+
+      {entry_size, key_offset, value_offset, hash_offset}
+    end
+
     # Hash#each intrinsic — iterates hash entries with proper PHI nodes for mutable vars.
     # Uses direct field access to Hash internals to avoid block closure variable capture issues.
     # Hash layout (from generated IR analysis):
@@ -49096,6 +49165,7 @@ module Crystal::HIR
       block : CrystalV2::Compiler::Frontend::BlockNode,
     ) : ValueId
       key_type, value_type = hash_kv_types(ctx, hash_id)
+      entry_size, key_offset, value_offset, hash_offset = hash_entry_layout(key_type, value_type)
 
       # Get block param names
       key_param = "__hash_key"
@@ -49139,6 +49209,10 @@ module Crystal::HIR
       # Start index at 0 — we iterate all entries [0, entries_total) skipping deleted
       zero = Literal.new(ctx.next_id, TypeRef::INT32, 0_i64)
       ctx.emit(zero)
+      entry_size_lit = Literal.new(ctx.next_id, TypeRef::INT32, entry_size.to_i64)
+      ctx.emit(entry_size_lit)
+      hash_offset_lit = Literal.new(ctx.next_id, TypeRef::INT32, hash_offset.to_i64)
+      ctx.emit(hash_offset_lit)
 
       # Create blocks (no empty_block — cond handles empty hash naturally: 0 < 0 → false)
       cond_block = ctx.create_block
@@ -49180,13 +49254,13 @@ module Crystal::HIR
       ctx.current_block = body_block
 
       # entry_ptr = __crystal_v2_hash_get_entry_ptr(hash, index)
-      entry_call = Call.new(ctx.next_id, TypeRef::POINTER, nil, "__crystal_v2_hash_get_entry_ptr", [hash_id, index_phi.id])
+      entry_call = Call.new(ctx.next_id, TypeRef::POINTER, nil, "__crystal_v2_hash_get_entry_ptr", [hash_id, index_phi.id, entry_size_lit.id])
       ctx.emit(entry_call)
       ctx.register_type(entry_call.id, TypeRef::POINTER)
       entry_ptr_id = entry_call.id
 
       # is_deleted = __crystal_v2_hash_entry_deleted(entry_ptr)
-      deleted_call = Call.new(ctx.next_id, TypeRef::BOOL, nil, "__crystal_v2_hash_entry_deleted", [entry_ptr_id])
+      deleted_call = Call.new(ctx.next_id, TypeRef::BOOL, nil, "__crystal_v2_hash_entry_deleted", [entry_ptr_id, hash_offset_lit.id])
       ctx.emit(deleted_call)
       ctx.register_type(deleted_call.id, TypeRef::BOOL)
       is_deleted = deleted_call
@@ -49200,12 +49274,12 @@ module Crystal::HIR
       ctx.push_scope(ScopeKind::Block)
 
       # key = entry field at offset 0
-      key_val = FieldGet.new(ctx.next_id, key_type, entry_ptr_id, "key", 0)
+      key_val = FieldGet.new(ctx.next_id, key_type, entry_ptr_id, "key", key_offset)
       ctx.emit(key_val)
       ctx.register_type(key_val.id, key_type)
 
       # value = entry field at offset 8
-      val_val = FieldGet.new(ctx.next_id, value_type, entry_ptr_id, "value", 8)
+      val_val = FieldGet.new(ctx.next_id, value_type, entry_ptr_id, "value", value_offset)
       ctx.emit(val_val)
       ctx.register_type(val_val.id, value_type)
 
@@ -49320,6 +49394,7 @@ module Crystal::HIR
       is_keys : Bool,
     ) : ValueId
       key_type, value_type = hash_kv_types(ctx, hash_id)
+      entry_size, key_offset, value_offset, hash_offset = hash_entry_layout(key_type, value_type)
       elem_type = is_keys ? key_type : value_type
 
       # Determine element type name for Array type registration
@@ -49349,6 +49424,10 @@ module Crystal::HIR
 
       zero = Literal.new(ctx.next_id, TypeRef::INT32, 0_i64)
       ctx.emit(zero)
+      entry_size_lit = Literal.new(ctx.next_id, TypeRef::INT32, entry_size.to_i64)
+      ctx.emit(entry_size_lit)
+      hash_offset_lit = Literal.new(ctx.next_id, TypeRef::INT32, hash_offset.to_i64)
+      ctx.emit(hash_offset_lit)
 
       entry_block = ctx.current_block
 
@@ -49378,11 +49457,11 @@ module Crystal::HIR
 
       # Body block — check if entry is deleted
       ctx.current_block = body_block
-      entry_call = Call.new(ctx.next_id, TypeRef::POINTER, nil, "__crystal_v2_hash_get_entry_ptr", [hash_id, index_phi.id])
+      entry_call = Call.new(ctx.next_id, TypeRef::POINTER, nil, "__crystal_v2_hash_get_entry_ptr", [hash_id, index_phi.id, entry_size_lit.id])
       ctx.emit(entry_call)
       ctx.register_type(entry_call.id, TypeRef::POINTER)
 
-      deleted_call = Call.new(ctx.next_id, TypeRef::BOOL, nil, "__crystal_v2_hash_entry_deleted", [entry_call.id])
+      deleted_call = Call.new(ctx.next_id, TypeRef::BOOL, nil, "__crystal_v2_hash_entry_deleted", [entry_call.id, hash_offset_lit.id])
       ctx.emit(deleted_call)
       ctx.register_type(deleted_call.id, TypeRef::BOOL)
 
@@ -49390,7 +49469,7 @@ module Crystal::HIR
 
       # Exec block — extract key or value, store into array
       ctx.current_block = exec_block
-      field_offset = is_keys ? 0 : 8
+      field_offset = is_keys ? key_offset : value_offset
       field_name = is_keys ? "key" : "value"
       elem_val = FieldGet.new(ctx.next_id, elem_type, entry_call.id, field_name, field_offset)
       ctx.emit(elem_val)
@@ -52382,9 +52461,10 @@ module Crystal::HIR
               lower_function_if_needed(method_name)
             end
           end
-          return_type = get_function_return_type(method_name)
+          call_target_name = prefer_primary_call_target(method_name, primary_mangled_name, arg_types)
+          return_type = get_function_return_type(call_target_name)
           owner_type_for_return = object_type
-          owner_part = strip_type_suffix(method_name)
+          owner_part = strip_type_suffix(call_target_name)
           owner_name = method_owner(owner_part)
           if owner_name && !owner_name.empty?
             if owner_ref = type_ref_for_name(owner_name)
@@ -52392,8 +52472,8 @@ module Crystal::HIR
             end
           end
           inferred_return = resolve_return_type_from_def(primary_mangled_name, base_method_name, owner_type_for_return)
-          if inferred_return.nil? && method_name != primary_mangled_name
-            inferred_return = resolve_return_type_from_def(method_name, base_method_name, owner_type_for_return)
+          if inferred_return.nil? && call_target_name != primary_mangled_name
+            inferred_return = resolve_return_type_from_def(call_target_name, base_method_name, owner_type_for_return)
           end
           if inferred_return && inferred_return != TypeRef::VOID
             if return_type == TypeRef::VOID || return_type == TypeRef::POINTER
@@ -52404,7 +52484,7 @@ module Crystal::HIR
           if return_type == TypeRef::VOID
             return_type = TypeRef::POINTER
           end
-          call = Call.new(ctx.next_id, return_type, object_id, method_name, [range_id])
+          call = Call.new(ctx.next_id, return_type, object_id, call_target_name, [range_id])
           ctx.emit(call)
           ctx.register_type(call.id, return_type)
           return call.id
@@ -52683,9 +52763,10 @@ module Crystal::HIR
             lower_function_if_needed(method_name)
           end
         end
-        return_type = get_function_return_type(method_name)
+        call_target_name = prefer_primary_call_target(method_name, primary_mangled_name, arg_types)
+        return_type = get_function_return_type(call_target_name)
         owner_type_for_return = object_type
-        owner_part = strip_type_suffix(method_name)
+        owner_part = strip_type_suffix(call_target_name)
         owner_name = method_owner(owner_part)
         if owner_name && !owner_name.empty?
           if owner_ref = type_ref_for_name(owner_name)
@@ -52693,8 +52774,8 @@ module Crystal::HIR
           end
         end
         inferred_return = resolve_return_type_from_def(primary_mangled_name, base_method_name, owner_type_for_return)
-        if inferred_return.nil? && method_name != primary_mangled_name
-          inferred_return = resolve_return_type_from_def(method_name, base_method_name, owner_type_for_return)
+        if inferred_return.nil? && call_target_name != primary_mangled_name
+          inferred_return = resolve_return_type_from_def(call_target_name, base_method_name, owner_type_for_return)
         end
         if inferred_return && inferred_return != TypeRef::VOID
           if return_type == TypeRef::VOID || return_type == TypeRef::POINTER
@@ -52709,7 +52790,7 @@ module Crystal::HIR
         if return_type == TypeRef::VOID
           return_type = TypeRef::POINTER
         end
-        call = Call.new(ctx.next_id, return_type, object_id, method_name, index_ids)
+        call = Call.new(ctx.next_id, return_type, object_id, call_target_name, index_ids)
         ctx.emit(call)
         ctx.register_type(call.id, return_type)
         call.id
@@ -54668,6 +54749,10 @@ module Crystal::HIR
           class_map[name] = enum_name
         end
 
+        if ivar_type && ivar_type != TypeRef::VOID
+          value_id = coerce_value_to_type(ctx, value_id, ivar_type)
+        end
+
         # Check if ivar is a union type - need to wrap the value
         if ivar_type && is_union_type?(ivar_type)
           # Get the type of the value being assigned
@@ -54681,14 +54766,16 @@ module Crystal::HIR
             ctx.register_type(union_wrap.id, ivar_type)
 
             # Store the wrapped union value
-            field_set = FieldSet.new(ctx.next_id, TypeRef::VOID, self_id, name, union_wrap.id, ivar_offset)
+            field_type = ivar_type || ctx.type_of(union_wrap.id)
+            field_set = FieldSet.new(ctx.next_id, field_type, self_id, name, union_wrap.id, ivar_offset)
             ctx.emit(field_set)
             return value_id
           end
         end
 
         # Regular (non-union) field assignment
-        field_set = FieldSet.new(ctx.next_id, TypeRef::VOID, self_id, name, value_id, ivar_offset)
+        field_type = ivar_type || ctx.type_of(value_id)
+        field_set = FieldSet.new(ctx.next_id, field_type, self_id, name, value_id, ivar_offset)
         ctx.emit(field_set)
         value_id
       when CrystalV2::Compiler::Frontend::ClassVarNode
@@ -54883,7 +54970,7 @@ module Crystal::HIR
                       store_val = unwrap.id
                     end
                   end
-                  field_set = FieldSet.new(ctx.next_id, TypeRef::VOID, ptr_id, ivar_info.name, store_val, ivar_info.offset)
+                  field_set = FieldSet.new(ctx.next_id, ivar_info.type, ptr_id, ivar_info.name, store_val, ivar_info.offset)
                   ctx.emit(field_set)
                   return field_set.id
                 end
@@ -54935,7 +55022,7 @@ module Crystal::HIR
                 store_val = union_wrap.id
               end
             end
-            field_set = FieldSet.new(ctx.next_id, TypeRef::VOID, object_id, ivar_name, store_val, ivar_info.offset)
+            field_set = FieldSet.new(ctx.next_id, ivar_info.type, object_id, ivar_name, store_val, ivar_info.offset)
             ctx.emit(field_set)
             return field_set.id
           elsif class_info.is_struct && @lib_structs.includes?(class_name)
@@ -54953,7 +55040,7 @@ module Crystal::HIR
                 ctx.register_type(unwrap.id, field_type)
                 store_val = unwrap.id
               end
-              field_set = FieldSet.new(ctx.next_id, TypeRef::VOID, object_id, field_name, store_val, ivar_info.offset)
+              field_set = FieldSet.new(ctx.next_id, ivar_info.type, object_id, field_name, store_val, ivar_info.offset)
               ctx.emit(field_set)
               return field_set.id
             end
@@ -55261,6 +55348,10 @@ module Crystal::HIR
           class_map[name] = enum_name
         end
 
+        if ivar_type && ivar_type != TypeRef::VOID
+          value_id = coerce_value_to_type(ctx, value_id, ivar_type)
+        end
+
         if ivar_type && is_union_type?(ivar_type)
           value_type = ctx.type_of(value_id)
           variant_id = get_union_variant_id(ivar_type, value_type)
@@ -55268,13 +55359,15 @@ module Crystal::HIR
             union_wrap = UnionWrap.new(ctx.next_id, ivar_type, value_id, variant_id)
             ctx.emit(union_wrap)
             ctx.register_type(union_wrap.id, ivar_type)
-            field_set = FieldSet.new(ctx.next_id, TypeRef::VOID, self_id, name, union_wrap.id, ivar_offset)
+            field_type = ivar_type || ctx.type_of(union_wrap.id)
+            field_set = FieldSet.new(ctx.next_id, field_type, self_id, name, union_wrap.id, ivar_offset)
             ctx.emit(field_set)
             return value_id
           end
         end
 
-        field_set = FieldSet.new(ctx.next_id, TypeRef::VOID, self_id, name, value_id, ivar_offset)
+        field_type = ivar_type || ctx.type_of(value_id)
+        field_set = FieldSet.new(ctx.next_id, field_type, self_id, name, value_id, ivar_offset)
         ctx.emit(field_set)
         value_id
       when CrystalV2::Compiler::Frontend::ClassVarNode
@@ -55416,12 +55509,12 @@ module Crystal::HIR
                 store_val = union_wrap.id
               end
             end
-            field_set = FieldSet.new(ctx.next_id, TypeRef::VOID, object_id, ivar_name, store_val, ivar_info.offset)
+            field_set = FieldSet.new(ctx.next_id, ivar_info.type, object_id, ivar_name, store_val, ivar_info.offset)
             ctx.emit(field_set)
             return field_set.id
           elsif class_info.is_struct && @lib_structs.includes?(class_name)
             if ivar_info = class_info.ivars.find { |iv| iv.name == field_name }
-              field_set = FieldSet.new(ctx.next_id, TypeRef::VOID, object_id, field_name, value_id, ivar_info.offset)
+              field_set = FieldSet.new(ctx.next_id, ivar_info.type, object_id, field_name, value_id, ivar_info.offset)
               ctx.emit(field_set)
               return field_set.id
             end

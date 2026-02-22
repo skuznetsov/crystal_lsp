@@ -54,6 +54,20 @@
 - Float64: arithmetic, ** on literals
 
 ## Current Investigation (Stage 2 bootstrap crash)
+- **2026-02-22: In progress — Nil field store/load corruption in Hash::Entry(K, Nil)**
+  - New minimal regression script: `regression_tests/hash_string_nil_layout_repro.sh`
+    (asserts `Hash(String, Nil)` preserves keys and `has_key?` correctness).
+  - Root-cause hypothesis: HIR→MIR emitted physical `store/load` for zero-sized
+    `Nil` fields. In `Hash::Entry(String, Nil)` this can overwrite adjacent field
+    bytes and corrupt hash/index behavior used by `Set(String)` and stage2 pipeline
+    file sets.
+  - Candidate compiler fix (codegen only, no stdlib changes):
+    - `src/compiler/mir/hir_to_mir.cr`:
+      - `lower_field_set`: skip stores for `Nil` field types.
+      - `lower_field_get`: return typed nil for `Nil` field types.
+    - `src/compiler/hir/ast_to_hir.cr`:
+      - emit `FieldSet` with concrete ivar type (instead of `Void`) in auto-assign
+        and ivar assignment paths so zero-size `Nil` fields can be handled safely.
 - **2026-02-22 (latest): Stage 2 release bootstrap now compiles but crashes during parser initialization**
   - Latest numbers:
     - `/tmp/stage1_rel_current` build: **real 404.99s**
@@ -6120,3 +6134,25 @@ crystal build -Ddebug_hooks src/crystal_v2.cr -o bin/crystal_v2 --no-debug
       - `./regression_tests/run_complex.sh /tmp/crystal_v2_nostdlib_hirfix2 quick` => `5 passed, 0 failed`.
       - `/tmp/crystal_v2_nostdlib_hirfix2 regression_tests/test_negative_int32_puts.cr && scripts/run_safe.sh regression_tests/test_negative_int32_puts 10 512` => stdout `neg=-7`, `EXIT 0`.
       - `./regression_tests/run_complex.sh /tmp/crystal_v2_nostdlib_hirfix2 full` => `6 passed, 2 failed` (same known blockers: `channel_receive_state`, `option_parser_to_s`).
+
+- **2026-02-22 (new): Hash(String, Nil) iteration/keys codegen partially stabilized (compiler-only)**
+  - Confirmed working after latest stage1 rebuild:
+    - `h.each` iterates live entries again.
+    - `h.keys` now yields real keys (`a,b,c`) instead of empty/corrupted strings.
+  - Implemented in compiler codegen (no stdlib changes):
+    - `src/compiler/hir/ast_to_hir.cr`
+      - Hash intrinsics (`each`, `keys`/`values`) now use `Hash::Entry(K,V)` layout from `ClassInfo`
+        instead of hardcoded offsets.
+      - Pass dynamic `hash_offset` to deleted-check helper.
+      - allocator/field-store paths now preserve concrete ivar type in `FieldSet` (no `TypeRef::VOID`
+        where field type is known), enabling safe Nil-field lowering.
+    - `src/compiler/mir/hir_to_mir.cr`
+      - Nil field store/load guard remains active (`skip store` / `typed nil` load).
+    - `src/compiler/mir/llvm_backend.cr`
+      - `__crystal_v2_hash_entry_deleted` now takes dynamic hash offset.
+      - `__crystal_v2_hash_get_entry_ptr` remains pointer-table based (`Entry*[]`) compatible helper.
+  - New/updated regression target:
+    - `regression_tests/hash_string_nil_layout_repro.sh`
+  - Remaining issue (separate bug):
+    - `Array(String)#==(Array(String))` still lowers to fallback false-path in some cases;
+      this keeps `hash_string_nil_layout_repro.sh` failing on equality/assert branch despite correct keys.

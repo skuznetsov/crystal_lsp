@@ -1004,6 +1004,12 @@ module Crystal
 
     private def lower_field_get(field : HIR::FieldGet) : ValueId
       builder = @builder.not_nil!
+      # Nil-typed fields are zero-sized and have no storage.
+      # Loading from such fields must return typed nil directly.
+      if field.type == HIR::TypeRef::NIL
+        return builder.const_nil_typed(convert_type(field.type))
+      end
+
       obj_ptr = get_value(field.object)
 
       # GEP to field address
@@ -1027,6 +1033,13 @@ module Crystal
       obj_ptr = get_value(field.object)
       value = get_value(field.value)
 
+      # Nil-typed fields are zero-sized placeholders with no backing storage.
+      # Emitting a physical store for them can clobber adjacent fields that share
+      # the same byte offset (for example in Hash::Entry(K, Nil)).
+      if field.type == HIR::TypeRef::NIL
+        return value
+      end
+
       # Check if the field is a union type but the value being stored is not.
       # If so, wrap the value in a union before storing (e.g., storing a Proc
       # into a (Proc | Nil) ivar).
@@ -1043,12 +1056,95 @@ module Crystal
             end
           end
         end
+      elsif field.type != HIR::TypeRef::VOID
+        # Coerce scalar stores to the declared field type.
+        # This is required for assignments like @u8 = 0 where the literal is Int32.
+        value_hir_type = @hir_value_types[field.value]? || field.type
+        value = coerce_value_for_field_store(builder, value, value_hir_type, field.type)
       end
 
       # GEP to field address + store
       field_ptr = builder.gep(obj_ptr, [field.field_offset.to_u32], TypeRef::POINTER)
       builder.store(field_ptr, value)
       value
+    end
+
+    private def coerce_value_for_field_store(
+      builder : Builder,
+      value : ValueId,
+      src_hir_type : HIR::TypeRef,
+      dst_hir_type : HIR::TypeRef
+    ) : ValueId
+      return value if dst_hir_type == HIR::TypeRef::VOID || src_hir_type == dst_hir_type
+
+      src_type = convert_type(src_hir_type)
+      dst_type = convert_type(dst_hir_type)
+      return value if src_type == dst_type
+
+      if src_hir_type == HIR::TypeRef::NIL
+        return builder.const_nil_typed(dst_type) if dst_type == TypeRef::POINTER || dst_type == TypeRef::NIL
+      end
+
+      int_like_src = hir_int_like?(src_hir_type)
+      int_like_dst = hir_int_like?(dst_hir_type)
+      float_like_src = hir_float_like?(src_hir_type)
+      float_like_dst = hir_float_like?(dst_hir_type)
+
+      if src_type == TypeRef::POINTER && int_like_dst
+        return builder.cast(CastKind::PtrToInt, value, dst_type)
+      elsif int_like_src && dst_type == TypeRef::POINTER
+        return builder.cast(CastKind::IntToPtr, value, dst_type)
+      elsif int_like_src && int_like_dst
+        src_size = type_size(src_hir_type)
+        dst_size = type_size(dst_hir_type)
+        if dst_size < src_size
+          return builder.cast(CastKind::Trunc, value, dst_type)
+        elsif dst_size > src_size
+          cast_kind = hir_signed_int?(src_hir_type) ? CastKind::SExt : CastKind::ZExt
+          return builder.cast(cast_kind, value, dst_type)
+        else
+          return builder.cast(CastKind::Bitcast, value, dst_type)
+        end
+      elsif float_like_src && float_like_dst
+        src_size = type_size(src_hir_type)
+        dst_size = type_size(dst_hir_type)
+        cast_kind = dst_size < src_size ? CastKind::FPTrunc : CastKind::FPExt
+        return builder.cast(cast_kind, value, dst_type)
+      elsif float_like_src && int_like_dst
+        cast_kind = hir_signed_int?(dst_hir_type) ? CastKind::FPToSI : CastKind::FPToUI
+        return builder.cast(cast_kind, value, dst_type)
+      elsif int_like_src && float_like_dst
+        cast_kind = hir_signed_int?(src_hir_type) ? CastKind::SIToFP : CastKind::UIToFP
+        return builder.cast(cast_kind, value, dst_type)
+      end
+
+      # Conservative fallback for representationally compatible values.
+      builder.cast(CastKind::Bitcast, value, dst_type)
+    end
+
+    private def hir_int_like?(t : HIR::TypeRef) : Bool
+      case t
+      when HIR::TypeRef::BOOL,
+           HIR::TypeRef::INT8, HIR::TypeRef::INT16, HIR::TypeRef::INT32, HIR::TypeRef::INT64, HIR::TypeRef::INT128,
+           HIR::TypeRef::UINT8, HIR::TypeRef::UINT16, HIR::TypeRef::UINT32, HIR::TypeRef::UINT64, HIR::TypeRef::UINT128,
+           HIR::TypeRef::CHAR
+        true
+      else
+        false
+      end
+    end
+
+    private def hir_float_like?(t : HIR::TypeRef) : Bool
+      t == HIR::TypeRef::FLOAT32 || t == HIR::TypeRef::FLOAT64
+    end
+
+    private def hir_signed_int?(t : HIR::TypeRef) : Bool
+      case t
+      when HIR::TypeRef::INT8, HIR::TypeRef::INT16, HIR::TypeRef::INT32, HIR::TypeRef::INT64, HIR::TypeRef::INT128
+        true
+      else
+        false
+      end
     end
 
     # Check if a HIR TypeRef refers to a struct (value type).
