@@ -22,7 +22,8 @@
     - `regression_tests/run_all.sh /tmp/crystal_v2_stage2_rel_default` => **0/44 passed** (all compile failures).
     - `regression_tests/run_complex.sh /tmp/crystal_v2_stage1_rel quick` => **15/15 passed**.
     - `regression_tests/run_complex.sh /tmp/crystal_v2_stage2_rel_default quick` => **0/15 passed** (all compile segfaults).
-    - Regression script: `scripts/stage2_bootstrap_repro.sh /tmp/crystal_v2_stage2_rel_default`
+    - Regression script (bootstrap target): `scripts/stage2_bootstrap_repro.sh /tmp/crystal_v2_stage2_rel_default`
+    - Minimal repro script (5-line source): `scripts/stage2_minimal_compile_repro.sh /tmp/crystal_v2_stage2_rel_default`
 - Recently fixed repros:
   - `regression_tests/complex/test_find_nil_and_value.cr`
     - fixed by CFG-reachable return-type merge (dead blocks no longer pollute
