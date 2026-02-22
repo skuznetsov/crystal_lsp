@@ -6156,3 +6156,23 @@ crystal build -Ddebug_hooks src/crystal_v2.cr -o bin/crystal_v2 --no-debug
   - Remaining issue (separate bug):
     - `Array(String)#==(Array(String))` still lowers to fallback false-path in some cases;
       this keeps `hash_string_nil_layout_repro.sh` failing on equality/assert branch despite correct keys.
+
+- **2026-02-22 (latest benchmark on commit ac7f3d7): stage1/stage2 speed delta measured**
+  - Stage1 build command:
+    - `crystal build src/crystal_v2.cr --release -o /tmp/stage1_rel_ac7f3d7 --error-trace`
+    - result: **real 438.64s**
+  - Stage2 build command:
+    - `/tmp/stage1_rel_ac7f3d7 src/crystal_v2.cr --release -o /tmp/stage2_rel_ac7f3d7`
+    - note: current stage2 CLI still rejects `--error-trace` (`Invalid option: --error-trace`).
+    - result: **real 114.58s**
+  - Speedup:
+    - stage1/stage2 wall-time ratio = **3.83x** faster stage2.
+
+- **2026-02-22 (current blocker persists): stage2 bootstrap repro still crashes**
+  - `scripts/stage2_bootstrap_repro.sh /tmp/stage2_rel_ac7f3d7`
+    - result: fail `exit 133` on `regression_tests/basic_sanity.cr`.
+  - `lldb --batch -o run -k 'thread backtrace all' -- /tmp/stage2_rel_ac7f3d7 --release regression_tests/basic_sanity.cr -o /tmp/basic_stage2.bin`
+    - `EXC_BREAKPOINT` at `__vdispatch__Enumerable$Heach$$block$$T1331`
+    - stack includes:
+      - `CrystalV2::Compiler::CLI#compile`
+      - `__crystal_main`
