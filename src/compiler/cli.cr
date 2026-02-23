@@ -317,8 +317,8 @@ module CrystalV2
           parser.parse(@args)
           stage2_debug("[STAGE2_DEBUG] parser.parse ok", err_io)
         rescue ex : OptionParser::InvalidOption
-          stage2_debug("[STAGE2_DEBUG] parser invalid option: #{ex.class} msg=#{ex.message.inspect}")
-          err_io.puts "Error: #{ex.message}"
+          stage2_debug("[STAGE2_DEBUG] parser invalid option")
+          err_io.puts "Error: invalid option"
           err_io.puts(parser || parser_text)
           return 1
         end
