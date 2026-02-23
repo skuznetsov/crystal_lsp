@@ -1268,6 +1268,7 @@ module Crystal::HIR
     getter class_parents : Hash(String, String?)
     getter module_includers : Hash(String, Array(String))
     getter lib_names : Set(String)
+    getter lib_structs : Set(String)
     getter primitive_methods : Hash(String, String)
 
     @next_function_id : FunctionId = 0_u32
@@ -1301,6 +1302,7 @@ module Crystal::HIR
       @class_parents = {} of String => String?
       @module_includers = {} of String => Array(String)
       @lib_names = Set(String).new
+      @lib_structs = Set(String).new
       @primitive_methods = {} of String => String
       register_builtin_primitives
     end

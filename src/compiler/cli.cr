@@ -101,6 +101,25 @@ module CrystalV2
         end
       end
 
+      # Workaround for File.join splat args being broken in stage2.
+      # File.join(*parts) uses Tuple splat expansion which the V2 compiler
+      # doesn't handle correctly. These helpers avoid the splat path.
+      private def path_join(a : String, b : String) : String
+        if a.ends_with?('/')
+          "#{a}#{b}"
+        else
+          "#{a}/#{b}"
+        end
+      end
+
+      private def path_join(a : String, b : String, c : String) : String
+        path_join(path_join(a, b), c)
+      end
+
+      private def path_join(a : String, b : String, c : String, d : String) : String
+        path_join(path_join(a, b, c), d)
+      end
+
       {% if flag?(:debug_hooks) %}
       private def setup_debug_hooks : Nil
         return unless ENV["CRYSTAL_V2_DEBUG_HOOKS"]?
@@ -427,7 +446,7 @@ module CrystalV2
         {% if flag?(:bootstrap_fast) %}
         property ast_cache : Bool = false
         {% else %}
-        property ast_cache : Bool = ENV["CRYSTAL_V2_AST_CACHE"]? != "0"
+        property ast_cache : Bool = false
         {% end %}
         property llvm_opt : Bool = true
         property llvm_cache : Bool = ENV["CRYSTAL_V2_LLVM_CACHE"]? != "0"
@@ -530,10 +549,10 @@ module CrystalV2
         unless options.no_prelude
           stage2_debug("[STAGE2_DEBUG] loading prelude branch", err_io)
           prelude_path = if options.prelude_file.empty?
-                           File.join(STDLIB_PATH, "prelude.cr")
+                           path_join(STDLIB_PATH, "prelude.cr")
                          elsif !options.prelude_file.includes?(File::SEPARATOR) && !options.prelude_file.ends_with?(".cr")
                            # Short name like "prelude" -> resolve to stdlib path
-                           File.join(STDLIB_PATH, "#{options.prelude_file}.cr")
+                           path_join(STDLIB_PATH, "#{options.prelude_file}.cr")
                          else
                            options.prelude_file
                          end
@@ -607,7 +626,7 @@ module CrystalV2
             end
           end
           pipeline_hash = digest.hexfinal
-          pipeline_cache_file = File.join(pipeline_cache_dir, "#{pipeline_hash}.ll")
+          pipeline_cache_file = path_join(pipeline_cache_dir, "#{pipeline_hash}.ll")
 
           pipeline_cache_libs_file = pipeline_cache_file + ".libs"
           if File.exists?(pipeline_cache_file) && File.exists?(pipeline_cache_libs_file)
@@ -1219,8 +1238,8 @@ module CrystalV2
 
         opt_tag = options.llvm_opt ? "opt=#{opt_flag}" : "opt=none"
         llc_tag = "llc=#{opt_flag}"
-        opt_cache_file = options.llvm_cache ? File.join(cache_dir, "#{digest_string("#{base_hash}|#{opt_tag}")}.opt.ll") : ""
-        obj_cache_file = options.llvm_cache ? File.join(cache_dir, "#{digest_string("#{base_hash}|#{opt_tag}|#{llc_tag}")}.o") : ""
+        opt_cache_file = options.llvm_cache ? path_join(cache_dir, "#{digest_string("#{base_hash}|#{opt_tag}")}.opt.ll") : ""
+        obj_cache_file = options.llvm_cache ? path_join(cache_dir, "#{digest_string("#{base_hash}|#{opt_tag}|#{llc_tag}")}.o") : ""
 
         opt_ll_file = ll_file
         if options.llvm_opt
@@ -1276,7 +1295,7 @@ module CrystalV2
 
         # Find runtime stub
         runtime_dir = File.dirname(File.dirname(__FILE__))
-        runtime_stub = File.join(runtime_dir, "..", "runtime_stub.o")
+        runtime_stub = path_join(runtime_dir, "..", "runtime_stub.o")
         runtime_src = runtime_stub.gsub(/\.o$/, ".c")
 
         # Compile runtime stub if needed
@@ -1441,16 +1460,21 @@ module CrystalV2
         if abs_path.size > 0
           stage2_debug("[STAGE2_DEBUG] parse_file_recursive expanded=#{abs_path} size=#{abs_path.size} first=#{abs_path.byte_at(0)} last=#{abs_path.byte_at(abs_path.size - 1)}", out_io)
         end
+        stage2_debug("[STAGE2_DEBUG] parse_file_recursive checking loaded", out_io)
         return if loaded.includes?(abs_path)
+        stage2_debug("[STAGE2_DEBUG] parse_file_recursive adding to loaded", out_io)
         loaded << abs_path
         log(options, out_io, "  Loading: #{abs_path}") if options.verbose
 
+        stage2_debug("[STAGE2_DEBUG] parse_file_recursive checking exists", out_io)
         unless File.exists?(abs_path)
           log(options, out_io, "  Warning: File not found: #{abs_path}")
           return
         end
+        stage2_debug("[STAGE2_DEBUG] parse_file_recursive exists=true, reading", out_io)
 
         source = File.read(abs_path)
+        stage2_debug("[STAGE2_DEBUG] parse_file_recursive read done size=#{source.size}", out_io)
 
         {% unless flag?(:bootstrap_fast) %}
         if options.ast_cache
@@ -1485,7 +1509,9 @@ module CrystalV2
         end
         {% end %}
 
+        stage2_debug("[STAGE2_DEBUG] parse_file_recursive creating lexer", out_io)
         lexer = Frontend::Lexer.new(source)
+        stage2_debug("[STAGE2_DEBUG] parse_file_recursive lexer created, creating parser", out_io)
         parser = Frontend::Parser.new(lexer)
         stage2_debug("[STAGE2_DEBUG] parse_file_recursive parse start abs_path=#{abs_path}", out_io)
         program = parser.parse_program
@@ -1604,9 +1630,9 @@ module CrystalV2
       end
 
       private def require_cache_path(file_path : String) : String
-        cache_dir = ENV["XDG_CACHE_HOME"]? || File.join(ENV["HOME"]? || "/tmp", ".cache")
+        cache_dir = ENV["XDG_CACHE_HOME"]? || path_join(ENV["HOME"]? || "/tmp", ".cache")
         hash = digest_string("v3:#{file_path}")
-        File.join(cache_dir, "crystal_v2", "requires", "#{hash}.req")
+        path_join(cache_dir, "crystal_v2", "requires", "#{hash}.req")
       end
 
       private def load_require_cache(file_path : String) : Array(String)?
@@ -2886,7 +2912,7 @@ module CrystalV2
           # On macOS aarch64, resolve to lib_c/aarch64-darwin/c/*
           # TODO: Detect actual platform
           platform = "aarch64-darwin"
-          platform_path = File.join(STDLIB_PATH, "lib_c", platform, req_path)
+          platform_path = path_join(STDLIB_PATH, "lib_c", platform, req_path)
           result = try_require_path(platform_path)
           return result if result
         end
@@ -2943,12 +2969,12 @@ module CrystalV2
         # If path exists as a directory, look for dir/basename.cr inside it
         if Dir.exists?(path)
           basename = File.basename(path)
-          inner_path = File.join(path, basename + ".cr")
+          inner_path = path_join(path, basename + ".cr")
           if File.file?(inner_path)
             # For crystal/system modules, also load the unix variant
             if path.includes?("/crystal/system/") && !path.includes?("/unix/") && !path.includes?("/win32/") && !path.includes?("/wasi/")
               unix_path = path.gsub("/crystal/system/", "/crystal/system/unix/")
-              unix_inner = File.join(unix_path, basename + ".cr")
+              unix_inner = path_join(unix_path, basename + ".cr")
               if File.file?(unix_inner)
                 return [inner_path, unix_inner]
               end
@@ -2985,7 +3011,7 @@ module CrystalV2
       # Gather all .cr files in a directory
       private def gather_crystal_files(dir : String, accumulator : Array(String), recursive : Bool)
         Dir.each_child(dir) do |entry|
-          full_path = File.join(dir, entry)
+          full_path = path_join(dir, entry)
           if File.directory?(full_path)
             gather_crystal_files(full_path, accumulator, true) if recursive
           elsif entry.ends_with?(".cr")

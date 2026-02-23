@@ -327,7 +327,7 @@ module Crystal::MIR
 
     private def has_side_effects?(inst : Value) : Bool
       case inst
-      when Store, GlobalStore, Free, RCDecrement, ArraySet, ArraySetSize, ArrayNew
+      when Store, GlobalStore, Free, RCDecrement, ArraySet, ArraySetSize, ArrayNew, MemCopy
         true
       when Call, IndirectCall, ExternCall
         # Calls always have potential side effects

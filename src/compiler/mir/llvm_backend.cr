@@ -5835,6 +5835,31 @@ module Crystal::MIR
         return true
       end
 
+      # Time.new(LibC::Timespec, Time::Location) — explicit self.new that adds UNIX_EPOCH
+      # The auto-allocator generates the wrong body (passes tv_sec directly as @seconds
+      # instead of computing UNIX_EPOCH.total_seconds + tv_sec).
+      if mangled == "Time$Dnew$$LibC$CCTimespec_Time$CCLocation"
+        emit_raw "; Time.new(LibC::Timespec, Time::Location) — runtime override\n"
+        emit_raw "define ptr @#{mangled}(i64 %tv_sec, i32 %tv_nsec, ptr %location) {\n"
+        emit_raw "entry:\n"
+        # Load UNIX_EPOCH global → Time struct pointer → @seconds at offset 0
+        emit_raw "  %epoch_ptr = load ptr, ptr @Time__classvar__UNIX_EPOCH\n"
+        emit_raw "  %epoch_is_null = icmp eq ptr %epoch_ptr, null\n"
+        emit_raw "  br i1 %epoch_is_null, label %epoch_zero, label %epoch_ok\n"
+        emit_raw "epoch_zero:\n"
+        emit_raw "  br label %compute\n"
+        emit_raw "epoch_ok:\n"
+        emit_raw "  %epoch_sec = load i64, ptr %epoch_ptr\n"
+        emit_raw "  br label %compute\n"
+        emit_raw "compute:\n"
+        emit_raw "  %epoch_total = phi i64 [0, %epoch_zero], [%epoch_sec, %epoch_ok]\n"
+        emit_raw "  %seconds = add i64 %epoch_total, %tv_sec\n"
+        emit_raw "  %result = call ptr @Time$Dnew$$Int64_Int32_Time$CCLocation(i64 %seconds, i32 %tv_nsec, ptr %location)\n"
+        emit_raw "  ret ptr %result\n"
+        emit_raw "}\n\n"
+        return true
+      end
+
       false
     end
 
@@ -7023,6 +7048,8 @@ module Crystal::MIR
             used << inst.callee_ptr
           when Store
             used << inst.value << inst.ptr
+          when MemCopy
+            used << inst.dst << inst.src
           when Load
             used << inst.ptr
           when GetElementPtr
@@ -7112,6 +7139,9 @@ module Crystal::MIR
             else
               contexts[inst.value] ||= TypeRef::POINTER
             end
+          when MemCopy
+            contexts[inst.dst] ||= TypeRef::POINTER
+            contexts[inst.src] ||= TypeRef::POINTER
           when Cast
             # Cast to ptr → source might be ptr-like
             if inst.type == TypeRef::POINTER
@@ -7161,6 +7191,7 @@ module Crystal::MIR
                         when ExternCall   then inst.args.to_a
                         when IndirectCall then inst.args.to_a + [inst.callee_ptr]
                         when Store        then [inst.value, inst.ptr]
+                        when MemCopy      then [inst.dst, inst.src]
                         when GlobalStore  then [inst.value]
                         when AtomicStore  then [inst.value, inst.ptr]
                         when Load         then [inst.ptr]
@@ -7749,7 +7780,7 @@ module Crystal::MIR
         call_llvm_type = call_ret_type ? @type_mapper.llvm_type(call_ret_type) : nil
         call_llvm_type == "void" || mir_llvm_type == "void"
       end
-      produces_value = !inst.is_a?(Store) && !inst.is_a?(Free) &&
+      produces_value = !inst.is_a?(Store) && !inst.is_a?(MemCopy) && !inst.is_a?(Free) &&
                        !inst.is_a?(RCIncrement) && !inst.is_a?(RCDecrement) &&
                        !inst.is_a?(GlobalStore) && !inst.is_a?(AtomicStore) &&
                        !inst.is_a?(TryEnd) && !inst.is_a?(ArraySet) &&
@@ -7790,6 +7821,8 @@ module Crystal::MIR
         emit_load(inst, name)
       when Store
         emit_store(inst)
+      when MemCopy
+        emit_memcopy(inst)
       when GetElementPtr
         emit_gep(inst, name)
       when GetElementPtrDynamic
@@ -8353,6 +8386,17 @@ module Crystal::MIR
       end
 
       emit "store #{val_type_str} #{val}, ptr #{ptr}"
+    end
+
+    private def emit_memcopy(inst : MemCopy)
+      dst = value_ref(inst.dst)
+      src = value_ref(inst.src)
+      # Skip memcopy from null — this happens when .new default-initializes lib struct
+      # fields. The allocation is already zeroed by malloc.
+      if src == "null" || src == "0"
+        return
+      end
+      emit "call void @llvm.memcpy.p0.p0.i64(ptr #{dst}, ptr #{src}, i64 #{inst.size}, i1 false)"
     end
 
     # Get TSan access size (1, 2, 4, 8, or 16 bytes)

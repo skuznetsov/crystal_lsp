@@ -864,6 +864,25 @@ module Crystal::MIR
     end
   end
 
+  # Memory copy — copies `size` bytes from src to dst (like llvm.memcpy)
+  class MemCopy < Value
+    getter dst : ValueId
+    getter src : ValueId
+    getter size : UInt64
+
+    def initialize(id : ValueId, @dst : ValueId, @src : ValueId, @size : UInt64)
+      super(id, TypeRef::VOID)
+    end
+
+    def operands : Array(ValueId)
+      [@dst, @src]
+    end
+
+    def to_s(io : IO) : Nil
+      io << "%" << @id << " = memcopy %" << @dst << ", %" << @src << ", " << @size
+    end
+  end
+
   # Get element pointer (GEP) - compute address of field/element
   class GetElementPtr < Value
     getter base : ValueId
@@ -2048,6 +2067,10 @@ module Crystal::MIR
 
     def store(ptr : ValueId, value : ValueId) : ValueId
       emit(Store.new(@function.next_value_id, ptr, value))
+    end
+
+    def memcopy(dst : ValueId, src : ValueId, size : UInt64) : ValueId
+      emit(MemCopy.new(@function.next_value_id, dst, src, size))
     end
 
     def global_load(global_name : String, type : TypeRef) : ValueId

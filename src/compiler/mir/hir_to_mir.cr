@@ -1025,6 +1025,11 @@ module Crystal
         # Tag the result as also pointing to inline struct data
         @inline_struct_ptrs << field.id
         field_ptr
+      elsif hir_type_is_lib_struct?(field.type)
+        # Lib struct fields are stored inline (via memcopy in FieldSet).
+        # Return the GEP pointer directly — the data is at the field address.
+        @inline_struct_ptrs << field.id
+        field_ptr
       else
         builder.load(field_ptr, convert_type(field.type))
       end
@@ -1067,6 +1072,17 @@ module Crystal
 
       # GEP to field address + store
       field_ptr = builder.gep(obj_ptr, [field.field_offset.to_u32], TypeRef::POINTER)
+
+      # For lib struct fields, copy the data inline instead of storing a pointer.
+      # This prevents dangling pointers when the source struct is stack-allocated
+      # and the target outlives the current stack frame (e.g., File::Info.@stat).
+      is_lib = hir_type_is_lib_struct?(field.type)
+      struct_size = is_lib ? hir_type_lib_struct_size(field.type) : 0_u64
+      if is_lib && struct_size > 0
+        builder.memcopy(field_ptr, value, struct_size)
+        return value
+      end
+
       builder.store(field_ptr, value)
       value
     end
@@ -1155,6 +1171,23 @@ module Crystal
       desc = @hir_module.get_type_descriptor(type)
       return false unless desc
       desc.kind == HIR::TypeKind::Struct
+    end
+
+    private def hir_type_is_lib_struct?(type : HIR::TypeRef) : Bool
+      return false if type.id < HIR::TypeRef::FIRST_USER_TYPE
+      desc = @hir_module.get_type_descriptor(type)
+      return false unless desc
+      return false unless desc.kind == HIR::TypeKind::Struct
+      lib_set = @hir_module.lib_structs
+      lib_set.includes?(desc.name) || lib_set.any? { |ls| ls.ends_with?("::#{desc.name}") || desc.name.ends_with?("::#{ls.split("::").last}") }
+    end
+
+    private def hir_type_lib_struct_size(type : HIR::TypeRef) : UInt64
+      mir_ref = convert_type(type)
+      if mir_type = @mir_module.type_registry.get(mir_ref)
+        return mir_type.size if mir_type.size > 0
+      end
+      0_u64
     end
 
     # Get the inline size of a struct type (from class_info via MIR type registry).

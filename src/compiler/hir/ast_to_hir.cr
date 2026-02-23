@@ -4058,6 +4058,7 @@ module Crystal::HIR
         struct_name = String.new(node.name)
         full_struct_name = "#{lib_name}::#{struct_name}"
         @lib_structs.add(full_struct_name)
+        @module.lib_structs.add(full_struct_name)
         register_class_with_name(node, full_struct_name)
       when CrystalV2::Compiler::Frontend::FunNode
         return unless pass == :externs
@@ -24053,6 +24054,11 @@ module Crystal::HIR
         if !needs_deferred && val_node.is_a?(CrystalV2::Compiler::Frontend::CallNode)
           needs_deferred = true
         end
+        # Tuple/Array literals need runtime init (e.g., DAYS_MONTH = {0, 31, 28, ...})
+        if !needs_deferred && (val_node.is_a?(CrystalV2::Compiler::Frontend::TupleLiteralNode) ||
+                               val_node.is_a?(CrystalV2::Compiler::Frontend::ArrayLiteralNode))
+          needs_deferred = true
+        end
         @arena = old_a2
         if needs_deferred
           owner = owner_name || "$"
@@ -28726,10 +28732,13 @@ module Crystal::HIR
         # Constants stay EAGER — process them now (same as eager mode)
         # Reorder: STDOUT/STDERR/STDIN first so Crystal.exit can report errors
         # even if later constant inits (e.g. CRYSTAL_SRC_PATH) raise exceptions.
-        @deferred_constant_inits.sort_by! do |(_, cn, _, _)|
-          case cn
-          when "STDIN" then 0; when "STDOUT" then 1; when "STDERR" then 2; else 3
-          end
+        @deferred_constant_inits.sort_by! do |(owner, cn, _, _)|
+          priority = case cn
+                     when "STDIN" then 0; when "STDOUT" then 1; when "STDERR" then 2; else 3
+                     end
+          full = owner == "$" ? cn : "#{owner}::#{cn}"
+          depth = full.count(':')
+          {priority, -depth}
         end
         @deferred_constant_inits.each do |(owner, const_name, value_id, init_arena)|
           @arena = init_arena
@@ -28793,12 +28802,15 @@ module Crystal::HIR
         @deferred_classvar_inits.clear
 
         # Process deferred constant initializations (string literals, etc.)
-        # Reorder: STDOUT/STDERR/STDIN first so Crystal.exit can report errors
-        # even if later constant inits (e.g. CRYSTAL_SRC_PATH) raise exceptions.
-        @deferred_constant_inits.sort_by! do |(_, cn, _, _)|
-          case cn
-          when "STDIN" then 0; when "STDOUT" then 1; when "STDERR" then 2; else 3
-          end
+        # Reorder: STDOUT/STDERR/STDIN first, then deeper nesting first
+        # (inner types like Zone::UTC before outer Location::UTC that reference them).
+        @deferred_constant_inits.sort_by! do |(owner, cn, _, _)|
+          priority = case cn
+                     when "STDIN" then 0; when "STDOUT" then 1; when "STDERR" then 2; else 3
+                     end
+          full = owner == "$" ? cn : "#{owner}::#{cn}"
+          depth = full.count(':')
+          {priority, -depth}
         end
         if env_has?("DEBUG_DEFERRED_CONST")
           STDERR.puts "[DEFERRED_CONST] Processing #{@deferred_constant_inits.size} deferred constant inits"
@@ -30344,6 +30356,7 @@ module Crystal::HIR
             struct_name = String.new(body_node.name)
             full_struct_name = "#{lib_name}::#{struct_name}"
             @lib_structs.add(full_struct_name)
+            @module.lib_structs.add(full_struct_name)
             register_class_with_name(body_node, full_struct_name)
             lower_class_with_name(body_node, full_struct_name)
           end
@@ -31086,6 +31099,49 @@ module Crystal::HIR
         else
           nil
         end
+      when CrystalV2::Compiler::Frontend::BinaryNode
+        # Fold arithmetic binary operations on number literals / constant references
+        # e.g., 365*400 + 97, 60 * SECONDS_PER_MINUTE
+        op = String.new(expr_node.operator)
+        lhs_val = macro_value_for_expr(expr_node.left)
+        rhs_val = macro_value_for_expr(expr_node.right)
+        if lhs_val && lhs_val.is_a?(CrystalV2::Compiler::Semantic::MacroNumberValue) &&
+           rhs_val && rhs_val.is_a?(CrystalV2::Compiler::Semantic::MacroNumberValue)
+          lhs = lhs_val.value
+          rhs = rhs_val.value
+          result = if lhs.is_a?(Int64) && rhs.is_a?(Int64)
+                     case op
+                     when "+"  then lhs + rhs
+                     when "-"  then lhs - rhs
+                     when "*"  then lhs * rhs
+                     when "/"  then rhs != 0 ? lhs // rhs : nil
+                     when "//" then rhs != 0 ? lhs // rhs : nil
+                     when "%"  then rhs != 0 ? lhs % rhs : nil
+                     when "&"  then lhs & rhs
+                     when "|"  then lhs | rhs
+                     when "^"  then lhs ^ rhs
+                     when "<<" then lhs << rhs
+                     when ">>" then lhs >> rhs
+                     else           nil
+                     end
+                   elsif lhs.is_a?(Float64) || rhs.is_a?(Float64)
+                     fl = lhs.is_a?(Float64) ? lhs : lhs.as(Int64).to_f64
+                     fr = rhs.is_a?(Float64) ? rhs : rhs.as(Int64).to_f64
+                     case op
+                     when "+" then fl + fr
+                     when "-" then fl - fr
+                     when "*" then fl * fr
+                     when "/" then fr != 0 ? fl / fr : nil
+                     else          nil
+                     end
+                   else
+                     nil
+                   end
+          if result
+            return CrystalV2::Compiler::Semantic::MacroNumberValue.new(result)
+          end
+        end
+        nil
       when CrystalV2::Compiler::Frontend::ConstantNode
         raw_name = String.new(expr_node.name)
         resolved = resolve_constant_name_in_context(raw_name) || raw_name
@@ -41808,6 +41864,21 @@ module Crystal::HIR
             end
           end
           if receiver_id.nil? && full_method_name.nil? && method_name == "set_crystal_type_id"
+            # Inline set_crystal_type_id: write the class's type_id at offset 0 of ptr
+            if call_args.size == 1 && block_expr.nil? && block_pass_expr.nil?
+              class_type_ref = type_ref_for_name(current)
+              if class_type_ref != TypeRef::VOID
+                ptr_id = lower_expr(ctx, call_args[0])
+                type_id_lit = Literal.new(ctx.next_id, TypeRef::INT32, class_type_ref.id.to_i64)
+                ctx.emit(type_id_lit)
+                ctx.register_type(type_id_lit.id, TypeRef::INT32)
+                store = PointerStore.new(ctx.next_id, TypeRef::VOID, ptr_id, type_id_lit.id)
+                ctx.emit(store)
+                ctx.register_type(store.id, TypeRef::VOID)
+                return ptr_id
+              end
+            end
+            # Fallback: resolve as class method call
             receiver_id = nil
             full_method_name = "#{current}.#{method_name}"
           end
@@ -41938,6 +42009,27 @@ module Crystal::HIR
               ctx.emit(proc_call)
               ctx.register_type(proc_call.id, proc_call_return)
               return proc_call.id
+            end
+          end
+        end
+
+        # Intrinsic: ClassName.set_crystal_type_id(ptr)
+        # Writes the class's type_id (i32) at offset 0 of ptr, returns ptr.
+        # Must be inlined because the generic Object.set_crystal_type_id calls
+        # crystal_instance_type_id (a primitive needing compile-time class context).
+        if method_name == "set_crystal_type_id" && call_args.size == 1 && block_expr.nil? && block_pass_expr.nil?
+          class_name = stringify_type_expr(obj_expr)
+          if class_name
+            class_type_ref = type_ref_for_name(class_name)
+            if class_type_ref != TypeRef::VOID
+              ptr_id = lower_expr(ctx, call_args[0])
+              type_id_lit = Literal.new(ctx.next_id, TypeRef::INT32, class_type_ref.id.to_i64)
+              ctx.emit(type_id_lit)
+              ctx.register_type(type_id_lit.id, TypeRef::INT32)
+              store = PointerStore.new(ctx.next_id, TypeRef::VOID, ptr_id, type_id_lit.id)
+              ctx.emit(store)
+              ctx.register_type(store.id, TypeRef::VOID)
+              return ptr_id
             end
           end
         end
@@ -47531,13 +47623,39 @@ module Crystal::HIR
 
       # Local variable: create temp alloca + AddressOf
       var_id = ctx.lookup_local(var_name)
+      is_lib_out = false
       if var_id.nil?
         alloc_type = out_alloc_type_for_param(param_type)
+        alloc_type_desc = @module.get_type_descriptor(alloc_type)
         alloc = Allocate.new(ctx.next_id, alloc_type, [] of ValueId, true)
+        # Lib struct `out` args must use heap allocation: the pointer may be stored
+        # in a struct field and outlive this function's stack frame.
+        alloc_type_desc = @module.get_type_descriptor(alloc_type)
+        is_lib_out = !!(alloc_type_desc && alloc_type_desc.kind == TypeKind::Struct && @lib_structs.includes?(alloc_type_desc.name))
+        if !is_lib_out && alloc_type_desc
+          is_lib_out = !!(alloc_type_desc.kind == TypeKind::Struct && @lib_structs.any? { |ls| ls == alloc_type_desc.name || ls.ends_with?("::#{alloc_type_desc.name}") })
+        end
+        if is_lib_out
+          alloc.memory_strategy = HIR::MemoryStrategy::ARC
+        end
         ctx.emit(alloc)
         record_allocation_location(ctx, alloc.id, @arena, node)
         ctx.register_local(var_name, alloc.id)
         var_id = alloc.id
+      else
+        # Existing variable — check if it's a heap-allocated lib struct
+        alloc_type = out_alloc_type_for_param(param_type)
+        alloc_type_desc = @module.get_type_descriptor(alloc_type)
+        is_lib_out = !!(alloc_type_desc && alloc_type_desc.kind == TypeKind::Struct && @lib_structs.includes?(alloc_type_desc.name))
+        if !is_lib_out && alloc_type_desc
+          is_lib_out = !!(alloc_type_desc.kind == TypeKind::Struct && @lib_structs.any? { |ls| ls == alloc_type_desc.name || ls.ends_with?("::#{alloc_type_desc.name}") })
+        end
+      end
+      # For heap-allocated lib structs, the var IS already a pointer to the struct
+      # data. Return it directly — AddressOf would create a pointer-to-pointer,
+      # causing the C function to write past the 8-byte slot and corrupt the stack.
+      if is_lib_out
+        return var_id
       end
       ptr = AddressOf.new(ctx.next_id, TypeRef::POINTER, var_id)
       ctx.emit(ptr)
