@@ -95,6 +95,12 @@ module CrystalV2
       def initialize(@args : Array(String))
       end
 
+      private def stage2_debug(msg : String, io : IO = STDERR) : Nil
+        if ENV["STAGE2_DEBUG"]? || ENV["STAGE2_BOOTSTRAP_TRACE"]?
+          io.puts msg
+        end
+      end
+
       {% if flag?(:debug_hooks) %}
       private def setup_debug_hooks : Nil
         return unless ENV["CRYSTAL_V2_DEBUG_HOOKS"]?
@@ -127,86 +133,197 @@ module CrystalV2
 
       def run(*, out_io : IO = STDOUT, err_io : IO = STDERR) : Int32
         options = Options.new
+        stage2_debug("[STAGE2_DEBUG] raw args join=#{@args.join("|")}", err_io)
+        stage2_debug("[STAGE2_DEBUG] run start args_size=#{@args.size}", err_io)
         mm_stack_threshold_invalid = false
+        parser_help = "Usage: crystal_v2 [options] <source.cr>\n\nOptions:"
+        parser : OptionParser | Nil = nil
+        parser_text = parser_help
 
-        parser = OptionParser.new do |p|
-          p.banner = "Usage: crystal_v2 [options] <source.cr>\n\nOptions:"
-
-          # Output options (Crystal-compatible)
-          p.on("-o FILE", "--output FILE", "Output file name") { |f| options.output = f }
-
-          # Optimization (Crystal-compatible)
-          p.on("--release", "Compile in release mode (-O3)") { options.optimize = 3; options.release = true }
-          p.on("-O LEVEL", "Optimization mode: 0 (default), 1, 2, 3") do |level|
-            options.optimize = level.to_i? || 0
-          end
-
-          # Emit options (Crystal-compatible)
-          p.on("--emit TYPE", "Emit: llvm-ir, hir, mir") do |t|
-            case t
-            when "llvm-ir" then options.emit_llvm = true
-            when "hir"     then options.emit_hir = true
-            when "mir"     then options.emit_mir = true
+        if ENV["CRYSTAL2_SAFE_PARSER"]?
+          i = 0
+          while i < @args.size
+            arg = @args[i]
+            if arg == "--release"
+              options.optimize = 3
+              options.release = true
+            elsif arg == "-O"
+              if i + 1 < @args.size
+                parsed = @args[i + 1].to_i32?
+                if parsed
+                  options.optimize = parsed.not_nil!
+                  i += 1
+                else
+                  mm_stack_threshold_invalid = true
+                end
+              else
+                mm_stack_threshold_invalid = true
+              end
+            elsif arg.starts_with?("-O") && arg.size > 2
+              parsed = arg[2..-1].to_i32?
+              if parsed
+                options.optimize = parsed.not_nil!
+              else
+                mm_stack_threshold_invalid = true
+              end
+            elsif arg == "--no-codegen"
+              options.check_only = true
+            elsif arg == "--version"
+              options.show_version = true
+            elsif arg == "--help" || arg == "-h"
+              options.show_help = true
+              options.help_text = parser_help
+            elsif arg == "--no-ast-cache"
+              options.ast_cache = false
+            elsif arg == "--ast-cache"
+              options.ast_cache = true
+            elsif arg == "--output"
+              if i + 1 < @args.size
+                options.output = @args[i + 1]
+                i += 1
+              else
+                err_io.puts "Error: --output expects a value"
+                return 1
+              end
+            elsif arg.starts_with?("--output=")
+              options.output = arg[9..-1]
+            elsif arg == "--mm-stack-threshold"
+              if i + 1 < @args.size
+                value = @args[i + 1].to_u32?
+                if value
+                  options.mm_stack_threshold = value.not_nil!
+                  i += 1
+                else
+                  mm_stack_threshold_invalid = true
+                end
+              else
+                mm_stack_threshold_invalid = true
+              end
+            elsif arg.starts_with?("--mm=")
+              options.mm_mode = arg[5..-1]
+            elsif arg.starts_with?("-o")
+              if arg.size > 2
+                options.output = arg[2..-1]
+              else
+                if i + 1 < @args.size
+                  options.output = @args[i + 1]
+                  i += 1
+                else
+                  err_io.puts "Error: -o expects a value"
+                  return 1
+                end
+              end
+            elsif arg.starts_with?("-")
+              err_io.puts "Error: unknown option: #{arg}"
+              err_io.puts parser_help
+              return 1
             end
+            i += 1
           end
-
-          # Prelude (Crystal-compatible)
-          p.on("--prelude FILE", "Use given file as prelude") { |f| options.prelude_file = f }
-          p.on("--no-prelude", "Don't load prelude") { options.no_prelude = true }
-
-          # Codegen control (Crystal-compatible)
-          p.on("--no-codegen", "Don't do code generation (semantic check only)") { options.check_only = true }
-
-          # Debug info
-          p.on("-d", "--debug", "Add symbolic debug info") { options.debug = true }
-          p.on("--no-debug", "Skip symbolic debug info") { options.debug = false }
-
-          # Verbose / progress (Crystal-compatible)
-          p.on("--verbose", "Display executed commands") { options.verbose = true }
-          p.on("-s", "--stats", "Enable statistics output") { options.stats = true }
-          p.on("-p", "--progress", "Enable progress output") { options.progress = true }
-
-          # Additional
-          p.on("--dump-symbols", "Dump symbol table") { options.dump_symbols = true }
-          {% if flag?(:bootstrap_fast) %}
-          p.on("--ast-cache", "Ignored in -Dbootstrap_fast (AST cache is compiled out)") { options.ast_cache = false }
-          p.on("--no-ast-cache", "Ignored in -Dbootstrap_fast (AST cache is compiled out)") { options.ast_cache = false }
-          {% else %}
-          p.on("--ast-cache", "Enable AST cache (file-based)") { options.ast_cache = true }
-          p.on("--no-ast-cache", "Disable AST cache (file-based)") { options.ast_cache = false }
-          {% end %}
-          p.on("--no-llvm-opt", "Skip LLVM opt (faster, less optimized)") { options.llvm_opt = false }
-          p.on("--llvm-cache", "Enable LLVM opt/llc cache") { options.llvm_cache = true }
-          p.on("--no-llvm-cache", "Disable LLVM opt/llc cache") { options.llvm_cache = false }
-          p.on("--no-llvm-metadata", "Disable LLVM type metadata (faster, less debug info)") { options.emit_type_metadata = false }
-          p.on("--lto", "Enable LLVM LTO at link time (clang)") { options.lto = true }
-          p.on("--pgo-gen", "Enable LLVM PGO instrumentation (clang)") { options.pgo_generate = true }
-          p.on("--pgo-use FILE", "Use LLVM PGO profile data (clang)") { |f| options.pgo_profile = f }
-          p.on("--no-link", "Skip final link step (leave .o file)") { options.link = false }
-          p.on("--no-mir-opt", "Skip MIR optimization passes (faster, less optimized)") { options.mir_opt = false }
-          p.on("--no-ltp", "Disable LTP/WBA MIR optimization (benchmarking)") { options.ltp_opt = false }
-          p.on("--slab-frame", "Use slab frame for no-escape functions (experimental)") { options.slab_frame = true }
-          p.on("--mm=MODE", "Memory mode: conservative, balanced, aggressive") { |mode| options.mm_mode = mode }
-          p.on("--mm-stack-threshold BYTES", "Max bytes for stack allocation in MM mode") do |bytes|
-            if value = bytes.to_u32?
-              options.mm_stack_threshold = value
-            else
-              mm_stack_threshold_invalid = true
+        elsif (minimal_parser = ENV["CRYSTAL2_MINIMAL_PARSER"]?)
+          if minimal_parser == "2"
+            parser = OptionParser.new do |p|
+              p.banner = "Usage: crystal_v2 [options] <source.cr>\n\nOptions:"
+              p.on("--release", "Compile in release mode (-O3)") { options.optimize = 3; options.release = true }
+              p.on("--version", "Show version") { options.show_version = true }
+              p.on("-h", "--help", "Show this message") { options.show_help = true; options.help_text = p.to_s }
             end
-          end
-          p.on("--no-gc", "Fail if any allocation uses GC") { options.no_gc = true }
+          else
+            parser = OptionParser.new do |p|
+              p.banner = "Usage: crystal_v2 [options] <source.cr>\n\nOptions:"
+              p.on("-o FILE", "--output FILE", "Output file name") { |f| options.output = f }
+              p.on("--release", "Compile in release mode (-O3)") { options.optimize = 3; options.release = true }
+              p.on("--version", "Show version") { options.show_version = true }
+              p.on("-h", "--help", "Show this message") { options.show_help = true; options.help_text = p.to_s }
+            end
+            end
+        else
+          parser = OptionParser.new do |p|
+            p.banner = "Usage: crystal_v2 [options] <source.cr>\n\nOptions:"
 
-          # Help/version (Crystal-compatible)
-          p.on("--version", "Show version") { options.show_version = true }
-          p.on("-h", "--help", "Show this message") { options.show_help = true; options.help_text = p.to_s }
+            # Output options (Crystal-compatible)
+            p.on("-o FILE", "--output FILE", "Output file name") { |f| options.output = f }
+
+            # Optimization (Crystal-compatible)
+            p.on("--release", "Compile in release mode (-O3)") { options.optimize = 3; options.release = true }
+            p.on("-O LEVEL", "Optimization mode: 0 (default), 1, 2, 3") do |level|
+              options.optimize = level.to_i? || 0
+            end
+
+            # Emit options (Crystal-compatible)
+            p.on("--emit TYPE", "Emit: llvm-ir, hir, mir") do |t|
+              case t
+              when "llvm-ir" then options.emit_llvm = true
+              when "hir"     then options.emit_hir = true
+              when "mir"     then options.emit_mir = true
+              end
+            end
+
+            # Prelude (Crystal-compatible)
+            p.on("--prelude FILE", "Use given file as prelude") { |f| options.prelude_file = f }
+            p.on("--no-prelude", "Don't load prelude") { options.no_prelude = true }
+
+            # Codegen control (Crystal-compatible)
+            p.on("--no-codegen", "Don't do code generation (semantic check only)") { options.check_only = true }
+
+            # Debug info
+            p.on("-d", "--debug", "Add symbolic debug info") { options.debug = true }
+            p.on("--no-debug", "Skip symbolic debug info") { options.debug = false }
+
+            # Verbose / progress (Crystal-compatible)
+            p.on("--verbose", "Display executed commands") { options.verbose = true }
+            p.on("-s", "--stats", "Enable statistics output") { options.stats = true }
+            p.on("-p", "--progress", "Enable progress output") { options.progress = true }
+
+            # Additional
+            p.on("--dump-symbols", "Dump symbol table") { options.dump_symbols = true }
+            {% if flag?(:bootstrap_fast) %}
+            p.on("--ast-cache", "Ignored in -Dbootstrap_fast (AST cache is compiled out)") { options.ast_cache = false }
+            p.on("--no-ast-cache", "Ignored in -Dbootstrap_fast (AST cache is compiled out)") { options.ast_cache = false }
+            {% else %}
+            p.on("--ast-cache", "Enable AST cache (file-based)") { options.ast_cache = true }
+            p.on("--no-ast-cache", "Disable AST cache (file-based)") { options.ast_cache = false }
+            {% end %}
+            p.on("--no-llvm-opt", "Skip LLVM opt (faster, less optimized)") { options.llvm_opt = false }
+            p.on("--llvm-cache", "Enable LLVM opt/llc cache") { options.llvm_cache = true }
+            p.on("--no-llvm-cache", "Disable LLVM opt/llc cache") { options.llvm_cache = false }
+            p.on("--no-llvm-metadata", "Disable LLVM type metadata (faster, less debug info)") { options.emit_type_metadata = false }
+            p.on("--lto", "Enable LLVM LTO at link time (clang)") { options.lto = true }
+            p.on("--pgo-gen", "Enable LLVM PGO instrumentation (clang)") { options.pgo_generate = true }
+            p.on("--pgo-use FILE", "Use LLVM PGO profile data (clang)") { |f| options.pgo_profile = f }
+            p.on("--no-link", "Skip final link step (leave .o file)") { options.link = false }
+            p.on("--no-mir-opt", "Skip MIR optimization passes (faster, less optimized)") { options.mir_opt = false }
+            p.on("--no-ltp", "Disable LTP/WBA MIR optimization (benchmarking)") { options.ltp_opt = false }
+            p.on("--slab-frame", "Use slab frame for no-escape functions (experimental)") { options.slab_frame = true }
+            p.on("--mm=MODE", "Memory mode: conservative, balanced, aggressive") { |mode| options.mm_mode = mode }
+            p.on("--mm-stack-threshold BYTES", "Max bytes for stack allocation in MM mode") do |bytes|
+              if value = bytes.to_u32?
+                options.mm_stack_threshold = value.not_nil!
+              else
+                mm_stack_threshold_invalid = true
+              end
+            end
+            p.on("--no-gc", "Fail if any allocation uses GC") { options.no_gc = true }
+
+            # Help/version (Crystal-compatible)
+            p.on("--version", "Show version") { options.show_version = true }
+            p.on("-h", "--help", "Show this message") { options.show_help = true; options.help_text = p.to_s }
+          end
         end
 
+        if parser && parser.is_a?(OptionParser)
         begin
+          stage2_debug("[STAGE2_DEBUG] before parser.parse", err_io)
           parser.parse(@args)
+          stage2_debug("[STAGE2_DEBUG] parser.parse ok", err_io)
         rescue ex : OptionParser::InvalidOption
+          stage2_debug("[STAGE2_DEBUG] parser invalid option: #{ex.class} msg=#{ex.message.inspect}")
           err_io.puts "Error: #{ex.message}"
-          err_io.puts parser
+          err_io.puts(parser || parser_text)
           return 1
+        end
+        elsif parser.nil?
+          parser_text = parser_help
         end
 
         {% if flag?(:debug_hooks) %}
@@ -214,18 +331,21 @@ module CrystalV2
         {% end %}
 
         if options.show_version
+          stage2_debug("[STAGE2_DEBUG] options.show_version=true", err_io)
           out_io.puts "crystal_v2 #{VERSION}"
           return 0
         end
 
+        stage2_debug("[STAGE2_DEBUG] after show_version, show_help=#{options.show_help}", err_io)
         if options.show_help
+          stage2_debug("[STAGE2_DEBUG] showing help", err_io)
           out_io.puts options.help_text
           return 0
         end
 
         if mm_stack_threshold_invalid
           err_io.puts "Error: --mm-stack-threshold expects an integer"
-          err_io.puts parser
+          err_io.puts(parser || parser_text)
           return 1
         end
         # Inlined valid_mm_mode? check (workaround: private methods defined
@@ -233,7 +353,7 @@ module CrystalV2
         mm = options.mm_mode
         unless mm == "conservative" || mm == "balanced" || mm == "aggressive"
           err_io.puts "Error: Unknown --mm mode: #{options.mm_mode}"
-          err_io.puts parser
+          err_io.puts(parser || parser_text)
           return 1
         end
 
@@ -246,12 +366,27 @@ module CrystalV2
           return 1
         end
 
-        # Get input file from remaining args
-        input_file = @args.find { |a| !a.starts_with?("-") && a.ends_with?(".cr") }
-        unless input_file
+        # Get input file from remaining args (index-based walk to avoid iterator edge cases in stage2)
+        stage2_debug("[STAGE2_DEBUG] searching input file in args", err_io)
+        input_file = ""
+        i = 0
+        while i < @args.size
+          arg = @args[i]
+          if !arg.starts_with?("-") && arg.ends_with?(".cr")
+            input_file = arg
+            break
+          end
+          i += 1
+        end
+        if input_file.empty?
           err_io.puts "Error: No input file specified"
-          err_io.puts parser
+          err_io.puts(parser || parser_text)
           return 1
+        end
+        if input_file.size > 0
+          stage2_debug("[STAGE2_DEBUG] selected input raw size=#{input_file.size} last_byte=#{input_file.byte_at(input_file.size - 1)}", err_io)
+        else
+          stage2_debug("[STAGE2_DEBUG] selected input raw size=0", err_io)
         end
 
         options.input = input_file
@@ -261,6 +396,8 @@ module CrystalV2
           STDOUT.sync = true
           STDERR.sync = true
         end
+        stage2_debug("[STAGE2_DEBUG] selected input is non-empty", err_io)
+        stage2_debug("[STAGE2_DEBUG] selected input size=#{input_file.size}, output size=#{options.output.size}, check_only=#{options.check_only}", err_io)
 
         if options.check_only
           return run_check(input_file, options, out_io, err_io)
@@ -317,7 +454,9 @@ module CrystalV2
         source = File.read(path)
         lexer = Frontend::Lexer.new(source)
         parser = Frontend::Parser.new(lexer)
+        stage2_debug("[STAGE2_DEBUG] parse_file_recursive parse start", out_io)
         program = parser.parse_program
+        stage2_debug("[STAGE2_DEBUG] parse_file_recursive parse ok", out_io)
 
         if parser.diagnostics.empty?
           analyzer = Semantic::Analyzer.new(program)
@@ -365,6 +504,7 @@ module CrystalV2
       # Full compilation (driver.cr functionality)
       private def compile(input_file : String, options : Options, out_io : IO, err_io : IO) : Int32
         timings = {} of String => Float64
+        stage2_debug("[STAGE2_DEBUG] compile start", err_io)
         total_start = Time.instant
         @ast_cache_hits = 0
         @ast_cache_misses = 0
@@ -380,12 +520,15 @@ module CrystalV2
         # Step 1: Parse source (with require support)
         log(options, out_io, "\n[1/6] Parsing...")
         parse_start = Time.instant
+        stage2_debug("[STAGE2_DEBUG] parse step start", err_io)
 
+        stage2_debug("[STAGE2_DEBUG] loaded_files init", err_io)
         loaded_files = Set(String).new
         all_arenas = [] of Tuple(Frontend::ArenaLike, Array(Frontend::ExprId), String, String)
 
         # Load prelude first (unless --no-prelude)
         unless options.no_prelude
+          stage2_debug("[STAGE2_DEBUG] loading prelude branch", err_io)
           prelude_path = if options.prelude_file.empty?
                            File.join(STDLIB_PATH, "prelude.cr")
                          elsif !options.prelude_file.includes?(File::SEPARATOR) && !options.prelude_file.ends_with?(".cr")
@@ -395,18 +538,24 @@ module CrystalV2
                            options.prelude_file
                          end
           if File.exists?(prelude_path)
+            stage2_debug("[STAGE2_DEBUG] prelude exists", err_io)
             log(options, out_io, "  Loading prelude: #{prelude_path}")
             prelude_start = Time.instant
             parse_file_recursive(prelude_path, all_arenas, loaded_files, input_file, options, out_io)
+            stage2_debug("[STAGE2_DEBUG] prelude parsed", err_io)
             if options.stats
               timings["parse_prelude"] = (Time.instant - prelude_start).total_milliseconds
             end
           end
         end
+        stage2_debug("[STAGE2_DEBUG] prelude phase done", err_io)
 
         # Parse user's input file
         user_parse_start = Time.instant
+        stage2_debug("[STAGE2_DEBUG] parsing user file start", err_io)
         parse_file_recursive(input_file, all_arenas, loaded_files, input_file, options, out_io)
+        stage2_debug("[STAGE2_DEBUG] user file parsed", err_io)
+        stage2_debug("[STAGE2_DEBUG] arenas=#{all_arenas.size} loaded_files=#{loaded_files.size}", err_io)
         if options.stats
           timings["parse_user"] = (Time.instant - user_parse_start).total_milliseconds
           timings["parse_total"] = (Time.instant - parse_start).total_milliseconds
@@ -421,6 +570,7 @@ module CrystalV2
         total_exprs = 0
         all_arenas.each { |t| total_exprs += t[1].size }
         log(options, out_io, "  Files: #{all_arenas.size}, Expressions: #{total_exprs}")
+        stage2_debug("[STAGE2_DEBUG] lowering start (all_arenas=#{all_arenas.size})", err_io)
 
         link_libs = collect_link_libraries(all_arenas, options, out_io)
 
@@ -435,7 +585,7 @@ module CrystalV2
         pipeline_cache_file = ""
         ll_file = options.output + ".ll"
 
-        if options.pipeline_cache
+        if false && options.pipeline_cache
           pipeline_cache_dir = File.expand_path("tmp/pipeline_cache", Dir.current)
           FileUtils.mkdir_p(pipeline_cache_dir)
           digest = Digest::SHA256.new
@@ -1004,7 +1154,7 @@ module CrystalV2
         end
 
         # Save to pipeline cache on miss
-        if options.pipeline_cache && !pipeline_cache_file.empty?
+        if false && options.pipeline_cache && !pipeline_cache_file.empty?
           FileUtils.cp(ll_file, pipeline_cache_file)
           File.write(pipeline_cache_file + ".libs", options.link_libraries.join("\n") + "\n")
           @pipeline_cache_misses += 1
@@ -1033,7 +1183,12 @@ module CrystalV2
         emit_timings(options, out_io, timings, total_start)
         return 1
       rescue ex
-        err_io.puts "error: #{ex.message}"
+        if ENV.fetch("CRYSTAL2_STAGE2_DEBUG", "0") == "1"
+          err_io.puts "error: #{ex.class}: #{ex.message.inspect}"
+          err_io.puts ex.backtrace.join("\n")
+        else
+          err_io.puts "error: #{ex.message}"
+        end
         err_io.puts ex.backtrace.join("\n") if options.verbose
         emit_timings(options, out_io, timings, total_start)
         return 1
@@ -1279,7 +1434,13 @@ module CrystalV2
         options : Options,
         out_io : IO
       )
+        if file_path.size > 0
+          stage2_debug("[STAGE2_DEBUG] parse_file_recursive start file_path=#{file_path} size=#{file_path.size} first=#{file_path.byte_at(0)} last=#{file_path.byte_at(file_path.size - 1)}", out_io)
+        end
         abs_path = File.expand_path(file_path)
+        if abs_path.size > 0
+          stage2_debug("[STAGE2_DEBUG] parse_file_recursive expanded=#{abs_path} size=#{abs_path.size} first=#{abs_path.byte_at(0)} last=#{abs_path.byte_at(abs_path.size - 1)}", out_io)
+        end
         return if loaded.includes?(abs_path)
         loaded << abs_path
         log(options, out_io, "  Loading: #{abs_path}") if options.verbose
@@ -1326,7 +1487,9 @@ module CrystalV2
 
         lexer = Frontend::Lexer.new(source)
         parser = Frontend::Parser.new(lexer)
+        stage2_debug("[STAGE2_DEBUG] parse_file_recursive parse start abs_path=#{abs_path}", out_io)
         program = parser.parse_program
+        stage2_debug("[STAGE2_DEBUG] parse_file_recursive parse ok abs_path=#{abs_path}", out_io)
         arena = program.arena
         exprs = program.roots
 
@@ -1338,6 +1501,7 @@ module CrystalV2
         end
 
         results << {arena, exprs, abs_path, source}
+        stage2_debug("[STAGE2_DEBUG] parse_file_recursive appended abs_path=#{abs_path} results=#{results.size}", out_io)
 
         {% unless flag?(:bootstrap_fast) %}
         if options.ast_cache && arena.is_a?(Frontend::AstArena)
