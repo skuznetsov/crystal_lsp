@@ -16009,14 +16009,27 @@ module Crystal::HIR
                               else
                                 init_param_types
                               end
+        if env_has?("DEBUG_INIT_LOWER")
+          STDERR.puts "[INIT_LOWER] class=#{class_name} init_base=#{init_base_name} init_name=#{init_name}"
+          STDERR.puts "[INIT_LOWER]   init_param_types=#{init_param_types.map { |t| get_type_name_from_ref(t) }.join(", ")}"
+          STDERR.puts "[INIT_LOWER]   callsite_init_types=#{callsite_init_types.map { |t| get_type_name_from_ref(t) }.join(", ")}"
+          STDERR.puts "[INIT_LOWER]   has_def_name=#{@function_defs.has_key?(init_name)} has_def_base=#{@function_defs.has_key?(init_base_name)}"
+          STDERR.puts "[INIT_LOWER]   inside_lowering=#{inside_lowering?} state=#{function_state(init_name)}"
+        end
         remember_callsite_arg_types(init_name, callsite_init_types) unless callsite_init_types.empty?
         lower_function_if_needed(init_name)
+        if env_has?("DEBUG_INIT_LOWER")
+          STDERR.puts "[INIT_LOWER]   after_lower: has_func=#{@module.has_function?(init_name)} state=#{function_state(init_name)}"
+        end
         # If the init def wasn't lowered (e.g., pending callsite got consumed),
         # force a direct lower so the allocator call has a matching body.
         if !@module.has_function?(init_name) &&
            !function_state(init_name).in_progress? &&
            !function_state(init_name).completed?
           init_def = @function_defs[init_name]? || @function_defs[init_base_name]?
+          if env_has?("DEBUG_INIT_LOWER")
+            STDERR.puts "[INIT_LOWER]   fallback: init_def=#{!init_def.nil?} (name=#{init_def ? "found" : "nil"}, base=#{@function_defs.has_key?(init_base_name)})"
+          end
           if init_def
             init_arena = @function_def_arenas[init_name]? || @function_def_arenas[init_base_name]?
             init_arena ||= resolve_arena_for_def(init_def, @arena)
@@ -16029,6 +16042,9 @@ module Crystal::HIR
             init_class_info = @class_info[init_defining_class]? || class_info
             with_arena(init_arena) do
               lower_method(init_defining_class, init_class_info, init_def, callsite_types, nil, nil, init_name)
+            end
+            if env_has?("DEBUG_INIT_LOWER")
+              STDERR.puts "[INIT_LOWER]   after_direct_lower: has_func=#{@module.has_function?(init_name)}"
             end
           end
         end
@@ -18879,9 +18895,11 @@ module Crystal::HIR
       if has_block
         suffix = suffix.empty? ? "block" : "#{suffix}_block"
       end
-      if has_named_only
-        suffix = suffix.empty? ? "named" : "#{suffix}_named"
-      end
+      # NOTE: Do NOT add _named suffix for named-only params.
+      # Named-only is a calling convention detail at the call site,
+      # not a function identity difference. Adding a suffix causes
+      # name mismatches: the def is registered as "foo$Int32_named"
+      # but call sites resolve to "foo$Int32", resulting in dead-code stubs.
 
       suffix.empty? ? base_name : "#{base_name}$#{suffix}"
     end
