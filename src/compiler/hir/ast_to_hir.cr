@@ -16009,27 +16009,14 @@ module Crystal::HIR
                               else
                                 init_param_types
                               end
-        if env_has?("DEBUG_INIT_LOWER")
-          STDERR.puts "[INIT_LOWER] class=#{class_name} init_base=#{init_base_name} init_name=#{init_name}"
-          STDERR.puts "[INIT_LOWER]   init_param_types=#{init_param_types.map { |t| get_type_name_from_ref(t) }.join(", ")}"
-          STDERR.puts "[INIT_LOWER]   callsite_init_types=#{callsite_init_types.map { |t| get_type_name_from_ref(t) }.join(", ")}"
-          STDERR.puts "[INIT_LOWER]   has_def_name=#{@function_defs.has_key?(init_name)} has_def_base=#{@function_defs.has_key?(init_base_name)}"
-          STDERR.puts "[INIT_LOWER]   inside_lowering=#{inside_lowering?} state=#{function_state(init_name)}"
-        end
         remember_callsite_arg_types(init_name, callsite_init_types) unless callsite_init_types.empty?
         lower_function_if_needed(init_name)
-        if env_has?("DEBUG_INIT_LOWER")
-          STDERR.puts "[INIT_LOWER]   after_lower: has_func=#{@module.has_function?(init_name)} state=#{function_state(init_name)}"
-        end
         # If the init def wasn't lowered (e.g., pending callsite got consumed),
         # force a direct lower so the allocator call has a matching body.
         if !@module.has_function?(init_name) &&
            !function_state(init_name).in_progress? &&
            !function_state(init_name).completed?
           init_def = @function_defs[init_name]? || @function_defs[init_base_name]?
-          if env_has?("DEBUG_INIT_LOWER")
-            STDERR.puts "[INIT_LOWER]   fallback: init_def=#{!init_def.nil?} (name=#{init_def ? "found" : "nil"}, base=#{@function_defs.has_key?(init_base_name)})"
-          end
           if init_def
             init_arena = @function_def_arenas[init_name]? || @function_def_arenas[init_base_name]?
             init_arena ||= resolve_arena_for_def(init_def, @arena)
@@ -16042,9 +16029,6 @@ module Crystal::HIR
             init_class_info = @class_info[init_defining_class]? || class_info
             with_arena(init_arena) do
               lower_method(init_defining_class, init_class_info, init_def, callsite_types, nil, nil, init_name)
-            end
-            if env_has?("DEBUG_INIT_LOWER")
-              STDERR.puts "[INIT_LOWER]   after_direct_lower: has_func=#{@module.has_function?(init_name)}"
             end
           end
         end
@@ -44296,6 +44280,12 @@ module Crystal::HIR
           # When concrete callsite args are available for untyped params, preserve
           # specialization by remangling with full arg_types.
           if !arg_types.empty? && def_has_untyped_regular_param?(entry_def) && arg_types.any? { |t| t != TypeRef::VOID } && !has_unknown_arg_types
+            mangled_method_name = mangle_function_name(base_method_name, arg_types, has_block_call)
+          elsif splat_packed && (entry_name.ends_with?("_splat") || entry_name.ends_with?("$splat"))
+            # Splat functions must be monomorphized per tuple arity.
+            # Each different call arity produces a different Tuple type, so
+            # we create a per-arity specialization (e.g., join$Tuple(String, String)
+            # vs join$Tuple(String, String, String)).
             mangled_method_name = mangle_function_name(base_method_name, arg_types, has_block_call)
           else
             mangled_method_name = entry_name

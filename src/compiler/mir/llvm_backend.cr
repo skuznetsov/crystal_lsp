@@ -12516,6 +12516,38 @@ module Crystal::MIR
         end
       end
 
+      # Check if this is a Tuple — tuples store elements inline, no @size field.
+      # Return compile-time element count instead of reading from memory.
+      if array_value_type
+        tuple_type_ref = array_value_type
+        if array_value_type == TypeRef::POINTER
+          if alloc_elem = @alloc_element_types[inst.array_value]?
+            tuple_type_ref = alloc_elem
+          end
+        end
+        if union_desc = @module.get_union_descriptor(tuple_type_ref)
+          if tuple_variant = union_desc.variants.find { |v| (t = @module.type_registry.get(v.type_ref)) && t.kind.tuple? }
+            tuple_type_ref = tuple_variant.type_ref
+          end
+        end
+        if tuple_type = @module.type_registry.get(tuple_type_ref)
+          if tuple_type.kind.tuple?
+            element_count = tuple_type.element_types.try(&.size) || 0
+            emit "#{name} = add i32 0, #{element_count}"
+            @value_types[inst.id] = TypeRef::INT32
+            return
+          end
+        end
+        # Also handle bare Tuple struct
+        bare_type = @module.type_registry.get(array_value_type)
+        if bare_type && bare_type.name == "Tuple" && bare_type.kind.struct?
+          element_count = bare_type.element_types.try(&.size) || 0
+          emit "#{name} = add i32 0, #{element_count}"
+          @value_types[inst.id] = TypeRef::INT32
+          return
+        end
+      end
+
       # Get size from array struct field 1 (byte offset 4), matching Crystal class layout
       emit "%#{base_name}.size_ptr = getelementptr { i32, i32, [0 x i32] }, ptr #{array_ptr}, i32 0, i32 1"
       emit "#{name} = load i32, ptr %#{base_name}.size_ptr"
@@ -12714,6 +12746,80 @@ module Crystal::MIR
               emit "#{name} = load #{element_type}, ptr %#{base_name}.elem_ptr"
               @value_types[inst.id] = inst.element_type
               return
+            else
+              # Variable (runtime) index on a Tuple.
+              # Tuples store elements inline (not via a buf pointer like Array).
+              # Compute byte offsets for each element, then use a switch to select
+              # the right GEP based on the runtime index value.
+              elements = tuple_type.element_types
+              element_count = elements.try(&.size) || 0
+              if element_count > 0 && elements
+                # Compute byte offsets for each element
+                offsets = [] of UInt64
+                byte_offset = 0_u64
+                elements.each_with_index do |elem, i|
+                  is_inline = elem.kind.primitive? || elem.kind.enum?
+                  elem_size = if is_inline && elem.size > 0
+                                elem.size
+                              elsif elem.kind.union? && elem.size > 8
+                                elem.size.to_u64
+                              else
+                                8_u64
+                              end
+                  elem_align = if is_inline && elem.alignment > 0
+                                 elem.alignment
+                               else
+                                 8_u32
+                               end
+                  byte_offset = (byte_offset + elem_align - 1) & ~(elem_align.to_u64 - 1)
+                  offsets << byte_offset
+                  byte_offset += elem_size
+                end
+
+                # Check if all offsets are uniformly spaced (homogeneous elements).
+                # If so, use a simple multiply instead of a switch.
+                stride = offsets.size >= 2 ? offsets[1] - offsets[0] : (offsets.first? || 8_u64)
+                uniform = offsets.each_with_index.all? { |(off, i)| off == i.to_u64 * stride }
+
+                # Ensure index is i32
+                var_index = index
+                if var_index.starts_with?('%')
+                  idx_type = @value_types[inst.index_value]?
+                  if idx_type
+                    idx_llvm = @type_mapper.llvm_type(idx_type)
+                    if idx_llvm == "i64"
+                      emit "%#{base_name}.tidx = trunc i64 #{var_index} to i32"
+                      var_index = "%#{base_name}.tidx"
+                    elsif idx_llvm != "i32"
+                      emit "%#{base_name}.tidx = sext #{idx_llvm} #{var_index} to i32"
+                      var_index = "%#{base_name}.tidx"
+                    end
+                  end
+                end
+
+                if uniform
+                  # Uniform stride: byte_offset = index * stride
+                  emit "%#{base_name}.byte_off = mul i32 #{var_index}, #{stride}"
+                  emit "%#{base_name}.elem_ptr = getelementptr i8, ptr #{array_ptr}, i32 %#{base_name}.byte_off"
+                else
+                  # Heterogeneous: use cascading selects to map index → byte offset
+                  # sel0 = (idx==0) ? off_0 : off_last
+                  # sel1 = (idx==1) ? off_1 : sel0
+                  # sel2 = (idx==2) ? off_2 : sel1
+                  # ...
+                  default_off = offsets.last
+                  prev = "#{default_off}"
+                  offsets.each_with_index do |off, i|
+                    emit "%#{base_name}.cmp#{i} = icmp eq i32 #{var_index}, #{i}"
+                    emit "%#{base_name}.sel#{i} = select i1 %#{base_name}.cmp#{i}, i32 #{off}, i32 #{prev}"
+                    prev = "%#{base_name}.sel#{i}"
+                  end
+                  emit "%#{base_name}.elem_ptr = getelementptr i8, ptr #{array_ptr}, i32 #{prev}"
+                end
+                emit "#{name} = load #{element_type}, ptr %#{base_name}.elem_ptr"
+                @value_types[inst.id] = inst.element_type
+                return
+              end
             end
           end
         end
@@ -12729,16 +12835,23 @@ module Crystal::MIR
           if !index.starts_with?('%') && index != "null"
             idx_const = index.to_i?
           end
+          elem_size = case element_type
+                      when "i1", "i8" then 1
+                      when "i16"      then 2
+                      when "i32", "float" then 4
+                      when "i64", "double", "ptr" then 8
+                      else 8
+                      end
           if idx_const
-            elem_size = case element_type
-                        when "i1", "i8" then 1
-                        when "i16"      then 2
-                        when "i32", "float" then 4
-                        when "i64", "double", "ptr" then 8
-                        else 8
-                        end
             byte_offset = idx_const * elem_size
             emit "%#{base_name}.elem_ptr = getelementptr i8, ptr #{array_ptr}, i32 #{byte_offset}"
+            emit "#{name} = load #{element_type}, ptr %#{base_name}.elem_ptr"
+            @value_types[inst.id] = inst.element_type
+            return
+          else
+            # Variable index on bare Tuple: all elements assumed same size
+            emit "%#{base_name}.byte_off = mul i32 #{index}, #{elem_size}"
+            emit "%#{base_name}.elem_ptr = getelementptr i8, ptr #{array_ptr}, i32 %#{base_name}.byte_off"
             emit "#{name} = load #{element_type}, ptr %#{base_name}.elem_ptr"
             @value_types[inst.id] = inst.element_type
             return
