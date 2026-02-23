@@ -11950,19 +11950,31 @@ module Crystal::MIR
       end
       emit "%#{base_name}.ptr = alloca #{union_type}, align 8"
 
-      # 2. Store type_id discriminator
-      emit "%#{base_name}.type_id_ptr = getelementptr #{union_type}, ptr %#{base_name}.ptr, i32 0, i32 0"
-      emit "store i32 #{inst.variant_type_id}, ptr %#{base_name}.type_id_ptr"
-
-      # 3. Store value in payload (skip for void/nil types - they have no payload)
+      # Resolve value early so we can check for null before storing type_id
       val_type = @value_types[inst.value]? || TypeRef::POINTER
       val_type_str = @type_mapper.llvm_type(val_type)
       val = value_ref(inst.value)
+      val = "null" if val_type_str == "ptr" && val == "0"
+
+      # 2. Store type_id discriminator
+      # When wrapping a ptr into a nilable union, the ptr might be null (Nil).
+      # A prior union ABI extraction may have stripped the type_id, so we must
+      # check for null at runtime and set the correct Nil variant type_id.
+      emit "%#{base_name}.type_id_ptr = getelementptr #{union_type}, ptr %#{base_name}.ptr, i32 0, i32 0"
+      nil_vid = nil_variant_id_for_union_type(union_type)
+      if val_type_str == "ptr" && nil_vid != nil && inst.variant_type_id != nil_vid
+        emit "%#{base_name}.is_null = icmp eq ptr #{val}, null"
+        emit "%#{base_name}.type_id = select i1 %#{base_name}.is_null, i32 #{nil_vid}, i32 #{inst.variant_type_id}"
+        emit "store i32 %#{base_name}.type_id, ptr %#{base_name}.type_id_ptr"
+      else
+        emit "store i32 #{inst.variant_type_id}, ptr %#{base_name}.type_id_ptr"
+      end
+
+      # 3. Store value in payload (skip for void/nil types - they have no payload)
       emit "%#{base_name}.payload_ptr = getelementptr #{union_type}, ptr %#{base_name}.ptr, i32 0, i32 1"
       if val_type_str == "void"
         emit "store i8 0, ptr %#{base_name}.payload_ptr, align 4"
       else
-        val = "null" if val_type_str == "ptr" && val == "0"
         # For tuple types (stack-allocated value types stored via ptr), copy data instead of storing pointer.
         # Only tuples need this — other structs are heap-allocated so their pointer IS the value.
         variant_is_value_type = false
@@ -13436,8 +13448,24 @@ module Crystal::MIR
             if @current_return_type == "ptr"
               emit "ret ptr null"
             elsif @current_return_type.includes?(".union")
-              # Return a fully zeroed nil union (type_id=0 + zero payload).
-              emit "ret #{@current_return_type} zeroinitializer"
+              # Return a nil union. Use the correct Nil variant type_id
+              # (not always 0 — depends on variant ordering in the union).
+              nil_vid = nil_variant_id_for_union_type(@current_return_type)
+              if nil_vid && nil_vid == 0
+                emit "ret #{@current_return_type} zeroinitializer"
+              elsif nil_vid
+                c = @cond_counter
+                @cond_counter += 1
+                emit "%ret_nil#{c}.ptr = alloca #{@current_return_type}, align 8"
+                emit "store #{@current_return_type} zeroinitializer, ptr %ret_nil#{c}.ptr"
+                emit "%ret_nil#{c}.tid = getelementptr #{@current_return_type}, ptr %ret_nil#{c}.ptr, i32 0, i32 0"
+                emit "store i32 #{nil_vid}, ptr %ret_nil#{c}.tid"
+                emit "%ret_nil#{c}.val = load #{@current_return_type}, ptr %ret_nil#{c}.ptr"
+                emit "ret #{@current_return_type} %ret_nil#{c}.val"
+              else
+                # No Nil variant found — use zeroinitializer as fallback
+                emit "ret #{@current_return_type} zeroinitializer"
+              end
             else
               # Use 0.0 for float types, 0 for others
               if @current_return_type == "double" || @current_return_type == "float"
@@ -13457,8 +13485,22 @@ module Crystal::MIR
             end
 
             if @current_return_type.includes?(".union") && val_ref == "null"
-              # Preserve nil semantics when returning union values as pointers later.
-              emit "ret #{@current_return_type} zeroinitializer"
+              # Preserve nil semantics — use the correct Nil variant type_id.
+              nil_vid = nil_variant_id_for_union_type(@current_return_type)
+              if nil_vid && nil_vid == 0
+                emit "ret #{@current_return_type} zeroinitializer"
+              elsif nil_vid
+                c = @cond_counter
+                @cond_counter += 1
+                emit "%ret_nil#{c}.ptr = alloca #{@current_return_type}, align 8"
+                emit "store #{@current_return_type} zeroinitializer, ptr %ret_nil#{c}.ptr"
+                emit "%ret_nil#{c}.tid = getelementptr #{@current_return_type}, ptr %ret_nil#{c}.ptr, i32 0, i32 0"
+                emit "store i32 #{nil_vid}, ptr %ret_nil#{c}.tid"
+                emit "%ret_nil#{c}.val = load #{@current_return_type}, ptr %ret_nil#{c}.ptr"
+                emit "ret #{@current_return_type} %ret_nil#{c}.val"
+              else
+                emit "ret #{@current_return_type} zeroinitializer"
+              end
               return
             end
 
@@ -13469,19 +13511,22 @@ module Crystal::MIR
             emit "%ret#{c}.union_ptr = alloca #{@current_return_type}, align 8"
             emit "%ret#{c}.type_id_ptr = getelementptr #{@current_return_type}, ptr %ret#{c}.union_ptr, i32 0, i32 0"
 
-            # Check if this is a nil/void return - set type_id=0 (nil variant)
-            # Convention: Nil = variant 0 (type_id 0), non-nil = variant 1+ (type_id 1+)
-            # Must match union variant table and IsA check convention.
+            # Determine the correct Nil variant type_id for this union
+            # (not always 0 — depends on variant ordering).
+            ret_nil_vid = nil_variant_id_for_union_type(@current_return_type) || 0
+            ret_nonnil_vid = ret_nil_vid == 0 ? 1 : 0
+
             if val_llvm_type == "void" || val_ref == "null"
+              # Nil/void return — set correct Nil variant type_id
               emit "store #{@current_return_type} zeroinitializer, ptr %ret#{c}.union_ptr"
-              emit "store i32 0, ptr %ret#{c}.type_id_ptr"
+              emit "store i32 #{ret_nil_vid}, ptr %ret#{c}.type_id_ptr"
               # Don't store payload for nil
             elsif @phi_nil_incoming_blocks.has_key?(val) && val_llvm_type.starts_with?('i')
               # Value comes from a phi that has nil incoming - emit conditional type_id
               # When nil flows into an integer phi, it becomes 0, so check if val == 0
               # TODO: This heuristic assumes non-nil values are never 0, which may not always be true
               emit "%ret#{c}.is_nil = icmp eq #{val_llvm_type} #{val_ref}, 0"
-              emit "%ret#{c}.type_id = select i1 %ret#{c}.is_nil, i32 0, i32 1"
+              emit "%ret#{c}.type_id = select i1 %ret#{c}.is_nil, i32 #{ret_nil_vid}, i32 #{ret_nonnil_vid}"
               emit "store i32 %ret#{c}.type_id, ptr %ret#{c}.type_id_ptr"
               emit "%ret#{c}.payload_ptr = getelementptr #{@current_return_type}, ptr %ret#{c}.union_ptr, i32 0, i32 1"
               emit "store #{val_llvm_type} #{val_ref}, ptr %ret#{c}.payload_ptr, align 4"
@@ -13490,7 +13535,7 @@ module Crystal::MIR
               # (from a union Nil variant that was extracted by the ABI fix).
               # Emit a runtime null check to set the correct type_id.
               emit "%ret#{c}.is_null = icmp eq ptr #{val_ref}, null"
-              emit "%ret#{c}.type_id = select i1 %ret#{c}.is_null, i32 0, i32 1"
+              emit "%ret#{c}.type_id = select i1 %ret#{c}.is_null, i32 #{ret_nil_vid}, i32 #{ret_nonnil_vid}"
               emit "store i32 %ret#{c}.type_id, ptr %ret#{c}.type_id_ptr"
               emit "%ret#{c}.payload_ptr = getelementptr #{@current_return_type}, ptr %ret#{c}.union_ptr, i32 0, i32 1"
               # For tuple types, copy data instead of storing pointer
