@@ -1103,7 +1103,8 @@ module CrystalV2
           return unless @streaming
           # Pull tokens until we reach idx or EOF
           while @tokens.size <= idx
-            tok = @lexer.not_nil!.next_token
+            lex = @lexer.not_nil!
+            tok = lex.next_token
             if !@keep_trivia && (tok.kind == Token::Kind::Whitespace || tok.kind == Token::Kind::Comment)
               next
             end

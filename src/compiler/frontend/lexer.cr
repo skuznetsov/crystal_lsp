@@ -143,7 +143,7 @@ module CrystalV2
         end
 
         private def current_byte
-          @rope.bytes[@offset]
+          @rope.bytes.unsafe_fetch(@offset)
         end
 
         private def advance(count : Int32 = 1)
@@ -164,7 +164,7 @@ module CrystalV2
         private def peek_byte(offset : Int32 = 1) : UInt8?
           idx = @offset + offset
           return nil if idx >= @rope.size
-          @rope.bytes[idx]
+          @rope.bytes.unsafe_fetch(idx)
         end
 
         private def lex_whitespace
