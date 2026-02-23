@@ -53,6 +53,7 @@ module Crystal
     # Index: base_name (before "$") → first matching MIR function.
     # Eliminates O(N) linear scans during fuzzy call resolution.
     @function_by_base_name : Hash(String, Function) = {} of String => Function
+    @functions_by_base_name_all : Hash(String, Array(Function)) = {} of String => Array(Function)
 
     # Index: class_name → Array of functions belonging to that class.
     # Eliminates O(N) full-scan of all functions during virtual dispatch.
@@ -136,6 +137,7 @@ module Crystal
         dollar_idx = name.index('$')
         base = dollar_idx ? name[0, dollar_idx] : name
         @function_by_base_name[base] = func unless @function_by_base_name.has_key?(base)
+        (@functions_by_base_name_all[base] ||= [] of Function) << func
 
         # Index by class name (part before '#' or '.')
         hash_idx = name.index('#')
@@ -1410,8 +1412,24 @@ module Crystal
           dollar_idx = method_name_str.index('$')
           base_name = dollar_idx ? method_name_str[0, dollar_idx] : method_name_str
 
-          # O(1) lookup via pre-computed index
-          func = @function_by_base_name[base_name]?
+          # Try to find the best overload by matching the type suffix.
+          # The method_name_str is e.g. "IO#<<$Char" and we need to find
+          # a MIR function with base "IO#<<" and suffix "Char".
+          if all_overloads = @functions_by_base_name_all[base_name]?
+            # First try exact suffix match
+            suffix = dollar_idx ? method_name_str[(dollar_idx + 1)..] : nil
+            if suffix && !suffix.empty?
+              func = all_overloads.find { |f|
+                f_dollar = f.name.index('$')
+                f_dollar && f.name[(f_dollar + 1)..] == suffix
+              }
+            end
+            # Fall back to first overload if no suffix match
+            func = all_overloads.first? unless func
+          else
+            # O(1) lookup via pre-computed index (legacy fallback)
+            func = @function_by_base_name[base_name]?
+          end
         else
           # For unqualified method names with a receiver, try to qualify based on receiver type
           if call.receiver
