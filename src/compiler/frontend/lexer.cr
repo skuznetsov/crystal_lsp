@@ -762,7 +762,25 @@ module CrystalV2
 
           # Infer NumberKind if not explicitly specified
           if number_kind.nil?
-            number_kind = has_decimal ? NumberKind::F64 : NumberKind::I32
+            if has_decimal
+              number_kind = NumberKind::F64
+            else
+              # Check if value exceeds Int32 range → use Int64
+              num_str = String.new(@rope.bytes[from...@offset]).delete('_')
+              if num_str.starts_with?('-')
+                is_negative = true
+                abs_str = num_str[1..]
+              else
+                is_negative = false
+                abs_str = num_str
+              end
+              val = abs_str.to_i64?(strict: false)
+              if val && (val > Int32::MAX || (is_negative && val > (Int32::MAX.to_i64 + 1)))
+                number_kind = NumberKind::I64
+              else
+                number_kind = NumberKind::I32
+              end
+            end
           end
 
           Token.new(

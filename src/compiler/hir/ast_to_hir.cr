@@ -16156,6 +16156,40 @@ module Crystal::HIR
       end
 
       init_params = @init_params[class_name]? || [] of {String, TypeRef}
+
+      # When call_arg_types has fewer args than the primary init params, try to
+      # find an initialize overload that matches the actual call arg count/types.
+      # E.g., Time.new$Int64 should use Time#initialize(unsafe_utc_seconds : Int64)
+      # not Time#initialize(seconds, nanoseconds, location).
+      if init_params.size > 0 && call_arg_types.size < init_params.size
+        init_base = resolve_method_with_inheritance(class_name, "initialize")
+        if init_base
+          if alt_match = lookup_function_def_for_call(init_base, call_arg_types.size, false, call_arg_types, false, call_arg_types.size > 0)
+            alt_name, alt_def = alt_match
+            if alt_params = alt_def.params
+              alt_init_params = [] of {String, TypeRef}
+              param_idx = 0
+              alt_params.each do |p|
+                next if p.is_block || named_only_separator?(p)
+                break if param_idx >= call_arg_types.size
+                pname = p.name ? String.new(p.name.not_nil!) : "arg#{param_idx}"
+                pname = pname.lstrip('@')
+                ptype = if ta = p.type_annotation
+                           type_ref_for_name(String.new(ta))
+                         else
+                           call_arg_types[param_idx]
+                         end
+                alt_init_params << {pname, ptype}
+                param_idx += 1
+              end
+              if alt_init_params.size == call_arg_types.size
+                init_params = alt_init_params
+              end
+            end
+          end
+        end
+      end
+
       allocator_params = init_params.map { |param| {param[0], param[1]} }
       if allocator_params.empty?
         allocator_params = call_arg_types.map_with_index { |type_ref, idx| {"arg#{idx}", type_ref} }
@@ -20499,7 +20533,15 @@ module Crystal::HIR
         return primary_mangled_name if primary_available
 
         if entry = lookup_function_def_for_call(primary_base, arg_types.size, false, arg_types, false, false)
-          return entry[0]
+          found_name = entry[0]
+          # Don't use generic arity-based names (e.g., IO#<<$arity1) when we
+          # have a properly typed name from resolve_method_call. Arity names
+          # lose type information and cause wrong overload selection in MIR
+          # (e.g., IO#<<$arity1 → falls back to IO#<<$String instead of IO#<<$Char).
+          if found_name.includes?("$arity")
+            return resolved_method_name
+          end
+          return found_name
         end
       end
 
@@ -34146,14 +34188,7 @@ module Crystal::HIR
         base_method_name = class_name.empty? ? "<<" : "#{class_name}#<<"
         primary_mangled_name = mangle_function_name(base_method_name, [right_type])
         # Debug: log the resolution attempt
-        if env_has?("DEBUG_SHOVEL")
-          type_desc = @module.get_type_descriptor(left_type)
-          STDERR.puts "[SHOVEL] left_type=#{left_type.id}, type_desc=#{type_desc.try(&.name) || "nil"}, right_type=#{right_type.id}"
-        end
         method_name = resolve_method_call(ctx, left_id, "<<", [right_type], false)
-        if env_has?("DEBUG_SHOVEL")
-          STDERR.puts "[SHOVEL] resolved to: #{method_name}"
-        end
         # Convert .class type literal to String when used as << argument (e.g., io << self.class)
         # For static (monomorphized) methods, use compile-time class name string.
         # For dynamic dispatch (union types), will use __crystal_v2_type_name(type_id) in the future.
@@ -41547,6 +41582,13 @@ module Crystal::HIR
           full_method_name = "#{current}.#{method_name}"
           static_class_name = current
         end
+        # Bare `new()` inside constant initialization (e.g., Time::Location::UTC = new("UTC", ...))
+        # @current_class is set by deferred constant init processing but current_is_class
+        # is false because we're in __crystal_main, not a class method.
+        if full_method_name.nil? && method_name == "new" && (current = @current_class)
+          full_method_name = "#{current}.#{method_name}"
+          static_class_name = current
+        end
         # Handle qualified calls like Int32.to_s that may appear as IdentifierNodes
         # (e.g., from macro expansion or type-literal printing).
         if method_name.includes?('.')
@@ -41631,7 +41673,7 @@ module Crystal::HIR
           end
         end
 
-        if receiver_id.nil? && (current = @current_class)
+        if receiver_id.nil? && (current = @current_class) && static_class_name.nil?
           # Debug: track when @current_class is a short name
           if env_has?("DEBUG_SHORT_NAMES") && !current.includes?("::") &&
              (current == "Seek" || current == "Section" || current == "LoadCommand" || current == "Sequence")
@@ -48987,6 +49029,58 @@ module Crystal::HIR
       func_context = func_entry ? function_context_from_name(func_entry[0]) : nil
       def_arena = func_entry ? (@function_def_arenas[func_entry[0]]? || @arena) : @arena
 
+      # When looking up `new` and the found def doesn't match any named args,
+      # fall back to `initialize` overloads. In Crystal, `new` is auto-generated
+      # from `initialize`, but our compiler may only have the `initialize` def.
+      if func_def && !named_args.empty? && func_name.ends_with?("new")
+        has_match = false
+        if params = func_def.params
+          named_args.each do |na|
+            arg_name = String.new(na.name)
+            params.each do |p|
+              next if p.is_block || named_only_separator?(p)
+              ext = p.external_name ? String.new(p.external_name.not_nil!) : nil
+              pname = p.name ? String.new(p.name.not_nil!) : nil
+              if arg_name == ext || arg_name == pname
+                has_match = true
+                break
+              end
+            end
+            break if has_match
+          end
+        end
+        unless has_match
+          # Try initialize overloads
+          init_name = func_name.sub(/[.#]new$/, "#initialize")
+          init_entry = lookup_function_def_for_call(init_name, positional_args.size + named_args.size, has_block_call, nil, false, !named_args.empty?)
+          if init_entry
+            init_def = init_entry[1]
+            if init_params = init_def.params
+              init_match = false
+              named_args.each do |na|
+                arg_name = String.new(na.name)
+                init_params.each do |p|
+                  next if p.is_block || named_only_separator?(p)
+                  ext = p.external_name ? String.new(p.external_name.not_nil!) : nil
+                  pname = p.name ? String.new(p.name.not_nil!) : nil
+                  if arg_name == ext || arg_name == pname
+                    init_match = true
+                    break
+                  end
+                end
+                break if init_match
+              end
+              if init_match
+                func_entry = init_entry
+                func_def = init_def
+                func_context = function_context_from_name(init_entry[0])
+                def_arena = @function_def_arenas[init_entry[0]]? || @arena
+              end
+            end
+          end
+        end
+      end
+
       if func_def && (params = func_def.params)
         param_call_names = [] of String
         param_local_names = [] of String
@@ -49201,6 +49295,32 @@ module Crystal::HIR
       def_arena = @function_def_arenas[func_entry[0]]? || @arena
       params = func_def.params
       return args unless params
+
+      # When dealing with .new calls, the found def may be a different overload
+      # than what reorder_named_args resolved (e.g., Time.new(time, location) vs
+      # Time#initialize(*, unsafe_utc_seconds: Int64)). If an initialize overload
+      # exists that accepts exactly args.size params, the args are already complete
+      # and no defaults should be added from this (possibly wrong) def.
+      if func_name.ends_with?(".new") || func_name.ends_with?("#new")
+        owner_for_init = method_owner(func_name)
+        if owner_for_init
+          init_base_for_da = resolve_method_with_inheritance(owner_for_init, "initialize")
+          if init_base_for_da
+            init_match_da = lookup_function_def_for_call(init_base_for_da, args.size, has_block_call, arg_types, false, call_has_named_args)
+            if init_match_da
+              init_def_da = init_match_da[1]
+              if init_params_da = init_def_da.params
+                real_param_count = 0
+                init_params_da.each do |p|
+                  next if p.is_block || named_only_separator?(p)
+                  real_param_count += 1
+                end
+                return args if real_param_count == args.size
+              end
+            end
+          end
+        end
+      end
 
       param_local_names = [] of String
       param_defaults = [] of ExprId?

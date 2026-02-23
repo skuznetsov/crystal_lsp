@@ -352,6 +352,7 @@ module Crystal::MIR
     @module : Module
     @type_mapper : LLVMTypeMapper
     @output : IO::Memory
+    @toplevel_output : IO::Memory? = nil  # Route top-level defs here during block buffering
     @indent : Int32
     @value_names : Hash(ValueId, String)
     @block_names : Hash(BlockId, String)
@@ -702,6 +703,14 @@ module Crystal::MIR
       # Apply filter
       functions_to_emit = functions_to_emit.reject { |func| skip_ids.includes?(func.id) }
 
+      # Pre-compute return types for ALL module functions.  This fixes a class of bugs
+      # where the MIR return_type is NIL (void) for methods that actually return values
+      # (e.g., String? getters encoded as Nil).  By scanning Return instructions we detect
+      # functions that have return values and override the type to "ptr" before emission
+      # begins.  Both emit_function (function definition) and emit_call (call sites) then
+      # see the corrected type, keeping LLVM IR consistent.
+      precompute_function_return_types(@module.functions) unless ENV["CRYSTAL_V2_NO_PRECOMPUTE"]?
+
       total_funcs = functions_to_emit.size
       STDERR.puts "  [LLVM] emitting #{total_funcs} functions (#{@module.functions.size} total, #{@module.functions.size - total_funcs} pruned)..." if @progress
       functions_to_emit.each_with_index do |func, idx|
@@ -712,6 +721,70 @@ module Crystal::MIR
           emit_function(func)
         rescue ex : IndexError
           raise "Index error in emit_function for: #{func.name}\n#{ex.message}"
+        end
+      end
+
+      # Second pass: iteratively emit functions discovered by call sites during the first pass.
+      # After emitting reachable functions, @called_crystal_functions may contain functions
+      # that exist in the module but weren't reached by the RTA name-resolution.
+      # Common issue: call sites use short names (e.g. "HIR$CCAstToHir$Dnew$$...")
+      # while module functions use full names (e.g. "Crystal$CCHIR$CCAstToHir$Dnew$$...").
+      # Iterate until no new functions are discovered.
+      if @reachability
+        func_by_mangled = {} of String => Function
+        # Suffix index: for "Crystal$CCHIR$CCFoo" also index "$CCHIR$CCFoo", "HIR$CCFoo", "$CCFoo"
+        func_by_suffix = {} of String => Function
+        @module.functions.each do |f|
+          mangled = mangle_function_name(f.name)
+          func_by_mangled[mangled] = f
+          # Index all $CC-separated suffixes for namespace-prefix matching
+          search_from = 0
+          while cc_pos = mangled.index("$CC", search_from)
+            suffix = mangled[cc_pos + 3..]
+            func_by_suffix[suffix] = f unless func_by_suffix.has_key?(suffix)
+            search_from = cc_pos + 3
+          end
+        end
+
+        max_passes = 20
+        pass = 0
+        loop do
+          pass += 1
+          break if pass > max_passes
+
+          newly_found = [] of Function
+          @called_crystal_functions.each do |name, _|
+            next if @emitted_functions.includes?(name)
+            next if @undefined_externs.has_key?(name)
+            # Try to find this function in the module
+            # 1. Exact mangled match
+            func = func_by_mangled[name]?
+            # 2. Suffix match: call site "HIR$CCAstToHir$Dnew" matches module "Crystal$CCHIR$CCAstToHir$Dnew"
+            unless func
+              func = func_by_suffix[name]?
+            end
+            # 3. Strip arg suffix and try suffix match on base
+            unless func
+              if dd_idx = name.index("$$")
+                base = name[0, dd_idx]
+                func = func_by_suffix[base]?
+              end
+            end
+            if func
+              next if skip_ids.includes?(func.id)
+              newly_found << func
+            end
+          end
+
+          break if newly_found.empty?
+          STDERR.puts "  [LLVM] Pass #{pass + 1}: emitting #{newly_found.size} additional functions..." if @progress
+          newly_found.each do |func|
+            begin
+              emit_function(func)
+            rescue ex : IndexError
+              # Skip functions that fail during emission
+            end
+          end
         end
       end
 
@@ -748,6 +821,62 @@ module Crystal::MIR
       @output.to_s
     end
 
+    # Pre-compute return types for all functions.
+    # Detects functions whose MIR return_type is NIL (→ "void") but which actually
+    # return values (have Return instructions with a value).  For those functions the
+    # return type is corrected to "ptr", ensuring that both the function definition
+    # and call sites use a consistent non-void return type.
+    #
+    # When MIR return_type is NIL the function typically returns a nilable or union
+    # type — these are always boxed as pointers.  We always use "ptr" rather than
+    # the defining instruction's scalar type (i32/i64) to avoid cross-block slot
+    # type mismatches downstream.
+    #
+    # Two-phase approach:
+    # 1. Scan all functions' Return instructions.  For void-returning functions that
+    #    have Return(value), set return type to "ptr".
+    # 2. Scan all call sites.  If a call instruction has a non-void type for the
+    #    callee that is still void, upgrade to "ptr".
+    private def precompute_function_return_types(functions : Array(Function))
+      # Build function lookup by ID for Call instruction resolution
+      func_by_id = {} of FunctionId => Function
+      functions.each { |f| func_by_id[f.id] = f }
+
+      # Phase 1: Record the declared return type for every function.
+      # We do NOT blindly upgrade void→ptr here because Crystal methods
+      # nearly always have Return(value) (last expression) even when void.
+      functions.each do |func|
+        mangled = mangle_function_name(func.name)
+        return_type = @type_mapper.llvm_type(func.return_type)
+        @emitted_function_return_types[mangled] = return_type
+      end
+
+      # Phase 2: Scan call sites (Call only, not ExternCall) for better type info.
+      # When a Call instruction's type is non-void and the callee is still void,
+      # upgrade to "ptr".
+      if !ENV["CRYSTAL_V2_NO_PRECOMPUTE_P2"]?
+        functions.each do |func|
+          func.blocks.each do |block|
+            block.instructions.each do |inst|
+              if inst.is_a?(Call)
+                callee_func = func_by_id[inst.callee]?
+                next unless callee_func
+                callee_mangled = mangle_function_name(callee_func.name)
+                call_type = @type_mapper.llvm_type(inst.type)
+                next if call_type == "void"
+                # Only upgrade void → ptr; don't downgrade existing non-void types
+                existing = @emitted_function_return_types[callee_mangled]?
+                if existing == "void"
+                  @emitted_function_return_types[callee_mangled] = "ptr"
+                  STDERR.puts "  [PRECOMPUTE-P2] #{callee_mangled}: void → ptr (call-site type: #{call_type})" if ENV["CRYSTAL_V2_PRECOMPUTE_DEBUG"]?
+                end
+              end
+            end
+          end
+        end
+      end
+    end
+
     # Compute reachable functions from main via transitive call graph
     private def compute_reachable_functions : Set(FunctionId)
       reachable = Set(FunctionId).new
@@ -769,11 +898,21 @@ module Crystal::MIR
       # Build function lookup by ID and by name
       func_by_id = {} of FunctionId => Function
       func_by_name = {} of String => Function
+      # Suffix index: handles namespace prefix mismatches where call sites use short
+      # names (e.g. "HIR::AstToHir.new") but module has full names ("Crystal::HIR::AstToHir.new")
+      func_by_suffix = {} of String => Function
       @module.functions.each do |f|
         func_by_id[f.id] = f
         mangled = @type_mapper.mangle_name(f.name)
         func_by_name[mangled] = f
         func_by_name[f.name] = f
+        # Index all $CC-separated (::) suffixes for namespace-prefix matching
+        search_from = 0
+        while cc_pos = mangled.index("$CC", search_from)
+          suffix = mangled[cc_pos + 3..]
+          func_by_suffix[suffix] = f unless func_by_suffix.has_key?(suffix)
+          search_from = cc_pos + 3
+        end
       end
 
       # Traverse call graph
@@ -799,8 +938,11 @@ module Crystal::MIR
               # Try to find matching function by exact name or mangled name
               matching_func = func_by_name[mangled_extern]? || func_by_name[extern_name]?
 
-              # Note: Disabled suffix matching as it causes false positives
-              # Functions should be found by exact name match only
+              # Suffix match: handles namespace prefix mismatches
+              # e.g. call to "HIR$CCAstToHir$Dnew" matches "Crystal$CCHIR$CCAstToHir$Dnew"
+              unless matching_func
+                matching_func = func_by_suffix[mangled_extern]? || func_by_suffix[extern_name]?
+              end
 
               if matching_func
                 unless reachable.includes?(matching_func.id)
@@ -887,6 +1029,17 @@ module Crystal::MIR
         next if name.starts_with?(runtime_prefix)
         already_declared << name
 
+        # If the function also appears in @called_crystal_functions AND is a
+        # V2-mangled Crystal function (contains $), prefer the call-site type info
+        # (which has correct return type and arg types) over the ExternCall info
+        # (which may have void return for unused results).
+        # External library functions (GC, libc, etc.) must stay as declare.
+        call_info = name.includes?("$") ? @called_crystal_functions[name]? : nil
+        if call_info
+          better_ret = call_info[0]
+          return_type = better_ret if return_type == "void" && better_ret != "void"
+        end
+
         # LLVM intrinsics need proper signatures (not varargs)
         if name.starts_with?("llvm.")
           # Normalize old typed pointer format (p0i8) to opaque pointer format (p0) for LLVM 15+
@@ -895,6 +1048,10 @@ module Crystal::MIR
             .gsub("p0i8", "p0")
           decl = emit_llvm_intrinsic_declaration(normalized_name)
           emit_raw "#{decl}\n" if decl
+        elsif call_info
+          # Use call-site info for proper arg types and return type
+          stub = emit_dead_code_stub(name, call_info[0], call_info[1], call_info[2])
+          emit_raw stub if stub
         elsif stub = emit_dead_code_stub(name, return_type)
           # Emit a stub function body for methods on impossible receivers
           # (Nil, Unknown, wrong-type dispatch). These arise from type inference
@@ -915,8 +1072,28 @@ module Crystal::MIR
           end
           emit_raw "}\n"
         else
-          # Declare with varargs to accept any arguments
-          emit_raw "declare #{return_type} @#{name}(...)\n"
+          # External library functions (GC, libc, system) must stay as 'declare' so
+          # the linker resolves them to the real implementations. Only V2-mangled
+          # Crystal functions (those containing $) get stub bodies.
+          if name.includes?("$")
+            ret_stmt = case return_type
+                       when "void"   then "ret void"
+                       when "ptr"    then "ret ptr null"
+                       when "i1"     then "ret i1 0"
+                       when "i8"     then "ret i8 0"
+                       when "i16"    then "ret i16 0"
+                       when "i32"    then "ret i32 0"
+                       when "i64"    then "ret i64 0"
+                       when "float"  then "ret float 0.0"
+                       when "double" then "ret double 0.0"
+                       else               "ret #{return_type} zeroinitializer"
+                       end
+            emit_raw "define #{return_type} @#{name}(...) {\n"
+            emit_raw "  #{ret_stmt}\n"
+            emit_raw "}\n"
+          else
+            emit_raw "declare #{return_type} @#{name}(...)\n"
+          end
         end
       end
     end
@@ -1101,6 +1278,25 @@ module Crystal::MIR
       end
 
       return nil unless is_nil_method || is_unknown_method || is_wrong_receiver || is_v2_mangled
+
+      # For .new constructors returning ptr, allocate memory instead of returning null.
+      # This prevents null-pointer crashes in the bootstrap when allocator functions
+      # weren't generated by HIR but are called at runtime.
+      is_constructor = name.includes?("$Dnew")
+      if is_constructor && return_type == "ptr"
+        param_list = if !arg_types.empty?
+                       arg_types.map_with_index { |t, i| "#{t} %arg#{i}" }.join(", ")
+                     else
+                       (0...arg_count).map { |i| "ptr %arg#{i}" }.join(", ")
+                     end
+        # Allocate 512 bytes (zero-initialized) — enough for most Crystal objects.
+        # Not properly initialized, but prevents null-ptr crashes during bootstrap.
+        return "; allocator stub for: #{name}\n" \
+               "define ptr @#{name}(#{param_list}) {\n" \
+               "  %mem = call ptr @calloc(i64 1, i64 512)\n" \
+               "  ret ptr %mem\n" \
+               "}\n"
+      end
 
       # Build a minimal function body that returns a zero/default value
       ret_stmt = case return_type
@@ -1744,6 +1940,17 @@ module Crystal::MIR
       @output << s
     end
 
+    # Emit text to the top-level output buffer. During block buffering,
+    # this routes to the main output to avoid nesting definitions inside functions.
+    # When not buffering, this is the same as emit_raw.
+    private def emit_toplevel(s : String)
+      if tl = @toplevel_output
+        tl << s
+      else
+        @output << s
+      end
+    end
+
     private def record_emitted_type(name : String, llvm_type : String)
       return unless name.starts_with?('%')
       @emitted_value_types[name] = llvm_type
@@ -2261,6 +2468,116 @@ module Crystal::MIR
       emit_raw "declare i32 @close(i32)\n"
       emit_raw "declare ptr @getcwd(ptr, i64)\n"
       emit_raw "declare ptr @realpath(ptr, ptr)\n"
+      # Boehm GC library functions
+      emit_raw "declare void @GC_init()\n"
+      emit_raw "declare ptr @GC_malloc(i64)\n"
+      emit_raw "declare ptr @GC_malloc_atomic(i64)\n"
+      emit_raw "declare ptr @GC_realloc(ptr, i64)\n"
+      emit_raw "declare void @GC_set_handle_fork(i32)\n"
+      emit_raw "declare void @GC_set_start_callback(ptr)\n"
+      emit_raw "declare void @GC_set_warn_proc(ptr)\n"
+      emit_raw "declare ptr @GC_get_push_other_roots()\n"
+      emit_raw "declare void @GC_set_push_other_roots(ptr)\n"
+      emit_raw "declare void @GC_push_all_eager(ptr, ptr)\n"
+      emit_raw "declare i32 @GC_get_my_stackbottom(ptr)\n"
+      # macOS/POSIX system functions used by Crystal stdlib
+      emit_raw "declare i32 @_NSGetExecutablePath(ptr, ptr)\n"
+      emit_raw "declare i32 @stat(ptr, ptr)\n"
+      emit_raw "declare i32 @stat$INODE64(ptr, ptr)\n"
+      emit_raw "declare i32 @lstat(ptr, ptr)\n"
+      emit_raw "declare i32 @lstat$INODE64(ptr, ptr)\n"
+      emit_raw "declare i32 @fstat(i32, ptr)\n"
+      emit_raw "declare i32 @fstat$INODE64(i32, ptr)\n"
+      emit_raw "declare ptr @readdir(ptr)\n"
+      emit_raw "declare ptr @opendir(ptr)\n"
+      emit_raw "declare i32 @closedir(ptr)\n"
+      emit_raw "declare i32 @mkdir(ptr, i32)\n"
+      emit_raw "declare i32 @rmdir(ptr)\n"
+      emit_raw "declare i32 @unlink(ptr)\n"
+      emit_raw "declare i32 @rename(ptr, ptr)\n"
+      emit_raw "declare i32 @access(ptr, i32)\n"
+      emit_raw "declare i32 @chmod(ptr, i32)\n"
+      emit_raw "declare i32 @chown(ptr, i32, i32)\n"
+      emit_raw "declare ptr @getenv(ptr)\n"
+      emit_raw "declare i32 @setenv(ptr, ptr, i32)\n"
+      emit_raw "declare i32 @unsetenv(ptr)\n"
+      emit_raw "declare i32 @isatty(i32)\n"
+      emit_raw "declare i32 @ioctl(i32, i64, ...)\n"
+      emit_raw "declare i32 @fcntl(i32, i32, ...)\n"
+      emit_raw "declare i32 @pipe(ptr)\n"
+      emit_raw "declare i32 @dup2(i32, i32)\n"
+      emit_raw "declare i32 @ttyname_r(i32, ptr, i64)\n"
+      emit_raw "declare i64 @sysconf(i32)\n"
+      emit_raw "declare i32 @posix_spawn(ptr, ptr, ptr, ptr, ptr, ptr)\n"
+      emit_raw "declare i32 @posix_spawn_file_actions_init(ptr)\n"
+      emit_raw "declare i32 @posix_spawn_file_actions_destroy(ptr)\n"
+      emit_raw "declare i32 @posix_spawn_file_actions_addclose(ptr, i32)\n"
+      emit_raw "declare i32 @posix_spawn_file_actions_adddup2(ptr, i32, i32)\n"
+      emit_raw "declare i32 @posix_spawn_file_actions_addopen(ptr, i32, ptr, i32, i32)\n"
+      emit_raw "declare i32 @posix_spawnattr_init(ptr)\n"
+      emit_raw "declare i32 @posix_spawnattr_destroy(ptr)\n"
+      emit_raw "declare i32 @posix_spawnattr_setflags(ptr, i16)\n"
+      emit_raw "declare i32 @waitpid(i32, ptr, i32)\n"
+      emit_raw "declare i32 @kill(i32, i32)\n"
+      emit_raw "declare i32 @getpid()\n"
+      emit_raw "declare i32 @sigaction(i32, ptr, ptr)\n"
+      emit_raw "declare i32 @sigemptyset(ptr)\n"
+      emit_raw "declare i32 @sigfillset(ptr)\n"
+      emit_raw "declare i32 @sigaddset(ptr, i32)\n"
+      emit_raw "declare i64 @time(ptr)\n"
+      emit_raw "declare ptr @localtime_r(ptr, ptr)\n"
+      emit_raw "declare ptr @gmtime_r(ptr, ptr)\n"
+      emit_raw "declare i64 @mktime(ptr)\n"
+      emit_raw "declare i64 @timegm(ptr)\n"
+      emit_raw "declare void @tzset()\n"
+      emit_raw "declare i64 @strftime(ptr, i64, ptr, ptr)\n"
+      emit_raw "declare i32 @gettimeofday(ptr, ptr)\n"
+      emit_raw "declare i32 @clock_gettime(i32, ptr)\n"
+      emit_raw "declare i32 @nanosleep(ptr, ptr)\n"
+      emit_raw "declare ptr @mmap(ptr, i64, i32, i32, i32, i64)\n"
+      emit_raw "declare i32 @munmap(ptr, i64)\n"
+      emit_raw "declare i32 @mprotect(ptr, i64, i32)\n"
+      emit_raw "declare i32 @kqueue()\n"
+      emit_raw "declare i32 @kevent(i32, ptr, i32, ptr, i32, ptr)\n"
+      emit_raw "declare ptr @dlopen(ptr, i32)\n"
+      emit_raw "declare ptr @dlsym(ptr, ptr)\n"
+      emit_raw "declare i32 @dlclose(ptr)\n"
+      emit_raw "declare ptr @dlerror()\n"
+      emit_raw "declare i32 @pthread_create(ptr, ptr, ptr, ptr)\n"
+      emit_raw "declare i32 @pthread_join(ptr, ptr)\n"
+      emit_raw "declare ptr @pthread_self()\n"
+      emit_raw "declare i32 @pthread_sigmask(i32, ptr, ptr)\n"
+      emit_raw "declare i32 @pthread_attr_init(ptr)\n"
+      emit_raw "declare i32 @pthread_attr_destroy(ptr)\n"
+      emit_raw "declare i32 @pthread_attr_setstack(ptr, ptr, i64)\n"
+      emit_raw "declare i32 @pthread_attr_getstacksize(ptr, ptr)\n"
+      emit_raw "declare i32 @gethostname(ptr, i64)\n"
+      emit_raw "declare i32 @socket(i32, i32, i32)\n"
+      emit_raw "declare i32 @connect(i32, ptr, i32)\n"
+      emit_raw "declare i32 @bind(i32, ptr, i32)\n"
+      emit_raw "declare i32 @listen(i32, i32)\n"
+      emit_raw "declare i32 @accept(i32, ptr, ptr)\n"
+      emit_raw "declare i32 @setsockopt(i32, i32, i32, ptr, i32)\n"
+      emit_raw "declare i32 @getsockopt(i32, i32, i32, ptr, ptr)\n"
+      emit_raw "declare i64 @send(i32, ptr, i64, i32)\n"
+      emit_raw "declare i64 @recv(i32, ptr, i64, i32)\n"
+      emit_raw "declare i32 @shutdown(i32, i32)\n"
+      emit_raw "declare i32 @getaddrinfo(ptr, ptr, ptr, ptr)\n"
+      emit_raw "declare void @freeaddrinfo(ptr)\n"
+      emit_raw "declare ptr @gai_strerror(i32)\n"
+      emit_raw "declare ptr @strerror(ptr)\n"
+      emit_raw "declare i32 @memset(ptr, i32, i64)\n"
+      emit_raw "declare ptr @memcpy(ptr, ptr, i64)\n"
+      emit_raw "declare ptr @memmove(ptr, ptr, i64)\n"
+      emit_raw "declare i32 @strncmp(ptr, ptr, i64)\n"
+      emit_raw "declare i64 @fwrite(ptr, i64, i64, ptr)\n"
+      emit_raw "declare i32 @fflush(ptr)\n"
+      emit_raw "declare i32 @fclose(ptr)\n"
+      emit_raw "declare ptr @fopen(ptr, ptr)\n"
+      emit_raw "declare i32 @fileno(ptr)\n"
+      emit_raw "declare ptr @fdopen(i32, ptr)\n"
+      emit_raw "declare i32 @getrlimit(i32, ptr)\n"
+      emit_raw "declare i32 @setrlimit(i32, ptr)\n"
       # Mark C stdlib functions as emitted so emit_undefined_extern_declarations
       # and emit_missing_crystal_function_stubs skip them (prevents duplicate declarations)
       @emitted_functions << "strlen" << "strcpy" << "strcat" << "sprintf" << "strstr"
@@ -2269,6 +2586,36 @@ module Crystal::MIR
       @emitted_functions << "malloc" << "calloc" << "realloc" << "free"
       @emitted_functions << "printf" << "puts" << "gets" << "fgets" << "fputs"
       @emitted_functions << "exit" << "perror" << "dprintf"
+      @emitted_functions << "GC_init" << "GC_malloc" << "GC_malloc_atomic" << "GC_realloc"
+      @emitted_functions << "GC_set_handle_fork" << "GC_set_start_callback" << "GC_set_warn_proc"
+      @emitted_functions << "GC_get_push_other_roots" << "GC_set_push_other_roots"
+      @emitted_functions << "GC_push_all_eager" << "GC_get_my_stackbottom"
+      @emitted_functions << "_NSGetExecutablePath"
+      @emitted_functions << "stat" << "stat$INODE64" << "lstat" << "lstat$INODE64"
+      @emitted_functions << "fstat" << "fstat$INODE64"
+      @emitted_functions << "readdir" << "opendir" << "closedir"
+      @emitted_functions << "mkdir" << "rmdir" << "unlink" << "rename" << "access" << "chmod" << "chown"
+      @emitted_functions << "getenv" << "setenv" << "unsetenv"
+      @emitted_functions << "isatty" << "ioctl" << "fcntl" << "pipe" << "dup2" << "ttyname_r" << "sysconf"
+      @emitted_functions << "posix_spawn" << "posix_spawn_file_actions_init" << "posix_spawn_file_actions_destroy"
+      @emitted_functions << "posix_spawn_file_actions_addclose" << "posix_spawn_file_actions_adddup2"
+      @emitted_functions << "posix_spawn_file_actions_addopen"
+      @emitted_functions << "posix_spawnattr_init" << "posix_spawnattr_destroy" << "posix_spawnattr_setflags"
+      @emitted_functions << "waitpid" << "kill" << "getpid"
+      @emitted_functions << "sigaction" << "sigemptyset" << "sigfillset" << "sigaddset"
+      @emitted_functions << "time" << "localtime_r" << "gmtime_r" << "mktime" << "timegm" << "tzset"
+      @emitted_functions << "strftime" << "gettimeofday" << "clock_gettime" << "nanosleep"
+      @emitted_functions << "mmap" << "munmap" << "mprotect"
+      @emitted_functions << "kqueue" << "kevent"
+      @emitted_functions << "dlopen" << "dlsym" << "dlclose" << "dlerror"
+      @emitted_functions << "pthread_create" << "pthread_join" << "pthread_self" << "pthread_sigmask"
+      @emitted_functions << "pthread_attr_init" << "pthread_attr_destroy" << "pthread_attr_setstack" << "pthread_attr_getstacksize"
+      @emitted_functions << "gethostname" << "socket" << "connect" << "bind" << "listen" << "accept"
+      @emitted_functions << "setsockopt" << "getsockopt" << "send" << "recv" << "shutdown"
+      @emitted_functions << "getaddrinfo" << "freeaddrinfo" << "gai_strerror"
+      @emitted_functions << "strerror" << "memset" << "memcpy" << "memmove" << "strncmp"
+      @emitted_functions << "fwrite" << "fflush" << "fclose" << "fopen" << "fileno" << "fdopen"
+      @emitted_functions << "getrlimit" << "setrlimit"
       emit_raw "\n"
 
       # String#includes?(String) — compares byte data via strstr
@@ -5646,8 +5993,8 @@ module Crystal::MIR
         # otherwise the final "missing function stubs" pass may emit a duplicate
         # definition for an already-defined function.
         mangled_name = mangle_function_name(func.name)
-        return_type = @type_mapper.llvm_type(func.return_type)
         @emitted_functions << mangled_name
+        return_type = @type_mapper.llvm_type(func.return_type)
         @emitted_function_return_types[mangled_name] = return_type
         return
       end
@@ -5709,11 +6056,21 @@ module Crystal::MIR
         "#{llvm_type} %#{llvm_name}"
       end
       return_type = @type_mapper.llvm_type(func.return_type)
+      # Use pre-computed return type if available.  This corrects void→ptr for methods
+      # whose MIR return_type is NIL but which actually return values (detected by
+      # scanning Return instructions in precompute_function_return_types).
+      mangled_name = @current_func_name
+      if return_type == "void"
+        if precomputed = @emitted_function_return_types[mangled_name]?
+          if precomputed != "void"
+            return_type = precomputed
+          end
+        end
+      end
       @current_return_type = return_type  # Store for terminator emission
       @current_return_type_ref = func.return_type
       # @current_func_name already set above before prepass
 
-      mangled_name = @current_func_name
       @current_func_params = func.params
       @current_slab_frame = func.slab_frame
 
@@ -5813,10 +6170,6 @@ module Crystal::MIR
       if @current_slab_frame
         emit_raw "  call void @__crystal_v2_slab_frame_push()\n"
       end
-      # Jump to first user block
-      if first_block = func.blocks.first?
-        emit_raw "  br label %#{@block_names[first_block.id]}\n"
-      end
 
       # TSan: emit function entry in first block
       @tsan_needs_func_entry = @emit_tsan
@@ -5838,8 +6191,58 @@ module Crystal::MIR
       # in predecessor blocks for primitive-typed phi nodes (e.g., phi i32 from union slot).
       prepass_collect_phi_union_payload_extracts(func)
 
+      # Buffer block emission to a temporary output so we can extract non-entry-block
+      # allocas and hoist them to the entry block. LLVM treats allocas in non-entry blocks
+      # as dynamic stack allocations that grow the stack on every execution and are only
+      # freed on function return. Inside loops this causes unbounded stack growth.
+      saved_output = @output
+      @output = IO::Memory.new
+      # Route top-level definitions (stubs, declarations) to the main output
+      # during block emission. Without this, they'd end up nested inside the
+      # current function which is invalid LLVM IR.
+      @toplevel_output = saved_output
+
       func.blocks.each do |block|
         emit_block(block, func)
+      end
+
+      block_ir = @output.to_s
+      @output = saved_output
+      @toplevel_output = nil
+
+      # Extract alloca instructions from block IR and hoist to entry block.
+      # These are scratch allocas for union operations (store→GEP→load patterns)
+      # that are safe to allocate once in the entry block and reuse.
+      hoisted_allocas = [] of String
+      block_ir.each_line do |line|
+        stripped = line.lstrip
+        if stripped.includes?("= alloca ") && !stripped.starts_with?(';')
+          hoisted_allocas << line
+        end
+      end
+
+      # Emit hoisted allocas in entry block (before the br)
+      hoisted_allocas.each do |alloca_line|
+        emit_raw alloca_line
+        emit_raw "\n"
+      end
+
+      # Jump to first user block
+      if first_block = func.blocks.first?
+        emit_raw "  br label %#{@block_names[first_block.id]}\n"
+      end
+
+      # Emit block IR with allocas replaced by no-ops (comments).
+      # The alloca SSA names are now defined in the entry block.
+      block_ir.each_line do |line|
+        stripped = line.lstrip
+        if stripped.includes?("= alloca ") && !stripped.starts_with?(';')
+          # Replace with comment — the alloca is now in the entry block
+          emit_raw "  ; hoisted: #{stripped}\n"
+        else
+          emit_raw line
+          emit_raw "\n"
+        end
       end
 
       emit_raw "}\n\n"
@@ -6315,26 +6718,32 @@ module Crystal::MIR
                 effective_type = func_ret_type
               end
             else
-              # Fallback: apply type suffix heuristics for method names with type suffixes
-              if suffix = suffix_after_dollar(extern_name)
-                if !suffix.includes?('_')
-                  case suffix
-                  when "UInt64", "Int64"
-                    effective_type = TypeRef::INT64
-                  when "UInt32", "Int32"
-                    effective_type = TypeRef::INT32
-                  when "UInt16", "Int16"
-                    effective_type = TypeRef::INT16
-                  when "UInt8", "Int8"
-                    effective_type = TypeRef::INT8
-                  end
-                end
-              end
               if effective_type == TypeRef::VOID
                 # Default fallback: use inst.type
                 extern_type_str = @type_mapper.llvm_type(inst.type)
                 if extern_type_str == "void"
                   effective_type = TypeRef::VOID
+                end
+              end
+            end
+            # Apply type suffix heuristics AFTER function matching to ensure
+            # prepass and emission agree on return types.  The emission path
+            # unconditionally applies suffix overrides, so the prepass must too.
+            # This fixes slot-type / call-type mismatches for primitive-returning
+            # methods on struct types (e.g., Array(UInt32)#unsafe_fetch$Int32
+            # where the MIR function returns a struct type mapped to ptr, but
+            # the real LLVM return type is i32).
+            if suffix2 = suffix_after_dollar(extern_name)
+              if !suffix2.includes?('_')
+                case suffix2
+                when "UInt64", "Int64"
+                  effective_type = TypeRef::INT64
+                when "UInt32", "Int32"
+                  effective_type = TypeRef::INT32
+                when "UInt16", "Int16"
+                  effective_type = TypeRef::INT16
+                when "UInt8", "Int8"
+                  effective_type = TypeRef::INT8
                 end
               end
             end
@@ -7475,10 +7884,12 @@ module Crystal::MIR
       return unless val_type
       llvm_type = @type_mapper.llvm_type(val_type)
       llvm_type = "ptr" if llvm_type == "void"
-      # Check actual emitted type — the value may have been cast to a different union
-      # type by fromslot code, so the type mapper result may not match reality.
+      # Check actual emitted type — the value may have been emitted with a different
+      # type than what @value_types reports (e.g., ExternCall returns i32 for
+      # Array(UInt32)#unsafe_fetch but MIR type says ptr for struct UInt32).
+      # Use the actual emitted type so the slot store can detect and handle mismatches.
       if actual = @emitted_value_types[name]?
-        llvm_type = actual if actual.includes?(".union") && llvm_type.includes?(".union") && actual != llvm_type
+        llvm_type = actual if actual != llvm_type
       end
       slot_llvm_type = @cross_block_slot_types[inst_id]?
       # Guard: if MIR reuses value IDs, skip store when types are completely incompatible
@@ -10523,6 +10934,78 @@ module Crystal::MIR
         # Strip the leading self arg regardless of its LLVM type.
         call_args = inst.args[1..]
       end
+      # Struct argument expansion: when the callee has more params than the call has args,
+      # a struct-typed argument may need to be expanded into its individual fields.
+      # Example: call has (Timespec_ptr, Location_ptr) but callee expects (i64, i32, ptr)
+      # because the auto-generated .new took the inner overload's flattened signature.
+      # Detect by finding a ptr arg where the callee expects consecutive scalar params.
+      if callee_func && call_args.size < callee_func.params.size
+        param_count = callee_func.params.size
+        extra_params = param_count - call_args.size
+        expanded = [] of ValueId
+        param_idx = 0
+        call_args.each do |arg_id|
+          break if param_idx >= param_count
+          arg_type_ref = @value_types[arg_id]? || TypeRef::POINTER
+          arg_llvm = @type_mapper.llvm_type(arg_type_ref)
+          param_llvm = @type_mapper.llvm_type(callee_func.params[param_idx].type)
+
+          # Check if arg is a ptr but callee expects a scalar — struct expansion needed.
+          # The ptr arg points to inline struct data whose fields match consecutive params.
+          if arg_llvm == "ptr" && param_llvm != "ptr" && !param_llvm.includes?(".union") &&
+             param_idx + extra_params < param_count
+            # Count how many consecutive scalar params could come from this struct.
+            # Stop when we hit a ptr or union param (that's the next real arg).
+            n_fields = 1
+            while param_idx + n_fields < param_count
+              next_param_llvm = @type_mapper.llvm_type(callee_func.params[param_idx + n_fields].type)
+              break if next_param_llvm == "ptr" || next_param_llvm.includes?(".union")
+              n_fields += 1
+            end
+            # Only expand if this absorbs the extra params gap
+            if n_fields > 1 && n_fields <= extra_params + 1
+              base_val = value_ref(arg_id)
+              byte_offset = 0
+              n_fields.times do |fi|
+                field_llvm = @type_mapper.llvm_type(callee_func.params[param_idx].type)
+                c = @cond_counter
+                @cond_counter += 1
+                field_ptr_name = "%struct_expand.#{c}.ptr"
+                field_val_name = "%struct_expand.#{c}.val"
+                emit "#{field_ptr_name} = getelementptr i8, ptr #{base_val}, i32 #{byte_offset}"
+                if field_llvm == "void"
+                  # Can't load void; use ptr null as placeholder for Nil-typed fields
+                  field_llvm = "ptr"
+                  emit "#{field_val_name} = inttoptr i64 0 to ptr"
+                else
+                  emit "#{field_val_name} = load #{field_llvm}, ptr #{field_ptr_name}"
+                end
+                synthetic_id = ValueId.new(900000_u32 + c.to_u32)
+                @value_names[synthetic_id] = field_val_name.lstrip('%')
+                @value_types[synthetic_id] = callee_func.params[param_idx].type
+                record_emitted_type(field_val_name, field_llvm)
+                expanded << synthetic_id
+                # Advance byte offset by field size
+                byte_offset += case field_llvm
+                               when "i8"  then 1
+                               when "i16" then 2
+                               when "i32" then 4
+                               when "i64" then 8
+                               when "float" then 4
+                               when "double" then 8
+                               else 8
+                               end
+                param_idx += 1
+              end
+              next  # Don't add the original struct arg
+            end
+          end
+          expanded << arg_id
+          param_idx += 1
+        end
+        call_args = expanded if expanded.size > call_args.size
+      end
+
       # Pad missing args with default values or zero/null to avoid UB from arg count mismatch.
       # This handles cases where callers omit default parameters (e.g., .new with defaults).
       pad_args_extra = nil.as(Array(String)?)
@@ -10569,7 +11052,30 @@ module Crystal::MIR
                     else
                       case param_llvm
                       when "i1"    then "i1 0"
-                      when "ptr"   then "ptr null"
+                      when "ptr"
+                        # Check if this is an Array type - create empty array instead of null
+                        # This handles default parameters like `transitions = [] of T`
+                        param_type_info = @module.type_registry.get(param.type)
+                        if param_type_info && param_type_info.name.starts_with?("Array(")
+                          # Create an inline empty array: {type_id, size=0, cap=0, offset=0, buf=null}
+                          c = @cond_counter
+                          @cond_counter += 1
+                          type_id = param.type.id.to_i32
+                          emit "%empty_arr.#{c} = call ptr @__crystal_v2_malloc64(i64 24)"
+                          emit "%empty_arr.#{c}.tid = getelementptr i8, ptr %empty_arr.#{c}, i32 0"
+                          emit "store i32 #{type_id}, ptr %empty_arr.#{c}.tid"
+                          emit "%empty_arr.#{c}.sz = getelementptr i8, ptr %empty_arr.#{c}, i32 4"
+                          emit "store i32 0, ptr %empty_arr.#{c}.sz"
+                          emit "%empty_arr.#{c}.cap = getelementptr i8, ptr %empty_arr.#{c}, i32 8"
+                          emit "store i32 0, ptr %empty_arr.#{c}.cap"
+                          emit "%empty_arr.#{c}.off = getelementptr i8, ptr %empty_arr.#{c}, i32 12"
+                          emit "store i32 0, ptr %empty_arr.#{c}.off"
+                          emit "%empty_arr.#{c}.buf = getelementptr i8, ptr %empty_arr.#{c}, i32 16"
+                          emit "store ptr null, ptr %empty_arr.#{c}.buf"
+                          "ptr %empty_arr.#{c}"
+                        else
+                          "ptr null"
+                        end
                       when "void"  then "ptr null"
                       when .includes?(".union") then "#{param_llvm} zeroinitializer"
                       when "float" then "float 0.0"
@@ -11904,8 +12410,10 @@ module Crystal::MIR
       elsif fixed_sig
         sig_prefix = fixed_sig.join(", ")
         emit "#{name} = call #{return_type} (#{sig_prefix}, ...) @#{mangled_extern_name}(#{args})"
+        record_emitted_type(name, return_type)
       else
         emit "#{name} = call #{return_type} @#{mangled_extern_name}(#{args})"
+        record_emitted_type(name, return_type)
         # Track type for downstream use (if not already set by pattern matching above)
         unless @value_types.has_key?(inst.id)
           actual_type = case return_type
@@ -12634,6 +13142,22 @@ module Crystal::MIR
 
       # Store elements into the heap buffer
       original_element_type = @type_mapper.llvm_type(inst.element_type)
+      # If element type is void, try to infer from actual element values.
+      # This handles cases like [Zone::UTC] where the constant reference type
+      # is not resolved during type inference but the actual value is a ptr.
+      if original_element_type == "void" && inst.elements.size > 0
+        inst.elements.each do |eid|
+          if et = @value_types[eid]?
+            inferred = @type_mapper.llvm_type(et)
+            if inferred != "void"
+              original_element_type = inferred
+              break
+            end
+          end
+        end
+        # Fallback: if all elements are still void, use ptr (class instances are ptrs)
+        original_element_type = "ptr" if original_element_type == "void"
+      end
       inst.elements.each_with_index do |elem_id, idx|
         emit "%#{base_name}.elem#{idx}_ptr = getelementptr #{element_type}, ptr %#{base_name}.buf, i32 #{idx}"
         # If original element was void, store null; otherwise store actual value
@@ -13792,6 +14316,8 @@ module Crystal::MIR
       @value_types[inst.id] = TypeRef::POINTER
       # Emit a bitcast to materialize it as a register (needed for phi/cross-block use)
       emit "#{name} = bitcast ptr @#{mangled} to ptr"
+      # Track as called function so iterative RTA pass emits it
+      @called_crystal_functions[mangled] ||= {"ptr", 0, [] of String}
     end
 
     private def emit_terminator(term : Terminator)
