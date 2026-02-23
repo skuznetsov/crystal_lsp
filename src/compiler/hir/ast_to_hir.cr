@@ -9361,6 +9361,11 @@ module Crystal::HIR
           end
         elsif callee_node.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode)
           method_name = String.new(callee_node.name)
+          # Bare `new(...)` call inside a class always returns the class type.
+          # This handles constant definitions like UNIX_EPOCH = new(unsafe_utc_seconds: ...).
+          if method_name == "new" && self_type_name
+            return type_ref_for_name(self_type_name)
+          end
           if self_type_name
             base = resolve_method_with_inheritance(self_type_name, method_name) || "#{self_type_name}##{method_name}"
             if ret_type = @function_base_return_types[base]?
@@ -33761,6 +33766,17 @@ module Crystal::HIR
         return param.id
       end
 
+      # Check closure cells: block procs that reference ivars capture `self`
+      # through closure cells since they don't have it as a parameter.
+      if ref_cell = @closure_ref_cells["self"]?
+        cell_class, cell_name, cell_type = ref_cell
+        get = ClassVarGet.new(ctx.next_id, cell_type, cell_class, cell_name)
+        ctx.emit(get)
+        ctx.register_type(get.id, cell_type)
+        ctx.register_local("self", get.id)
+        return get.id
+      end
+
       # Create implicit self parameter
       local_type = TypeRef::VOID
       if @current_method_is_class
@@ -57319,6 +57335,9 @@ module Crystal::HIR
         if eb = node.else_branch
           eb.each { |e| collect_proc_body_ident_walk(e, names) }
         end
+      when CrystalV2::Compiler::Frontend::InstanceVarNode
+        # Block body references an instance variable → needs `self` captured
+        names.add("self")
       end
     end
 
@@ -57426,7 +57445,6 @@ module Crystal::HIR
       captures = [] of {String, ValueId, TypeRef} # {name, parent_value_id, type}
       referenced_names.each do |name|
         next if proc_param_names.includes?(name)
-        next if name == "self"
         if parent_value_id = parent_locals[name]?
           parent_type = ctx.type_of(parent_value_id)
           next if parent_type == TypeRef::VOID
@@ -57635,7 +57653,6 @@ module Crystal::HIR
       captures = [] of {String, ValueId, TypeRef}
       referenced_names.each do |name|
         next if block_param_names.includes?(name)
-        next if name == "self"
         if parent_value_id = parent_locals[name]?
           parent_type = ctx.type_of(parent_value_id)
           next if parent_type == TypeRef::VOID
