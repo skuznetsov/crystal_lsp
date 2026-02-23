@@ -6176,3 +6176,41 @@ crystal build -Ddebug_hooks src/crystal_v2.cr -o bin/crystal_v2 --no-debug
     - stack includes:
       - `CrystalV2::Compiler::CLI#compile`
       - `__crystal_main`
+
+- **2026-02-23 (handoff): localized static `Type[...]` misresolution in `lower_index`**
+  - New minimal repro:
+    - `regression_tests/lexer_next_token_repro.cr` (stage1-built binary segfaults)
+    - `/tmp/bytes_index_probe2.cr`:
+      ```crystal
+      arr = Bytes[1u8, 2u8]
+      x = arr[0]
+      puts "nil=#{x.nil?}"
+      puts "slice=#{x.is_a?(Slice(UInt8))}"
+      puts "u8=#{x.is_a?(UInt8)}"
+      ```
+  - Baseline evidence:
+    - `crystal build /tmp/bytes_index_probe2.cr -o /tmp/bytes_index_probe2_cr && scripts/run_safe.sh /tmp/bytes_index_probe2_cr 10 512`
+      - stdout: `nil=false`, `slice=false`, `u8=true`
+    - `/tmp/stage1_dbg_fix2 /tmp/bytes_index_probe2.cr -o /tmp/bytes_index_probe2_stage1 && scripts/run_safe.sh /tmp/bytes_index_probe2_stage1 10 512`
+      - stdout: `nil=false`, `slice=false`, `u8=false`
+  - HIR evidence (wrong owner selected):
+    - `--emit hir` for repro contains:
+      - `call Slice(UInt64)#[]$Int32_Int32(%3597, %3598)`
+      - followed by `arr` typed as `Slice(UInt64)`.
+    - expected owner is `Slice(UInt8).[]` for `Bytes[...]`.
+  - Extra trace (`DEBUG_INDEX_CALL=1`) confirms owner drift:
+    - `recv=Slice(UInt8) arg_types=UInt8,UInt8 resolved=Slice(UInt64)#[]$Int32_Int32 ...`
+  - In-progress local experiments (not stabilized yet):
+    - Added static `Type[...]` path in `lower_index` and `Identifier(Bytes)` normalization.
+    - This forces static dispatch path (`static=Slice(UInt8)`), but selected target still drifts
+      to `Slice(UInt64)#[]...` and resulting repro can crash at runtime.
+  - Likely root cause:
+    - `lookup_function_def_for_call` overload filtering is not strict enough for explicit owner
+      on bracket calls (`Type[...]`), and allows cross-owner generic drift (`Slice(UInt8)` -> `Slice(UInt64)`).
+  - Next action for Claude:
+    - tighten owner matching in `lookup_function_def_for_call` when callsite owner is explicit generic
+      and static (`Owner.[]`), disallow fallback to `owner#[]` / different owner generic.
+    - then re-run:
+      - `/tmp/stage1_dbg_* /tmp/bytes_index_probe2.cr -o ... && scripts/run_safe.sh ...`
+      - `/tmp/stage1_dbg_* regression_tests/lexer_next_token_repro.cr -o ... && scripts/run_safe.sh ...`
+      - `regression_tests/stage2_bootstrap_minimal_repro.sh /tmp/stage2_*`
