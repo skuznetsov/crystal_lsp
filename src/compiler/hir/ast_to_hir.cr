@@ -16086,6 +16086,43 @@ module Crystal::HIR
       return if overload_name == base_name
       return if @module.has_function?(overload_name)
 
+      # If an explicit def self.new with splat params exists that matches
+      # these call args, skip allocator generation — the explicit method
+      # body should be lowered instead. This handles cases like
+      # Path.new(name, *parts) which has custom logic (new(name).join(*parts))
+      # that can't be captured by the standard allocate+initialize pattern.
+      # BUT: only skip if the call args DON'T match the initialize signature.
+      # E.g., Path.new(String, Path::Kind) should still use the allocator
+      # because it exactly matches initialize(name, kind).
+      if matched = lookup_function_def_for_call(base_name, call_arg_types.size, false, call_arg_types)
+        matched_name, matched_def = matched
+        if matched_def.params
+          has_splat = matched_def.params.not_nil!.any? { |p| p.is_splat }
+          if has_splat
+            # Check if the call args match the initialize params (allocator pattern).
+            # If they do, use the allocator. If not, the explicit .new body is needed.
+            init_params = @init_params[class_name]? || [] of {String, TypeRef}
+            init_matches = false
+            if init_params.size > 0 && call_arg_types.size <= init_params.size
+              init_matches = true
+              call_arg_types.each_with_index do |call_type, idx|
+                next if call_type == TypeRef::VOID
+                break if idx >= init_params.size
+                init_type = init_params[idx][1]
+                next if init_type == TypeRef::VOID
+                if call_type != init_type && !needs_union_coercion?(call_type, init_type)
+                  init_matches = false
+                  break
+                end
+              end
+            end
+            unless init_matches
+              return
+            end
+          end
+        end
+      end
+
       # When auto-allocator init params have a hard type mismatch with call args
       # (e.g., File.new(path, mode) where init expects fd:Int but call passes String),
       # generate a custom allocator that calls __crystal_v2_file_open to get the fd
@@ -21212,6 +21249,51 @@ module Crystal::HIR
                 score += 1
               end
             end
+            # When param is a module type (Enumerable, Indexable, etc.) and
+            # arg is a Tuple/Array, give a bonus for the typed constraint.
+            # This ensures join(parts : Enumerable) beats join(part) (untyped)
+            # when a Tuple is passed.
+            if param_desc = @module.get_type_descriptor(param_type)
+              if param_desc.kind.module? || module_like_type_name?(param_desc.name)
+                collection_names = {"Enumerable", "Indexable", "Iterable"}
+                is_collection = collection_names.includes?(param_desc.name) ||
+                                collection_names.any? { |c| param_desc.name.starts_with?("#{c}(") }
+                if is_collection
+                  if ad = @module.get_type_descriptor(arg_type)
+                    if ad.kind.tuple? || ad.name.starts_with?("Tuple(") || ad.name.starts_with?("Array(")
+                      score += 1
+                    end
+                  end
+                end
+              end
+            end
+          else
+            # Module-like type annotations (Enumerable, Indexable, etc.)
+            # don't have concrete type refs. Give a score bonus when the
+            # arg is a Tuple/Array passed to an Enumerable/Indexable param,
+            # since Tuple IS a collection type and should prefer the
+            # collection overload over an untyped param. Don't give the
+            # bonus for scalar types like String (which includes
+            # Enumerable(Char) but shouldn't match collection overloads).
+            is_module_like = module_like_type_name?(resolved_name)
+            if is_module_like
+              collection_module = resolved_name == "Enumerable" ||
+                                  resolved_name == "Indexable" ||
+                                  resolved_name.starts_with?("Enumerable(") ||
+                                  resolved_name.starts_with?("Indexable(")
+              if collection_module
+                arg_desc = @module.get_type_descriptor(arg_type)
+                is_tuple = arg_desc && (arg_desc.kind.tuple? || arg_desc.name.starts_with?("Tuple(") ||
+                   arg_desc.name.starts_with?("Array("))
+                if is_tuple
+                  score += 1
+                end
+
+
+              end
+            end
+
+
           end
         end
 
@@ -21390,6 +21472,42 @@ module Crystal::HIR
         end
       end
       false
+    end
+
+    # Check if module `owner` includes module `target` (directly or transitively).
+    # Used to determine module specificity: Indexable includes Enumerable,
+    # so Indexable is more specific than Enumerable for method resolution.
+    # Returns the position (0-based) of `owner` in the receiver's included module chain.
+    # Lower position = more specific. Returns Int32::MAX if not found.
+    # Used to break ties in block method resolution: prefer Indexable over Enumerable.
+    private def module_specificity_for_receiver(receiver_base : String, owner : String) : Int32
+      return 0 if receiver_base == owner
+      if mods = @class_included_modules[receiver_base]?
+        mods.each_with_index do |mod, i|
+          mod_base = strip_generic_args(mod)
+          return i + 1 if mod_base == owner
+        end
+      end
+      # Check parent class chain
+      current = receiver_base
+      depth = 0
+      while current
+        info = @class_info[current]?
+        break unless info
+        parent = info.parent_name
+        if parent
+          depth += 1
+          return depth * 1000 if strip_generic_args(parent) == owner
+          if parent_mods = @class_included_modules[strip_generic_args(parent)]?
+            parent_mods.each_with_index do |mod, i|
+              mod_base = strip_generic_args(mod)
+              return depth * 1000 + i + 1 if mod_base == owner
+            end
+          end
+        end
+        current = parent
+      end
+      Int32::MAX
     end
 
     # Fallback for yield-function inlining when receiver type is unknown (often due to untyped params).
@@ -41821,6 +41939,69 @@ module Crystal::HIR
             when "max"   then return lower_array_max_intrinsic(ctx, recv_id)
             end
           end
+          # Tuple#max / Tuple#min (EARLY): inline as pairwise comparison.
+          # Must intercept before method resolution to avoid Enumerable#max → max_by chain.
+          recv_type_ref = ctx.type_of(recv_id)
+          recv_type_nm = get_type_name_from_ref(recv_type_ref)
+          if recv_type_nm.starts_with?("Tuple")
+            tup_sz = tuple_size_from_type_name(recv_type_nm)
+            if tup_sz && tup_sz > 0 && (method_name == "max" || method_name == "min")
+              elem_type = tuple_element_type(recv_type_ref, 0) || TypeRef::INT32
+              # Start with first element
+              idx0 = Literal.new(ctx.next_id, TypeRef::INT32, 0_i64)
+              ctx.emit(idx0)
+              ctx.register_type(idx0.id, TypeRef::INT32)
+              best = IndexGet.new(ctx.next_id, elem_type, recv_id, idx0.id)
+              ctx.emit(best)
+              ctx.register_type(best.id, elem_type)
+              best_id = best.id
+              # Compare with remaining elements using if/then/else + Phi
+              (1...tup_sz).each do |i|
+                idx_lit = Literal.new(ctx.next_id, TypeRef::INT32, i.to_i64)
+                ctx.emit(idx_lit)
+                ctx.register_type(idx_lit.id, TypeRef::INT32)
+                next_elem = IndexGet.new(ctx.next_id, elem_type, recv_id, idx_lit.id)
+                ctx.emit(next_elem)
+                ctx.register_type(next_elem.id, elem_type)
+                cmp_op = method_name == "max" ? BinaryOp::Gt : BinaryOp::Lt
+                cmp = BinaryOperation.new(ctx.next_id, TypeRef::BOOL, cmp_op, next_elem.id, best_id)
+                ctx.emit(cmp)
+                ctx.register_type(cmp.id, TypeRef::BOOL)
+                then_block = ctx.create_block
+                else_block = ctx.create_block
+                merge_block = ctx.create_block
+                ctx.terminate(Branch.new(cmp.id, then_block, else_block))
+                ctx.current_block = then_block
+                ctx.terminate(Jump.new(merge_block))
+                ctx.current_block = else_block
+                ctx.terminate(Jump.new(merge_block))
+                ctx.current_block = merge_block
+                phi = Phi.new(ctx.next_id, elem_type)
+                phi.add_incoming(then_block, next_elem.id)
+                phi.add_incoming(else_block, best_id)
+                ctx.emit(phi)
+                ctx.register_type(phi.id, elem_type)
+                best_id = phi.id
+              end
+              return best_id
+            end
+          end
+        end
+
+        # Path#dirname (EARLY): intercept before method resolution to avoid broken stdlib.
+        if method_name == "dirname" && call_args.empty? && block_expr.nil? && block_pass_expr.nil?
+          recv_id = lower_expr(ctx, obj_expr)
+          recv_type_ref = ctx.type_of(recv_id)
+          recv_type_nm = get_type_name_from_ref(recv_type_ref)
+          if recv_type_nm == "Path" || recv_type_nm.starts_with?("Path")
+            path_name_field = FieldGet.new(ctx.next_id, TypeRef::STRING, recv_id, "@name", 0)
+            ctx.emit(path_name_field)
+            ctx.register_type(path_name_field.id, TypeRef::STRING)
+            ext_call = ExternCall.new(ctx.next_id, TypeRef::STRING, "__crystal_v2_file_dirname", [path_name_field.id])
+            ctx.emit(ext_call)
+            ctx.register_type(ext_call.id, TypeRef::STRING)
+            return ext_call.id
+          end
         end
 
         # Array#join(separator) (EARLY): intercept before method resolution.
@@ -42575,6 +42756,41 @@ module Crystal::HIR
             ctx.register_type(ext_call.id, TypeRef::VOID)
             return ext_call.id
           end
+          # File.dirname(String) intercept → runtime helper
+          if class_name_str == "File" && method_name == "dirname" && call_args.size >= 1
+            arg_id = with_arena(call_arena) { lower_expr(ctx, call_args[0]) }
+            # If arg is a Path, extract .to_s from it (Path wraps a String @name)
+            arg_type = ctx.type_of(arg_id)
+            arg_type_name = get_type_name_from_ref(arg_type)
+            if arg_type_name == "Path" || arg_type_name.starts_with?("Path")
+              # Get @name field from Path
+              path_name_ivar = FieldGet.new(ctx.next_id, TypeRef::STRING, arg_id, "@name", 0)
+              ctx.emit(path_name_ivar)
+              ctx.register_type(path_name_ivar.id, TypeRef::STRING)
+              arg_id = path_name_ivar.id
+            end
+            ext_call = ExternCall.new(ctx.next_id, TypeRef::STRING, "__crystal_v2_file_dirname", [arg_id])
+            ctx.emit(ext_call)
+            ctx.register_type(ext_call.id, TypeRef::STRING)
+            return ext_call.id
+          end
+          # File.expand_path(path) / File.expand_path(path, dir) intercept → runtime helper
+          if class_name_str == "File" && method_name == "expand_path" && call_args.size >= 1
+            path_id = with_arena(call_arena) { lower_expr(ctx, call_args[0]) }
+            dir_id = if call_args.size >= 2
+                       with_arena(call_arena) { lower_expr(ctx, call_args[1]) }
+                     else
+                       # Empty string as dir → will use getcwd
+                       empty_lit = Literal.new(ctx.next_id, TypeRef::STRING, "")
+                       ctx.emit(empty_lit)
+                       ctx.register_type(empty_lit.id, TypeRef::STRING)
+                       empty_lit.id
+                     end
+            ext_call = ExternCall.new(ctx.next_id, TypeRef::STRING, "__crystal_v2_file_expand_path", [path_id, dir_id])
+            ctx.emit(ext_call)
+            ctx.register_type(ext_call.id, TypeRef::STRING)
+            return ext_call.id
+          end
           # Math.pw2ceil(v) → v.next_power_of_two (inline to avoid union return type loss)
           if class_name_str == "Math" && method_name == "pw2ceil" && call_args.size == 1
             arg_id = with_arena(call_arena) { lower_expr(ctx, call_args[0]) }
@@ -42627,6 +42843,31 @@ module Crystal::HIR
             call_has_named_args = node.named_args.try(&.empty?) == false
             has_block_call = !!block_expr || !!block_pass_expr
             call_arg_types = infer_arg_types_for_call(call_args, @current_class)
+            # When the call has a splat, expand Tuple-typed splat args for correct
+            # overload resolution. E.g., Path.new(*parts) where parts : Tuple(String, String)
+            # should resolve with 2 args [String, String], not 1 arg [Tuple/VOID].
+            if call_has_splat
+              expanded_types = [] of TypeRef
+              call_args.each_with_index do |arg_expr, i|
+                arg_node = call_arena[arg_expr]
+                if arg_node.is_a?(CrystalV2::Compiler::Frontend::SplatNode)
+                  inner_type = infer_type_from_expr(arg_node.expr, @current_class) || TypeRef::VOID
+                  if inner_type != TypeRef::VOID
+                    desc = @module.get_type_descriptor(inner_type)
+                    if desc && (desc.kind == TypeKind::Tuple || desc.name.starts_with?("Tuple("))
+                      desc.type_params.each do |elem_type|
+                        expanded_types << elem_type unless elem_type == TypeRef::VOID
+                      end
+                      next
+                    end
+                  end
+                end
+                expanded_types << (i < call_arg_types.size ? call_arg_types[i] : TypeRef::VOID)
+              end
+              if expanded_types.size != call_arg_types.size
+                call_arg_types = expanded_types
+              end
+            end
             if entry = lookup_function_def_for_call(full_method_name, call_arg_types.size, has_block_call, call_arg_types, call_has_splat, call_has_named_args)
               full_method_name = entry[0]
             end
@@ -43460,21 +43701,49 @@ module Crystal::HIR
         return result_id.not_nil!
       end
 
-      # When in? is called with a single collection arg and the collection is a struct
-      # (Tuple, NamedTuple, etc.), virtual dispatch won't work because structs don't
-      # have type_id headers. Instead, emit a direct static call to collection.includes?(self).
+      # When in? is called with a single collection arg and the collection is a Tuple,
+      # inline the comparison directly: self == tuple[0] || self == tuple[1] || ...
+      # This avoids broken Tuple#includes? dispatch (structs have no type_id header,
+      # and the generic includes? method doesn't specialize correctly for all arg types).
       if method_name == "in?" && receiver_id && args.size == 1
         collection_id = args[0]
         collection_type = ctx.type_of(collection_id)
         collection_type_name = get_type_name_from_ref(collection_type)
+        if collection_type_name.starts_with?("Tuple")
+          tup_size = tuple_size_from_type_name(collection_type_name)
+          if tup_size && tup_size > 0
+            # Inline expansion: self == tuple[0] || self == tuple[1] || ...
+            in_result_id : ValueId? = nil
+            tup_size.times do |i|
+              idx_lit = Literal.new(ctx.next_id, TypeRef::INT32, i.to_i64)
+              ctx.emit(idx_lit)
+              ctx.register_type(idx_lit.id, TypeRef::INT32)
+              elem_type = tuple_element_type(collection_type, i) || TypeRef::VOID
+              elem = IndexGet.new(ctx.next_id, elem_type, collection_id, idx_lit.id)
+              ctx.emit(elem)
+              ctx.register_type(elem.id, elem_type)
+              cmp = BinaryOperation.new(ctx.next_id, TypeRef::BOOL, BinaryOp::Eq, receiver_id, elem.id)
+              ctx.emit(cmp)
+              ctx.register_type(cmp.id, TypeRef::BOOL)
+              if prev = in_result_id
+                or_op = BinaryOperation.new(ctx.next_id, TypeRef::BOOL, BinaryOp::Or, prev, cmp.id)
+                ctx.emit(or_op)
+                ctx.register_type(or_op.id, TypeRef::BOOL)
+                in_result_id = or_op.id
+              else
+                in_result_id = cmp.id
+              end
+            end
+            return in_result_id.not_nil!
+          end
+        end
+        # For non-Tuple struct collections, try direct static call to includes?
         if collection_type_name != "" && !collection_type_name.starts_with?("Nil")
-          is_struct_type = @class_info[collection_type_name]?.try(&.is_struct) || collection_type_name.starts_with?("Tuple")
+          is_struct_type = @class_info[collection_type_name]?.try(&.is_struct)
           if is_struct_type
-            # Direct static call: collection.includes?(self) → Tuple#includes?(Object)
             includes_method = "#{collection_type_name}#includes?"
             self_type = ctx.type_of(receiver_id)
             self_type_name = get_type_name_from_ref(self_type)
-            # Try to find includes? with specific arg type first, then Object
             includes_candidates = [
               mangle_function_name("#{collection_type_name}#includes?", [self_type], false),
               "#{collection_type_name}#includes?$#{self_type_name}",
@@ -44271,9 +44540,15 @@ module Crystal::HIR
       end
 
       lookup_name = full_method_name || base_method_name
+      if env_has?("DEBUG_SLICE_EACH") && method_name == "each" && lookup_name.includes?("Slice")
+        STDERR.puts "[SLICE_LOOKUP] lookup_name=#{lookup_name} full=#{full_method_name || "nil"} base=#{base_method_name} has_block=#{has_block_call} args=#{args.size}"
+      end
       if entry = lookup_function_def_for_call(lookup_name, args.size, has_block_call, arg_types, has_splat, has_named_args)
         entry_name = entry[0]
         entry_def = entry[1]
+        if env_has?("DEBUG_SLICE_EACH") && method_name == "each" && (lookup_name.includes?("Slice") || entry_name.includes?("Flags"))
+          STDERR.puts "[SLICE_LOOKUP_HIT] lookup=#{lookup_name} → entry=#{entry_name}"
+        end
         base_method_name = strip_type_suffix(entry_name)
         if entry_name.includes?('$')
           # Entry key may encode only annotated params (e.g. IO#read_bytes$IO::ByteFormat).
@@ -44287,6 +44562,17 @@ module Crystal::HIR
             # we create a per-arity specialization (e.g., join$Tuple(String, String)
             # vs join$Tuple(String, String, String)).
             mangled_method_name = mangle_function_name(base_method_name, arg_types, has_block_call)
+            # Preserve _splat suffix to match the body function name created
+            # by function_full_name_for_def (which appends _splat for splat defs).
+            if entry_name.ends_with?("_splat") && !mangled_method_name.ends_with?("_splat")
+              mangled_method_name = if mangled_method_name.includes?('$')
+                                      "#{mangled_method_name}_splat"
+                                    else
+                                      "#{base_method_name}$splat"
+                                    end
+            elsif entry_name.ends_with?("$splat") && !mangled_method_name.ends_with?("$splat")
+              mangled_method_name = "#{mangled_method_name}$splat"
+            end
           else
             mangled_method_name = entry_name
           end
@@ -44369,7 +44655,53 @@ module Crystal::HIR
             generate_allocator(class_name, class_info, arg_types)
           end
         end
-        explicit_new = !!lookup_function_def_for_call(full_method_name, args.size, has_block_call, arg_types, false, has_named_args)
+        explicit_match = lookup_function_def_for_call(full_method_name, args.size, has_block_call, arg_types, false, has_named_args)
+        explicit_new = !!explicit_match
+        if explicit_new && explicit_match
+          matched_def = explicit_match[1]
+          if matched_def.params && matched_def.params.not_nil!.any? { |p| p.is_splat }
+            # Explicit .new with splat — the body function was lowered with
+            # packed Tuple arg types and a _splat suffix. Compute the correct
+            # function name to call instead of the allocator.
+            splat_pos = 0
+            non_splat_count = 0
+            matched_def.params.not_nil!.each do |p|
+              next if p.is_block || named_only_separator?(p)
+              if p.is_splat
+                splat_pos = non_splat_count
+                break
+              end
+              non_splat_count += 1
+            end
+            if splat_pos < arg_types.size
+              # Build packed param types: [pre-splat types..., Tuple(splat types...)]
+              packed = [] of TypeRef
+              arg_types.each_with_index do |t, i|
+                if i < splat_pos
+                  packed << t
+                elsif i == splat_pos
+                  remaining = arg_types[splat_pos..-1]
+                  if remaining.size == 1 && is_tuple_type_ref?(remaining[0])
+                    packed << remaining[0]
+                  else
+                    packed << tuple_type_from_arg_types(remaining, allow_void: true)
+                  end
+                  break
+                end
+              end
+              splat_mangled = mangle_function_name(full_method_name, packed)
+              splat_mangled = if splat_mangled.includes?('$')
+                                "#{splat_mangled}_splat"
+                              else
+                                "#{full_method_name}$splat"
+                              end
+              if @module.has_function?(splat_mangled) || @function_types.has_key?(splat_mangled)
+                mangled_method_name = splat_mangled
+                base_method_name = full_method_name
+              end
+            end
+          end
+        end
         if !explicit_new && @module.has_function?(full_method_name) && !@module.has_function?(mangled_method_name) &&
            arg_types.all? { |t| t == TypeRef::VOID }
           mangled_method_name = full_method_name
@@ -44643,6 +44975,20 @@ module Crystal::HIR
               STDERR.puts "[TRY_INLINE] recv_type=#{get_type_name_from_ref(recv_type)} union=#{is_union_or_nilable_type?(recv_type)}"
             end
           end
+          if env_has?("DEBUG_SLICE_EACH") && method_name == "each" && receiver_id
+            recv_t = get_type_name_from_ref(ctx.type_of(receiver_id))
+            if recv_t.includes?("Slice")
+              STDERR.puts "[SLICE_EACH] recv=#{recv_t} base=#{base_method_name} mangled=#{mangled_method_name} skip_inline=#{skip_inline}"
+              STDERR.puts "[SLICE_EACH]   in_yield_functions_mangled=#{@yield_functions.includes?(mangled_method_name)}"
+              STDERR.puts "[SLICE_EACH]   in_yield_functions_base=#{@yield_functions.includes?(base_method_name)}"
+              yfn = yield_function_name_for(base_method_name)
+              STDERR.puts "[SLICE_EACH]   yield_function_name_for=#{yfn || "nil"}"
+              mods = @class_included_modules[recv_t]?
+              STDERR.puts "[SLICE_EACH]   included_modules=#{mods ? mods.join(",") : "nil"}"
+              mods2 = @class_included_modules[strip_generic_args(recv_t)]?
+              STDERR.puts "[SLICE_EACH]   included_modules_stripped=#{mods2 ? mods2.join(",") : "nil"}"
+            end
+          end
           if method_name == "try" && !try_inline_allowed
             skip_inline = true
             debug_hook("call.inline.skip", "callee=#{mangled_method_name} reason=try_inline_limit")
@@ -44713,7 +45059,46 @@ module Crystal::HIR
                                 else
                                   block_variant = base_method_name + "$block"
                                   if @yield_functions.includes?(block_variant)
-                                    block_variant
+                                    # Verify the $block variant's arity matches the call arity.
+                                    # $block may be the zero-arg overload (e.g. Tuple#reduce(&))
+                                    # while the call has arguments (e.g. reduce("X") { ... }).
+                                    block_def = @function_defs[block_variant]?
+                                    block_arity_ok = true
+                                    if block_def && call_args.size > 0
+                                      non_block_params = 0
+                                      if bp = block_def.params
+                                        bp.each do |p|
+                                          non_block_params += 1 unless p.is_block
+                                        end
+                                      end
+                                      if non_block_params == 0 && call_args.size > 0
+                                        block_arity_ok = false
+                                      end
+                                    end
+                                    if block_arity_ok
+                                      block_variant
+                                    else
+                                      # Try arity-specific variant
+                                      arity_variant = base_method_name + "$arity#{call_args.size}"
+                                      if @yield_functions.includes?(arity_variant)
+                                        arity_variant
+                                      elsif @function_defs.has_key?(arity_variant)
+                                        # Not yet in yield_functions but registered as function_def
+                                        if arity_def = @function_defs[arity_variant]?
+                                          arity_arena = @function_def_arenas[arity_variant]? || @arena
+                                          if def_contains_yield?(arity_def, arity_arena)
+                                            @yield_functions.add(arity_variant)
+                                            arity_variant
+                                          else
+                                            nil
+                                          end
+                                        else
+                                          nil
+                                        end
+                                      else
+                                        nil
+                                      end
+                                    end
                                   else
                                     nil
                                   end
@@ -44743,17 +45128,29 @@ module Crystal::HIR
               end
             end
           end
+          if env_has?("DEBUG_SLICE_EACH") && method_name == "each" && receiver_id
+            recv_t2 = get_type_name_from_ref(ctx.type_of(receiver_id))
+            if recv_t2.includes?("Slice")
+              STDERR.puts "[SLICE_EACH2] effective_yield_key=#{effective_yield_key || "nil"} skip_inline=#{skip_inline} inline_required=#{inline_required}"
+            end
+          end
           if !skip_inline && effective_yield_key
             if receiver_id
               recv_name = get_type_name_from_ref(ctx.type_of(receiver_id))
               owner_part = strip_type_suffix(effective_yield_key)
               owner_name = method_owner(owner_part)
+              if env_has?("DEBUG_SLICE_EACH") && recv_name.includes?("Slice")
+                STDERR.puts "[SLICE_EACH3] owner_part=#{owner_part} owner_name=#{owner_name || "nil"} recv_name=#{recv_name}"
+              end
               if owner_name && owner_name.includes?('(') && recv_name.includes?('(')
                 owner_base = split_generic_base_and_args(owner_name).try(&.[](:base)) || owner_name
                 recv_base = split_generic_base_and_args(recv_name).try(&.[](:base)) || recv_name
                 if owner_base == recv_base && owner_name != recv_name
                   # Only skip when we can't map generic params from the receiver type.
                   receiver_map = type_param_map_for_receiver_type(ctx.type_of(receiver_id))
+                  if env_has?("DEBUG_SLICE_EACH") && recv_name.includes?("Slice")
+                    STDERR.puts "[SLICE_EACH4] owner_base=#{owner_base} recv_base=#{recv_base} receiver_map=#{receiver_map} SKIPPING=#{receiver_map.empty?}"
+                  end
                   skip_inline = true if receiver_map.empty?
                 end
               end
@@ -44762,6 +45159,13 @@ module Crystal::HIR
               # Try function_defs with effective key first, then base name (without $block suffix), then mangled name
               effective_base_key = strip_type_suffix(effective_yield_key)
               func_def = @function_defs[effective_yield_key]? || @function_defs[effective_base_key]? || @function_defs[mangled_method_name]?
+              if env_has?("DEBUG_SLICE_EACH") && method_name == "each" && receiver_id
+                recv_t3 = get_type_name_from_ref(ctx.type_of(receiver_id))
+                if recv_t3.includes?("Slice")
+                  STDERR.puts "[SLICE_EACH5] eff_key=#{effective_yield_key} eff_base=#{effective_base_key} func_def=#{func_def ? "found" : "nil"}"
+                  STDERR.puts "[SLICE_EACH5]   has_eff_key=#{@function_defs.has_key?(effective_yield_key)} has_eff_base=#{@function_defs.has_key?(effective_base_key)} has_mangled=#{@function_defs.has_key?(mangled_method_name)}"
+                end
+              end
               if func_def
                 use_key = if @function_defs.has_key?(effective_yield_key)
                             effective_yield_key
@@ -47426,6 +47830,34 @@ module Crystal::HIR
       return {args, false} unless splat_index && splat_is_last
       return {args, false} if args.size <= splat_index
 
+      # Before packing into a Tuple, check if a non-splat overload exists
+      # that accepts the expanded args with compatible types. This prevents
+      # re-packing when the expanded args can directly match a simpler overload
+      # (e.g., join(*parts) expanded to join("subdir") should call join(part)
+      # rather than re-packing into Tuple and calling join(*parts) again).
+      # Only do this check when none of the args are already Tuple types.
+      no_tuple_args = args.none? { |a|
+        if desc = @module.get_type_descriptor(ctx.type_of(a))
+          desc.kind.tuple? || desc.name.starts_with?("Tuple(")
+        end
+      }
+      if no_tuple_args
+        non_splat_match = lookup_function_def_for_call(func_name, args.size, has_block_call, arg_types, false, call_has_named_args)
+        if non_splat_match
+          ns_def = non_splat_match[1]
+          if ns_params = ns_def.params
+            ns_has_splat = ns_params.any? { |p| p.is_splat && !p.is_double_splat }
+            unless ns_has_splat
+              # Verify type compatibility
+              ns_context = function_context_from_name(non_splat_match[0])
+              if params_compatible_with_args?(ns_def, arg_types, ns_context)
+                return {args, false}
+              end
+            end
+          end
+        end
+      end
+
       fixed = args[0, splat_index]
       splat_args = args[splat_index..-1] || [] of ValueId
       return {args, false} if splat_args.empty?
@@ -47785,6 +48217,7 @@ module Crystal::HIR
       call_has_splat : Bool = false,
       call_has_named_args : Bool = false,
     ) : Tuple(String, CrystalV2::Compiler::Frontend::DefNode)?
+      dbg_slice_lookup = env_has?("DEBUG_SLICE_EACH") && func_name.includes?("Slice") && func_name.includes?("each")
       unknown_args = arg_types && arg_types.all? { |t| t == TypeRef::VOID }
       if @function_lookup_cache_size != @function_defs.size
         @function_lookup_cache_size = @function_defs.size
@@ -47817,6 +48250,10 @@ module Crystal::HIR
          @function_lookup_last_args_hash == args_hash &&
          @function_lookup_last_flags == flags &&
          @function_lookup_last_base_epoch == base_epoch
+        if dbg_slice_lookup
+          r = @function_lookup_last_result
+          STDERR.puts "[SLICE_LOOKUP_FN]   FAST_PATH hit name_id=#{name_id} → #{r ? r[0] : "nil"}"
+        end
         return @function_lookup_last_result
       end
       cache_key = FunctionLookupKey.new(
@@ -47832,6 +48269,9 @@ module Crystal::HIR
       if entry = @function_lookup_cache[cache_key]?
         if entry.base_epoch == base_epoch
           result = entry.result
+          if dbg_slice_lookup
+            STDERR.puts "[SLICE_LOOKUP_FN]   CACHE hit key=#{func_name} → #{result ? result[0] : "nil"}"
+          end
           @function_lookup_last_name_id = name_id
           @function_lookup_last_arg_count = arg_count
           @function_lookup_last_args_hash = args_hash
@@ -47863,10 +48303,20 @@ module Crystal::HIR
         if parts.separator && parts.method
           ensure_method_index_built
           base_owner = strip_generic_args(parts.owner)
+          if dbg_slice_lookup
+            STDERR.puts "[SLICE_LOOKUP_FN] func=#{func_name} base_owner=#{base_owner} method=#{parts.method}"
+          end
           if owner_methods = @method_index[base_owner]?
             if candidates = owner_methods[parts.method.not_nil!]?
+              if dbg_slice_lookup
+                STDERR.puts "[SLICE_LOOKUP_FN]   method_index[#{base_owner}][#{parts.method}] = #{candidates.join(", ")}"
+              end
               overload_keys = candidates unless candidates.empty?
+            elsif dbg_slice_lookup
+              STDERR.puts "[SLICE_LOOKUP_FN]   method_index[#{base_owner}] has no '#{parts.method}' key"
             end
+          elsif dbg_slice_lookup
+            STDERR.puts "[SLICE_LOOKUP_FN]   no method_index entry for owner '#{base_owner}'"
           end
           # If the callsite owner is a concrete generic instance, prefer
           # candidates that match the exact owner (avoid falling back to
@@ -47884,20 +48334,35 @@ module Crystal::HIR
 
       if overload_keys.empty?
         stripped_func = func_name.includes?('(') ? strip_generic_receiver_for_lookup(func_name) : func_name
+        if dbg_slice_lookup
+          STDERR.puts "[SLICE_LOOKUP_FN]   method_index empty, trying function_def_overloads(#{func_name}, #{stripped_func})"
+        end
         overload_keys = function_def_overloads(func_name, stripped_func)
+        if dbg_slice_lookup && !overload_keys.empty?
+          STDERR.puts "[SLICE_LOOKUP_FN]   function_def_overloads → #{overload_keys.join(", ")}"
+        end
         if overload_keys.empty?
           # Fall back to base name if call included a mangled suffix.
           base = strip_type_suffix(func_name)
           if base != func_name
             stripped_base = stripped_func != func_name ? strip_type_suffix(stripped_func) : nil
             overload_keys = function_def_overloads(base, stripped_base)
+            if dbg_slice_lookup && !overload_keys.empty?
+              STDERR.puts "[SLICE_LOOKUP_FN]   strip_type fallback → #{overload_keys.join(", ")}"
+            end
           end
         end
         if overload_keys.empty?
           stripped = stripped_func
           if stripped != func_name
             overload_keys = function_def_overloads(stripped, stripped)
+            if dbg_slice_lookup && !overload_keys.empty?
+              STDERR.puts "[SLICE_LOOKUP_FN]   stripped fallback → #{overload_keys.join(", ")}"
+            end
           end
+        end
+        if dbg_slice_lookup && overload_keys.empty?
+          STDERR.puts "[SLICE_LOOKUP_FN]   ALL overload lookups empty for #{func_name}"
         end
       end
       prefer_non_named = false
@@ -48048,7 +48513,11 @@ module Crystal::HIR
         # on the base name (e.g., Foo#each_with_index$block).
         if has_block
           base = strip_type_suffix(func_name)
-          if block_entry = lookup_block_function_def_for_call(base, arg_count, arg_types)
+          # Extract receiver base from func_name (e.g., "Slice(UInt8)#each" → "Slice")
+          # to constrain the fallback search to compatible types only.
+          block_receiver_base = method_owner(base)
+          block_receiver_base = block_receiver_base ? strip_generic_args(block_receiver_base) : nil
+          if block_entry = lookup_block_function_def_for_call(base, arg_count, arg_types, block_receiver_base)
             @function_lookup_cache[cache_key] = FunctionLookupEntry.new(block_entry, base_epoch)
             @function_lookup_last_name_id = name_id
             @function_lookup_last_arg_count = arg_count
@@ -48188,13 +48657,15 @@ module Crystal::HIR
           @block_lookup_cache[cache_key] = result
           return result
         end
+        best_owner_base : String? = nil
         block_fallback_candidates_for_method(method_short).each do |name|
           def_node = @function_defs[name]?
           next unless def_node
+          candidate_owner_base : String? = nil
           if receiver_base
             owner = method_owner_from_name(name)
-            owner_base = strip_generic_args(owner)
-            next unless receiver_allows_yield_owner?(receiver_base, owner_base)
+            candidate_owner_base = strip_generic_args(owner)
+            next unless receiver_allows_yield_owner?(receiver_base, candidate_owner_base)
           end
 
           stats = function_param_stats(name, def_node)
@@ -48223,6 +48694,19 @@ module Crystal::HIR
             best_name = name
             best_param_count = param_count
             best_score = score
+            best_owner_base = candidate_owner_base
+          elsif param_count == best_param_count && score == best_score && candidate_owner_base && best_owner_base && receiver_base
+            # Tie-breaker: prefer more specific module (e.g., Indexable over Enumerable).
+            # Use position in receiver's module chain: lower position = more specific.
+            new_spec = module_specificity_for_receiver(receiver_base, candidate_owner_base)
+            old_spec = module_specificity_for_receiver(receiver_base, best_owner_base)
+            if new_spec < old_spec
+              best = def_node
+              best_name = name
+              best_param_count = param_count
+              best_score = score
+              best_owner_base = candidate_owner_base
+            end
           end
         end
       end
@@ -53913,6 +54397,69 @@ module Crystal::HIR
           ext_call = ExternCall.new(ctx.next_id, TypeRef::INT32, "__crystal_v2_array_sum_int32", [object_id])
           ctx.emit(ext_call)
           ctx.register_type(ext_call.id, TypeRef::INT32)
+          return ext_call.id
+        end
+      end
+
+      # Tuple#max / Tuple#min intrinsic (MemberAccessNode path — no-parens call)
+      if (member_name == "max" || member_name == "min")
+        recv_type_ref = ctx.type_of(object_id)
+        recv_type_nm = get_type_name_from_ref(recv_type_ref)
+        if recv_type_nm.starts_with?("Tuple")
+          tup_sz = tuple_size_from_type_name(recv_type_nm)
+          if tup_sz && tup_sz > 0
+            elem_type = tuple_element_type(recv_type_ref, 0) || TypeRef::INT32
+            idx0 = Literal.new(ctx.next_id, TypeRef::INT32, 0_i64)
+            ctx.emit(idx0)
+            ctx.register_type(idx0.id, TypeRef::INT32)
+            best = IndexGet.new(ctx.next_id, elem_type, object_id, idx0.id)
+            ctx.emit(best)
+            ctx.register_type(best.id, elem_type)
+            best_id = best.id
+            (1...tup_sz).each do |i|
+              idx_lit = Literal.new(ctx.next_id, TypeRef::INT32, i.to_i64)
+              ctx.emit(idx_lit)
+              ctx.register_type(idx_lit.id, TypeRef::INT32)
+              next_elem = IndexGet.new(ctx.next_id, elem_type, object_id, idx_lit.id)
+              ctx.emit(next_elem)
+              ctx.register_type(next_elem.id, elem_type)
+              cmp_op = member_name == "max" ? BinaryOp::Gt : BinaryOp::Lt
+              cmp = BinaryOperation.new(ctx.next_id, TypeRef::BOOL, cmp_op, next_elem.id, best_id)
+              ctx.emit(cmp)
+              ctx.register_type(cmp.id, TypeRef::BOOL)
+              then_block = ctx.create_block
+              else_block = ctx.create_block
+              merge_block = ctx.create_block
+              ctx.terminate(Branch.new(cmp.id, then_block, else_block))
+              ctx.current_block = then_block
+              ctx.terminate(Jump.new(merge_block))
+              ctx.current_block = else_block
+              ctx.terminate(Jump.new(merge_block))
+              ctx.current_block = merge_block
+              phi = Phi.new(ctx.next_id, elem_type)
+              phi.add_incoming(then_block, next_elem.id)
+              phi.add_incoming(else_block, best_id)
+              ctx.emit(phi)
+              ctx.register_type(phi.id, elem_type)
+              best_id = phi.id
+            end
+            return best_id
+          end
+        end
+      end
+
+      # Path#dirname intrinsic (MemberAccessNode path — no-parens call)
+      if member_name == "dirname"
+        recv_type = ctx.type_of(object_id)
+        recv_name = get_type_name_from_ref(recv_type)
+        if recv_name == "Path" || recv_name.starts_with?("Path")
+          # Extract @name from Path struct and call dirname helper
+          path_name_field = FieldGet.new(ctx.next_id, TypeRef::STRING, object_id, "@name", 0)
+          ctx.emit(path_name_field)
+          ctx.register_type(path_name_field.id, TypeRef::STRING)
+          ext_call = ExternCall.new(ctx.next_id, TypeRef::STRING, "__crystal_v2_file_dirname", [path_name_field.id])
+          ctx.emit(ext_call)
+          ctx.register_type(ext_call.id, TypeRef::STRING)
           return ext_call.id
         end
       end
