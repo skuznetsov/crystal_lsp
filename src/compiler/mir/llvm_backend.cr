@@ -874,6 +874,8 @@ module Crystal::MIR
       already_declared << "pcre2_match_data_create_from_pattern_8"
       already_declared << "pcre2_jit_compile_8" << "pcre2_get_ovector_pointer_8"
       already_declared << "pcre2_get_ovector_count_8" << "pcre2_match_data_free_8"
+      # C stdlib functions already declared in emit_runtime_declarations
+      already_declared << "getcwd" << "realpath"
       # Skip any function starting with __crystal_v2_ (runtime functions)
       runtime_prefix = "__crystal_v2_"
 
@@ -920,7 +922,13 @@ module Crystal::MIR
     end
 
     private def emit_missing_crystal_function_stubs
-      missing = @called_crystal_functions.reject { |name, _| @emitted_functions.includes?(name) || @undefined_externs.has_key?(name) }
+      # Skip functions already declared in emit_runtime_declarations or emit_header
+      already_declared = Set(String).new
+      already_declared << "getcwd" << "realpath" << "open" << "close" << "read" << "lseek"
+      already_declared << "write" << "malloc" << "calloc" << "realloc" << "free" << "memcpy" << "memmove" << "memset"
+      already_declared << "strlen" << "strcmp" << "strncmp" << "strstr" << "strerror" << "snprintf" << "exit" << "abort"
+      already_declared << "puts" << "printf" << "fwrite" << "fflush"
+      missing = @called_crystal_functions.reject { |name, _| @emitted_functions.includes?(name) || @undefined_externs.has_key?(name) || already_declared.includes?(name) }
       return if missing.empty?
       emit_raw "\n; Forward declarations for Crystal functions called but not defined\n"
       missing.each do |name, info|
@@ -2253,6 +2261,14 @@ module Crystal::MIR
       emit_raw "declare i32 @close(i32)\n"
       emit_raw "declare ptr @getcwd(ptr, i64)\n"
       emit_raw "declare ptr @realpath(ptr, ptr)\n"
+      # Mark C stdlib functions as emitted so emit_undefined_extern_declarations
+      # and emit_missing_crystal_function_stubs skip them (prevents duplicate declarations)
+      @emitted_functions << "strlen" << "strcpy" << "strcat" << "sprintf" << "strstr"
+      @emitted_functions << "write" << "open" << "lseek" << "read" << "close"
+      @emitted_functions << "getcwd" << "realpath"
+      @emitted_functions << "malloc" << "calloc" << "realloc" << "free"
+      @emitted_functions << "printf" << "puts" << "gets" << "fgets" << "fputs"
+      @emitted_functions << "exit" << "perror" << "dprintf"
       emit_raw "\n"
 
       # String#includes?(String) — compares byte data via strstr
@@ -7988,6 +8004,7 @@ module Crystal::MIR
       base = "null" if base == "0"
       emit "#{name} = getelementptr i8, ptr #{base}, i32 #{byte_offset}"
       @value_types[inst.id] = TypeRef::POINTER  # GEP always returns pointer
+      record_emitted_type(name, "ptr")
     end
 
     # Compute LLVM struct field index from byte offset.
@@ -8153,6 +8170,7 @@ module Crystal::MIR
         emit "#{name} = getelementptr #{element_type}, ptr #{base}, i64 #{idx64}"
       end
       @value_types[inst.id] = TypeRef::POINTER  # GEP always returns pointer
+      record_emitted_type(name, "ptr")
     end
 
     private def emit_binary_op(inst : BinaryOp, name : String)
@@ -11906,11 +11924,12 @@ module Crystal::MIR
         end
       end
 
-      # If prepass detected this ExternCall needs zext for phi compatibility, emit it now
+      # If prepass detected this ExternCall needs zext/trunc for phi compatibility, emit it now
       if (conversion = @phi_zext_conversions[inst.id]?)
         from_bits, to_bits = conversion
         zext_name = "#{name}.zext"
-        emit "#{zext_name} = zext i#{from_bits} #{name} to i#{to_bits}"
+        cast_op = from_bits < to_bits ? "zext" : "trunc"
+        emit "#{zext_name} = #{cast_op} i#{from_bits} #{name} to i#{to_bits}"
         @zext_value_names[inst.id] = zext_name
       end
 
@@ -12998,17 +13017,36 @@ module Crystal::MIR
 
                 # Ensure index is i32
                 var_index = index
-                if var_index.starts_with?('%')
+                if var_index.starts_with?('@')
+                  # Global reference used as index — likely a value_ref mismatch.
+                  # Load as pointer-sized int and truncate to i32.
+                  emit "%#{base_name}.gidx_raw = ptrtoint ptr #{var_index} to i64"
+                  emit "%#{base_name}.tidx = trunc i64 %#{base_name}.gidx_raw to i32"
+                  var_index = "%#{base_name}.tidx"
+                elsif var_index.starts_with?('%')
                   idx_type = @value_types[inst.index_value]?
-                  if idx_type
-                    idx_llvm = @type_mapper.llvm_type(idx_type)
-                    if idx_llvm == "i64"
-                      emit "%#{base_name}.tidx = trunc i64 #{var_index} to i32"
-                      var_index = "%#{base_name}.tidx"
-                    elsif idx_llvm != "i32"
+                  idx_llvm = idx_type ? @type_mapper.llvm_type(idx_type) : "i32"
+                  # Also check actual emitted type — GEP results are ptr even if MIR says i32
+                  actual_emitted = @emitted_value_types[var_index]?
+                  idx_llvm = "ptr" if actual_emitted == "ptr"
+                  if idx_llvm == "ptr" || idx_llvm.includes?(".")
+                    # Pointer or non-integer used as index — convert via ptrtoint
+                    emit "%#{base_name}.gidx_raw = ptrtoint ptr #{var_index} to i64"
+                    emit "%#{base_name}.tidx = trunc i64 %#{base_name}.gidx_raw to i32"
+                    var_index = "%#{base_name}.tidx"
+                  elsif idx_llvm == "i64"
+                    emit "%#{base_name}.tidx = trunc i64 #{var_index} to i32"
+                    var_index = "%#{base_name}.tidx"
+                  elsif idx_llvm != "i32" && idx_llvm.starts_with?('i')
+                    # Guard: verify value is actually integer-typed, not ptr
+                    emitted_ty = @emitted_value_types[var_index]?
+                    if emitted_ty == "ptr"
+                      emit "%#{base_name}.gidx_raw = ptrtoint ptr #{var_index} to i64"
+                      emit "%#{base_name}.tidx = trunc i64 %#{base_name}.gidx_raw to i32"
+                    else
                       emit "%#{base_name}.tidx = sext #{idx_llvm} #{var_index} to i32"
-                      var_index = "%#{base_name}.tidx"
                     end
+                    var_index = "%#{base_name}.tidx"
                   end
                 end
 
@@ -13065,7 +13103,13 @@ module Crystal::MIR
             return
           else
             # Variable index on bare Tuple: all elements assumed same size
-            emit "%#{base_name}.byte_off = mul i32 #{index}, #{elem_size}"
+            var_index = index
+            if var_index.starts_with?('@')
+              emit "%#{base_name}.gidx_raw = ptrtoint ptr #{var_index} to i64"
+              emit "%#{base_name}.tidx = trunc i64 %#{base_name}.gidx_raw to i32"
+              var_index = "%#{base_name}.tidx"
+            end
+            emit "%#{base_name}.byte_off = mul i32 #{var_index}, #{elem_size}"
             emit "%#{base_name}.elem_ptr = getelementptr i8, ptr #{array_ptr}, i32 %#{base_name}.byte_off"
             emit "#{name} = load #{element_type}, ptr %#{base_name}.elem_ptr"
             @value_types[inst.id] = inst.element_type
