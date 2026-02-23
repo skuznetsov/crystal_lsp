@@ -1040,6 +1040,20 @@ module Crystal::MIR
           return_type = better_ret if return_type == "void" && better_ret != "void"
         end
 
+        # Tuple#[] — the dead-code stub returns 0 which breaks tuple case/when
+        # matching (e.g., `case {num, precision}` in Int#to_s).
+        # Implement as i32 element access: ptr + index * 4.
+        if name == "$IDX"
+          emit_raw "; Tuple#[] — runtime tuple element access (i32 elements)\n"
+          emit_raw "define i32 @$IDX(ptr %arg0, i32 %arg1) {\n"
+          emit_raw "  %idx64 = sext i32 %arg1 to i64\n"
+          emit_raw "  %elem_ptr = getelementptr i32, ptr %arg0, i64 %idx64\n"
+          emit_raw "  %value = load i32, ptr %elem_ptr\n"
+          emit_raw "  ret i32 %value\n"
+          emit_raw "}\n"
+          next
+        end
+
         # LLVM intrinsics need proper signatures (not varargs)
         if name.starts_with?("llvm.")
           # Normalize old typed pointer format (p0i8) to opaque pointer format (p0) for LLVM 15+

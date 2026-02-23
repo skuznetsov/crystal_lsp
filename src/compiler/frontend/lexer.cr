@@ -63,6 +63,11 @@ module CrystalV2
 
           byte = current_byte
 
+          if ENV["STAGE2_DEBUG"]? && @offset < 200
+            STDOUT.puts "[LEXER_DBG] next_token offset=#{@offset} byte=#{byte} HASH=#{HASH} eq_hash=#{byte == HASH} is_ws=#{whitespace?(byte)} is_nl=#{byte == NEWLINE} id_start=#{identifier_start?(byte)}"
+            STDOUT.flush
+          end
+
           token = case
           when whitespace?(byte)
             lex_whitespace
@@ -202,6 +207,10 @@ module CrystalV2
 
           # Slice of the identifier
           id = @rope.bytes[from...@offset]
+          if ENV["STAGE2_DEBUG"]?
+            STDOUT.puts "[LEXER_DBG] lex_id from=#{from} offset=#{@offset} rope_size=#{@rope.size} slice_size=#{id.size} expected=#{@offset - from}"
+            STDOUT.flush
+          end
           # Classify keyword without allocating String
           kind = keyword_kind_for(id)
           # Do not intern here to avoid copying for tokens not used in AST;
@@ -2419,21 +2428,23 @@ module CrystalV2
           # If codepoint is out of range, write nothing (silently ignore)
         end
 
-        SPACE        = 0x20_u8
-        TAB          = 0x09_u8
-        NEWLINE      = 0x0A_u8
-        DOUBLE_QUOTE = '"'.ord.to_u8
-        SINGLE_QUOTE = '\''.ord.to_u8  # Phase 56: character literals
-        BACKTICK     = '`'.ord.to_u8    # Command literal delimiter
-        HASH         = '#'.ord.to_u8
-        UNDERSCORE   = '_'.ord.to_u8
-        QUESTION     = '?'.ord.to_u8
-        EXCLAMATION  = '!'.ord.to_u8
-        AT_SIGN      = '@'.ord.to_u8
-        DOLLAR_SIGN  = '$'.ord.to_u8  # Phase 75: for global variables
-        LEFT_BRACE   = '{'.ord.to_u8  # Phase 8: for interpolation detection
-        RIGHT_BRACE  = '}'.ord.to_u8
-        COLON        = ':'.ord.to_u8  # Phase 16: for symbol literals
+        # Use hex literals instead of '.ord.to_u8 — the .ord.to_u8 chain
+        # evaluates to 0 in stage2 because Char#ord constant init is broken.
+        SPACE        = 0x20_u8  # ' '
+        TAB          = 0x09_u8  # '\t'
+        NEWLINE      = 0x0A_u8  # '\n'
+        DOUBLE_QUOTE = 0x22_u8  # '"'
+        SINGLE_QUOTE = 0x27_u8  # '\''
+        BACKTICK     = 0x60_u8  # '`'
+        HASH         = 0x23_u8  # '#'
+        UNDERSCORE   = 0x5F_u8  # '_'
+        QUESTION     = 0x3F_u8  # '?'
+        EXCLAMATION  = 0x21_u8  # '!'
+        AT_SIGN      = 0x40_u8  # '@'
+        DOLLAR_SIGN  = 0x24_u8  # '$'
+        LEFT_BRACE   = 0x7B_u8  # '{'
+        RIGHT_BRACE  = 0x7D_u8  # '}'
+        COLON        = 0x3A_u8  # ':'
 
         private def build_span(start_offset, start_line, start_column)
           Span.new(
