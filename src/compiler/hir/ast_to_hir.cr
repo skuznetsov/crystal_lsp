@@ -24040,29 +24040,27 @@ module Crystal::HIR
       # Defer runtime initialization for non-numeric constants (string literals, etc.)
       # Numeric constants are stored directly as global initial values, but string
       # constants need to be initialized at runtime by storing a pointer to the string data.
+      if env_has?("DEBUG_DEFERRED_CONST")
+        lit_val = @constant_literal_values[full_name]?
+        STDERR.puts "[CONST_CHECK] #{full_name} literal_value=#{lit_val.class.name} is_num=#{lit_val.is_a?(CrystalV2::Compiler::Semantic::MacroNumberValue)} is_bool=#{lit_val.is_a?(CrystalV2::Compiler::Semantic::MacroBoolValue)}"
+        if lit_val.is_a?(CrystalV2::Compiler::Semantic::MacroNumberValue)
+          STDERR.puts "[CONST_CHECK] #{full_name} numeric_value=#{lit_val.value}"
+        end
+      end
       unless @constant_literal_values[full_name]?.is_a?(CrystalV2::Compiler::Semantic::MacroNumberValue) ||
              @constant_literal_values[full_name]?.is_a?(CrystalV2::Compiler::Semantic::MacroBoolValue)
-        # Defer runtime initialization for string literals and constructor calls.
-        # String literals need runtime allocation, constructor calls (Foo.new(...))
-        # need the constructor to run.
-        old_a2 = @arena
-        @arena = arena
-        val_node = @arena[value_id]
-        needs_deferred = val_node.is_a?(CrystalV2::Compiler::Frontend::StringNode)
-        # Also defer any call expression — runtime function calls need to run at startup.
-        # This catches constructors (X.new), class methods (File.expand_path), etc.
-        if !needs_deferred && val_node.is_a?(CrystalV2::Compiler::Frontend::CallNode)
-          needs_deferred = true
-        end
-        # Tuple/Array literals need runtime init (e.g., DAYS_MONTH = {0, 31, 28, ...})
-        if !needs_deferred && (val_node.is_a?(CrystalV2::Compiler::Frontend::TupleLiteralNode) ||
-                               val_node.is_a?(CrystalV2::Compiler::Frontend::ArrayLiteralNode))
-          needs_deferred = true
-        end
-        @arena = old_a2
-        if needs_deferred
-          owner = owner_name || "$"
-          @deferred_constant_inits << {owner, name, value_id, arena}
+        # If no compile-time value was determined, the constant MUST be initialized
+        # at runtime. This covers all expression types: method calls (MemberAccessNode),
+        # string literals (StringNode), constructors (CallNode), tuples, arrays,
+        # begin blocks, macro expansions, as-casts, unary/binary ops, etc.
+        owner = owner_name || "$"
+        @deferred_constant_inits << {owner, name, value_id, arena}
+        if env_has?("DEBUG_DEFERRED_CONST")
+          old_a2 = @arena
+          @arena = arena
+          val_node = @arena[value_id]
+          @arena = old_a2
+          STDERR.puts "[DEFERRED_CONST] Added #{full_name} val_node=#{val_node.class.name} (total: #{@deferred_constant_inits.size})"
         end
       end
 
@@ -28740,15 +28738,25 @@ module Crystal::HIR
           depth = full.count(':')
           {priority, -depth}
         end
+        if env_has?("DEBUG_DEFERRED_CONST")
+          STDERR.puts "[DEFERRED_CONST] Processing #{@deferred_constant_inits.size} deferred constants"
+        end
         @deferred_constant_inits.each do |(owner, const_name, value_id, init_arena)|
           @arena = init_arena
           old_class = @current_class
           @current_class = owner == "$" ? nil : owner
           begin
+            if env_has?("DEBUG_DEFERRED_CONST")
+              val_node = @arena[value_id]
+              STDERR.puts "[DEFERRED_CONST] Lowering #{owner}::#{const_name} val_node=#{val_node.class.name}"
+            end
             value = lower_expr(ctx, value_id)
             value_type = ctx.type_of(value)
             full_name = constant_full_name(owner == "$" ? nil : owner, const_name)
             storage_owner, storage_name = constant_storage_info(full_name)
+            if env_has?("DEBUG_DEFERRED_CONST")
+              STDERR.puts "[DEFERRED_CONST] OK #{owner}::#{const_name} → value=#{value} type=#{value_type.id}"
+            end
             set = ClassVarSet.new(ctx.next_id, value_type, storage_owner, storage_name, value)
             ctx.emit(set)
           rescue ex
@@ -37139,7 +37147,7 @@ module Crystal::HIR
           ctx.emit(idx_lit)
           ctx.register_type(idx_lit.id, TypeRef::INT32)
 
-          subject_elem = Call.new(ctx.next_id, cond_type, subject_id, "[]", [idx_lit.id])
+          subject_elem = IndexGet.new(ctx.next_id, cond_type, subject_id, idx_lit.id)
           ctx.emit(subject_elem)
           ctx.register_type(subject_elem.id, cond_type)
 
