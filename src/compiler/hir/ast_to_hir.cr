@@ -14884,24 +14884,18 @@ module Crystal::HIR
     # all classes have correctly aligned field offsets regardless of which code
     # path registered the ivars.
     def align_all_class_ivars : Nil
-      realigned = 0
-      @class_info.each do |class_name, info|
-        next if info.ivars.empty?
-        is_c_struct = info.name.starts_with?("LibC::") || info.name.includes?("::Lib")
+      # Iterate until convergence: struct sizes depend on union sizes and other struct
+      # sizes, which may change as class_infos are updated. Repeat until no more changes.
+      max_iterations = 5
+      iteration = 0
+      loop do
+        iteration += 1
+        realigned = 0
+        @class_info.each do |class_name, info|
+          next if info.ivars.empty?
+          is_c_struct = info.name.starts_with?("LibC::") || info.name.includes?("::Lib")
 
-        needs_fix = false
-        # Structs (including C structs) have no type_id header, classes start at 4 (i32 type_id)
-        offset = info.is_struct ? 0 : 4
-        info.ivars.each do |ivar|
-          aligned = align_offset(offset, type_alignment(ivar.type, is_c_struct))
-          if aligned != ivar.offset
-            needs_fix = true
-            break
-          end
-          offset = aligned + field_storage_size(ivar.type, is_c_struct)
-        end
-
-        if needs_fix
+          # Recompute all offsets and total size from scratch
           new_ivars = [] of IVarInfo
           offset = info.is_struct ? 0 : 4
           info.ivars.each do |ivar|
@@ -14914,14 +14908,27 @@ module Crystal::HIR
           max_align = new_ivars.max_of { |iv| type_alignment(iv.type, is_c_struct) }
           offset = align_offset(offset, max_align)
 
-          new_info = ClassInfo.new(info.name, info.type_ref, new_ivars, info.class_vars,
-            offset, info.is_struct, info.parent_name)
-          @class_info[class_name] = new_info
-          @class_info_by_type_id[info.type_ref.id] = new_info
-          realigned += 1
+          # Check if anything changed
+          changed = offset != info.size
+          unless changed
+            new_ivars.each_with_index do |iv, i|
+              if iv.offset != info.ivars[i].offset
+                changed = true
+                break
+              end
+            end
+          end
+          if changed
+            new_info = ClassInfo.new(info.name, info.type_ref, new_ivars, info.class_vars,
+              offset, info.is_struct, info.parent_name)
+            @class_info[class_name] = new_info
+            @class_info_by_type_id[info.type_ref.id] = new_info
+            realigned += 1
+          end
         end
+        STDERR.puts "[ALIGN] Iteration #{iteration}: realigned #{realigned} classes" if realigned > 0 && env_has?("CRYSTAL_V2_DEBUG_FIXUP")
+        break if realigned == 0 || iteration >= max_iterations
       end
-      STDERR.puts "[ALIGN] Realigned #{realigned} classes" if realigned > 0 && env_has?("CRYSTAL_V2_DEBUG_FIXUP")
     end
 
     # Align ivars for a single class (used after late monomorphization)
@@ -21736,8 +21743,27 @@ module Crystal::HIR
     end
 
     # Helper for field storage bytes (Nil still needs pointer-sized slot)
+    # V2 ABI: non-C structs are heap-allocated and stored as pointers in fields.
+    # When a struct's inline size < pointer size, the stored pointer would overlap
+    # adjacent fields. Fix by using pointer size as minimum for struct-typed fields.
     private def field_storage_size(type : TypeRef, c_context : Bool = false) : Int32
       storage = type_size(type, c_context)
+      # V2 ABI fix: non-C, non-primitive struct types are heap-allocated and stored
+      # as pointers. When inline size < pointer size, adjacent fields overlap.
+      # Only apply to user-defined types (id >= FIRST_USER_TYPE), not primitives.
+      if !c_context && storage > 0 && storage < pointer_word_bytes_i32 &&
+         type.id >= TypeRef::FIRST_USER_TYPE
+        if info = @class_info_by_type_id[type.id]?
+          return pointer_word_bytes_i32 if info.is_struct
+        else
+          type_name = get_type_name_from_ref(type)
+          if type_name != "Unknown"
+            if info2 = @class_info[type_name]?
+              return pointer_word_bytes_i32 if info2.is_struct
+            end
+          end
+        end
+      end
       storage == 0 && type == TypeRef::NIL ? pointer_word_bytes_i32 : storage
     end
 
@@ -23775,10 +23801,14 @@ module Crystal::HIR
           class_info.ivars.each do |ivar|
             if ivar.name == name
               if env_has?("DEBUG_IVAR_OFFSET") && class_name.includes?("Entry")
-                STDERR.puts "[IVAR_OFFSET] #{class_name}##{name} FOUND offset=#{ivar.offset} (#{class_info.ivars.map { |iv| "#{iv.name}:#{iv.offset}" }.join(", ")})"
+                STDERR.puts "[IVAR_OFFSET] #{class_name}##{name} FOUND offset=#{ivar.offset} size=#{class_info.size} (#{class_info.ivars.map { |iv| "#{iv.name}:#{iv.offset}" }.join(", ")})"
               end
               return ivar.offset
             end
+          end
+        else
+          if env_has?("DEBUG_IVAR_OFFSET")
+            STDERR.puts "[IVAR_OFFSET] #{class_name}##{name} NO CLASS_INFO"
           end
         end
       end
@@ -24049,18 +24079,34 @@ module Crystal::HIR
       end
       unless @constant_literal_values[full_name]?.is_a?(CrystalV2::Compiler::Semantic::MacroNumberValue) ||
              @constant_literal_values[full_name]?.is_a?(CrystalV2::Compiler::Semantic::MacroBoolValue)
-        # If no compile-time value was determined, the constant MUST be initialized
-        # at runtime. This covers all expression types: method calls (MemberAccessNode),
-        # string literals (StringNode), constructors (CallNode), tuples, arrays,
-        # begin blocks, macro expansions, as-casts, unary/binary ops, etc.
-        owner = owner_name || "$"
-        @deferred_constant_inits << {owner, name, value_id, arena}
+        # Defer runtime initialization for expressions that need runtime code to execute.
+        # Only defer specific node types that genuinely require runtime evaluation.
+        # Simple literals (NumberNode, CharNode, UnaryNode, BinaryNode, etc.) should
+        # be handled by macro_value_for_expr instead — deferring too many constants
+        # bloats __crystal_main's stack frame and causes stack overflow crashes.
+        old_a2 = @arena
+        @arena = arena
+        val_node = @arena[value_id]
+        needs_deferred = false
+        # String literals need runtime allocation
+        needs_deferred = true if val_node.is_a?(CrystalV2::Compiler::Frontend::StringNode)
+        # Method calls: constructors (X.new), class methods (File.expand_path), etc.
+        needs_deferred = true if val_node.is_a?(CrystalV2::Compiler::Frontend::CallNode)
+        # Dot-call chains: '#'.ord.to_u8, Char::MAX_CODEPOINT.to_i32, etc.
+        needs_deferred = true if val_node.is_a?(CrystalV2::Compiler::Frontend::MemberAccessNode)
+        # Collection literals need runtime allocation
+        needs_deferred = true if val_node.is_a?(CrystalV2::Compiler::Frontend::TupleLiteralNode)
+        needs_deferred = true if val_node.is_a?(CrystalV2::Compiler::Frontend::ArrayLiteralNode)
+        needs_deferred = true if val_node.is_a?(CrystalV2::Compiler::Frontend::HashLiteralNode)
+        # Begin blocks (multi-expression initializers)
+        needs_deferred = true if val_node.is_a?(CrystalV2::Compiler::Frontend::BeginNode)
         if env_has?("DEBUG_DEFERRED_CONST")
-          old_a2 = @arena
-          @arena = arena
-          val_node = @arena[value_id]
-          @arena = old_a2
-          STDERR.puts "[DEFERRED_CONST] Added #{full_name} val_node=#{val_node.class.name} (total: #{@deferred_constant_inits.size})"
+          STDERR.puts "[DEFERRED_CONST] #{needs_deferred ? "Added" : "Skipped"} #{full_name} val_node=#{val_node.class.name}"
+        end
+        @arena = old_a2
+        if needs_deferred
+          owner = owner_name || "$"
+          @deferred_constant_inits << {owner, name, value_id, arena}
         end
       end
 
@@ -56159,9 +56205,10 @@ module Crystal::HIR
               end
               ivar_offset = existing.offset
             elsif value_type != TypeRef::VOID
-              new_offset = class_info.size
+              is_c_struct = class_name.starts_with?("LibC::") || class_name.includes?("::Lib")
+              new_offset = align_offset(class_info.size, type_alignment(value_type, is_c_struct))
               ivars << IVarInfo.new(name, value_type, new_offset)
-              new_size = new_offset + type_size(value_type)
+              new_size = new_offset + field_storage_size(value_type, is_c_struct)
               @class_info[class_name] = ClassInfo.new(
                 class_info.name,
                 class_info.type_ref,
@@ -56758,9 +56805,10 @@ module Crystal::HIR
               end
               ivar_offset = existing.offset
             elsif value_type != TypeRef::VOID
-              new_offset = class_info.size
+              is_c_struct = class_name.starts_with?("LibC::") || class_name.includes?("::Lib")
+              new_offset = align_offset(class_info.size, type_alignment(value_type, is_c_struct))
               ivars << IVarInfo.new(name, value_type, new_offset)
-              new_size = new_offset + type_size(value_type)
+              new_size = new_offset + field_storage_size(value_type, is_c_struct)
               @class_info[class_name] = ClassInfo.new(
                 class_info.name,
                 class_info.type_ref,
