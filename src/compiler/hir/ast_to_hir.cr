@@ -23800,15 +23800,8 @@ module Crystal::HIR
         if class_info = @class_info[class_name]?
           class_info.ivars.each do |ivar|
             if ivar.name == name
-              if env_has?("DEBUG_IVAR_OFFSET") && class_name.includes?("Entry")
-                STDERR.puts "[IVAR_OFFSET] #{class_name}##{name} FOUND offset=#{ivar.offset} size=#{class_info.size} (#{class_info.ivars.map { |iv| "#{iv.name}:#{iv.offset}" }.join(", ")})"
-              end
               return ivar.offset
             end
-          end
-        else
-          if env_has?("DEBUG_IVAR_OFFSET")
-            STDERR.puts "[IVAR_OFFSET] #{class_name}##{name} NO CLASS_INFO"
           end
         end
       end

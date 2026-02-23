@@ -5151,6 +5151,53 @@ module Crystal::MIR
         return true
       end
 
+      # Slice(UInt8)#[](Range) — monomorphization override
+      # V2 generates a single generic function that calls wrong range_to_index_and_count
+      # overload (Range(Int64,Nil) instead of Range(Int32,Int32)). This override handles
+      # Range(Int32,Int32) correctly by extracting begin/end and delegating to #[](Int32,Int32).
+      if mangled == "Slice$LUInt8$R$H$IDX$$Range"
+        emit_raw "; Slice(UInt8)#[](Range) — range monomorphization override\n"
+        emit_raw "define ptr @#{mangled}(ptr %self, ptr %range) {\n"
+        emit_raw "entry:\n"
+        # Range(Int32, Int32) layout: @begin at offset 0 (i32), @end at offset 4 (i32), @exclusive at offset 8 (i1)
+        emit_raw "  %begin_ptr = getelementptr i8, ptr %range, i32 0\n"
+        emit_raw "  %begin_val = load i32, ptr %begin_ptr\n"
+        emit_raw "  %end_ptr = getelementptr i8, ptr %range, i32 4\n"
+        emit_raw "  %end_val = load i32, ptr %end_ptr\n"
+        emit_raw "  %excl_ptr = getelementptr i8, ptr %range, i32 8\n"
+        emit_raw "  %excl_val = load i8, ptr %excl_ptr\n"
+        emit_raw "  %is_excl = trunc i8 %excl_val to i1\n"
+        # Get collection size
+        emit_raw "  %size = call i32 @Slice$LUInt8$R$Hsize(ptr %self)\n"
+        # Handle negative begin
+        emit_raw "  %begin_neg = icmp slt i32 %begin_val, 0\n"
+        emit_raw "  br i1 %begin_neg, label %fix_begin, label %begin_ok\n"
+        emit_raw "fix_begin:\n"
+        emit_raw "  %begin_fixed = add i32 %begin_val, %size\n"
+        emit_raw "  br label %begin_ok\n"
+        emit_raw "begin_ok:\n"
+        emit_raw "  %start = phi i32 [%begin_val, %entry], [%begin_fixed, %fix_begin]\n"
+        # Handle end: if exclusive, count = end - start; else count = end - start + 1
+        emit_raw "  br i1 %is_excl, label %excl_count, label %incl_count\n"
+        emit_raw "excl_count:\n"
+        emit_raw "  %count_excl = sub i32 %end_val, %start\n"
+        emit_raw "  br label %have_count\n"
+        emit_raw "incl_count:\n"
+        emit_raw "  %end_plus1 = add i32 %end_val, 1\n"
+        emit_raw "  %count_incl = sub i32 %end_plus1, %start\n"
+        emit_raw "  br label %have_count\n"
+        emit_raw "have_count:\n"
+        emit_raw "  %count = phi i32 [%count_excl, %excl_count], [%count_incl, %incl_count]\n"
+        # Clamp count to >= 0
+        emit_raw "  %count_neg = icmp slt i32 %count, 0\n"
+        emit_raw "  %count_clamped = select i1 %count_neg, i32 0, i32 %count\n"
+        # Delegate to Slice(UInt8)#[](Int32, Int32)
+        emit_raw "  %result = call ptr @Slice$LUInt8$R$H$IDX$$Int32_Int32(ptr %self, i32 %start, i32 %count_clamped)\n"
+        emit_raw "  ret ptr %result\n"
+        emit_raw "}\n\n"
+        return true
+      end
+
       # Arena::Index#valid? — null check for uninitialized __evloop_data
       if mangled == "Crystal$CCEventLoop$CCPolling$CCArena$CCIndex$Hvalid$Q"
         emit_raw "; Arena::Index#valid? — with null self guard\n"
