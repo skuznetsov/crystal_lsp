@@ -92,23 +92,7 @@ module CrystalV2
             @keep_trivia = ENV["CRYSTAL_V2_PARSER_KEEP_TRIVIA"]? != nil
           else
             keep_trivia = ENV["CRYSTAL_V2_PARSER_KEEP_TRIVIA"]? != nil
-            if ENV["STAGE2_DEBUG"]?
-              STDOUT.puts "[STAGE2_DEBUG] parser init: source.size=#{@source.size} source.bytesize=#{@source.bytesize} rope_size=#{lexer.@rope.size} keep_trivia=#{keep_trivia}"
-              STDOUT.flush
-              token_count_dbg = 0
-              lexer.each_token(skip_trivia: !keep_trivia) do |token|
-                token_count_dbg += 1
-                if token_count_dbg <= 20
-                  STDOUT.puts "[STAGE2_DEBUG] token[#{token_count_dbg}] kind=#{token.kind} slice_size=#{token.slice.size}"
-                  STDOUT.flush
-                end
-                @tokens << token
-              end
-              STDOUT.puts "[STAGE2_DEBUG] parser init done: total tokens=#{@tokens.size}"
-              STDOUT.flush
-            else
-              lexer.each_token(skip_trivia: !keep_trivia) { |token| @tokens << token }
-            end
+            lexer.each_token(skip_trivia: !keep_trivia) { |token| @tokens << token }
             @lexer = nil
             @keep_trivia = keep_trivia
             # Pre-size arena capacity heuristically based on token count to reduce reallocations
