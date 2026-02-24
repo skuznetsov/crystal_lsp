@@ -54,6 +54,19 @@
 - Float64: arithmetic, ** on literals
 
 ## Current Investigation (Stage 2 bootstrap crash)
+- **2026-02-24 (latest): localized `_lnct` linker regression to record field access path**
+  - New minimal repro script:
+    - `regression_tests/stage1_record_macro_lnct_link_repro.sh`
+  - Minimal source repro (outside stdlib) currently fails with unresolved `_lnct`:
+    - `record F, lnct : Int32`
+    - `def foo(format : F); format.lnct; end`
+  - Observed generated IR shape on repro:
+    - function lowered as `foo$$Pointer(ptr %format)` (expected typed owner),
+    - member call lowered to `@Pointer$LUInt8$R$Hlnct(...)`,
+    - plus unresolved global `@lnct(...)` declaration in linked unit.
+  - This strongly indicates incorrect type/method resolution in the `record`/field-access path
+    (compiler codegen issue, not stdlib correctness).
+
 - **2026-02-24 (latest): stage2 release now links, but compile-time runtime crash remains**
   - New release bootstrap measurements:
     - stage1 (original compiler): `crystal build --release src/crystal_v2.cr -o /tmp/stage1_rel_fix35`
