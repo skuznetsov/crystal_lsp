@@ -24,7 +24,7 @@ module CrystalV2
         end
 
         def initialize(@program : Program, root_table : SymbolTable)
-          @arena = @program.arena
+          @arena = @program.arena.as(Frontend::AstArena)
           @string_pool = @program.string_pool
           @root_table = root_table
           @identifier_symbols = {} of ExprId => Symbol

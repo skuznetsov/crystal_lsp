@@ -75,7 +75,9 @@ module CrystalV2
           @allow_pointer_suffix = 0
           @allow_in_operator = true
           @lib_depth = 0
-          @streaming = ENV["CRYSTAL_V2_PARSER_STREAM"]? != nil
+          # Bootstrap stability: force non-streaming tokenization path.
+          # Streaming mode is currently unstable in self-hosted stage2 builds.
+          @streaming = false
           @expect_context = nil
           @parsing_method_params = false
           @skip_newlines_in_braces = true
@@ -87,27 +89,22 @@ module CrystalV2
           # Ensure lexer can emit diagnostics into this parser's buffer
           lexer.diagnostics = @diagnostics
 
-          if @streaming
-            @lexer = lexer
-            @keep_trivia = ENV["CRYSTAL_V2_PARSER_KEEP_TRIVIA"]? != nil
-          else
-            keep_trivia = ENV["CRYSTAL_V2_PARSER_KEEP_TRIVIA"]? != nil
-            lexer.each_token(skip_trivia: !keep_trivia) { |token| @tokens << token }
-            @lexer = nil
-            @keep_trivia = keep_trivia
-            # Pre-size arena capacity heuristically based on token count to reduce reallocations
-            token_count = @tokens.size
-            # Heuristic: approx half token count, clamped
-            capacity = token_count // 2
-            if capacity < 512
-              capacity = 512
-            elsif capacity > 32768
-              capacity = 32768
-            end
-            # Pre-size AstArena capacity heuristically; skip when using PageArena
-            unless @arena.is_a?(PageArena)
-              @arena = AstArena.new(capacity)
-            end
+          keep_trivia = ENV["CRYSTAL_V2_PARSER_KEEP_TRIVIA"]? != nil
+          lexer.each_token(skip_trivia: !keep_trivia) { |token| @tokens << token }
+          @lexer = nil
+          @keep_trivia = keep_trivia
+          # Pre-size arena capacity heuristically based on token count to reduce reallocations
+          token_count = @tokens.size
+          # Heuristic: approx half token count, clamped
+          capacity = token_count // 2
+          if capacity < 512
+            capacity = 512
+          elsif capacity > 32768
+            capacity = 32768
+          end
+          # Pre-size AstArena capacity heuristically; skip when using PageArena
+          unless @arena.is_a?(PageArena)
+            @arena = AstArena.new(capacity)
           end
         end
 
@@ -181,7 +178,8 @@ module CrystalV2
           @in_macro_expression = false # Not in macro expression initially
           @allow_pointer_suffix = 0
           @allow_in_operator = true
-          @streaming = ENV["CRYSTAL_V2_PARSER_STREAM"]? != nil
+          # Bootstrap stability: force non-streaming tokenization path.
+          @streaming = false
           @expect_context = nil
           @parsing_method_params = false
           @skip_newlines_in_braces = true
@@ -191,15 +189,10 @@ module CrystalV2
           @macro_expr_brace_cache = Hash(Int32, Bool).new
           @allow_inline_rescue = true
           @lib_depth = 0
-          if @streaming
-            @lexer = lexer
-            @keep_trivia = ENV["CRYSTAL_V2_PARSER_KEEP_TRIVIA"]? != nil
-          else
-            keep_trivia = ENV["CRYSTAL_V2_PARSER_KEEP_TRIVIA"]? != nil
-            lexer.each_token(skip_trivia: !keep_trivia) { |token| @tokens << token }
-            @lexer = nil
-            @keep_trivia = keep_trivia
-          end
+          keep_trivia = ENV["CRYSTAL_V2_PARSER_KEEP_TRIVIA"]? != nil
+          lexer.each_token(skip_trivia: !keep_trivia) { |token| @tokens << token }
+          @lexer = nil
+          @keep_trivia = keep_trivia
         end
 
         def parse_program : Program
@@ -1099,18 +1092,9 @@ module CrystalV2
 
         # Ensure token at index exists (fill from lexer if streaming)
         private def ensure_token(idx : Int32)
-          return if idx < @tokens.size
-          return unless @streaming
-          # Pull tokens until we reach idx or EOF
-          while @tokens.size <= idx
-            lex = @lexer.not_nil!
-            tok = lex.next_token
-            if !@keep_trivia && (tok.kind == Token::Kind::Whitespace || tok.kind == Token::Kind::Comment)
-              next
-            end
-            @tokens << tok
-            break if tok.kind == Token::Kind::EOF
-          end
+          # Non-streaming mode only: tokens are preloaded in initialize.
+          # Keep this as a no-op for API compatibility.
+          idx
         end
 
         # Lookahead: check if a colon follows on the same line AND is separated by space

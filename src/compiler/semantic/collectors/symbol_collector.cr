@@ -15,9 +15,10 @@ module CrystalV2
         getter diagnostics : Array(Diagnostic)
 
       def initialize(@program : Program, context : Context)
-        @arena = @program.arena
+        program_arena = @program.arena
+        @arena = program_arena.as(Frontend::AstArena)
         @string_pool = @program.string_pool
-        @virtual_arena = @arena.is_a?(Frontend::VirtualArena) ? @arena.as(Frontend::VirtualArena) : nil
+        @virtual_arena = nil
         @table_stack = [context.symbol_table]
         @diagnostics = [] of Diagnostic
         @source_cache = {} of String => String
@@ -38,7 +39,7 @@ module CrystalV2
 
         def collect
           @program.roots.each do |root_id|
-            node = @arena[root_id]
+            node = arena[root_id]
 
             case node
             when Frontend::AnnotationNode
@@ -49,6 +50,10 @@ module CrystalV2
             end
           end
           self
+        end
+
+        private def arena : Frontend::AstArena
+          @arena
         end
 
         private def current_table
@@ -100,12 +105,12 @@ module CrystalV2
         end
 
         private def macro_block_source(block_id : Frontend::ExprId) : String?
-          block_node = @arena[block_id]
+          block_node = arena[block_id]
           return nil unless block_node.is_a?(Frontend::BlockNode)
           body = block_node.body
           return nil if body.empty?
 
-          spans = body.map { |expr_id| @arena[expr_id].span }
+          spans = body.map { |expr_id| arena[expr_id].span }
           span = Frontend::Span.cover_all(spans)
           source = nil
           if path = file_path_for(block_id)
@@ -119,7 +124,7 @@ module CrystalV2
               end
             end
           end
-          source ||= source_for_span(@arena, span)
+          source ||= source_for_span(arena, span)
           return nil unless source
 
           start = span.start_offset
@@ -133,7 +138,7 @@ module CrystalV2
       private def visit(node_id : Frontend::ExprId)
         return if node_id.invalid?
 
-        node = @arena[node_id]
+        node = arena[node_id]
 
         case node
         when Frontend::MacroDefNode
@@ -174,7 +179,7 @@ module CrystalV2
           body_id = node.body
           return unless body_id
 
-          body_node = @arena[body_id]
+          body_node = arena[body_id]
           unless body_node.is_a?(Frontend::MacroLiteralNode)
             return
           end
@@ -387,7 +392,7 @@ module CrystalV2
             member_name = intern_name(member.name)
             if val_id = member.value
               # Member has explicit value - try to evaluate it
-              val_node = @program.arena[val_id]
+              val_node = arena[val_id]
               if val_node.is_a?(Frontend::NumberNode)
                 members[member_name] = intern_name(val_node.value).to_i64? || next_value
                 next_value = members[member_name] + 1
@@ -447,7 +452,7 @@ module CrystalV2
 
         private def handle_global_assignment(node : Frontend::AssignNode)
           target_id = node.target
-          target_node = @arena[target_id]
+          target_node = arena[target_id]
           case target_node
           when Frontend::GlobalNode
             name = intern_name(target_node.name)
@@ -492,21 +497,21 @@ module CrystalV2
             when Frontend::GetterNode
               # Generate: def name : Type; @name; end
               def_node = build_getter_def(spec, node.span)
-              def_id = @arena.add_typed(def_node)
+              def_id = arena.add_typed(def_node)
               visit(def_id)  # Immediately register as MethodSymbol
 
             when Frontend::SetterNode
               # Generate: def name=(value : Type); @name = value; end
               def_node = build_setter_def(spec, node.span)
-              def_id = @arena.add_typed(def_node)
+              def_id = arena.add_typed(def_node)
               visit(def_id)
 
             when Frontend::PropertyNode
               # Generate both getter and setter
               getter_node = build_getter_def(spec, node.span)
               setter_node = build_setter_def(spec, node.span)
-              visit(@arena.add_typed(getter_node))
-              visit(@arena.add_typed(setter_node))
+              visit(arena.add_typed(getter_node))
+              visit(arena.add_typed(setter_node))
             end
           end
         end
@@ -527,7 +532,7 @@ module CrystalV2
             spec.name_span,
             ivar_bytes
           )
-          ivar_id = @arena.add_typed(ivar_node)
+          ivar_id = arena.add_typed(ivar_node)
 
           # Create def node with instance variable as body
           method_name_bytes = if spec.predicate
@@ -575,7 +580,7 @@ module CrystalV2
             spec.name_span,
             ivar_bytes
           )
-          ivar_id = @arena.add_typed(ivar_node)
+          ivar_id = arena.add_typed(ivar_node)
 
           # Create identifier node: value
           value_bytes = "value".to_slice
@@ -583,7 +588,7 @@ module CrystalV2
             spec.name_span,
             value_bytes
           )
-          value_id = @arena.add_typed(value_node)
+          value_id = arena.add_typed(value_node)
 
           # Create assignment: @name = value
           assign_node = Frontend::AssignNode.new(
@@ -591,7 +596,7 @@ module CrystalV2
             ivar_id,
             value_id
           )
-          assign_id = @arena.add_typed(assign_node)
+          assign_id = arena.add_typed(assign_node)
 
           # Create def node with assignment as body
           spec_name_str2 = intern_name(spec.name)  # Convert for interpolation
@@ -668,7 +673,7 @@ module CrystalV2
         # to the owning class symbol.
         private def attach_class_annotations(class_symbol : ClassSymbol, annotation_ids : Array(Frontend::ExprId))
           annotation_ids.each do |ann_id|
-            node = @arena[ann_id]
+            node = arena[ann_id]
             next unless node.is_a?(Frontend::AnnotationNode)
 
             if info = build_annotation_info(node)
@@ -686,7 +691,7 @@ module CrystalV2
           ivar_name = ivar_name[1..-1] if ivar_name.starts_with?("@")
 
           annotation_ids.each do |ann_id|
-            ann_node = @arena[ann_id]
+            ann_node = arena[ann_id]
             next unless ann_node.is_a?(Frontend::AnnotationNode)
 
             if info = build_annotation_info(ann_node)
@@ -705,7 +710,7 @@ module CrystalV2
 
           # Build all annotation infos up front to reuse for each spec
           infos = annotation_ids.compact_map do |ann_id|
-            ann_node = @arena[ann_id]
+            ann_node = arena[ann_id]
             next unless ann_node.is_a?(Frontend::AnnotationNode)
             build_annotation_info(ann_node)
           end
@@ -743,7 +748,7 @@ module CrystalV2
         # Handles simple identifiers and nested PathNode chains such as
         # JSON::Serializable::Options.
         private def annotation_full_name(name_expr_id : Frontend::ExprId) : String
-          node = @arena[name_expr_id]
+          node = arena[name_expr_id]
 
           case node
           when Frontend::IdentifierNode
@@ -754,7 +759,7 @@ module CrystalV2
 
             # Traverse left-associative PathNode chain
             while true
-              current = @arena[current_id]
+              current = arena[current_id]
               case current
               when Frontend::PathNode
                 right_id = current.right
@@ -790,7 +795,7 @@ module CrystalV2
           pending_annotations = [] of Frontend::ExprId
 
           body.each do |expr_id|
-            node = @arena[expr_id]
+            node = arena[expr_id]
 
             case node
             when Frontend::AnnotationNode
@@ -850,7 +855,7 @@ module CrystalV2
 
         private def scan_for_instance_vars(class_symbol : ClassSymbol, expr_id : Frontend::ExprId, current_method : Frontend::DefNode? = nil)
           return if expr_id.invalid?
-          node = @arena[expr_id]
+          node = arena[expr_id]
 
           case node
           when Frontend::InstanceVarDeclNode
@@ -865,7 +870,7 @@ module CrystalV2
           when Frontend::AssignNode
             # Check if assignment target is instance variable
             target_id = node.target
-            target_node = @arena[target_id]
+            target_node = arena[target_id]
             if target_node.is_a?(Frontend::InstanceVarNode)
               var_name = intern_name(target_node.name)
               var_name = var_name[1..-1] if var_name.starts_with?("@")
@@ -899,7 +904,7 @@ module CrystalV2
 
         private def scan_for_class_vars(class_symbol : ClassSymbol, expr_id : Frontend::ExprId, current_method : Frontend::DefNode? = nil)
           return if expr_id.invalid?
-          node = @arena[expr_id]
+          node = arena[expr_id]
 
           case node
           when Frontend::ClassVarDeclNode
@@ -909,7 +914,7 @@ module CrystalV2
             define_class_var_symbol(class_symbol, var_name, type_annotation, expr_id)
           when Frontend::AssignNode
             target_id = node.target
-            target_node = @arena[target_id]
+            target_node = arena[target_id]
             if target_node.is_a?(Frontend::ClassVarNode)
               var_name = intern_name(target_node.name)
               var_name = var_name[2..-1] if var_name.starts_with?("@@")
@@ -936,7 +941,7 @@ module CrystalV2
         private def infer_ivar_type_from_assignment(value_expr_id : Frontend::ExprId, current_method : Frontend::DefNode?) : String?
           return nil unless current_method
 
-          value_node = @arena[value_expr_id]
+          value_node = arena[value_expr_id]
           # If RHS is an identifier (e.g., parameter name)
           if value_node.is_a?(Frontend::IdentifierNode)
             param_name = intern_name(value_node.name)
@@ -1066,7 +1071,7 @@ module CrystalV2
         end
 
         private def span_for(node_id : Frontend::ExprId) : Frontend::Span
-          @arena[node_id].span
+          arena[node_id].span
         end
 
         # Week 1 Day 2: Detect generic type parameters from method signature
@@ -1180,7 +1185,7 @@ module CrystalV2
         end
 
         private def resolve_symbol_from_expr(expr_id : Frontend::ExprId) : Symbol?
-          node = @arena[expr_id]
+          node = arena[expr_id]
           case node
           when Frontend::PathNode
             segments = [] of String
@@ -1195,7 +1200,7 @@ module CrystalV2
 
         private def collect_path_segments(node : Frontend::PathNode, segments : Array(String))
           if left_id = node.left
-            left_node = @arena[left_id]
+            left_node = arena[left_id]
             case left_node
             when Frontend::PathNode
               collect_path_segments(left_node, segments)
@@ -1204,7 +1209,7 @@ module CrystalV2
             end
           end
 
-          right_node = @arena[node.right]
+          right_node = arena[node.right]
           case right_node
           when Frontend::IdentifierNode
             segments << intern_name(right_node.name)

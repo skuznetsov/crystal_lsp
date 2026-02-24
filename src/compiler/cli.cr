@@ -652,7 +652,7 @@ module CrystalV2
 
         stage2_debug("[STAGE2_DEBUG] loaded_files init", err_io)
         loaded_files = Set(String).new
-        all_arenas = [] of Tuple(Frontend::ArenaLike, Array(Frontend::ExprId), String, String)
+        all_arenas = [] of Tuple(Frontend::AstArena, Array(Frontend::ExprId), String, String)
 
         # Load prelude first (unless --no-prelude)
         unless options.no_prelude
@@ -700,7 +700,9 @@ module CrystalV2
         log(options, out_io, "  Files: #{all_arenas.size}, Expressions: #{total_exprs}")
         stage2_debug("[STAGE2_DEBUG] lowering start (all_arenas=#{all_arenas.size})", err_io)
 
+        stage2_debug("[STAGE2_DEBUG] collect_link_libraries start", err_io)
         link_libs = collect_link_libraries(all_arenas, options, out_io)
+        stage2_debug("[STAGE2_DEBUG] collect_link_libraries done count=#{link_libs.size}", err_io)
 
         if ENV.has_key?("CRYSTAL_V2_STOP_AFTER_PARSE")
           log(options, out_io, "  Stop after parse (CRYSTAL_V2_STOP_AFTER_PARSE)")
@@ -754,15 +756,19 @@ module CrystalV2
         log(options, out_io, "\n[2/6] Lowering to HIR...")
         hir_start = Time.instant
 
-        first_arena = all_arenas[0][0]
+        stage2_debug("[STAGE2_DEBUG] hir setup start", err_io)
+        first_entry = all_arenas.unsafe_fetch(0)
+        first_arena = first_entry[0]
         sources_by_arena = {} of Frontend::ArenaLike => String
         paths_by_arena = {} of Frontend::ArenaLike => String
-        all_arenas.each do |arena, _exprs, path, source|
-          sources_by_arena[arena] = source
-          paths_by_arena[arena] = path
-        end
+        # Bootstrap stability: skip arena-keyed source/path caches.
+        # ArenaLike hash key operations are currently unstable in stage2 builds.
+        stage2_debug("[STAGE2_DEBUG] hir setup maps ready size=#{sources_by_arena.size}", err_io)
         hir_converter = HIR::AstToHir.new(first_arena, input_file, sources_by_arena, paths_by_arena)
+        stage2_debug("[STAGE2_DEBUG] hir converter created", err_io)
         link_libs.each { |lib_name| hir_converter.module.add_link_library(lib_name) }
+        stage2_debug("[STAGE2_DEBUG] hir link libs attached", err_io)
+        stage2_debug("[STAGE2_DEBUG] top-level collection init", err_io)
 
         # Collect nodes by type
         def_nodes = [] of Tuple(Frontend::DefNode, Frontend::ArenaLike)
@@ -777,6 +783,7 @@ module CrystalV2
         acyclic_types = Set(String).new
 
         flags = Runtime.target_flags
+        stage2_debug("[STAGE2_DEBUG] top-level collection walk start", err_io)
         all_arenas.each do |arena, exprs, file_path, source|
           next if skip_file_directive?(source, flags)
           pending_annotations = [] of Tuple(Frontend::AnnotationNode, Frontend::ArenaLike)
@@ -801,25 +808,60 @@ module CrystalV2
             )
           end
         end
+        stage2_debug("[STAGE2_DEBUG] top-level collection done defs=#{def_nodes.size} classes=#{class_nodes.size} modules=#{module_nodes.size} constants=#{constant_exprs.size} main=#{main_exprs.size}", err_io)
 
+        stage2_debug("[STAGE2_DEBUG] seed top-level names start", err_io)
         top_level_type_names = Set(String).new
-        class_nodes.each { |node, _| top_level_type_names.add(String.new(node.name)) }
-        module_nodes.each { |node, _| top_level_type_names.add(String.new(node.name)) }
-        enum_nodes.each { |node, _| top_level_type_names.add(String.new(node.name)) }
-        alias_nodes.each { |node, _| top_level_type_names.add(String.new(node.name)) }
-        lib_nodes.each { |node, _, _| top_level_type_names.add(String.new(node.name)) }
-        hir_converter.seed_top_level_type_names(top_level_type_names)
+        i = 0
+        while i < class_nodes.size
+          node, _ = class_nodes.unsafe_fetch(i)
+          top_level_type_names.add(String.new(node.name))
+          i += 1
+        end
+        i = 0
+        while i < module_nodes.size
+          node, _ = module_nodes.unsafe_fetch(i)
+          top_level_type_names.add(String.new(node.name))
+          i += 1
+        end
+        i = 0
+        while i < enum_nodes.size
+          node, _ = enum_nodes.unsafe_fetch(i)
+          top_level_type_names.add(String.new(node.name))
+          i += 1
+        end
+        i = 0
+        while i < alias_nodes.size
+          node, _ = alias_nodes.unsafe_fetch(i)
+          top_level_type_names.add(String.new(node.name))
+          i += 1
+        end
+        i = 0
+        while i < lib_nodes.size
+          node, _, _ = lib_nodes.unsafe_fetch(i)
+          top_level_type_names.add(String.new(node.name))
+          i += 1
+        end
+        unless top_level_type_names.empty?
+          hir_converter.seed_top_level_type_names(top_level_type_names)
+        end
         top_level_class_kinds = {} of String => Bool
-        class_nodes.each do |node, _|
+        i = 0
+        while i < class_nodes.size
+          node, _ = class_nodes.unsafe_fetch(i)
           name = String.new(node.name)
           top_level_class_kinds[name] = node.is_struct == true
+          i += 1
         end
-        hir_converter.seed_top_level_class_kinds(top_level_class_kinds)
+        unless top_level_class_kinds.empty?
+          hir_converter.seed_top_level_class_kinds(top_level_class_kinds)
+        end
+        stage2_debug("[STAGE2_DEBUG] seed top-level names done", err_io)
 
         # Pre-scan constant definitions so nested classes can resolve outer constants
         # across reopened types (require order interleaves files).
         debug_filter = ENV["DEBUG_PRE_SCAN_CONST"]?
-        scan_constants_in_body = ->(owner : String, arena : Frontend::ArenaLike, body : Array(Frontend::ExprId)) do
+        scan_constants_in_body = ->(owner : String, arena : Frontend::AstArena, body : Array(Frontend::ExprId)) do
           stack = [body]
           while current = stack.pop?
             current.each do |expr_id|
@@ -850,7 +892,7 @@ module CrystalV2
           end
         end
 
-        scan_module_body = ->(prefix : String, arena : Frontend::ArenaLike, body : Array(Frontend::ExprId)) do
+        scan_module_body = ->(prefix : String, arena : Frontend::AstArena, body : Array(Frontend::ExprId)) do
           stack = [{prefix: prefix, body: body}]
           while current = stack.pop?
             current[:body].each do |expr_id|
@@ -878,22 +920,32 @@ module CrystalV2
           end
         end
 
-        class_nodes.each do |class_node, arena|
-          next unless body = class_node.body
-          hir_converter.arena = arena
-          class_name = String.new(class_node.name)
-          scan_constants_in_body.call(class_name, arena, body)
+        stage2_debug("[STAGE2_DEBUG] pre-scan class/module loops start", err_io)
+        i = 0
+        while i < class_nodes.size
+          class_node, arena = class_nodes.unsafe_fetch(i)
+          if body = class_node.body
+            hir_converter.arena = arena
+            class_name = String.new(class_node.name)
+            scan_constants_in_body.call(class_name, arena, body)
+          end
+          i += 1
         end
 
-        module_nodes.each do |module_node, arena|
-          next unless body = module_node.body
-          hir_converter.arena = arena
-          module_name = String.new(module_node.name)
-          scan_module_body.call(module_name, arena, body)
+        i = 0
+        while i < module_nodes.size
+          module_node, arena = module_nodes.unsafe_fetch(i)
+          if body = module_node.body
+            hir_converter.arena = arena
+            module_name = String.new(module_node.name)
+            scan_module_body.call(module_name, arena, body)
+          end
+          i += 1
         end
+        stage2_debug("[STAGE2_DEBUG] pre-scan constants done", err_io)
 
         # Pass 1: Register types
-        if ENV.has_key?("DEBUG_NESTED_CLASS")
+        if false && ENV.has_key?("DEBUG_NESTED_CLASS")
           STDERR.puts "[DEBUG_CLI] class_nodes: #{class_nodes.size}, module_nodes: #{module_nodes.size}"
           module_nodes.each do |module_node, arena|
             name = String.new(module_node.name)
@@ -911,8 +963,22 @@ module CrystalV2
         lib_nodes.each { |n, a, annotations| hir_converter.arena = a; hir_converter.register_lib(n, annotations) }
         log(options, out_io, "    Enums: #{enum_nodes.size}")
         enum_nodes.each { |n, a| hir_converter.arena = a; hir_converter.register_enum(n) }
-        hir_converter.resolve_pending_enum_constants
-        hir_converter.recompute_c_struct_sizes
+        enum_count = enum_nodes.size
+        stage2_debug("[STAGE2_DEBUG] enum resolve guard count=#{enum_count}", err_io)
+        if enum_count > 0
+          stage2_debug("[STAGE2_DEBUG] enum resolve call", err_io)
+          hir_converter.resolve_pending_enum_constants
+        else
+          stage2_debug("[STAGE2_DEBUG] enum resolve skipped", err_io)
+        end
+        lib_count = lib_nodes.size
+        stage2_debug("[STAGE2_DEBUG] recompute_c_struct_sizes guard lib_count=#{lib_count}", err_io)
+        if lib_count == 0
+          stage2_debug("[STAGE2_DEBUG] recompute_c_struct_sizes skipped", err_io)
+        else
+          stage2_debug("[STAGE2_DEBUG] recompute_c_struct_sizes call", err_io)
+          hir_converter.recompute_c_struct_sizes
+        end
         log(options, out_io, "    Aliases: #{alias_nodes.size}")
         alias_nodes.each { |n, a| hir_converter.arena = a; hir_converter.register_alias(n) }
         log(options, out_io, "    Macros: #{macro_nodes.size}")
@@ -1556,7 +1622,7 @@ module CrystalV2
 
       private def parse_file_recursive(
         file_path : String,
-        results : Array(Tuple(Frontend::ArenaLike, Array(Frontend::ExprId), String, String)),
+        results : Array(Tuple(Frontend::AstArena, Array(Frontend::ExprId), String, String)),
         loaded : Set(String),
         input_file : String,
         options : Options,
@@ -1625,7 +1691,7 @@ module CrystalV2
         stage2_debug("[STAGE2_DEBUG] parse_file_recursive parse start abs_path=#{abs_path}", out_io)
         program = parser.parse_program
         stage2_debug("[STAGE2_DEBUG] parse_file_recursive parse ok abs_path=#{abs_path}", out_io)
-        arena = program.arena
+        arena = program.arena.as(Frontend::AstArena)
         exprs = program.roots
 
         # Process requires first
@@ -1654,11 +1720,11 @@ module CrystalV2
 
       # Process a node for require statements (recursively handles macro bodies)
       private def process_require_node(
-        arena : Frontend::ArenaLike,
+        arena : Frontend::AstArena,
         expr_id : Frontend::ExprId,
         base_dir : String,
         input_file : String,
-        results : Array(Tuple(Frontend::ArenaLike, Array(Frontend::ExprId), String, String)),
+        results : Array(Tuple(Frontend::AstArena, Array(Frontend::ExprId), String, String)),
         loaded : Set(String),
         options : Options,
         out_io : IO,
@@ -1771,7 +1837,7 @@ module CrystalV2
       end
 
       private def collect_link_libraries(
-        all_arenas : Array(Tuple(Frontend::ArenaLike, Array(Frontend::ExprId), String, String)),
+        all_arenas : Array(Tuple(Frontend::AstArena, Array(Frontend::ExprId), String, String)),
         options : Options,
         out_io : IO
       ) : Array(String)
@@ -1785,7 +1851,7 @@ module CrystalV2
       end
 
       private def collect_link_libraries_from_expr(
-        arena : Frontend::ArenaLike,
+        arena : Frontend::AstArena,
         expr_id : Frontend::ExprId,
         libraries : Array(String),
         options : Options,
@@ -1824,7 +1890,7 @@ module CrystalV2
       end
 
       private def collect_top_level_nodes(
-        arena : Frontend::ArenaLike,
+        arena : Frontend::AstArena,
         expr_id : Frontend::ExprId,
         def_nodes : Array(Tuple(Frontend::DefNode, Frontend::ArenaLike)),
         class_nodes : Array(Tuple(Frontend::ClassNode, Frontend::ArenaLike)),
@@ -2006,7 +2072,7 @@ module CrystalV2
       # Expand a top-level {% for %} macro loop (e.g., in primitives.cr)
       private def expand_top_level_macro_for(
         node : Frontend::MacroForNode,
-        arena : Frontend::ArenaLike,
+        arena : Frontend::AstArena,
         source : String,
         def_nodes : Array(Tuple(Frontend::DefNode, Frontend::ArenaLike)),
         class_nodes : Array(Tuple(Frontend::ClassNode, Frontend::ArenaLike)),
@@ -2080,7 +2146,7 @@ module CrystalV2
 
       # Resolve a macro for-loop iterable to a list of string values
       private def resolve_top_level_macro_iterable(
-        arena : Frontend::ArenaLike,
+        arena : Frontend::AstArena,
         iterable_id : Frontend::ExprId,
         source : String
       ) : Array(String)?
@@ -2149,7 +2215,7 @@ module CrystalV2
       # {% for %}, {% if %}, {{ expr }}, and variable assignments.
       private def expand_macro_literal_via_expander(
         body_id : Frontend::ExprId,
-        arena : Frontend::ArenaLike,
+        arena : Frontend::AstArena,
         source : String,
         flags : Set(String)
       ) : String?
@@ -2231,7 +2297,7 @@ module CrystalV2
       end
 
       private def collect_macro_literal_exprs(
-        arena : Frontend::ArenaLike,
+        arena : Frontend::AstArena,
         node : Frontend::MacroLiteralNode,
         flags : Set(String)
       ) : Array(Frontend::ExprId)
@@ -2302,7 +2368,7 @@ module CrystalV2
 
 
       private def extract_link_libraries_from_annotation(
-        arena : Frontend::ArenaLike,
+        arena : Frontend::AstArena,
         node : Frontend::AnnotationNode
       ) : Array(String)
         libraries = [] of String
@@ -2384,7 +2450,7 @@ module CrystalV2
       end
 
       private def macro_literal_active_texts(
-        arena : Frontend::ArenaLike,
+        arena : Frontend::AstArena,
         node : Frontend::MacroLiteralNode,
         flags : Set(String)
       ) : Array(String)
@@ -2462,7 +2528,7 @@ module CrystalV2
       end
 
       private def annotation_name_from_expr(
-        arena : Frontend::ArenaLike,
+        arena : Frontend::AstArena,
         expr_id : Frontend::ExprId
       ) : String
         node = arena[expr_id]
@@ -2477,7 +2543,7 @@ module CrystalV2
       end
 
       private def macro_literal_require_texts(
-        arena : Frontend::ArenaLike,
+        arena : Frontend::AstArena,
         node : Frontend::MacroLiteralNode,
         flags : Set(String)
       ) : Array(String)
@@ -2939,7 +3005,7 @@ module CrystalV2
       end
 
       private def evaluate_macro_condition(
-        arena : Frontend::ArenaLike,
+        arena : Frontend::AstArena,
         expr_id : Frontend::ExprId,
         flags : Set(String)
       ) : Bool?
@@ -2982,7 +3048,7 @@ module CrystalV2
       end
 
       private def macro_flag_call?(
-        arena : Frontend::ArenaLike,
+        arena : Frontend::AstArena,
         node : Frontend::CallNode,
         flags : Set(String)
       ) : Bool?

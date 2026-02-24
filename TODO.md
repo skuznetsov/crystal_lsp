@@ -54,6 +54,25 @@
 - Float64: arithmetic, ** on literals
 
 ## Current Investigation (Stage 2 bootstrap crash)
+- **2026-02-24 (latest): stage2 no-prelude path moved forward, bootstrap parse crash still open**
+  - Release stage2 rebuild from `/tmp/stage1_rel_fix4` remains stable:
+    - `/tmp/stage2_rel_fix19`..`/tmp/stage2_rel_fix24` all built in ~117–118s.
+  - `src/compiler/cli.cr` fixes that are now in working tree:
+    - fixed potential infinite loop in pre-scan `while` loops (`next unless body = ...` inside `while` no longer skips index increment);
+    - guarded empty-seed calls (`seed_top_level_type_names` / `seed_top_level_class_kinds`);
+    - added traceable guards for enum/lib post-registration passes.
+  - No-prelude minimal repro status:
+    - `STAGE2_BOOTSTRAP_TRACE=1 /tmp/stage2_rel_fix24 --release --no-ast-cache --no-prelude /tmp/stage2_repro_small.cr -o ...`
+      now passes parse + seed + pre-scan and reaches later HIR path,
+      but still crashes (`exit 139`) in `AstToHir#flush_pending_monomorphizations` (`Array#dup` path).
+  - Target bootstrap status (still failing):
+    - `STAGE2_BOOTSTRAP_TRACE=1 /tmp/stage2_rel_fix24 --release regression_tests/basic_sanity.cr -o ...`
+      => `exit 138` (`Bus error`) during prelude parse startup.
+    - `--no-codegen --no-prelude src/stdlib/prelude.cr` also reproduces early (`exit 138`), so
+      this gives a smaller parse/check-side repro independent of codegen/link.
+  - Added regression script:
+    - `regression_tests/stage2_parse_prelude_nocodegen_repro.sh`
+
 - **2026-02-24: In progress — stage2 CLI option parsing stabilized, parser/check path still unstable**
   - Added a bootstrap-safe fallback parser in `src/compiler/cli.cr`:
     - when `OptionParser` raises `InvalidOption` in stage2, CLI retries with
