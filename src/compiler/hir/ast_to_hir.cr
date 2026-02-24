@@ -20484,6 +20484,17 @@ module Crystal::HIR
           best_name = name
           best_param_count = param_count
           best_score = score
+        elsif score == best_score && param_count == best_param_count && arg_count == 1
+          # Tie-breaker for single-arg overloads with unknown arg types:
+          # prefer primitive index overloads over complex range/regex overloads.
+          if best_name
+            best_ends_range = best_name.ends_with?("$Range") || best_name.ends_with?("$Regex")
+            name_ends_prim = name.ends_with?("$Int32") || name.ends_with?("$UInt8") ||
+                             name.ends_with?("$Int64") || name.ends_with?("$UInt32")
+            if best_ends_range && name_ends_prim
+              best_name = name
+            end
+          end
         end
       end
 
@@ -21974,8 +21985,11 @@ module Crystal::HIR
         return false unless source_has_macro_markers?(source)
         scan_body_source = true
         if snippet = slice_source_for_span(node.span, source)
-          has_macro = contains_macro_marker_tokens?(snippet)
-          if has_macro && macro_text_contains_yield?(snippet)
+          # Ignore single-line comments: they can contain "{%" or "yield"
+          # and cause false-positive "$block" suffix registration.
+          stripped = strip_single_line_comments(snippet)
+          has_macro = contains_macro_marker_tokens?(stripped)
+          if has_macro && macro_text_contains_yield?(stripped)
             return true
           end
           scan_body_source = has_macro
@@ -21984,11 +21998,62 @@ module Crystal::HIR
           body.each do |expr_id|
             snippet = slice_source_for_expr_in_arena(expr_id, resolved_arena, source)
             next unless snippet
-            return true if macro_text_contains_yield?(snippet)
+            stripped = strip_single_line_comments(snippet)
+            return true if macro_text_contains_yield?(stripped)
           end
         end
       end
       false
+    end
+
+    # Remove single-line comments (#...) to avoid false positives in
+    # macro/yield source scanning.
+    private def strip_single_line_comments(text : String) : String
+      result = String::Builder.new(text.bytesize)
+      in_string = false
+      string_char : Char = '"'
+      escape_next = false
+      i = 0
+      bytes = text.to_slice
+      while i < bytes.size
+        byte = bytes[i]
+        if escape_next
+          result.write_byte(byte)
+          escape_next = false
+          i += 1
+          next
+        end
+        if byte == '\\'.ord
+          result.write_byte(byte)
+          escape_next = true
+          i += 1
+          next
+        end
+        if in_string
+          result.write_byte(byte)
+          if byte == string_char.ord
+            in_string = false
+          end
+          i += 1
+          next
+        end
+        if byte == '"'.ord || byte == '\''.ord
+          in_string = true
+          string_char = byte.unsafe_chr
+          result.write_byte(byte)
+          i += 1
+          next
+        end
+        if byte == '#'.ord
+          while i < bytes.size && bytes[i] != '\n'.ord
+            i += 1
+          end
+          next
+        end
+        result.write_byte(byte)
+        i += 1
+      end
+      result.to_s
     end
 
     private def contains_macro_marker_tokens?(text : String) : Bool
@@ -29191,7 +29256,7 @@ module Crystal::HIR
         considered = 0
         @pending_arg_types.each do |name, args|
           considered += 1
-          next if @module.has_function?(name)
+          next if @module.has_function_with_body?(name)
           state = function_state(name)
           next if state.completed?
           next if state.in_progress?
@@ -29256,7 +29321,7 @@ module Crystal::HIR
                    else
                      mangle_function_name(base_name, args.types, signature.has_block)
                    end
-            next if @module.has_function?(name)
+            next if @module.has_function_with_body?(name)
             state = function_state(name)
             next if state.completed?
             next if state.in_progress?
@@ -29388,7 +29453,7 @@ module Crystal::HIR
                 end
               end
               next if name.empty?
-              next if @module.has_function?(name)
+              next if @module.has_function_with_body?(name)
               next unless ast_filter_allows_safety_net_name?(name, ast_method_names, ast_owner_types, ast_method_bases)
               if function_state(name).completed?
                 # Some flows mark completed without emitting a function body.
@@ -29606,8 +29671,8 @@ module Crystal::HIR
         defs_before = @function_defs.size
         mono_before = @monomorphized.size
         pending.each do |name|
-          # Skip if already lowered or currently being lowered
-          next if @module.has_function?(name)
+          # Skip if already lowered (with a real body) or currently being lowered
+          next if @module.has_function_with_body?(name)
           next if function_state(name).completed?
           next if function_state(name).in_progress?
 
@@ -39476,7 +39541,7 @@ module Crystal::HIR
       return false unless @inline_yield_name_stack.empty?
       # Don't force if it would cause infinite recursion
       return false if function_state(name).in_progress?
-      return false if @module.has_function?(name)
+      return false if @module.has_function_with_body?(name)
       return false if function_state(name).completed?
       # Prevent deep chaining: A needs ret type of B, B needs C, C needs D...
       max_force_depth = 4
@@ -39552,7 +39617,7 @@ module Crystal::HIR
         end
         return
       end
-      if @module.has_function?(name)
+      if @module.has_function_with_body?(name)
         if is_math_min_debug
           STDERR.puts "[MATH_MIN_LOWER_FUNC] EARLY_RETURN: already_exists name=#{name}"
         end
@@ -39602,6 +39667,20 @@ module Crystal::HIR
         unless function_state(name).pending?
           @function_lowering_states[name] = FunctionLoweringState::Pending
           @pending_function_queue << name
+          # Keep AST reachability filter aligned for deferred functions.
+          if @ast_filter_active
+            if method_names = @ast_reachable_method_names
+              if method = method_short_from_name(name)
+                method_names << method
+              end
+            end
+            if owner_types = @ast_reachable_owner_types
+              owner = method_owner_from_name(name)
+              owner_types << owner unless owner.empty?
+              owner_base = strip_generic_args(owner)
+              owner_types << owner_base unless owner_base.empty?
+            end
+          end
           if env_get("DEBUG_PENDING_SOURCES")
             base = strip_type_suffix(name)
             stripped = strip_generic_receiver_from_base_name(base)
@@ -39751,6 +39830,17 @@ module Crystal::HIR
                 end
               end
             end
+          end
+        end
+        # Reverse $block lookup: call wants name without $block, but def was
+        # registered with $block (e.g., false-positive yield detection).
+        if !func_def && !name.includes?('$')
+          block_name = "#{name}$block"
+          if block_def = @function_defs[block_name]?
+            func_def = block_def
+            arena = @function_def_arenas[block_name]
+            target_name = name
+            lookup_branch = "reverse_block"
           end
         end
         if base_name != name

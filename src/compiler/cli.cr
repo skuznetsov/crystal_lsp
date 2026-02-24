@@ -101,6 +101,193 @@ module CrystalV2
         end
       end
 
+      # Bootstrap-safe argument parser used as a fallback when OptionParser
+      # misbehaves in self-hosted stage2 binaries.
+      private def parse_args_safe(options : Options, parser_help : String, err_io : IO) : Int32
+        opt_level_invalid = false
+        mm_stack_threshold_invalid = false
+        emit_invalid : String? = nil
+        i = 0
+        while i < @args.size
+          arg = @args[i]
+          if arg == "--release"
+            options.optimize = 3
+            options.release = true
+          elsif arg == "-O"
+            if i + 1 < @args.size
+              parsed = @args[i + 1].to_i32?
+              if parsed
+                options.optimize = parsed.not_nil!
+                i += 1
+              else
+                opt_level_invalid = true
+              end
+            else
+              opt_level_invalid = true
+            end
+          elsif arg.starts_with?("-O") && arg.size > 2
+            parsed = arg[2..-1].to_i32?
+            if parsed
+              options.optimize = parsed.not_nil!
+            else
+              opt_level_invalid = true
+            end
+          elsif arg == "--no-codegen"
+            options.check_only = true
+          elsif arg == "--emit"
+            if i + 1 < @args.size
+              emit_type = @args[i + 1]
+              case emit_type
+              when "llvm-ir" then options.emit_llvm = true
+              when "hir"     then options.emit_hir = true
+              when "mir"     then options.emit_mir = true
+              else
+                emit_invalid = emit_type
+              end
+              i += 1
+            else
+              err_io.puts "Error: --emit expects a value"
+              return 1
+            end
+          elsif arg.starts_with?("--emit=")
+            emit_type = arg[7..-1]
+            case emit_type
+            when "llvm-ir" then options.emit_llvm = true
+            when "hir"     then options.emit_hir = true
+            when "mir"     then options.emit_mir = true
+            else
+              emit_invalid = emit_type
+            end
+          elsif arg == "--prelude"
+            if i + 1 < @args.size
+              options.prelude_file = @args[i + 1]
+              i += 1
+            else
+              err_io.puts "Error: --prelude expects a value"
+              return 1
+            end
+          elsif arg.starts_with?("--prelude=")
+            options.prelude_file = arg[10..-1]
+          elsif arg == "--no-prelude"
+            options.no_prelude = true
+          elsif arg == "-d" || arg == "--debug"
+            options.debug = true
+          elsif arg == "--no-debug"
+            options.debug = false
+          elsif arg == "--verbose"
+            options.verbose = true
+          elsif arg == "-s" || arg == "--stats"
+            options.stats = true
+          elsif arg == "-p" || arg == "--progress"
+            options.progress = true
+          elsif arg == "--dump-symbols"
+            options.dump_symbols = true
+          elsif arg == "--version"
+            options.show_version = true
+          elsif arg == "--help" || arg == "-h"
+            options.show_help = true
+            options.help_text = parser_help
+          elsif arg == "--no-ast-cache"
+            options.ast_cache = false
+          elsif arg == "--ast-cache"
+            options.ast_cache = true
+          elsif arg == "--output"
+            if i + 1 < @args.size
+              options.output = @args[i + 1]
+              i += 1
+            else
+              err_io.puts "Error: --output expects a value"
+              return 1
+            end
+          elsif arg.starts_with?("--output=")
+            options.output = arg[9..-1]
+          elsif arg == "--mm-stack-threshold"
+            if i + 1 < @args.size
+              value = @args[i + 1].to_u32?
+              if value
+                options.mm_stack_threshold = value.not_nil!
+                i += 1
+              else
+                mm_stack_threshold_invalid = true
+              end
+            else
+              mm_stack_threshold_invalid = true
+            end
+          elsif arg.starts_with?("--mm=")
+            options.mm_mode = arg[5..-1]
+          elsif arg == "--no-llvm-opt"
+            options.llvm_opt = false
+          elsif arg == "--llvm-cache"
+            options.llvm_cache = true
+          elsif arg == "--no-llvm-cache"
+            options.llvm_cache = false
+          elsif arg == "--no-llvm-metadata"
+            options.emit_type_metadata = false
+          elsif arg == "--lto"
+            options.lto = true
+          elsif arg == "--pgo-gen"
+            options.pgo_generate = true
+          elsif arg == "--pgo-use"
+            if i + 1 < @args.size
+              options.pgo_profile = @args[i + 1]
+              i += 1
+            else
+              err_io.puts "Error: --pgo-use expects a value"
+              return 1
+            end
+          elsif arg.starts_with?("--pgo-use=")
+            options.pgo_profile = arg[10..-1]
+          elsif arg == "--no-link"
+            options.link = false
+          elsif arg == "--no-mir-opt"
+            options.mir_opt = false
+          elsif arg == "--no-ltp"
+            options.ltp_opt = false
+          elsif arg == "--slab-frame"
+            options.slab_frame = true
+          elsif arg == "--no-gc"
+            options.no_gc = true
+          elsif arg.starts_with?("-o")
+            if arg.size > 2
+              options.output = arg[2..-1]
+            else
+              if i + 1 < @args.size
+                options.output = @args[i + 1]
+                i += 1
+              else
+                err_io.puts "Error: -o expects a value"
+                return 1
+              end
+            end
+          elsif arg.starts_with?("-")
+            err_io.puts "Error: unknown option: #{arg}"
+            err_io.puts parser_help
+            return 1
+          end
+          i += 1
+        end
+
+        if opt_level_invalid
+          err_io.puts "Error: -O expects an integer"
+          err_io.puts parser_help
+          return 1
+        end
+
+        if mm_stack_threshold_invalid
+          err_io.puts "Error: --mm-stack-threshold expects an integer"
+          err_io.puts parser_help
+          return 1
+        end
+
+        if invalid_emit = emit_invalid
+          err_io.puts "Error: invalid --emit value: #{invalid_emit}"
+          err_io.puts parser_help
+          return 1
+        end
+
+        0
+      end
+
       # Workaround for File.join splat args being broken in stage2.
       # File.join(*parts) uses Tuple splat expansion which the V2 compiler
       # doesn't handle correctly. These helpers avoid the splat path.
@@ -160,85 +347,8 @@ module CrystalV2
         parser_text = parser_help
 
         if ENV["CRYSTAL2_SAFE_PARSER"]?
-          i = 0
-          while i < @args.size
-            arg = @args[i]
-            if arg == "--release"
-              options.optimize = 3
-              options.release = true
-            elsif arg == "-O"
-              if i + 1 < @args.size
-                parsed = @args[i + 1].to_i32?
-                if parsed
-                  options.optimize = parsed.not_nil!
-                  i += 1
-                else
-                  mm_stack_threshold_invalid = true
-                end
-              else
-                mm_stack_threshold_invalid = true
-              end
-            elsif arg.starts_with?("-O") && arg.size > 2
-              parsed = arg[2..-1].to_i32?
-              if parsed
-                options.optimize = parsed.not_nil!
-              else
-                mm_stack_threshold_invalid = true
-              end
-            elsif arg == "--no-codegen"
-              options.check_only = true
-            elsif arg == "--version"
-              options.show_version = true
-            elsif arg == "--help" || arg == "-h"
-              options.show_help = true
-              options.help_text = parser_help
-            elsif arg == "--no-ast-cache"
-              options.ast_cache = false
-            elsif arg == "--ast-cache"
-              options.ast_cache = true
-            elsif arg == "--output"
-              if i + 1 < @args.size
-                options.output = @args[i + 1]
-                i += 1
-              else
-                err_io.puts "Error: --output expects a value"
-                return 1
-              end
-            elsif arg.starts_with?("--output=")
-              options.output = arg[9..-1]
-            elsif arg == "--mm-stack-threshold"
-              if i + 1 < @args.size
-                value = @args[i + 1].to_u32?
-                if value
-                  options.mm_stack_threshold = value.not_nil!
-                  i += 1
-                else
-                  mm_stack_threshold_invalid = true
-                end
-              else
-                mm_stack_threshold_invalid = true
-              end
-            elsif arg.starts_with?("--mm=")
-              options.mm_mode = arg[5..-1]
-            elsif arg.starts_with?("-o")
-              if arg.size > 2
-                options.output = arg[2..-1]
-              else
-                if i + 1 < @args.size
-                  options.output = @args[i + 1]
-                  i += 1
-                else
-                  err_io.puts "Error: -o expects a value"
-                  return 1
-                end
-              end
-            elsif arg.starts_with?("-")
-              err_io.puts "Error: unknown option: #{arg}"
-              err_io.puts parser_help
-              return 1
-            end
-            i += 1
-          end
+          status = parse_args_safe(options, parser_help, err_io)
+          return status if status != 0
         elsif (minimal_parser = ENV["CRYSTAL2_MINIMAL_PARSER"]?)
           if minimal_parser == "2"
             parser = OptionParser.new do |p|
@@ -336,10 +446,9 @@ module CrystalV2
           parser.parse(@args)
           stage2_debug("[STAGE2_DEBUG] parser.parse ok", err_io)
         rescue ex : OptionParser::InvalidOption
-          stage2_debug("[STAGE2_DEBUG] parser invalid option")
-          err_io.puts "Error: invalid option"
-          err_io.puts(parser || parser_text)
-          return 1
+          stage2_debug("[STAGE2_DEBUG] parser invalid option, fallback safe parser", err_io)
+          status = parse_args_safe(options, parser_help, err_io)
+          return status if status != 0
         end
         elsif parser.nil?
           parser_text = parser_help

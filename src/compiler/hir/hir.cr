@@ -1508,6 +1508,16 @@ module Crystal::HIR
       @functions_by_name.has_key?(name)
     end
 
+    # Check if a function exists and has at least one emitted instruction.
+    # Function stubs created by create_function can exist with an empty body.
+    def has_function_with_body?(name : String) : Bool
+      if func = @functions_by_name[name]?
+        func.blocks.any? { |block| block.instructions.size > 0 }
+      else
+        false
+      end
+    end
+
     def function_count : Int32
       @functions.size
     end

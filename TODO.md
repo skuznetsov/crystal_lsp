@@ -54,6 +54,33 @@
 - Float64: arithmetic, ** on literals
 
 ## Current Investigation (Stage 2 bootstrap crash)
+- **2026-02-24: In progress — stage2 CLI option parsing stabilized, parser/check path still unstable**
+  - Added a bootstrap-safe fallback parser in `src/compiler/cli.cr`:
+    - when `OptionParser` raises `InvalidOption` in stage2, CLI retries with
+      an internal parser supporting key bootstrap/CLI flags (`--release`,
+      `-O`, `-o/--output`, `--no-codegen`, `--no-prelude`, `--emit`,
+      `--ast-cache/--no-ast-cache`, `--mm=*`, `--pgo-*`, etc.).
+    - This removes the previous immediate `Error: invalid option` hard stop and
+      allows stage2 to proceed into parse/compile paths.
+  - New benchmark on current working tree:
+    - stage1 (`crystal --release`): **real 410.57s**
+    - stage2 (`/tmp/stage1_rel_fix4 --release`): **real 120.35s**
+    - stage2 speedup vs stage1: **~3.41x**
+  - Current blocker remains:
+    - `scripts/stage2_bootstrap_repro.sh /tmp/stage2_rel_fix4`
+      => `exit 138` (`Bus error`) on `regression_tests/basic_sanity.cr`.
+    - `regression_tests/stage2_bootstrap_minimal_repro.sh /tmp/stage2_rel_fix4`
+      still reproduces failures in all 4 modes (`default/no_ast_cache/no_codegen/parser_stub`).
+    - Trace shows `no_codegen` now reaches parser success (`parse ok`) and then
+      crashes later in check pipeline; full compile path still crashes around
+      prelude parse/require flow.
+  - Notes:
+    - During this session, reverting uncommitted HIR WIP entirely caused stage2
+      to regress into broader parser loops (including `puts 1` no-codegen).
+    - Restored key HIR stabilization pieces (`has_function_with_body?` usage,
+      `$block` false-positive mitigation, reverse `$block` lookup, and deferred
+      AST-filter sync) to return to the narrower crash surface.
+
 - **2026-02-22: In progress — Nil field store/load corruption in Hash::Entry(K, Nil)**
   - New minimal regression script: `regression_tests/hash_string_nil_layout_repro.sh`
     (asserts `Hash(String, Nil)` preserves keys and `has_key?` correctness).
