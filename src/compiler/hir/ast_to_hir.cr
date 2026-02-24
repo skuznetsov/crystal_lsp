@@ -36051,6 +36051,40 @@ module Crystal::HIR
       nil
     end
 
+    # Conservative constant condition evaluator that only looks at literal AST
+    # forms. This avoids relying on lowered ValueId metadata for control-flow
+    # pruning decisions.
+    private def static_literal_condition_value(condition_id : ExprId) : Bool?
+      return nil if condition_id.invalid?
+
+      node = @arena[condition_id]
+      case node
+      when CrystalV2::Compiler::Frontend::GroupingNode
+        static_literal_condition_value(node.expression)
+      when CrystalV2::Compiler::Frontend::BoolNode
+        node.value
+      when CrystalV2::Compiler::Frontend::NilNode
+        false
+      when CrystalV2::Compiler::Frontend::UnaryNode
+        op = String.new(node.operator)
+        return nil unless op == "!"
+        inner = static_literal_condition_value(node.operand)
+        inner.nil? ? nil : !inner
+      when CrystalV2::Compiler::Frontend::BinaryNode
+        op = node.operator_string
+        if op == "&&" || op == "||"
+          left = static_literal_condition_value(node.left)
+          right = static_literal_condition_value(node.right)
+          return nil if left.nil? || right.nil?
+          op == "&&" ? (left && right) : (left || right)
+        else
+          nil
+        end
+      else
+        nil
+      end
+    end
+
     private def lower_condition_branch(
       ctx : LoweringContext,
       expr_id : ExprId,
@@ -36762,7 +36796,7 @@ module Crystal::HIR
         cond_bool = lower_truthy_check(ctx, cond_id, cond_type)
         # If the condition is constant, don't build both branches (this avoids
         # emitting unreachable code like beginless range iterators).
-        static_val = static_truthy_value(ctx, cond_bool)
+        static_val = static_literal_condition_value(node.condition)
         if !has_elsifs && !static_val.nil?
           if static_val
             ctx.push_scope(ScopeKind::Block)
@@ -36827,6 +36861,8 @@ module Crystal::HIR
           elsif_truthy_targets = truthy_narrowing_targets(elsif_branch.condition)
           elsif_is_a_targets = is_a_narrowing_targets(elsif_branch.condition)
           elsif_cond_id = lower_expr(ctx, elsif_branch.condition)
+          elsif_cond_type = ctx.type_of(elsif_cond_id)
+          elsif_cond_bool = lower_truthy_check(ctx, elsif_cond_id, elsif_cond_type)
 
           # Create body block and next block
           elsif_body_block = ctx.create_block
@@ -36837,7 +36873,7 @@ module Crystal::HIR
                               ctx.create_block # Next elsif test
                             end
 
-          ctx.terminate(Branch.new(elsif_cond_id, elsif_body_block, next_test_block))
+          ctx.terminate(Branch.new(elsif_cond_bool, elsif_body_block, next_test_block))
 
           # Process elsif body
           ctx.current_block = elsif_body_block

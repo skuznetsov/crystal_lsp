@@ -13710,8 +13710,8 @@ module Crystal::MIR
                             when "i32", "float" then 4
                             else 8
                             end
-                byte_offset = idx_const * elem_size
-                emit "%#{base_name}.elem_ptr = getelementptr i8, ptr #{array_ptr}, i32 #{byte_offset}"
+                byte_offset = idx_const.to_i64 * elem_size.to_i64
+                emit "%#{base_name}.elem_ptr = getelementptr i8, ptr #{array_ptr}, i64 #{byte_offset}"
               end
               emit "#{name} = load #{element_type}, ptr %#{base_name}.elem_ptr"
               @value_types[inst.id] = inst.element_type
@@ -13850,8 +13850,8 @@ module Crystal::MIR
                       else 8
                       end
           if idx_const
-            byte_offset = idx_const * elem_size
-            emit "%#{base_name}.elem_ptr = getelementptr i8, ptr #{array_ptr}, i32 #{byte_offset}"
+            byte_offset = idx_const.to_i64 * elem_size.to_i64
+            emit "%#{base_name}.elem_ptr = getelementptr i8, ptr #{array_ptr}, i64 #{byte_offset}"
             emit "#{name} = load #{element_type}, ptr %#{base_name}.elem_ptr"
             @value_types[inst.id] = inst.element_type
             return
@@ -14910,16 +14910,16 @@ module Crystal::MIR
                             slot_llvm_type || (cond_type ? @type_mapper.llvm_type(cond_type) : nil)
                           end
         if union_llvm_type && union_llvm_type.includes?(".union")
-          # Union layout: { i32 type_id, [N x i8] payload }
-          # Extract type_id and compare with 0 (nil variant)
+          # Union layout: { i32 type_id, [N x i8] payload }.
+          # Nil is not guaranteed to have variant_id=0, so resolve it from type.
           c = @cond_counter
           @cond_counter += 1
+          nil_vid = nil_variant_id_for_union_type(union_llvm_type) || 0
           emit "%cond#{c}.union_ptr = alloca #{union_llvm_type}, align 8"
           emit "store #{union_llvm_type} #{normalize_union_value(cond, union_llvm_type)}, ptr %cond#{c}.union_ptr"
           emit "%cond#{c}.type_id_ptr = getelementptr #{union_llvm_type}, ptr %cond#{c}.union_ptr, i32 0, i32 0"
           emit "%cond#{c}.type_id = load i32, ptr %cond#{c}.type_id_ptr"
-          # type_id 0 = nil (falsy), type_id 1+ = non-nil (truthy)
-          emit "%cond#{c}.is_not_nil = icmp ne i32 %cond#{c}.type_id, 0"
+          emit "%cond#{c}.is_not_nil = icmp ne i32 %cond#{c}.type_id, #{nil_vid}"
           emit "br i1 %cond#{c}.is_not_nil, label %#{then_block}, label %#{else_block}"
         elsif (actual_cond_type == "ptr") ||
               (cond_type && @type_mapper.llvm_type(cond_type) == "ptr" && (slot_llvm_type.nil? || slot_llvm_type == "ptr"))

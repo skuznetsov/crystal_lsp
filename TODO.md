@@ -1,6 +1,32 @@
 # Crystal v2 — Active Work (codegen branch)
 
 ## Known Bugs (codegen)
+- **2026-02-24 (latest): stage2 release build unblocked again; parser `definition_start?` loop still reproduces**
+  - Applied control-flow hardening in `src/compiler/hir/ast_to_hir.cr`:
+    - `lower_if` static-fold now uses AST-literal-only evaluator (`static_literal_condition_value`) instead of lowered `ValueId` metadata;
+    - `elsif` branch conditions now pass through `lower_truthy_check` before `Branch.new`.
+  - Result:
+    - parser-loop repro still reproduces on stage2:
+      - `regression_tests/stage2_parser_definition_start_stuck_repro.sh src/crystal_v2 20`
+      - status: timeout + millions of `parse_program: current=0` iterations.
+  - During re-test, stage2 release build hit new `opt` blocker:
+    - `src/crystal_v2.ll:868076` mismatch (`store i64 %r443` where `%r443` is `i32`)
+    - function: `Crystal::MIR::LLVMIRGenerator#emit_array_get`.
+  - Fixed in `src/compiler/mir/llvm_backend.cr`:
+    - constant tuple byte offsets in `emit_array_get` now use explicit `i64` arithmetic and `i64` GEP index.
+  - Fresh measurements after fix:
+    - stage1 (original compiler, release): `crystal build --release src/crystal_v2.cr -o /tmp/stage1_rel_iffix_20260224`
+      - **real 452.35s**
+    - stage2 (self-hosted release): `/tmp/stage1_rel_iffix_20260224 --release src/crystal_v2.cr -o /tmp/stage2_rel_iffix2_20260224`
+      - **real 124.40s**, exit 0
+      - speedup stage2 vs stage1: **~3.64x** (delta ~-327.95s).
+  - Current stage2 blocker status:
+    - `regression_tests/stage2_env_optional_repro.sh src/crystal_v2` -> timeout 180s
+    - `regression_tests/stage1_fetch_default_block_repro.sh src/crystal_v2` -> timeout 180s
+  - Stage1 reference remains good:
+    - `regression_tests/stage2_env_optional_repro.sh /tmp/stage1_rel_iffix_20260224` -> `not reproduced`
+    - `regression_tests/stage1_fetch_default_block_repro.sh /tmp/stage1_rel_iffix_20260224` -> `not reproduced`
+
 - **2026-02-24 (latest): `ENV.fetch` default-overload root cause fixed in HIR; stage2 still hangs on minimal ENV repro**
   - Compiler fix (codegen path, no stdlib changes):
     - `src/compiler/hir/ast_to_hir.cr`
