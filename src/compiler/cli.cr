@@ -406,17 +406,8 @@ module CrystalV2
 
             # Additional
             p.on("--dump-symbols", "Dump symbol table") { options.dump_symbols = true }
-            {% if flag?(:bootstrap_fast) %}
-            ast_cache_flag = "--ast" + "-cache"
-            no_ast_cache_flag = "--no-ast" + "-cache"
-            p.on(ast_cache_flag, "Ignored in -Dbootstrap_fast (AST cache is compiled out)") { options.ast_cache = false }
-            p.on(no_ast_cache_flag, "Ignored in -Dbootstrap_fast (AST cache is compiled out)") { options.ast_cache = false }
-            {% else %}
-            ast_cache_flag = "--ast" + "-cache"
-            no_ast_cache_flag = "--no-ast" + "-cache"
-            p.on(ast_cache_flag, "Enable AST cache (file-based)") { options.ast_cache = true }
-            p.on(no_ast_cache_flag, "Disable AST cache (file-based)") { options.ast_cache = false }
-            {% end %}
+            p.on("--ast-cache", "Enable AST cache (file-based)") { options.ast_cache = true }
+            p.on("--no-ast-cache", "Disable AST cache (file-based)") { options.ast_cache = false }
             p.on("--no-llvm-opt", "Skip LLVM opt (faster, less optimized)") { options.llvm_opt = false }
             p.on("--llvm-cache", "Enable LLVM opt/llc cache") { options.llvm_cache = true }
             p.on("--no-llvm-cache", "Disable LLVM opt/llc cache") { options.llvm_cache = false }

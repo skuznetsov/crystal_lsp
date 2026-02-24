@@ -1,5 +1,6 @@
 #!/usr/bin/env crystal
 
+require "./compiler/bootstrap_shims"
 require "./compiler/cli"
 
 # Entry point

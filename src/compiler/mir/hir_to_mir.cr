@@ -169,6 +169,8 @@ module Crystal
           lower_function_body(hir_func)
         rescue ex : IndexError
           raise "Index out of bounds in function #{idx + 1}/#{total}: #{hir_func.name}\n#{ex.message}\n#{ex.backtrace.first(10).join("\n")}"
+        rescue ex : KeyError
+          raise "Missing hash key in function #{idx + 1}/#{total}: #{hir_func.name}\n#{ex.message}\n#{ex.backtrace.first(10).join("\n")}"
         end
       end
 
@@ -526,7 +528,7 @@ module Crystal
         union_descriptor = is_phi_union ? @mir_module.get_union_descriptor(mir_phi_type) : nil
 
         hir_phi.incoming.each do |(hir_block, hir_value)|
-          mir_block = @block_map[hir_block]
+          mir_block = mir_block_for(hir_block)
           mir_value = get_value(hir_value)
 
           if is_phi_union && union_descriptor
@@ -618,7 +620,7 @@ module Crystal
 
     private def lower_block(hir_block : HIR::Block)
       builder = @builder.not_nil!
-      mir_block_id = @block_map[hir_block.id]
+      mir_block_id = mir_block_for(hir_block.id)
       builder.current_block = mir_block_id
 
       # Lower each instruction
@@ -3479,20 +3481,20 @@ module Crystal
         end
       when HIR::Branch
         cond = get_value(term.condition)
-        then_block = @block_map[term.then_block]
-        else_block = @block_map[term.else_block]
+        then_block = mir_block_for(term.then_block)
+        else_block = mir_block_for(term.else_block)
         builder.branch(cond, then_block, else_block)
       when HIR::Jump
-        target = @block_map[term.target]
+        target = mir_block_for(term.target)
         builder.jump(target)
       when HIR::Switch
         value = get_value(term.value)
         cases = term.cases.map do |(val_id, block_id)|
           val = get_value(val_id)
-          mir_block = @block_map[block_id]
+          mir_block = mir_block_for(block_id)
           {0_i64, mir_block}  # Would need to extract actual constant value
         end
-        default_block = @block_map[term.default]
+        default_block = mir_block_for(term.default)
         builder.switch(value, cases, default_block)
       when HIR::Unreachable
         builder.unreachable
@@ -3502,6 +3504,28 @@ module Crystal
     # ─────────────────────────────────────────────────────────────────────────
     # Helpers
     # ─────────────────────────────────────────────────────────────────────────
+
+    private def mir_block_for(hir_block_id : HIR::BlockId) : BlockId
+      if mapped = @block_map[hir_block_id]?
+        return mapped
+      end
+
+      mir_func = @current_mir_func.not_nil!
+      builder = @builder.not_nil!
+      synthetic = mir_func.create_block
+      @block_map[hir_block_id] = synthetic
+
+      if ENV.fetch("CRYSTAL2_STAGE2_DEBUG", "0") == "1"
+        STDERR.puts "[MIR_MISSING_BLOCK] func=#{@current_lowering_func_name} hir_block=#{hir_block_id} synthetic=#{synthetic}"
+      end
+
+      saved_block = builder.current_block
+      builder.current_block = synthetic
+      builder.unreachable
+      builder.current_block = saved_block
+
+      synthetic
+    end
 
     private def get_value(hir_id : HIR::ValueId) : ValueId
       if mapped = @value_map[hir_id]?

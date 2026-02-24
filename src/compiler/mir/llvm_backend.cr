@@ -5976,6 +5976,8 @@ module Crystal::MIR
         emit_raw "compute:\n"
         emit_raw "  %epoch_total = phi i64 [0, %epoch_zero], [%epoch_sec, %epoch_ok]\n"
         emit_raw "  %seconds = add i64 %epoch_total, %tv_sec\n"
+        # Bootstrap fallback: route through the always-emitted Int64 constructor.
+        # This keeps stage2 codegen valid even when the 3-arg overload isn't lowered.
         emit_raw "  %result = call ptr @Time$Dnew$$Int64(i64 %seconds)\n"
         emit_raw "  ret ptr %result\n"
         emit_raw "}\n\n"
@@ -12881,6 +12883,12 @@ module Crystal::MIR
       val_type = @value_types[inst.value]? || TypeRef::POINTER
       val_type_str = @type_mapper.llvm_type(val_type)
       val = value_ref(inst.value)
+      if emitted_val_type = @emitted_value_types[val]?
+        # Trust the actually emitted LLVM type when it disagrees with MIR hints.
+        # This avoids invalid stores where @value_types is stale (e.g. narrowed
+        # union hint but value register still holds a wider union aggregate).
+        val_type_str = emitted_val_type unless emitted_val_type == "void"
+      end
       val = "null" if val_type_str == "ptr" && val == "0"
 
       # 2. Store type_id discriminator
@@ -12902,6 +12910,25 @@ module Crystal::MIR
       if val_type_str == "void"
         emit "store i8 0, ptr %#{base_name}.payload_ptr, align 4"
       else
+        # If the selected union variant is itself a union type, but the wrapped
+        # value is a different union layout, normalize by bitcasting through a
+        # temporary alloca so the store type matches the payload type exactly.
+        expected_variant_llvm : String? = nil
+        if union_desc = @module.get_union_descriptor(inst.union_type)
+          if variant_desc = union_desc.variants.find { |v| v.type_id == inst.variant_type_id }
+            expected_variant_llvm = @type_mapper.llvm_type(variant_desc.type_ref)
+          end
+        end
+        if expected_union = expected_variant_llvm
+          if expected_union.includes?(".union") && val_type_str.includes?(".union") && expected_union != val_type_str
+            emit "%#{base_name}.payload_cast = alloca #{val_type_str}, align 8"
+            emit "store #{val_type_str} #{val}, ptr %#{base_name}.payload_cast"
+            emit "%#{base_name}.payload_cast_val = load #{expected_union}, ptr %#{base_name}.payload_cast"
+            val = "%#{base_name}.payload_cast_val"
+            val_type_str = expected_union
+          end
+        end
+
         # For tuple types (stack-allocated value types stored via ptr), copy data instead of storing pointer.
         # Only tuples need this — other structs are heap-allocated so their pointer IS the value.
         variant_is_value_type = false
