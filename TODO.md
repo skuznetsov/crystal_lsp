@@ -1,6 +1,29 @@
 # Crystal v2 — Active Work (codegen branch)
 
 ## Known Bugs (codegen)
+- **2026-02-24 (latest): stage2 `--release` bootstrap reaches link again; stage2 compiler binary still unstable**
+  - New backend fixes in `src/compiler/mir/llvm_backend.cr`:
+    - `emit_unary_op`: prefer actually emitted operand LLVM type (`@emitted_value_types`) and use `nil_variant_id_for_union_type` for union truthiness;
+    - `emit_call`: added ABI adaptation for `union -> different union` returns;
+    - `emit_phi`: fixed union incoming type choice to use effective emitted/slot union type before scheduling `u2u` conversion;
+    - `emit_terminator` return fallback: fixed invalid `ret <union> 0` by emitting proper nil-union value.
+  - Hash `[]?` override robustness:
+    - `Hash#[]?` `find_entry` resolution in `emit_builtin_override` now prefers actual module function matching (`@module.functions`) instead of fragile suffix synthesis.
+  - Linker fallback updates (temporary bootstrap shims):
+    - `runtime_stub.c` now also exports `each_index`, `join`, `unsafe_fetch` (no-op / zero-return) to bypass current stage1 mis-lowered plain-symbol calls.
+  - Fresh measurements:
+    - stage1 (original compiler, release): `crystal build --release src/crystal_v2.cr -o /tmp/stage1_rel_20260224_notfix5`
+      - **real 396.25s**
+    - stage2 (self-hosted, release): `/tmp/stage1_rel_20260224_notfix5 --release src/crystal_v2.cr -o <ignored>`
+      - **real 92.04s**, exit 0
+      - speedup stage2 vs stage1: **~4.31x** (delta ~-304.21s).
+  - Noted compatibility regression:
+    - stage2 currently ignores `-o` on this path and writes compiler binary to `src/crystal_v2`.
+  - Regression status on this snapshot:
+    - `regression_tests/run_all.sh /tmp/stage1_rel_20260224_notfix5` -> **50/56 passed**.
+    - `regression_tests/run_all.sh src/crystal_v2` (stage2-built compiler) -> **0/56 passed** (compile failures/crashes).
+    - direct sample: `src/crystal_v2 regression_tests/basic_sanity.cr -o /tmp/stage2_basic_sanity_notfix5` -> **exit 139** (no diagnostic).
+
 - **2026-02-24 (latest): stage2 release build unblocked again; parser `definition_start?` loop still reproduces**
   - Applied control-flow hardening in `src/compiler/hir/ast_to_hir.cr`:
     - `lower_if` static-fold now uses AST-literal-only evaluator (`static_literal_condition_value`) instead of lowered `ValueId` metadata;
