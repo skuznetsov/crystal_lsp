@@ -1,6 +1,27 @@
 # Crystal v2 — Active Work (codegen branch)
 
 ## Known Bugs (codegen)
+- **2026-02-24 (latest): stage1 `Object#to_s` crash fixed; stage2 release now blocked in `array_join` codegen path**
+  - New regression repro is now **fixed**:
+    - `regression_tests/stage1_object_to_s_crash_repro.sh /tmp/stage1_dbg_20260224_fix6`
+    - status: `not reproduced` (runtime exit 0).
+  - What was fixed:
+    - `lower_module_method` return-type resolution for generic/pointer annotations (`T*`) and post-merge re-resolve;
+    - fallback for annotated `VOID` return type to concrete lowered value;
+    - contextual alias guard to prevent built-in type shadowing (`Char` was leaking to `LibC::Char`);
+    - bootstrap linker shim extended (`runtime_stub.c`, plus `lnct` fallback updates) for `_lnct`-related mis-lowering.
+  - Fresh benchmark with current tree:
+    - stage1 (original compiler): `crystal build --release src/crystal_v2.cr -o /tmp/stage1_rel_20260224_fix7`
+    - **real 398.86s**.
+  - Stage2 status on same run:
+    - `/tmp/stage1_rel_20260224_fix7 --release src/crystal_v2.cr -o /tmp/stage2_rel_20260224_fix7`
+    - fails in `opt` (no output binary), current blocker:
+      - `opt: ... error: '%r25500.fromslot.6875' defined with type 'i32' but expected 'Nil|Pointer|UInt32.union'`
+      - location: generated `.ll` around `__crystal_v2_array_join_string` call argument packing.
+  - Current in-progress fix in tree:
+    - `Array#join` late intrinsic path now narrows/casts call args to `ValueId` before `ExternCall.new`;
+    - needs re-benchmark with fresh release stage1 to confirm stage2 result on this exact patchset.
+
 - **2026-02-24 (latest): stage2 release link restored; stage3 still crashes immediately**
   - Fresh baseline with original compiler:
     - `crystal build --release src/crystal_v2.cr -o /tmp/stage1_rel_fix67`

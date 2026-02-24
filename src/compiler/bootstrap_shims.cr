@@ -7,3 +7,8 @@
 def lnct(_value)
   0_i64
 end
+
+# Some bad lowerings lose the receiver *and* argument and emit bare `lnct()`.
+def lnct
+  0_i64
+end
