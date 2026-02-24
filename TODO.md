@@ -1,6 +1,25 @@
 # Crystal v2 — Active Work (codegen branch)
 
 ## Known Bugs (codegen)
+- **2026-02-24 (latest): stage2 release link restored; stage3 still crashes immediately**
+  - Fresh baseline with original compiler:
+    - `crystal build --release src/crystal_v2.cr -o /tmp/stage1_rel_fix67`
+    - **real 398.09s**.
+  - Stage2 from fresh stage1:
+    - `/tmp/stage1_rel_fix67 --release src/crystal_v2.cr -o /tmp/stage2_rel_fix71`
+    - **real 138.24s** (link OK, with `llc` fallback message).
+  - Stage2 speedup vs stage1 on this run:
+    - **~2.88x** (delta: **-259.85s**).
+  - Stage3 status (current blocker):
+    - `/tmp/stage2_rel_fix71 --release src/crystal_v2.cr -o /tmp/stage3_rel_fix71`
+    - immediate crash (`exit 139`, real ~0s).
+  - Stabilization changes currently in working tree:
+    - removed problematic compile-time macro branch around CLI `--ast-cache` option registrations;
+    - refactored inherited/alignment ivar rebuild loops to index-based loops (less block-lowering fragility);
+    - temporary bootstrap shim added: `src/compiler/bootstrap_shims.cr` (`def lnct(_value); 0_i64; end`) to avoid `_lnct` linker blocker from stage1 mis-lowering.
+  - New targeted repro script:
+    - `regression_tests/stage1_macro_if_ast_cache_link_repro.sh`
+
 - Confirmed repros in complex regression suite (still failing):
   - `regression_tests/complex/test_channel_receive_state.cr`
     - status: link failure (missing `_current` symbol in spawn/channel path).

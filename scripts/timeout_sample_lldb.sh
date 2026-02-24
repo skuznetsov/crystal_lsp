@@ -7,60 +7,46 @@ Usage:
   scripts/timeout_sample_lldb.sh [options] -- <command> [args...]
 
 Options:
-  --timeout SEC       Timeout before sampling (default: 180)
-  --sample SEC        sample(1) duration in seconds (default: 3)
-  --top N             Number of hot symbols to convert into lldb breakpoints (default: 8)
-  --out-dir DIR       Output directory (default: /tmp/stage2_hang_probe_<timestamp>)
-  --keep-running      Do not kill target process after probe
-  --help              Show this help
-
-Example:
-  scripts/timeout_sample_lldb.sh --timeout 180 --sample 2 --top 10 -- \
-    /tmp/stage2_rel_current --release src/crystal_v2.cr -o /tmp/stage2.bin
+  -t, --timeout SEC       Timeout before sampling (default: 180)
+  -s, --sample SEC        sample(1) duration in seconds (default: 10)
+  -n, --top N             Number of hotspot symbols (default: 5)
+  -o, --out DIR           Output directory (default: /tmp/timeout_sample_<ts>_<pid>)
+  -b, --breakpoints LIST  Comma-separated LLDB breakpoint symbols
+      --no-lldb           Skip LLDB attach/backtrace
+  -h, --help              Show this help
 USAGE
 }
 
-TIMEOUT_SEC=180
-SAMPLE_SEC=3
-TOP_N=8
-KEEP_RUNNING=0
+TIMEOUT_SECS=180
+SAMPLE_SECS=10
+TOP_N=5
 OUT_DIR=""
+BREAKPOINTS=""
+USE_LLDB=1
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --timeout)
-      TIMEOUT_SEC="${2:-}"
-      shift 2
-      ;;
-    --sample)
-      SAMPLE_SEC="${2:-}"
-      shift 2
-      ;;
-    --top)
-      TOP_N="${2:-}"
-      shift 2
-      ;;
-    --out-dir)
-      OUT_DIR="${2:-}"
-      shift 2
-      ;;
-    --keep-running)
-      KEEP_RUNNING=1
-      shift
-      ;;
-    --help|-h)
-      usage
-      exit 0
-      ;;
+    -t|--timeout)
+      TIMEOUT_SECS="${2:-}"; shift 2 ;;
+    -s|--sample)
+      SAMPLE_SECS="${2:-}"; shift 2 ;;
+    -n|--top)
+      TOP_N="${2:-}"; shift 2 ;;
+    -o|--out)
+      OUT_DIR="${2:-}"; shift 2 ;;
+    -b|--breakpoints)
+      BREAKPOINTS="${2:-}"; shift 2 ;;
+    --no-lldb)
+      USE_LLDB=0; shift ;;
+    -h|--help)
+      usage; exit 0 ;;
     --)
       shift
-      break
-      ;;
+      break ;;
     *)
-      echo "Unknown argument: $1" >&2
+      echo "unknown option: $1" >&2
       usage >&2
-      exit 2
-      ;;
+      exit 2 ;;
   esac
 done
 
@@ -69,52 +55,27 @@ if [[ $# -eq 0 ]]; then
   exit 2
 fi
 
-if ! [[ "$TIMEOUT_SEC" =~ ^[0-9]+$ ]] || ! [[ "$SAMPLE_SEC" =~ ^[0-9]+$ ]] || ! [[ "$TOP_N" =~ ^[0-9]+$ ]]; then
-  echo "timeout/sample/top must be non-negative integers" >&2
-  exit 2
-fi
-
 if [[ -z "$OUT_DIR" ]]; then
-  OUT_DIR="/tmp/stage2_hang_probe_$(date +%Y%m%d_%H%M%S)"
+  OUT_DIR="/tmp/timeout_sample_$(date +%Y%m%d_%H%M%S)_$$"
 fi
 mkdir -p "$OUT_DIR"
 
-if ! command -v sample >/dev/null 2>&1; then
-  echo "sample command not found (macOS required)" >&2
-  exit 1
-fi
-if ! command -v lldb >/dev/null 2>&1; then
-  echo "lldb command not found" >&2
-  exit 1
-fi
-
 CMD=("$@")
-CMD_PRINT="$(printf '%q ' "${CMD[@]}")"
-echo "$CMD_PRINT" > "$OUT_DIR/command.txt"
-
-STDOUT_LOG="$OUT_DIR/stdout.log"
-STDERR_LOG="$OUT_DIR/stderr.log"
+CMD_LOG="$OUT_DIR/command.log"
 SAMPLE_LOG="$OUT_DIR/sample.txt"
-SAMPLE_CMD_LOG="$OUT_DIR/sample_cmd.log"
-HOTSPOT_RAW="$OUT_DIR/hotspots_raw.txt"
-HOTSPOT_LIST="$OUT_DIR/hotspots.txt"
-LLDB_CMDS="$OUT_DIR/lldb_cmds.txt"
-LLDB_LOG="$OUT_DIR/lldb.log"
-SUMMARY="$OUT_DIR/summary.txt"
+HOTSPOT_LOG="$OUT_DIR/hotspots.txt"
+LLDB_LOG="$OUT_DIR/lldb.txt"
+LLDB_CMDS="$OUT_DIR/lldb.commands"
 
-echo "[probe] command: $CMD_PRINT"
-echo "[probe] out_dir: $OUT_DIR"
-
-"${CMD[@]}" >"$STDOUT_LOG" 2>"$STDERR_LOG" &
+echo "[run] ${CMD[*]}" | tee "$OUT_DIR/summary.txt"
+"${CMD[@]}" >"$CMD_LOG" 2>&1 &
 PID=$!
 START_TS=$(date +%s)
 TIMED_OUT=0
-STATUS=0
 
 while kill -0 "$PID" 2>/dev/null; do
   NOW_TS=$(date +%s)
-  ELAPSED=$((NOW_TS - START_TS))
-  if (( ELAPSED >= TIMEOUT_SEC )); then
+  if (( NOW_TS - START_TS >= TIMEOUT_SECS )); then
     TIMED_OUT=1
     break
   fi
@@ -122,83 +83,69 @@ while kill -0 "$PID" 2>/dev/null; do
 done
 
 if (( TIMED_OUT == 0 )); then
-  wait "$PID" || STATUS=$?
+  wait "$PID"
+  STATUS=$?
   {
-    echo "status=completed"
-    echo "exit_code=$STATUS"
-    echo "elapsed_sec=$(( $(date +%s) - START_TS ))"
-  } > "$SUMMARY"
-  echo "[probe] process completed before timeout (exit=$STATUS)"
-  echo "[probe] logs: $STDOUT_LOG $STDERR_LOG"
-  echo "[probe] summary: $SUMMARY"
+    echo "[exit] status=$STATUS"
+    echo "[log] $CMD_LOG"
+  } | tee -a "$OUT_DIR/summary.txt"
   exit "$STATUS"
 fi
 
-echo "[probe] timeout reached (${TIMEOUT_SEC}s), collecting sample..."
-sample "$PID" "$SAMPLE_SEC" -file "$SAMPLE_LOG" >"$SAMPLE_CMD_LOG" 2>&1 || true
+echo "[timeout] ${TIMEOUT_SECS}s (pid=$PID)" | tee -a "$OUT_DIR/summary.txt"
 
-awk '
-  /^Sort by top of stack, same collapsed/ {in_section = 1; next}
-  /^Binary Images:/ {in_section = 0}
-  in_section {
-    line = $0
-    sub(/^[[:space:]]+/, "", line)
-    if (line ~ /  \(in [^)]+\)[[:space:]]+[0-9]+[[:space:]]*$/) {
-      count = line
-      sub(/^.*\)[[:space:]]+/, "", count)
-      sym = line
-      sub(/[[:space:]]+\(in [^)]+\)[[:space:]]+[0-9]+[[:space:]]*$/, "", sym)
-      gsub(/^[[:space:]]+|[[:space:]]+$/, "", sym)
-      if (sym != "" && count ~ /^[0-9]+$/) print count "\t" sym
-    }
-  }
-' "$SAMPLE_LOG" | sort -rn -k1,1 | head -n "$TOP_N" > "$HOTSPOT_RAW"
-
-cut -f2 "$HOTSPOT_RAW" > "$HOTSPOT_LIST" || true
-
-{
-  echo "settings set target.process.stop-on-exec false"
-  while IFS= read -r sym; do
-    [[ -z "$sym" ]] && continue
-    esc="${sym//\"/\\\"}"
-    echo "breakpoint set --name \"$esc\""
-  done < "$HOTSPOT_LIST"
-  echo "process interrupt"
-  echo "thread backtrace all"
-  echo "breakpoint list"
-  echo "detach"
-  echo "quit"
-} > "$LLDB_CMDS"
-
-lldb -p "$PID" --batch -s "$LLDB_CMDS" >"$LLDB_LOG" 2>&1 || true
-
-if (( KEEP_RUNNING == 0 )); then
-  kill "$PID" 2>/dev/null || true
-  wait "$PID" 2>/dev/null || true
-fi
-
-{
-  echo "status=timed_out"
-  echo "pid=$PID"
-  echo "timeout_sec=$TIMEOUT_SEC"
-  echo "sample_sec=$SAMPLE_SEC"
-  echo "top_n=$TOP_N"
-  echo "kept_running=$KEEP_RUNNING"
-  echo "out_dir=$OUT_DIR"
-  echo "sample_log=$SAMPLE_LOG"
-  echo "hotspots=$HOTSPOT_RAW"
-  echo "lldb_log=$LLDB_LOG"
-} > "$SUMMARY"
-
-echo "[probe] timeout probe completed"
-echo "[probe] sample:  $SAMPLE_LOG"
-echo "[probe] hotspots:"
-if [[ -s "$HOTSPOT_RAW" ]]; then
-  cat "$HOTSPOT_RAW"
+if command -v sample >/dev/null 2>&1; then
+  sample "$PID" "$SAMPLE_SECS" -file "$SAMPLE_LOG" >/dev/null 2>&1 || true
 else
-  echo "  (no hotspots parsed)"
+  echo "sample tool not found" > "$SAMPLE_LOG"
 fi
-echo "[probe] lldb log: $LLDB_LOG"
-echo "[probe] summary:  $SUMMARY"
+
+if [[ -s "$SAMPLE_LOG" ]]; then
+  grep -Eo '[A-Za-z_][A-Za-z0-9_:$#.<>\-]+' "$SAMPLE_LOG" \
+    | rg -v '^(Thread|Dispatch|kernel|libsystem|sample|All|Total|self|start|main)$' \
+    | sort | uniq -c | sort -nr | head -n "$TOP_N" > "$HOTSPOT_LOG" || true
+fi
+
+BP_SYMBOLS=()
+if [[ -n "$BREAKPOINTS" ]]; then
+  IFS=',' read -r -a BP_SYMBOLS <<< "$BREAKPOINTS"
+elif [[ -s "$HOTSPOT_LOG" ]]; then
+  while read -r _count sym; do
+    [[ -n "${sym:-}" ]] && BP_SYMBOLS+=("$sym")
+  done < "$HOTSPOT_LOG"
+fi
+
+if (( USE_LLDB == 1 )) && command -v lldb >/dev/null 2>&1 && kill -0 "$PID" 2>/dev/null; then
+  {
+    echo "process attach --pid $PID"
+    for sym in "${BP_SYMBOLS[@]}"; do
+      echo "breakpoint set --name $sym"
+    done
+    echo "thread backtrace all"
+    echo "process detach"
+    echo "quit"
+  } > "$LLDB_CMDS"
+  lldb -b -s "$LLDB_CMDS" > "$LLDB_LOG" 2>&1 || true
+fi
+
+kill "$PID" 2>/dev/null || true
+wait "$PID" 2>/dev/null || true
+
+{
+  echo "[killed] pid=$PID"
+  echo "[log] $CMD_LOG"
+  echo "[sample] $SAMPLE_LOG"
+  if [[ -s "$HOTSPOT_LOG" ]]; then
+    echo "[hotspots] $HOTSPOT_LOG"
+  fi
+  if [[ -f "$LLDB_LOG" ]]; then
+    echo "[lldb] $LLDB_LOG"
+  fi
+} | tee -a "$OUT_DIR/summary.txt"
+
+if [[ -s "$HOTSPOT_LOG" ]]; then
+  echo "Top symbols:"
+  cat "$HOTSPOT_LOG"
+fi
 
 exit 124
