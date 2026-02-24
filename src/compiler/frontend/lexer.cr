@@ -165,6 +165,14 @@ module CrystalV2
           end
         end
 
+        # Slice bytes[from, to - from] without creating a Range object.
+        # V2's Range monomorphization is broken (passes raw int as Range ptr),
+        # so we use the 2-argument Slice#[](start, count) form instead.
+        @[AlwaysInline]
+        private def bytes_range(from : Int32, to : Int32) : Slice(UInt8)
+          @rope.bytes[from, to - from]
+        end
+
         # Lookahead without consuming
         private def peek_byte(offset : Int32 = 1) : UInt8?
           idx = @offset + offset
@@ -180,7 +188,7 @@ module CrystalV2
           end
           Token.new(
             Token::Kind::Whitespace,
-            @rope.bytes[from...@offset],
+            bytes_range(from, @offset),
             build_span(start_offset, start_line, start_column)
           )
         end
@@ -190,7 +198,7 @@ module CrystalV2
           advance
           Token.new(
             Token::Kind::Newline,
-            @rope.bytes[start_offset...@offset],
+            bytes_range(start_offset, @offset),
             build_span(start_offset, start_line, start_column)
           )
         end
@@ -206,7 +214,7 @@ module CrystalV2
           end
 
           # Slice of the identifier
-          id = @rope.bytes[from...@offset]
+          id = bytes_range(from, @offset)
           if ENV["STAGE2_DEBUG"]?
             STDOUT.puts "[LEXER_DBG] lex_id from=#{from} offset=#{@offset} rope_size=#{@rope.size} slice_size=#{id.size} expected=#{@offset - from}"
             STDOUT.flush
@@ -330,7 +338,7 @@ module CrystalV2
             # Invalid instance variable - just @, return as operator
             return Token.new(
               Token::Kind::Operator,
-              @rope.bytes[from...@offset],
+              bytes_range(from, @offset),
               build_span(start_offset, start_line, start_column)
             )
           end
@@ -347,7 +355,7 @@ module CrystalV2
 
           Token.new(
             Token::Kind::InstanceVar,
-            @string_pool.intern(@rope.bytes[from...@offset]),
+            @string_pool.intern(bytes_range(from, @offset)),
             build_span(start_offset, start_line, start_column)
           )
         end
@@ -360,7 +368,7 @@ module CrystalV2
             # Invalid class variable - just @@, return as operator
             return Token.new(
               Token::Kind::Operator,
-              @rope.bytes[from...@offset],
+              bytes_range(from, @offset),
               build_span(start_offset, start_line, start_column)
             )
           end
@@ -377,7 +385,7 @@ module CrystalV2
 
           Token.new(
             Token::Kind::ClassVar,
-            @string_pool.intern(@rope.bytes[from...@offset]),
+            @string_pool.intern(bytes_range(from, @offset)),
             build_span(start_offset, start_line, start_column)
           )
         end
@@ -396,7 +404,7 @@ module CrystalV2
             advance
             return Token.new(
               Token::Kind::GlobalVar,
-              @string_pool.intern(@rope.bytes[from...@offset]),
+              @string_pool.intern(bytes_range(from, @offset)),
               build_span(start_offset, start_line, start_column)
             )
           end
@@ -413,7 +421,7 @@ module CrystalV2
             end
             return Token.new(
               Token::Kind::GlobalVar,
-              @string_pool.intern(@rope.bytes[from...@offset]),
+              @string_pool.intern(bytes_range(from, @offset)),
               build_span(start_offset, start_line, start_column)
             )
           end
@@ -426,7 +434,7 @@ module CrystalV2
             end
             return Token.new(
               Token::Kind::GlobalVar,
-              @string_pool.intern(@rope.bytes[from...@offset]),
+              @string_pool.intern(bytes_range(from, @offset)),
               build_span(start_offset, start_line, start_column)
             )
           end
@@ -436,7 +444,7 @@ module CrystalV2
             # Invalid global variable - just '$' as operator
             return Token.new(
               Token::Kind::Operator,
-              @rope.bytes[from...@offset],
+              bytes_range(from, @offset),
               build_span(start_offset, start_line, start_column)
             )
           end
@@ -453,7 +461,7 @@ module CrystalV2
 
           Token.new(
             Token::Kind::GlobalVar,
-            @string_pool.intern(@rope.bytes[from...@offset]),
+            @string_pool.intern(bytes_range(from, @offset)),
             build_span(start_offset, start_line, start_column)
           )
         end
@@ -473,7 +481,7 @@ module CrystalV2
             advance
             return Token.new(
               Token::Kind::ColonColon,
-              @rope.bytes[from...@offset],
+              bytes_range(from, @offset),
               build_span(start_offset, start_line, start_column)
             )
           end
@@ -487,7 +495,7 @@ module CrystalV2
             # Just a colon (for type annotations)
             return Token.new(
               Token::Kind::Colon,
-              @rope.bytes[from...@offset],
+              bytes_range(from, @offset),
               build_span(start_offset, start_line, start_column)
             )
           end
@@ -509,7 +517,7 @@ module CrystalV2
 
           Token.new(
             Token::Kind::Symbol,
-            @rope.bytes[from...@offset],
+            bytes_range(from, @offset),
             build_span(start_offset, start_line, start_column)
           )
         end
@@ -598,7 +606,7 @@ module CrystalV2
 
           Token.new(
             Token::Kind::Symbol,
-            @rope.bytes[from...@offset],
+            bytes_range(from, @offset),
             build_span(start_offset, start_line, start_column)
           )
         end
@@ -686,7 +694,7 @@ module CrystalV2
               advance
             end
 
-            suffix = String.new(@rope.bytes[suffix_from...@offset])
+            suffix = String.new(bytes_range(suffix_from, @offset))
             number_kind = case suffix
             # Signed integers
             when "i8"   then NumberKind::I8
@@ -775,7 +783,7 @@ module CrystalV2
               number_kind = NumberKind::F64
             else
               # Check if value exceeds Int32 range → use Int64
-              num_str = String.new(@rope.bytes[from...@offset]).delete('_')
+              num_str = String.new(bytes_range(from, @offset)).delete('_')
               if num_str.starts_with?('-')
                 is_negative = true
                 abs_str = num_str[1..]
@@ -794,7 +802,7 @@ module CrystalV2
 
           Token.new(
             Token::Kind::Number,
-            @rope.bytes[from...@offset],
+            bytes_range(from, @offset),
             build_span(start_offset, start_line, start_column),
             number_kind: number_kind
           )
@@ -859,7 +867,7 @@ module CrystalV2
 
           Token.new(
             Token::Kind::Number,
-            @rope.bytes[from...@offset],
+            bytes_range(from, @offset),
             build_span(start_offset, start_line, start_column),
             number_kind: number_kind
           )
@@ -924,7 +932,7 @@ module CrystalV2
 
           Token.new(
             Token::Kind::Number,
-            @rope.bytes[from...@offset],
+            bytes_range(from, @offset),
             build_span(start_offset, start_line, start_column),
             number_kind: number_kind
           )
@@ -989,7 +997,7 @@ module CrystalV2
 
           Token.new(
             Token::Kind::Number,
-            @rope.bytes[from...@offset],
+            bytes_range(from, @offset),
             build_span(start_offset, start_line, start_column),
             number_kind: number_kind
           )
@@ -1155,7 +1163,7 @@ module CrystalV2
             end
             return Token.new(
               kind,
-              @rope.bytes[from...@offset - 1],
+              bytes_range(from, @offset - 1),
               build_span(start_offset, start_line, start_column)
             )
           end
@@ -1354,7 +1362,7 @@ module CrystalV2
             kind = has_interpolation ? Token::Kind::StringInterpolation : Token::Kind::String
             return Token.new(
               kind,
-              @rope.bytes[from...@offset - 1],
+              bytes_range(from, @offset - 1),
               build_span(start_offset, start_line, start_column)
             )
           end
@@ -1662,7 +1670,7 @@ module CrystalV2
 
             return Token.new(
               Token::Kind::Char,
-              @rope.bytes[from...from + bytes_consumed],
+              bytes_range(from, from + bytes_consumed),
               build_span(start_offset, start_line, start_column)
             )
           end
@@ -1688,7 +1696,7 @@ module CrystalV2
           end
           Token.new(
             Token::Kind::Comment,
-            @rope.bytes[from...@offset],
+            bytes_range(from, @offset),
             build_span(start_offset, start_line, start_column)
           )
         end
@@ -1699,7 +1707,7 @@ module CrystalV2
           advance(2)
           Token.new(
             Token::Kind::MacroExprStart,
-            @rope.bytes[start_offset...@offset],
+            bytes_range(start_offset, @offset),
             build_span(start_offset, start_line, start_column)
           )
         end
@@ -1710,7 +1718,7 @@ module CrystalV2
           advance(2)
           Token.new(
             Token::Kind::MacroExprEnd,
-            @rope.bytes[start_offset...@offset],
+            bytes_range(start_offset, @offset),
             build_span(start_offset, start_line, start_column)
           )
         end
@@ -2077,7 +2085,7 @@ module CrystalV2
 
           Token.new(
             kind,
-            @rope.bytes[from...@offset],
+            bytes_range(from, @offset),
             build_span(start_offset, start_line, start_column)
           )
         end
@@ -2299,12 +2307,12 @@ module CrystalV2
           end
 
           if interpolation_allowed && has_interpolation
-            content_slice = @rope.bytes[content_start...content_end]
+            content_slice = bytes_range(content_start, content_end)
             return Token.new(Token::Kind::StringInterpolation, content_slice, span)
           end
 
           # Get the slice from rope for the entire literal (including delimiters)
-          slice = @rope.bytes[start_offset...@offset]
+          slice = bytes_range(start_offset, @offset)
           span = build_span(start_offset, start_line, start_column)
 
           # For arrays, we need to return special token or handle differently

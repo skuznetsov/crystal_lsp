@@ -54123,6 +54123,37 @@ module Crystal::HIR
         ctx.emit(ext_call)
         ctx.register_type(ext_call.id, TypeRef::STRING)
         return ext_call.id
+      elsif type_desc && (type_desc.name.starts_with?("Slice(") || type_desc.name == "Slice" ||
+            type_desc.name == "Bytes") && index_ids.size == 1 && !index_is_range
+        # Slice element access: slice[i] → call Slice#[](Int32) explicitly
+        # Without this, VOID arg types cause method resolution to pick the Range
+        # overload, passing the raw integer as a Range pointer (stage2 crash).
+        elem_name = "UInt8"
+        if type_desc.name.starts_with?("Slice(")
+          inner = type_desc.name[6, type_desc.name.size - 7]
+          elem_name = inner unless inner.empty?
+        end
+        element_type = type_ref_for_name(elem_name)
+        element_type = TypeRef::UINT8 if element_type == TypeRef::VOID
+        slice_class = type_desc.name.starts_with?("Slice(") ? type_desc.name : "Slice(#{elem_name})"
+        forced_arg_types = [TypeRef::INT32]
+        method_name = resolve_method_call(ctx, object_id, "[]", forced_arg_types, false)
+        base_method_name = "#{slice_class}#[]"
+        primary_mangled_name = mangle_function_name(base_method_name, forced_arg_types)
+        remember_callsite_arg_types(primary_mangled_name, forced_arg_types)
+        if method_name != primary_mangled_name
+          remember_callsite_arg_types(method_name, forced_arg_types)
+        end
+        lower_function_if_needed(primary_mangled_name)
+        if method_name != primary_mangled_name
+          lower_function_if_needed(method_name)
+        end
+        call_target = prefer_primary_call_target(method_name, primary_mangled_name, forced_arg_types)
+        return_type = element_type
+        call = Call.new(ctx.next_id, return_type, object_id, call_target, index_ids)
+        ctx.emit(call)
+        ctx.register_type(call.id, return_type)
+        call.id
       else
         # Everything else (classes like Hash, custom types): call [] method
         # Resolve the method name properly (with class name and mangling)
@@ -54140,6 +54171,21 @@ module Crystal::HIR
           end
         end
         method_name = resolve_method_call(ctx, object_id, "[]", arg_types, false)
+        # Post-resolution guard: if resolve picked a Range overload but the AST
+        # index is NOT a RangeNode, the selection is wrong (VOID arg matched Range
+        # parameter). Re-resolve with Int32 to pick the correct element-access overload.
+        # This prevents the inttoptr crash where a raw integer is passed as Range ptr.
+        if method_name.includes?("Range") && node.indexes.size == 1
+          idx_node_fixup = @arena[node.indexes.first]
+          unless idx_node_fixup.is_a?(CrystalV2::Compiler::Frontend::RangeNode)
+            fixed_arg_types = [TypeRef::INT32]
+            fixed_method = resolve_method_call(ctx, object_id, "[]", fixed_arg_types, false)
+            if !fixed_method.includes?("Range")
+              method_name = fixed_method
+              arg_types = fixed_arg_types
+            end
+          end
+        end
         # Ensure the target function is lowered (IndexNode bypasses lower_call).
         object_type = ctx.type_of(object_id)
         type_desc = @module.get_type_descriptor(object_type)
@@ -54172,6 +54218,25 @@ module Crystal::HIR
           end
         end
         call_target_name = prefer_primary_call_target(method_name, primary_mangled_name, arg_types)
+
+        # Fix misresolution: when the index is NOT a Range (per AST/type check) but the
+        # untyped overload resolver picked the $Range overload, re-resolve with Int32.
+        # This happens when the receiver type is unknown (VOID) causing the Slice-specific
+        # path above to be skipped, and the untyped resolver tiebreaks to Range.
+        if !index_is_range && index_ids.size == 1 &&
+           (call_target_name.ends_with?("$Range") || call_target_name.includes?("$Range$"))
+          int32_base = base_method_name
+          int32_args = [TypeRef::INT32]
+          int32_mangled = mangle_function_name(int32_base, int32_args)
+          if @function_types.has_key?(int32_mangled) ||
+             (has_function_base?(int32_base) && resolve_untyped_overload(int32_base, 1, false) == int32_mangled)
+            call_target_name = int32_mangled
+            arg_types = int32_args
+            remember_callsite_arg_types(int32_mangled, int32_args)
+            lower_function_if_needed(int32_mangled)
+          end
+        end
+
         if env_has?("DEBUG_INDEX_CALL")
           span = node.span
           recv_name = type_name_for_mangling(ctx.type_of(object_id))
