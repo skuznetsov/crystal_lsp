@@ -19,6 +19,10 @@
     - `regression_tests/stage2_env_optional_hang_probe.sh`
   - Added fast parser-loop signature repro:
     - `regression_tests/stage2_parser_definition_start_stuck_repro.sh`
+  - IR evidence from stage2 unit (`src/crystal_v2.ll`):
+    - in `CCParser#parse_program`, call `%r197 = ...definition_start?` is emitted,
+      but control flow does not branch on `%r197` (definition branch executed unconditionally),
+      which matches the observed infinite parse loop on identifier-start statements.
 
 - **2026-02-24 (latest): stage1 `Object#to_s` crash fixed; stage2 release links again but runtime stability still broken**
   - New regression repro is now **fixed**:
