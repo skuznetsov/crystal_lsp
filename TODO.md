@@ -54,6 +54,24 @@
 - Float64: arithmetic, ** on literals
 
 ## Current Investigation (Stage 2 bootstrap crash)
+- **2026-02-24 (latest): stage2 release now links, but compile-time runtime crash remains**
+  - New release bootstrap measurements:
+    - stage1 (original compiler): `crystal build --release src/crystal_v2.cr -o /tmp/stage1_rel_fix35`
+      - **real 399.43s**
+    - stage2 (self-hosted): `/tmp/stage1_rel_fix35 --release src/crystal_v2.cr -o /tmp/stage2_rel_fix35`
+      - **real 125.17s**
+    - stage2 speedup vs stage1: **~3.19x** (delta: **-274.26s**).
+  - Link blocker status:
+    - resolved previous undefined `_AST` / `_cache`.
+    - current undefined-symbol blocker (`_default_expr_id`, `_default_arena`, `_lnct`) has been suppressed sufficiently for link on this path.
+  - Stage2 runtime status:
+    - `regression_tests/run_all.sh /tmp/stage2_rel_fix35` => **0/56 passed** (all compile crashes/failures).
+    - `lldb --batch` on `basic_sanity` shows immediate crash in
+      `IO::FileDescriptor.new(Int32, Bool)` (`EXC_BAD_ACCESS` at null access)
+      during `__crystal_main` startup.
+  - New targeted repro script:
+    - `regression_tests/stage2_basic_sanity_crash_repro.sh /tmp/stage2_rel_fix35`
+
 - **2026-02-24 (latest-2): original-compiler compatibility restored, stage2 bench still unstable**
   - Compatibility fixes (so `crystal build --release src/crystal_v2.cr` works again):
     - `SymbolCollector`: explicit `@virtual_arena : Frontend::VirtualArena?`.

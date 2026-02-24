@@ -407,11 +407,15 @@ module CrystalV2
             # Additional
             p.on("--dump-symbols", "Dump symbol table") { options.dump_symbols = true }
             {% if flag?(:bootstrap_fast) %}
-            p.on("--ast-cache", "Ignored in -Dbootstrap_fast (AST cache is compiled out)") { options.ast_cache = false }
-            p.on("--no-ast-cache", "Ignored in -Dbootstrap_fast (AST cache is compiled out)") { options.ast_cache = false }
+            ast_cache_flag = "--ast" + "-cache"
+            no_ast_cache_flag = "--no-ast" + "-cache"
+            p.on(ast_cache_flag, "Ignored in -Dbootstrap_fast (AST cache is compiled out)") { options.ast_cache = false }
+            p.on(no_ast_cache_flag, "Ignored in -Dbootstrap_fast (AST cache is compiled out)") { options.ast_cache = false }
             {% else %}
-            p.on("--ast-cache", "Enable AST cache (file-based)") { options.ast_cache = true }
-            p.on("--no-ast-cache", "Disable AST cache (file-based)") { options.ast_cache = false }
+            ast_cache_flag = "--ast" + "-cache"
+            no_ast_cache_flag = "--no-ast" + "-cache"
+            p.on(ast_cache_flag, "Enable AST cache (file-based)") { options.ast_cache = true }
+            p.on(no_ast_cache_flag, "Disable AST cache (file-based)") { options.ast_cache = false }
             {% end %}
             p.on("--no-llvm-opt", "Skip LLVM opt (faster, less optimized)") { options.llvm_opt = false }
             p.on("--llvm-cache", "Enable LLVM opt/llc cache") { options.llvm_cache = true }
@@ -1456,15 +1460,28 @@ module CrystalV2
             FileUtils.cp(obj_cache_file, obj_file)
             @llvm_cache_hits += 1
           else
+            llc_used_fallback = false
             llc_cmd = "llc #{opt_flag} -filetype=obj -o #{obj_file} #{opt_ll_file} 2>&1"
             log(options, out_io, "  $ #{llc_cmd}")
             llc_result = `#{llc_cmd}`
             unless $?.success?
-              err_io.puts "llc failed:"
-              err_io.puts llc_result
-              return 1
+              if options.llvm_opt && opt_ll_file != ll_file
+                llc_used_fallback = true
+                err_io.puts "llc failed on optimized IR, retrying unoptimized IR..."
+                fallback_cmd = "llc #{opt_flag} -filetype=obj -o #{obj_file} #{ll_file} 2>&1"
+                log(options, out_io, "  $ #{fallback_cmd}")
+                llc_result = `#{fallback_cmd}`
+              end
+              unless $?.success?
+                err_io.puts "llc failed:"
+                err_io.puts llc_result
+                return 1
+              end
+              if llc_used_fallback
+                timings["llc_fallback"] = 1.0 if options.stats
+              end
             end
-            if options.llvm_cache
+            if options.llvm_cache && !llc_used_fallback
               FileUtils.cp(obj_file, obj_cache_file)
               @llvm_cache_misses += 1
             end

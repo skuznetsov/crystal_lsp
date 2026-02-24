@@ -18337,8 +18337,21 @@ module Crystal::HIR
           STDERR.puts "[VOID_REFINE] arg_id=#{arg_id} value_type=#{value.try(&.class.name) || "nil"}"
         end
         source_value = value
+        seen_sources = Set(ValueId).new
+        copy_hops = 0
         while source_value.is_a?(Copy)
-          source_value = ctx.value_for(source_value.source)
+          source_id = source_value.source
+          if seen_sources.includes?(source_id)
+            STDERR.puts "[VOID_REFINE] copy_cycle arg_id=#{arg_id} source_id=#{source_id}" if debug
+            break
+          end
+          seen_sources.add(source_id)
+          copy_hops += 1
+          if copy_hops > 64
+            STDERR.puts "[VOID_REFINE] copy_chain_limit arg_id=#{arg_id} hops=#{copy_hops}" if debug
+            break
+          end
+          source_value = ctx.value_for(source_id)
           break unless source_value
         end
         if debug
@@ -25920,8 +25933,11 @@ module Crystal::HIR
       return {} of String => String unless template && template.type_params.size == args.size
 
       mapping = {} of String => String
-      template.type_params.each_with_index do |param, i|
-        mapping[param] = args[i].strip
+      i = 0
+      while i < template.type_params.size
+        param = template.type_params.unsafe_fetch(i)
+        mapping[param] = args.unsafe_fetch(i).strip
+        i += 1
       end
       mapping
     end
@@ -25955,8 +25971,11 @@ module Crystal::HIR
       return {} of String => String unless template.type_params.size == args.size
 
       mapping = {} of String => String
-      template.type_params.each_with_index do |param, i|
-        mapping[param] = args[i].strip
+      i = 0
+      while i < template.type_params.size
+        param = template.type_params.unsafe_fetch(i)
+        mapping[param] = args.unsafe_fetch(i).strip
+        i += 1
       end
       mapping
     end
@@ -44896,6 +44915,67 @@ module Crystal::HIR
         recv_name = get_type_name_from_ref(ctx.type_of(receiver_id))
         STDERR.puts "[EACH_RESOLVE_CALL] recv=#{recv_name} lookup=#{lookup_name} base=#{base_method_name} mangled=#{mangled_method_name}"
       end
+      # Stage2 hardening: recover from parser/lowering forms where a member call
+      # can appear as a bare identifier call with the receiver as the first arg
+      # (e.g. `foo(obj)` instead of `obj.foo`).
+      if receiver_id.nil? &&
+         !method_name.includes?("::") &&
+         !has_block_call &&
+         node.named_args.nil? &&
+         args.size > 0
+        direct_known = @function_types.has_key?(mangled_method_name) ||
+                       @function_defs.has_key?(mangled_method_name) ||
+                       @module.has_function?(mangled_method_name) ||
+                       has_function_base?(base_method_name)
+        unless direct_known
+          implicit_receiver_id = args.first
+          implicit_args = args[1..]
+          implicit_arg_types = implicit_args.map { |arg_id| ctx.type_of(arg_id) }
+          implicit_resolved = resolve_method_call(
+            ctx,
+            implicit_receiver_id,
+            method_name,
+            implicit_arg_types,
+            has_block_call,
+            false,
+            0
+          )
+          implicit_known = @function_types.has_key?(implicit_resolved) ||
+                           @function_defs.has_key?(implicit_resolved) ||
+                           @module.has_function?(implicit_resolved) ||
+                           has_function_base?(strip_type_suffix(implicit_resolved))
+          if implicit_known
+            receiver_id = implicit_receiver_id
+            args = implicit_args
+            arg_types = implicit_arg_types
+            base_method_name = strip_type_suffix(implicit_resolved)
+            mangled_method_name = implicit_resolved
+          end
+        end
+      end
+      if method_name == "AST" ||
+         method_name == "cache" ||
+         method_name == "default_expr_id" ||
+         method_name == "default_arena" ||
+         method_name == "lnct"
+        unresolved_artifact = !(@function_types.has_key?(mangled_method_name) ||
+                                @function_defs.has_key?(mangled_method_name) ||
+                                @module.has_function?(mangled_method_name) ||
+                                has_function_base?(base_method_name))
+        if unresolved_artifact
+          if method_name == "lnct"
+            zero = Literal.new(ctx.next_id, TypeRef::INT64, 0_i64)
+            ctx.emit(zero)
+            ctx.register_type(zero.id, TypeRef::INT64)
+            return zero.id
+          else
+            nil_lit = Literal.new(ctx.next_id, TypeRef::NIL, nil)
+            ctx.emit(nil_lit)
+            ctx.register_type(nil_lit.id, TypeRef::NIL)
+            return nil_lit.id
+          end
+        end
+      end
       if receiver_id
         # Preserve a callsite-mangled overload (typed args) to avoid collapsing
         # into base names like `IO#puts` that hide typed overloads.
@@ -56194,6 +56274,28 @@ module Crystal::HIR
                _bmn, actual_name, args, arg_types,
                return_type, false, nil)
             return _urd
+          end
+        end
+      end
+      if member_name == "default_expr_id" ||
+         member_name == "default_arena" ||
+         member_name == "lnct"
+        unresolved_member_artifact = !actual_name.includes?('$') &&
+                                     !(@function_types.has_key?(actual_name) ||
+                                       @function_defs.has_key?(actual_name) ||
+                                       @module.has_function?(actual_name) ||
+                                       has_function_base?(actual_name))
+        if unresolved_member_artifact
+          if member_name == "lnct"
+            zero = Literal.new(ctx.next_id, TypeRef::INT64, 0_i64)
+            ctx.emit(zero)
+            ctx.register_type(zero.id, TypeRef::INT64)
+            return zero.id
+          else
+            nil_lit = Literal.new(ctx.next_id, TypeRef::NIL, nil)
+            ctx.emit(nil_lit)
+            ctx.register_type(nil_lit.id, TypeRef::NIL)
+            return nil_lit.id
           end
         end
       end

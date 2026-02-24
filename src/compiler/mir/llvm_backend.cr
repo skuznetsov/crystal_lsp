@@ -5976,7 +5976,7 @@ module Crystal::MIR
         emit_raw "compute:\n"
         emit_raw "  %epoch_total = phi i64 [0, %epoch_zero], [%epoch_sec, %epoch_ok]\n"
         emit_raw "  %seconds = add i64 %epoch_total, %tv_sec\n"
-        emit_raw "  %result = call ptr @Time$Dnew$$Int64_Int32_Time$CCLocation(i64 %seconds, i32 %tv_nsec, ptr %location)\n"
+        emit_raw "  %result = call ptr @Time$Dnew$$Int64(i64 %seconds)\n"
         emit_raw "  ret ptr %result\n"
         emit_raw "}\n\n"
         return true
@@ -8680,6 +8680,13 @@ module Crystal::MIR
       # Check if index needs to be converted to i64 for GEP
       index_type = @value_types[inst.index]? || TypeRef::INT32
       index_type_str = @type_mapper.llvm_type(index_type)
+      if !index_type_str.includes?(".union")
+        if emitted_index_type = @emitted_value_types[index]?
+          if emitted_index_type.includes?(".union")
+            index_type_str = emitted_index_type
+          end
+        end
+      end
       if index_type_str.includes?(".union")
         base_name = name.lstrip('%')
         emit "%#{base_name}.idx_union_ptr = alloca #{index_type_str}, align 8"
@@ -11778,16 +11785,20 @@ module Crystal::MIR
         if return_type.includes?(".union")
           # For union types, find matching TypeRef for the emitted union
           # Use prepass_type if it matches, otherwise try to find from callee
+          resolved_union_type = nil.as(TypeRef?)
           if prepass_type && @type_mapper.llvm_type(prepass_type).includes?(".union")
-            @value_types[inst.id] = prepass_type
+            resolved_union_type = prepass_type
           elsif callee_func && @type_mapper.llvm_type(callee_func.return_type).includes?(".union")
-            @value_types[inst.id] = callee_func.return_type
+            resolved_union_type = callee_func.return_type
           else
             # Fallback to inst.type if it's a union
             if @type_mapper.llvm_type(inst.type).includes?(".union")
-              @value_types[inst.id] = inst.type
+              resolved_union_type = inst.type
+            else
+              resolved_union_type = find_type_ref_for_llvm_type(return_type)
             end
           end
+          @value_types[inst.id] = resolved_union_type if resolved_union_type
         else
           # If the MIR type is a tuple or StaticArray, preserve it even if ABI uses ptr.
           if tuple_type = @module.type_registry.get(inst.type)
@@ -11893,6 +11904,14 @@ module Crystal::MIR
                       end
         @value_types[inst.id] = actual_type
       end
+    end
+
+    private def find_type_ref_for_llvm_type(llvm_type : String) : TypeRef?
+      @module.type_registry.types.each do |type|
+        ref = TypeRef.new(type.id)
+        return ref if @type_mapper.llvm_type(ref) == llvm_type
+      end
+      nil
     end
 
     private def emit_extern_call(inst : ExternCall, name : String)
@@ -13718,9 +13737,27 @@ module Crystal::MIR
                   idx_llvm = idx_type ? @type_mapper.llvm_type(idx_type) : "i32"
                   # Also check actual emitted type — GEP results are ptr even if MIR says i32
                   actual_emitted = @emitted_value_types[var_index]?
+                  if actual_emitted && actual_emitted.includes?(".union")
+                    idx_llvm = actual_emitted
+                  end
                   idx_llvm = "ptr" if actual_emitted == "ptr"
-                  if idx_llvm == "ptr" || idx_llvm.includes?(".")
+                  if idx_llvm.includes?(".union")
+                    emit "%#{base_name}.gidx_union_ptr = alloca #{idx_llvm}, align 8"
+                    emit "store #{idx_llvm} #{normalize_union_value(var_index, idx_llvm)}, ptr %#{base_name}.gidx_union_ptr"
+                    emit "%#{base_name}.gidx_payload_ptr = getelementptr #{idx_llvm}, ptr %#{base_name}.gidx_union_ptr, i32 0, i32 1"
+                    if idx_llvm.includes?("Int64") || idx_llvm.includes?("UInt64") || idx_llvm.includes?("Pointer")
+                      emit "%#{base_name}.gidx_payload = load i64, ptr %#{base_name}.gidx_payload_ptr, align 4"
+                      emit "%#{base_name}.tidx = trunc i64 %#{base_name}.gidx_payload to i32"
+                    else
+                      emit "%#{base_name}.tidx = load i32, ptr %#{base_name}.gidx_payload_ptr, align 4"
+                    end
+                    var_index = "%#{base_name}.tidx"
+                  elsif idx_llvm == "ptr"
                     # Pointer or non-integer used as index — convert via ptrtoint
+                    emit "%#{base_name}.gidx_raw = ptrtoint ptr #{var_index} to i64"
+                    emit "%#{base_name}.tidx = trunc i64 %#{base_name}.gidx_raw to i32"
+                    var_index = "%#{base_name}.tidx"
+                  elsif idx_llvm.includes?(".")
                     emit "%#{base_name}.gidx_raw = ptrtoint ptr #{var_index} to i64"
                     emit "%#{base_name}.tidx = trunc i64 %#{base_name}.gidx_raw to i32"
                     var_index = "%#{base_name}.tidx"
@@ -13812,6 +13849,13 @@ module Crystal::MIR
       index_type = @value_types[inst.index_value]?
       if index_type
         index_llvm = @type_mapper.llvm_type(index_type)
+        if !index_llvm.includes?(".union")
+          if emitted_index_llvm = @emitted_value_types[index]?
+            if emitted_index_llvm.includes?(".union")
+              index_llvm = emitted_index_llvm
+            end
+          end
+        end
         if index_llvm.includes?(".union")
           # Union type index - extract payload as i32
           emit "%#{base_name}.idx_union_ptr = alloca #{index_llvm}, align 8"
@@ -13912,6 +13956,13 @@ module Crystal::MIR
       index_type = @value_types[inst.index_value]?
       if index_type
         index_llvm = @type_mapper.llvm_type(index_type)
+        if !index_llvm.includes?(".union")
+          if emitted_index_llvm = @emitted_value_types[index]?
+            if emitted_index_llvm.includes?(".union")
+              index_llvm = emitted_index_llvm
+            end
+          end
+        end
         if index_llvm.includes?(".union")
           # Union type index - extract payload as i32
           emit "%#{base_name}.idx_union_ptr = alloca #{index_llvm}, align 8"
