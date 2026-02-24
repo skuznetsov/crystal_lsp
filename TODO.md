@@ -17,6 +17,8 @@
       shows parser hotspot loop (`CCParser#definition_start?`, `#parse_program`, `#current_token`).
   - Added dedicated hang probe script:
     - `regression_tests/stage2_env_optional_hang_probe.sh`
+  - Added fast parser-loop signature repro:
+    - `regression_tests/stage2_parser_definition_start_stuck_repro.sh`
 
 - **2026-02-24 (latest): stage1 `Object#to_s` crash fixed; stage2 release links again but runtime stability still broken**
   - New regression repro is now **fixed**:
