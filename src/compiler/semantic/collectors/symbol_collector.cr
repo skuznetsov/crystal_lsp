@@ -13,6 +13,7 @@ module CrystalV2
         alias TypedNode = Frontend::TypedNode
 
         getter diagnostics : Array(Diagnostic)
+        @virtual_arena : Frontend::VirtualArena?
 
       def initialize(@program : Program, context : Context)
         program_arena = @program.arena

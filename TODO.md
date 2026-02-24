@@ -54,6 +54,20 @@
 - Float64: arithmetic, ** on literals
 
 ## Current Investigation (Stage 2 bootstrap crash)
+- **2026-02-24 (latest-2): original-compiler compatibility restored, stage2 bench still unstable**
+  - Compatibility fixes (so `crystal build --release src/crystal_v2.cr` works again):
+    - `SymbolCollector`: explicit `@virtual_arena : Frontend::VirtualArena?`.
+    - `CLI`: helper signatures broadened to `Frontend::ArenaLike` where required by original compiler typing.
+  - Fresh stage1 benchmark with original compiler:
+    - `crystal build --release src/crystal_v2.cr -o /tmp/stage1_rel_fix24_bench`
+    - **real 388.40s**.
+  - Stage2 benchmark from that freshly built stage1:
+    - `/tmp/stage1_rel_fix24_bench --release src/crystal_v2.cr -o /tmp/stage2_rel_fix24_bench`
+    - did not finish within 240s (timeout probe triggered), so currently unstable/looping on this path.
+    - sample hotspots at timeout:
+      - `Hash(UInt32, Crystal::HIR::Value+)#find_entry`
+      - `Crystal::HIR::AstToHir#refine_void_args_from_source_calls`
+
 - **2026-02-24 (latest): stage2 no-prelude path moved forward, bootstrap parse crash still open**
   - Release stage2 rebuild from `/tmp/stage1_rel_fix4` remains stable:
     - `/tmp/stage2_rel_fix19`..`/tmp/stage2_rel_fix24` all built in ~117–118s.

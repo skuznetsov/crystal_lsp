@@ -925,9 +925,11 @@ module CrystalV2
         while i < class_nodes.size
           class_node, arena = class_nodes.unsafe_fetch(i)
           if body = class_node.body
-            hir_converter.arena = arena
-            class_name = String.new(class_node.name)
-            scan_constants_in_body.call(class_name, arena, body)
+            if arena.is_a?(Frontend::AstArena)
+              hir_converter.arena = arena
+              class_name = String.new(class_node.name)
+              scan_constants_in_body.call(class_name, arena, body)
+            end
           end
           i += 1
         end
@@ -936,9 +938,11 @@ module CrystalV2
         while i < module_nodes.size
           module_node, arena = module_nodes.unsafe_fetch(i)
           if body = module_node.body
-            hir_converter.arena = arena
-            module_name = String.new(module_node.name)
-            scan_module_body.call(module_name, arena, body)
+            if arena.is_a?(Frontend::AstArena)
+              hir_converter.arena = arena
+              module_name = String.new(module_node.name)
+              scan_module_body.call(module_name, arena, body)
+            end
           end
           i += 1
         end
@@ -1890,7 +1894,7 @@ module CrystalV2
       end
 
       private def collect_top_level_nodes(
-        arena : Frontend::AstArena,
+        arena : Frontend::ArenaLike,
         expr_id : Frontend::ExprId,
         def_nodes : Array(Tuple(Frontend::DefNode, Frontend::ArenaLike)),
         class_nodes : Array(Tuple(Frontend::ClassNode, Frontend::ArenaLike)),
@@ -2072,7 +2076,7 @@ module CrystalV2
       # Expand a top-level {% for %} macro loop (e.g., in primitives.cr)
       private def expand_top_level_macro_for(
         node : Frontend::MacroForNode,
-        arena : Frontend::AstArena,
+        arena : Frontend::ArenaLike,
         source : String,
         def_nodes : Array(Tuple(Frontend::DefNode, Frontend::ArenaLike)),
         class_nodes : Array(Tuple(Frontend::ClassNode, Frontend::ArenaLike)),
@@ -2146,7 +2150,7 @@ module CrystalV2
 
       # Resolve a macro for-loop iterable to a list of string values
       private def resolve_top_level_macro_iterable(
-        arena : Frontend::AstArena,
+        arena : Frontend::ArenaLike,
         iterable_id : Frontend::ExprId,
         source : String
       ) : Array(String)?
@@ -2215,7 +2219,7 @@ module CrystalV2
       # {% for %}, {% if %}, {{ expr }}, and variable assignments.
       private def expand_macro_literal_via_expander(
         body_id : Frontend::ExprId,
-        arena : Frontend::AstArena,
+        arena : Frontend::ArenaLike,
         source : String,
         flags : Set(String)
       ) : String?
@@ -2528,7 +2532,7 @@ module CrystalV2
       end
 
       private def annotation_name_from_expr(
-        arena : Frontend::AstArena,
+        arena : Frontend::ArenaLike,
         expr_id : Frontend::ExprId
       ) : String
         node = arena[expr_id]
@@ -3005,7 +3009,7 @@ module CrystalV2
       end
 
       private def evaluate_macro_condition(
-        arena : Frontend::AstArena,
+        arena : Frontend::ArenaLike,
         expr_id : Frontend::ExprId,
         flags : Set(String)
       ) : Bool?
@@ -3048,7 +3052,7 @@ module CrystalV2
       end
 
       private def macro_flag_call?(
-        arena : Frontend::AstArena,
+        arena : Frontend::ArenaLike,
         node : Frontend::CallNode,
         flags : Set(String)
       ) : Bool?
