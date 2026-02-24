@@ -1,6 +1,23 @@
 # Crystal v2 — Active Work (codegen branch)
 
 ## Known Bugs (codegen)
+- **2026-02-24 (latest): `ENV.fetch` default-overload root cause fixed in HIR; stage2 still hangs on minimal ENV repro**
+  - Compiler fix (codegen path, no stdlib changes):
+    - `src/compiler/hir/ast_to_hir.cr`
+      - unresolved generic annotations (for example `default : T` before `T` binds) are now treated as wildcard in:
+        - `params_compatible_with_args?`
+        - `params_match_score`
+        - module class deferred lookup scoring (`find_module_class_def` path).
+  - Validation with fresh stage1 release (`/tmp/stage1_rel_20260224_envfix1`):
+    - `regression_tests/stage2_env_optional_repro.sh /tmp/stage1_rel_20260224_envfix1` -> `not reproduced` (~3.33s).
+    - `regression_tests/stage1_fetch_default_block_repro.sh /tmp/stage1_rel_20260224_envfix1` -> `not reproduced` (~3.25s).
+  - Stage2 status:
+    - same repro scripts against `src/crystal_v2` both timeout at `180s`.
+    - `scripts/timeout_sample_lldb.sh --timeout 180 --sample 8 --top 12 --out <probe> -- src/crystal_v2 <repro>.cr -o <bin>`
+      shows parser hotspot loop (`CCParser#definition_start?`, `#parse_program`, `#current_token`).
+  - Added dedicated hang probe script:
+    - `regression_tests/stage2_env_optional_hang_probe.sh`
+
 - **2026-02-24 (latest): stage1 `Object#to_s` crash fixed; stage2 release links again but runtime stability still broken**
   - New regression repro is now **fixed**:
     - `regression_tests/stage1_object_to_s_crash_repro.sh /tmp/stage1_dbg_20260224_fix6`

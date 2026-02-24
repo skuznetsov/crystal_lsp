@@ -21963,9 +21963,20 @@ module Crystal::HIR
           next
         end
 
+        # Unresolved generic type variables (for example, `default : T` before
+        # T is bound from call-site args) must behave as wildcard parameters.
+        if !param_type_name.empty? && unresolved_type_param_annotation?(param_type_name)
+          arg_idx += 1
+          next
+        end
+
         if !param_type_name.empty?
           # Resolve type alias chain FIRST, then get type ref
           resolved_name = resolve_type_alias_chain(param_type_name)
+          if unresolved_type_param_annotation?(resolved_name)
+            arg_idx += 1
+            next
+          end
           param_resolved_name = resolved_name
           if module_like_type_name?(resolved_name)
             return false if primitive_type?(arg_type)
@@ -22079,8 +22090,18 @@ module Crystal::HIR
           arg_idx += 1
           next
         end
+        if !param_type_name.empty? && unresolved_type_param_annotation?(param_type_name)
+          score += 1
+          arg_idx += 1
+          next
+        end
         if !param_type_name.empty? && arg_type != TypeRef::VOID
           resolved_name = resolve_type_alias_chain(param_type_name)
+          if unresolved_type_param_annotation?(resolved_name)
+            score += 1
+            arg_idx += 1
+            next
+          end
           param_type = type_ref_for_name(resolved_name)
           if param_type != TypeRef::VOID
             if param_type == arg_type
@@ -22151,6 +22172,14 @@ module Crystal::HIR
       end
 
       score
+    end
+
+    @[AlwaysInline]
+    private def unresolved_type_param_annotation?(type_name : String) : Bool
+      return false if type_name.empty?
+      return false unless type_param_like?(type_name)
+      return false unless short_type_param_name?(type_name)
+      !@type_param_map.has_key?(type_name)
     end
 
     private def primitive_type?(type : TypeRef) : Bool
@@ -40606,7 +40635,20 @@ module Crystal::HIR
                     call_type = call_arg_types[param_idx]
                     if ta = param.type_annotation
                       param_type_name = String.new(ta)
-                      param_type = type_ref_for_name(param_type_name)
+                      if unresolved_type_param_annotation?(param_type_name)
+                        score += 1
+                        param_idx += 1
+                        next
+                      end
+
+                      resolved_param_type_name = resolve_type_alias_chain(param_type_name)
+                      if unresolved_type_param_annotation?(resolved_param_type_name)
+                        score += 1
+                        param_idx += 1
+                        next
+                      end
+
+                      param_type = type_ref_for_name(resolved_param_type_name)
                       if param_type != TypeRef::VOID && call_type != TypeRef::VOID
                         if param_type == call_type
                           score += 10 # Exact match bonus
