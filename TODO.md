@@ -1,6 +1,38 @@
 # Crystal v2 — Active Work (codegen branch)
 
 ## Known Bugs (codegen)
+- **2026-02-25 (latest): fixed root-cause crash for `uninitialized StaticArray(Struct, N)`**
+  - Root cause:
+    - explicit HIR allocation strategy (`alloc.memory_strategy = ARC`) was overwritten later by `MemoryStrategyAssigner`;
+    - for unresolved MIR type-name path (`hir_type=StaticArray(E, 2)`, `mir_type=""`), `HIRToMIR#lower_allocate` fell back to tiny raw alloc (pointer-sized payload), while downstream `ArraySet/ArrayGet` expected Array-layout object with `@buffer` at offset `+16`.
+  - Fixes applied:
+    - `src/compiler/hir/memory_strategy.cr`
+      - preserve explicitly pre-set `Allocate#memory_strategy` (unless `Unknown`) instead of always recomputing.
+    - `src/compiler/mir/hir_to_mir.cr`
+      - in `lower_allocate`, detect `StaticArray(T, N)` using MIR name with HIR-name fallback;
+      - for `Allocate` of static arrays (no constructor args), lower via `MIR::ArrayNew` (proper array object + buffer), not raw pointer alloc;
+      - static-array size fallback now also uses HIR-name when MIR name is unavailable.
+  - New regression script:
+    - `regression_tests/stage1_uninitialized_staticarray_struct_repro.sh`
+    - status:
+      - `/tmp/stage1_dbg_current` -> `not reproduced`
+      - `src/crystal_v2` (stage2 compiler) -> `reproduced (compile failed; segfault)`
+  - Fresh bootstrap timing (this run):
+    - stage1 (original compiler, release):
+      - `crystal build --release src/crystal_v2.cr -o /tmp/stage1_rel_staticarray_fix`
+      - **real 6:52.77** (`412.77s`)
+    - stage2 (self-hosted, release, timeout-guarded):
+      - `scripts/timeout_sample_lldb.sh -t 180 -s 8 -n 12 -o /tmp/stage2_rel_staticarray_fix_probe -- /tmp/stage1_rel_staticarray_fix --release src/crystal_v2.cr -o /tmp/stage2_rel_staticarray_fix`
+      - **exit 0**, elapsed **109s**
+      - speedup stage2 vs stage1: **~3.79x** (delta ~`-303.77s`)
+  - Current blocker after stage2:
+    - stage3 (`src/crystal_v2 --release src/crystal_v2.cr ...`) crashes immediately (`exit 139`, ~1s).
+    - LLDB: `EXC_BAD_ACCESS` in `__crystal_v2_string_eq`, stack through:
+      - `Hash(String, Slice(UInt8))#entry_matches?`
+      - `...#find_entry_with_index`
+      - `Frontend::StringPool#intern`
+      - `Frontend::Parser#parse_identifier_like`.
+
 - **2026-02-25 (latest): fixed root-cause return-type pollution from macro-generic tails (`IdentifierNode(F)`)**
   - Root cause:
     - `get_function_return_type` eagerly used `infer_return_type_from_body_without_callsite` for unresolved signatures.

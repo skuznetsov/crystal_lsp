@@ -179,7 +179,11 @@ module Crystal::HIR
       @function.blocks.each do |block|
         block.instructions.each do |value|
           if value.is_a?(Allocate)
-            strategy = determine_strategy(value)
+            strategy = if explicit = value.memory_strategy
+                         explicit == MemoryStrategy::Unknown ? determine_strategy(value) : explicit
+                       else
+                         determine_strategy(value)
+                       end
             @result.add(value.id, strategy)
             # Propagate strategy to value for downstream lowering
             value.memory_strategy = strategy if value.responds_to?(:memory_strategy=)

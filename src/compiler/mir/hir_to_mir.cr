@@ -435,6 +435,23 @@ module Crystal
       {% end %}
     end
 
+    private def container_elem_storage_size_u64(elem_type : Type?) : UInt64
+      return pointer_word_bytes_u64 unless elem_type
+
+      is_inline = elem_type.kind.primitive? || elem_type.kind.enum?
+      if is_inline && elem_type.size > 0
+        return elem_type.size
+      end
+
+      # Unions with explicit payload layout are stored inline.
+      if elem_type.kind.union? && elem_type.size > pointer_word_bytes_u64
+        return elem_type.size
+      end
+
+      # Classes/structs/non-inline values are represented as pointers in containers.
+      pointer_word_bytes_u64
+    end
+
     # Create function stub with params and return type (no body)
     private def create_function_stub(hir_func : HIR::Function)
       mir_return_type = convert_type(hir_func.return_type)
@@ -805,11 +822,41 @@ module Crystal
     private def lower_allocate(alloc : HIR::Allocate) : ValueId
       builder = @builder.not_nil!
 
+      # Get the MIR type reference and look up size from type registry
+      mir_type_ref = convert_type(alloc.type)
+      mir_type_name = @mir_module.type_registry.get(mir_type_ref).try(&.name) || ""
+      hir_type_name = @hir_module.get_type_descriptor(alloc.type).try(&.name) || ""
+
+      # StaticArray(T, N) allocated via HIR::Allocate (not literal/new path)
+      # still needs a real array object layout with @size/@capacity/@buffer.
+      # Re-route such allocations to MIR::ArrayNew so downstream ArraySet/ArrayGet
+      # operate on valid storage instead of raw pointer slots.
+      if alloc.constructor_args.empty?
+        static_array_name = mir_type_name.empty? ? hir_type_name : mir_type_name
+        if match = static_array_name.match(/^StaticArray\((.+),\s*(\d+)\)$/)
+          elem_name = match[1].strip
+          count = match[2].to_i?
+          if count && count >= 0
+            elem_type_ref = if elem_type = @mir_module.type_registry.get_by_name(elem_name)
+                              TypeRef.new(elem_type.id)
+                            elsif hir_desc = @hir_module.get_type_descriptor(alloc.type)
+                              if hir_elem = hir_desc.type_params.first?
+                                convert_type(hir_elem)
+                              end
+                            end
+            if elem_type_ref
+              capacity = builder.const_int(count.to_i64, TypeRef::INT32)
+              mir_new = MIR::ArrayNew.new(builder.next_id, elem_type_ref, capacity)
+              builder.emit(mir_new)
+              return mir_new.id
+            end
+          end
+        end
+      end
+
       # Determine memory strategy based on escape/taint analysis
       strategy = select_memory_strategy(alloc)
 
-      # Get the MIR type reference and look up size from type registry
-      mir_type_ref = convert_type(alloc.type)
       alloc_size = pointer_word_bytes_u64
       if mir_type = @mir_module.type_registry.get(mir_type_ref)
         alloc_size = mir_type.size
@@ -819,14 +866,14 @@ module Crystal
       end
 
       # Fix StaticArray size: if type is StaticArray but size is 0, compute from name
+      # using container storage ABI (non-inline elements occupy pointer-sized slots).
       if alloc_size == 0
-        type_name = @mir_module.type_registry.get(mir_type_ref).try(&.name) || ""
+        type_name = mir_type_name.empty? ? hir_type_name : mir_type_name
         if m = type_name.match(/StaticArray\((.+),\s*(\d+)\)/)
           elem_name = m[1].strip
           count = m[2].to_u64
           elem_type = @mir_module.type_registry.get_by_name(elem_name)
-          elem_size = elem_type ? elem_type.size : 1_u64
-          elem_size = 1_u64 if elem_size == 0
+          elem_size = container_elem_storage_size_u64(elem_type)
           alloc_size = elem_size * count
         end
         alloc_size = pointer_word_bytes_u64 if alloc_size == 0
@@ -1497,7 +1544,27 @@ module Crystal
                                else
                                  call.args
                                end
-        coerced_args = coerce_call_args(builder, args, hir_args_for_coerce, func)
+
+        # Dot-methods (module/class methods) can resolve to static functions whose
+        # signature does not include receiver `self`. For those, drop the receiver
+        # argument before coercion to keep call ABI aligned with callee params.
+        callee_param_count = func.params.size
+        drop_dispatch_receiver = callee_param_count <= args.size - 1 &&
+                                 method_name_str.includes?('.') &&
+                                 !method_name_str.includes?('#')
+
+        effective_args = args
+        effective_hir_args = hir_args_for_coerce
+        if drop_dispatch_receiver
+          effective_args = args[1, callee_param_count]
+          effective_hir_args = call.args
+        end
+        if callee_param_count < effective_args.size
+          effective_args = effective_args[0, callee_param_count]
+          effective_hir_args = effective_hir_args[0, callee_param_count]? || effective_hir_args
+        end
+
+        coerced_args = coerce_call_args(builder, effective_args, effective_hir_args, func)
         return builder.call(callee_id, coerced_args, convert_type(call.type))
       end
 
@@ -1813,7 +1880,7 @@ module Crystal
           # Module/class dispatch can route to static methods (dot methods) whose
           # signature does not include receiver `self`. In that case, drop the
           # dispatch receiver argument before coercion.
-          drop_dispatch_receiver = callee_param_count == cand_args.size - 1 &&
+          drop_dispatch_receiver = callee_param_count <= cand_args.size - 1 &&
                                    call_func.name.includes?('.') &&
                                    !call_func.name.includes?('#')
           if hir_call
@@ -1927,19 +1994,38 @@ module Crystal
         return @builder.not_nil!.call(existing.id, args, existing.return_type)
       end
 
-      # Determine return type: prefer candidate function return type over call.type
-      # because the call site may discard the result (VOID) while the function actually
-      # returns a value (e.g. property getters returning union types).
+      # Determine return type for dispatch.
+      # `call.type` can be too generic (often POINTER for virtual calls), which causes
+      # primitive returns to be retyped as pointer and breaks downstream codegen.
       ret_type = convert_type(call.type)
-      if ret_type == TypeRef::VOID
-        old_candidates.each do |c|
-          if f = c[:func]
-            if f.return_type != TypeRef::VOID
-              ret_type = f.return_type
-              break
-            end
-          end
+      first_candidate_ret = nil.as(TypeRef?)
+      unanimous_candidate_ret = nil.as(TypeRef?)
+      mixed_candidate_rets = false
+      old_candidates.each do |c|
+        next unless f = c[:func]
+        cand_ret = f.return_type
+        next if cand_ret == TypeRef::VOID
+        first_candidate_ret ||= cand_ret
+        if unanimous_candidate_ret.nil?
+          unanimous_candidate_ret = cand_ret
+        elsif unanimous_candidate_ret != cand_ret
+          mixed_candidate_rets = true
+          break
         end
+      end
+      ret_type_too_generic = ret_type == TypeRef::VOID ||
+                             ret_type == TypeRef::NIL ||
+                             ret_type == TypeRef::POINTER
+      ret_type_reference_vs_primitive = unanimous_candidate_ret &&
+                                        ret_type.reference? &&
+                                        unanimous_candidate_ret.not_nil!.primitive?
+
+      if unanimous_candidate_ret &&
+         !mixed_candidate_rets &&
+         (ret_type_too_generic || ret_type_reference_vs_primitive)
+        ret_type = unanimous_candidate_ret.not_nil!
+      elsif ret_type == TypeRef::VOID && first_candidate_ret
+        ret_type = first_candidate_ret.not_nil!
       end
 
       # Create dispatch function
@@ -1997,7 +2083,7 @@ module Crystal
         call_args[0] = union_val
       end
 
-      @builder.not_nil!.call(dispatch_func.id, call_args, convert_type(call.type))
+      @builder.not_nil!.call(dispatch_func.id, call_args, dispatch_func.return_type)
     end
 
     private def extract_method_suffix(full_name : String) : String?
@@ -3515,7 +3601,7 @@ module Crystal
       synthetic = mir_func.create_block
       @block_map[hir_block_id] = synthetic
 
-      if ENV.fetch("CRYSTAL2_STAGE2_DEBUG", "0") == "1"
+      if ::CrystalV2::Compiler::BootstrapEnv.get?("CRYSTAL2_STAGE2_DEBUG") == "1"
         STDERR.puts "[MIR_MISSING_BLOCK] func=#{@current_lowering_func_name} hir_block=#{hir_block_id} synthetic=#{synthetic}"
       end
 
