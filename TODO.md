@@ -1,6 +1,32 @@
 # Crystal v2 — Active Work (codegen branch)
 
 ## Known Bugs (codegen)
+- **2026-02-25 (latest): fixed root-cause pruning of union virtual-dispatch targets (`A | B` index-call case)**
+  - Root cause:
+    - HIR RTA pruning in `HIR::Module#reachable_function_names` expanded virtual targets from **callee owner** only.
+    - For `u = B.new.as(A | B); u[7]`, virtual call carried `A#[]...` as callee, so RTA kept `A#[]` and pruned `B#[]`.
+    - Result: generated vdispatch switched on union type id but both branches called `A#[]`.
+  - Fixes applied:
+    - `src/compiler/hir/hir.cr`
+      - in virtual-call reachability, derive dispatch root owners from **receiver runtime type** (including union variants and `Union(...)` generic wrapper), then expand subclasses/module-includers from those owners;
+      - keep callee owner as fallback owner.
+  - New regression script:
+    - `regression_tests/stage1_union_index_virtual_dispatch_repro.sh`
+    - status: `/tmp/stage1_dbg_current` -> `not reproduced` (expected output `B:7`)
+  - Fresh bootstrap timing (this run):
+    - stage1 (original compiler, release):
+      - `crystal build --release src/crystal_v2.cr -o /tmp/stage1_rel_fix`
+      - **real 401.93s**
+    - stage2 (self-hosted, release, timeout-guarded):
+      - `scripts/timeout_sample_lldb.sh -t 180 -s 8 -n 12 -o /tmp/stage2_rel_fix -- /tmp/stage1_rel_fix --release src/crystal_v2.cr -o /tmp/stage2_rel_fix_bin`
+      - **exit 0**, **real 100.17s**
+      - speedup stage2 vs stage1: **~4.01x** (delta ~`-301.76s`)
+  - Current blocker after stage2:
+    - stage3 (`src/crystal_v2 --release src/crystal_v2.cr ...`) still crashes immediately (`exit 139`, ~1s).
+    - LLDB stop location (current run): `Array(Tuple(String, Array(String), String))#dup`, `EXC_BAD_ACCESS`, address `0x4`.
+  - Note:
+    - `-o` remains ignored on this stage2 path (binary written to `src/crystal_v2`).
+
 - **2026-02-25 (latest): fixed root-cause crash for `uninitialized StaticArray(Struct, N)`**
   - Root cause:
     - explicit HIR allocation strategy (`alloc.memory_strategy = ARC`) was overwritten later by `MemoryStrategyAssigner`;

@@ -1572,6 +1572,46 @@ module Crystal::HIR
         end
       end
 
+      # Best-effort type name for TypeRef (handles both user types and primitives)
+      type_name_for_ref = ->(type_ref : TypeRef) do
+        if desc = get_type_descriptor(type_ref)
+          desc.name
+        else
+          case type_ref
+          when TypeRef::VOID    then "Void"
+          when TypeRef::BOOL    then "Bool"
+          when TypeRef::INT8    then "Int8"
+          when TypeRef::INT16   then "Int16"
+          when TypeRef::INT32   then "Int32"
+          when TypeRef::INT64   then "Int64"
+          when TypeRef::INT128  then "Int128"
+          when TypeRef::UINT8   then "UInt8"
+          when TypeRef::UINT16  then "UInt16"
+          when TypeRef::UINT32  then "UInt32"
+          when TypeRef::UINT64  then "UInt64"
+          when TypeRef::UINT128 then "UInt128"
+          when TypeRef::FLOAT32 then "Float32"
+          when TypeRef::FLOAT64 then "Float64"
+          when TypeRef::CHAR    then "Char"
+          when TypeRef::STRING  then "String"
+          when TypeRef::NIL     then "Nil"
+          when TypeRef::SYMBOL  then "Symbol"
+          when TypeRef::POINTER then "Pointer"
+          else
+            ""
+          end
+        end
+      end
+
+      split_union_variants = ->(name : String) do
+        normalized = if name.includes?("$_$OR$_")
+                       name.gsub("$_$OR$_", " | ")
+                     else
+                       name
+                     end
+        normalized.split(" | ").map(&.strip).reject(&.empty?)
+      end
+
       # ── RTA Phase 1: Collect instantiated types from ALL functions ──
       # Scan every function for Allocate instructions to build the set of
       # types that can actually exist at runtime. This is conservative
@@ -1697,6 +1737,14 @@ module Crystal::HIR
         func = func_by_name[name]?
         next unless func
 
+        value_types = Hash(ValueId, TypeRef).new
+        func.params.each { |param| value_types[param.id] = param.type }
+        func.blocks.each do |fblock|
+          fblock.instructions.each do |fins|
+            value_types[fins.id] = fins.type
+          end
+        end
+
         func.blocks.each do |block|
           block.instructions.each do |inst|
             # FuncPointer references (C callbacks) are always reachable
@@ -1714,6 +1762,48 @@ module Crystal::HIR
               callee_owner = strip_generics.call(owner_for.call(callee))
               method_base = base_name_for.call(callee)
 
+              receiver_root_owners = [] of String
+              if recv_id = inst.receiver
+                if recv_type = value_types[recv_id]?
+                  if recv_desc = get_type_descriptor(recv_type)
+                    if recv_desc.kind == TypeKind::Union
+                      if recv_desc.type_params.empty?
+                        split_union_variants.call(recv_desc.name).each do |variant_name|
+                          owner_name = strip_generics.call(variant_name)
+                          next if owner_name.empty? || owner_name == "Nil"
+                          receiver_root_owners << owner_name unless receiver_root_owners.includes?(owner_name)
+                        end
+                      else
+                        recv_desc.type_params.each do |variant_ref|
+                          variant_name = type_name_for_ref.call(variant_ref)
+                          next if variant_name.empty?
+                          owner_name = strip_generics.call(variant_name)
+                          next if owner_name.empty? || owner_name == "Nil"
+                          receiver_root_owners << owner_name unless receiver_root_owners.includes?(owner_name)
+                        end
+                      end
+                    elsif recv_desc.kind == TypeKind::Generic &&
+                          recv_desc.name.starts_with?("Union(") &&
+                          recv_desc.name.ends_with?(')')
+                      inner_size = recv_desc.name.bytesize - 7
+                      if inner_size > 0
+                        inner = recv_desc.name[6, inner_size]
+                        split_union_variants.call(inner).each do |variant_name|
+                          owner_name = strip_generics.call(variant_name)
+                          next if owner_name.empty? || owner_name == "Nil"
+                          receiver_root_owners << owner_name unless receiver_root_owners.includes?(owner_name)
+                        end
+                      end
+                    else
+                      owner_name = strip_generics.call(recv_desc.name)
+                      if !owner_name.empty? && owner_name != "Nil"
+                        receiver_root_owners << owner_name unless receiver_root_owners.includes?(owner_name)
+                      end
+                    end
+                  end
+                end
+              end
+
               if callee_owner.empty?
                 # No owner — fallback to base-name-only matching
                 base_to_funcs[method_base].each do |candidate|
@@ -1724,11 +1814,18 @@ module Crystal::HIR
               else
                 # Type-aware: check owner + subclasses + module includers
                 # For union types (contains "|"), expand to all variant types
-                root_owners = if callee_owner.includes?(" | ") || callee_owner.includes?("$_$OR$_")
-                                callee_owner.gsub("$_$OR$_", " | ").split(" | ").map { |v| strip_generics.call(v.strip) }
+                root_owners = if receiver_root_owners.empty?
+                                if callee_owner.includes?(" | ") || callee_owner.includes?("$_$OR$_")
+                                  callee_owner.gsub("$_$OR$_", " | ").split(" | ").map { |v| strip_generics.call(v.strip) }
+                                else
+                                  [callee_owner]
+                                end
                               else
-                                [callee_owner]
+                                receiver_root_owners.dup
                               end
+                unless callee_owner.empty?
+                  root_owners << callee_owner unless root_owners.includes?(callee_owner)
+                end
 
                 # Try RTA-filtered subclasses first, fall back to all if no
                 # method candidates exist in the RTA-filtered set at all.
