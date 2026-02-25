@@ -1,6 +1,35 @@
 # Crystal v2 — Active Work (codegen branch)
 
 ## Known Bugs (codegen)
+- **2026-02-25 (latest): fixed root-cause wrong union variant wrap for `String | Symbol` in HIR→MIR call coercion**
+  - Root cause:
+    - `HIRToMIR#coerce_call_args` used `get_arg_type(hir_id)` (HIR scan) to choose union variant when wrapping call args into union params;
+    - in `sanitize_type_name_part`, string literal keys for `NamedTuple#[]` were inferred as `Symbol` on this path (`arg_type=17`), while actual MIR payload was string pointer;
+    - this produced `UnionWrap` with `variant_id=1` for `%String$_$OR$_Symbol.union` (where descriptor is `[0:String, 1:Symbol]`), causing wrong branch and stage2 segfault chain in `NamedTuple#[]`.
+  - Fixes applied:
+    - `src/compiler/mir/hir_to_mir.cr`
+      - added `get_mir_value_type(mir_id)` and made `coerce_call_args` prefer actual MIR value type over HIR lookup for union wrapping decisions;
+      - in `lower_union_wrap`, improved variant selection with pointer-like fallback when HIR value type is unavailable or pointer-like.
+    - `src/compiler/mir/llvm_backend.cr`
+      - hardened union-to-union conversions with `type_id` remap helper (`emit_union_type_id_remap`) across call arg conversion, phi u2u conversion, return u2u conversion, and helper coercion paths;
+      - added descriptor-aware remap for same-LLVM-union-name but different variant-table cases.
+  - New regression script:
+    - `regression_tests/stage1_union_wrap_string_symbol_repro.sh`
+    - status:
+      - `/tmp/stage1_dbg_union_wrap_trace6` (pre-fix) -> `reproduced (runtime segfault)`
+      - `/tmp/stage1_dbg_union_fix_clean` (post-fix) -> `not reproduced`
+  - Fresh bootstrap timing (this run):
+    - stage1 (original compiler, release):
+      - `crystal build --release src/crystal_v2.cr -o /tmp/stage1_rel_union_fix`
+      - **real 473.55s** (`7:53.55`)
+    - stage2 (self-hosted, release, timeout-guarded 180s):
+      - `scripts/timeout_sample_lldb.sh -t 180 -s 8 -n 12 -o /tmp/stage2_rel_union_fix_probe -- /tmp/stage1_rel_union_fix --release src/crystal_v2.cr -o /tmp/stage2_rel_union_fix`
+      - **timeout (exit 124)** at 180s
+      - sample/lldb hotspot points into heavy hashing during `mangle_name` path (`llvm_backend.cr:247` / `emit_extern_call`), not immediate segfault.
+  - Current blocker after fix:
+    - stage2 `--release` still exceeds 180s watchdog and is treated as unstable loop/slow path;
+    - next step: isolate why `mangle_name`/hash path becomes hotspot in stage2 after union-wrap fix chain.
+
 - **2026-02-25 (latest): fixed root-cause `||=` lowering for index targets to use `[]?` query semantics**
   - Root cause:
     - parser compound-assignment desugaring rewrote `x ||= y` as `x = x || y` for all targets;

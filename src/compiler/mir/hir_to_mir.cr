@@ -21,7 +21,7 @@ module Crystal
 
   class HIRToMIRLowering
     getter hir_module : HIR::Module
-    getter mir_module : Module
+    getter mir_module : Crystal::MIR::Module
 
     # Mapping from HIR ValueId to MIR ValueId per function
     @value_map : Hash(HIR::ValueId, ValueId)
@@ -42,7 +42,7 @@ module Crystal
 
     # Current function being lowered
     @current_hir_func : HIR::Function?
-    @current_mir_func : Function?
+    @current_mir_func : Crystal::MIR::Function?
     @builder : Builder?
     @current_lowering_func_name : String = ""
     @slab_frame_enabled : Bool
@@ -52,17 +52,17 @@ module Crystal
 
     # Index: base_name (before "$") → first matching MIR function.
     # Eliminates O(N) linear scans during fuzzy call resolution.
-    @function_by_base_name : Hash(String, Function) = {} of String => Function
-    @functions_by_base_name_all : Hash(String, Array(Function)) = {} of String => Array(Function)
+    @function_by_base_name : Hash(String, Crystal::MIR::Function) = {} of String => Crystal::MIR::Function
+    @functions_by_base_name_all : Hash(String, Array(Crystal::MIR::Function)) = {} of String => Array(Crystal::MIR::Function)
 
     # Index: class_name → Array of functions belonging to that class.
     # Eliminates O(N) full-scan of all functions during virtual dispatch.
-    @functions_by_class : Hash(String, Array(Function)) = {} of String => Array(Function)
+    @functions_by_class : Hash(String, Array(Crystal::MIR::Function)) = {} of String => Array(Crystal::MIR::Function)
 
     # Caches for virtual dispatch (avoid repeated hierarchy traversals)
     @subclass_cache : Hash(String, Array(String)) = {} of String => Array(String)
     @module_includers_cache : Hash(String, Array(String)) = {} of String => Array(String)
-    @resolve_virtual_cache : Hash({String, String, Int32?, Bool}, Function?) = {} of {String, String, Int32?, Bool} => Function?
+    @resolve_virtual_cache : Hash({String, String, Int32?, Bool}, Crystal::MIR::Function?) = {} of {String, String, Int32?, Bool} => Crystal::MIR::Function?
 
     # Memory strategy (note: we use inline selection, not global assigner)
 
@@ -74,7 +74,7 @@ module Crystal
     getter stats : LoweringStats = LoweringStats.new
 
     def initialize(@hir_module : HIR::Module, *, slab_frame : Bool = false)
-      @mir_module = Module.new(@hir_module.name)
+      @mir_module = Crystal::MIR::Module.new(@hir_module.name)
       @value_map = {} of HIR::ValueId => ValueId
       @hir_value_types = {} of HIR::ValueId => HIR::TypeRef
       @block_map = {} of HIR::BlockId => BlockId
@@ -94,7 +94,7 @@ module Crystal
     # Main Entry Point
     # ─────────────────────────────────────────────────────────────────────────
 
-    def lower(progress : Bool = false) : Module
+    def lower(progress : Bool = false) : Crystal::MIR::Module
       # Two-pass approach for forward references:
       # Pass 1: Create all function stubs (for call resolution)
       # Track which functions we've created stubs for (avoid duplicates from methods with/without blocks)
@@ -137,7 +137,7 @@ module Crystal
         dollar_idx = name.index('$')
         base = dollar_idx ? name[0, dollar_idx] : name
         @function_by_base_name[base] = func unless @function_by_base_name.has_key?(base)
-        (@functions_by_base_name_all[base] ||= [] of Function) << func
+        (@functions_by_base_name_all[base] ||= [] of Crystal::MIR::Function) << func
 
         # Index by class name (part before '#' or '.')
         hash_idx = name.index('#')
@@ -149,7 +149,7 @@ module Crystal
                   end
         if sep_idx
           class_name = name[0, sep_idx]
-          (@functions_by_class[class_name] ||= [] of Function) << func
+          (@functions_by_class[class_name] ||= [] of Crystal::MIR::Function) << func
         end
       end
 
@@ -827,12 +827,15 @@ module Crystal
       mir_type_name = @mir_module.type_registry.get(mir_type_ref).try(&.name) || ""
       hir_type_name = @hir_module.get_type_descriptor(alloc.type).try(&.name) || ""
 
-      # StaticArray(T, N) allocated via HIR::Allocate (not literal/new path)
-      # still needs a real array object layout with @size/@capacity/@buffer.
-      # Re-route such allocations to MIR::ArrayNew so downstream ArraySet/ArrayGet
-      # operate on valid storage instead of raw pointer slots.
-      if alloc.constructor_args.empty?
-        static_array_name = mir_type_name.empty? ? hir_type_name : mir_type_name
+      # StaticArray(T, N) via unresolved MIR name path (mir_type_name == "") can
+      # be lowered incorrectly to tiny raw allocs. Re-route only that unresolved
+      # case to MIR::ArrayNew.
+      #
+      # For resolved StaticArray types keep raw allocation path; some code paths
+      # (for example inline StaticArray ivars) expect direct element-buffer
+      # semantics and are corrupted if we materialize an Array object here.
+      if alloc.constructor_args.empty? && mir_type_name.empty?
+        static_array_name = hir_type_name
         if match = static_array_name.match(/^StaticArray\((.+),\s*(\d+)\)$/)
           elem_name = match[1].strip
           count = match[2].to_i?
@@ -1797,7 +1800,7 @@ module Crystal
     # Unified candidate structure for vdispatch
     private alias VDispatchCandidate = NamedTuple(
       type_id: Int32,
-      func: Function?,
+      func: Crystal::MIR::Function?,
       type_ref: TypeRef?,       # for Union unwrap
       variant_id: Int32?,       # for Union unwrap
       dispatch_class: String?   # for nested class dispatch
@@ -1806,7 +1809,7 @@ module Crystal
     # Unified vdispatch body generator - handles both Union and Class dispatch
     # Returns the phi node if return type is non-void, nil otherwise
     private def generate_vdispatch_body(
-      dispatch_func : Function,
+      dispatch_func : Crystal::MIR::Function,
       dispatch_builder : Builder,
       param_values : Array(ValueId),
       candidates : Array(VDispatchCandidate),
@@ -1978,6 +1981,57 @@ module Crystal
           end
         end
       end
+
+      # Some union call-sites (notably IndexNode lowering paths) can reach MIR
+      # with an incomplete union descriptor candidate set. Augment candidates
+      # directly from HIR union variants so virtual dispatch remains complete.
+      if recv_desc.kind == HIR::TypeKind::Union
+        existing_variant_ids = Set(Int32).new
+        old_candidates.each { |c| existing_variant_ids.add(c[:variant_id]) }
+
+        variant_names = [] of String
+        recv_desc.type_params.each do |variant_hir_ref|
+          variant_desc = @hir_module.get_type_descriptor(variant_hir_ref)
+          variant_name = variant_desc.try(&.name) || hir_type_name(variant_hir_ref)
+          variant_names << variant_name unless variant_name.empty?
+        end
+        if variant_names.size < 2
+          split_union_type_name_loose(recv_desc.name).each { |name| variant_names << name }
+        end
+
+        variant_names.uniq.each do |variant_name|
+          next if variant_name.empty? || variant_name == "Nil" || variant_name.starts_with?('*')
+
+          mir_type = @mir_module.type_registry.get_by_name(variant_name)
+          next unless mir_type
+          variant_mir_ref = TypeRef.new(mir_type.id)
+          variant_id = variant_mir_ref.id.to_i32
+          next if existing_variant_ids.includes?(variant_id)
+
+          if func = resolve_virtual_method_for_class(variant_name, method_suffix, call.args.size)
+            old_candidates << {
+              type_id: variant_id,
+              type_ref: variant_mir_ref,
+              variant_id: variant_id,
+              func: func,
+              dispatch_class: nil.as(String?)
+            }
+            existing_variant_ids.add(variant_id)
+          elsif (mir_type = @mir_module.type_registry.get_by_name(variant_name)) &&
+                !mir_type.is_value_type? &&
+                !subclasses_for(variant_name).empty?
+            old_candidates << {
+              type_id: variant_id,
+              type_ref: variant_mir_ref,
+              variant_id: variant_id,
+              func: nil.as(Crystal::MIR::Function?),
+              dispatch_class: variant_name
+            }
+            existing_variant_ids.add(variant_id)
+          end
+        end
+      end
+
       return nil if old_candidates.empty?
 
       # vdispatch cache key must include the static receiver type.
@@ -2091,6 +2145,46 @@ module Crystal
         return full_name[(idx + 1)..-1]
       end
       nil
+    end
+
+    private def split_union_type_name_loose(type_name : String) : Array(String)
+      normalized = if type_name.includes?('|')
+                     type_name
+                   elsif type_name.includes?("$_$OR$_")
+                     type_name.gsub("$_$OR$_", "|")
+                   elsif type_name.includes?("___")
+                     type_name.gsub("___", "|")
+                   else
+                     type_name
+                   end
+      unless normalized.includes?('|')
+        trimmed = normalized.strip
+        return trimmed.empty? ? [] of String : [trimmed]
+      end
+
+      parts = [] of String
+      depth = 0
+      start = 0
+      i = 0
+      while i < normalized.bytesize
+        ch = normalized.byte_at(i).unsafe_chr
+        case ch
+        when '(', '{', '['
+          depth += 1
+        when ')', '}', ']'
+          depth -= 1 if depth > 0
+        when '|'
+          if depth == 0
+            part = normalized[start, i - start].strip
+            parts << part unless part.empty?
+            start = i + 1
+          end
+        end
+        i += 1
+      end
+      tail = normalized[start, normalized.size - start].strip
+      parts << tail unless tail.empty?
+      parts
     end
 
     private def subclasses_for(base : String) : Array(String)
@@ -2229,8 +2323,8 @@ module Crystal
       recv_type : HIR::TypeRef,
       method_suffix : String,
       arg_count : Int32
-    ) : Array(NamedTuple(type_id: Int32, type_ref: TypeRef, variant_id: Int32, func: Function?, dispatch_class: String?))
-      candidates = [] of NamedTuple(type_id: Int32, type_ref: TypeRef, variant_id: Int32, func: Function?, dispatch_class: String?)
+    ) : Array(NamedTuple(type_id: Int32, type_ref: TypeRef, variant_id: Int32, func: Crystal::MIR::Function?, dispatch_class: String?))
+      candidates = [] of NamedTuple(type_id: Int32, type_ref: TypeRef, variant_id: Int32, func: Crystal::MIR::Function?, dispatch_class: String?)
 
       if recv_desc.kind == HIR::TypeKind::Union
         mir_union_ref = convert_type(recv_type)
@@ -2329,14 +2423,14 @@ module Crystal
       method_suffix : String,
       receiver_type : TypeRef,
       call : HIR::Call
-    ) : Function?
+    ) : Crystal::MIR::Function?
       dispatch_name = "__vdispatch__#{class_name}##{method_suffix}"
       if existing = @mir_module.get_function(dispatch_name)
         return existing
       end
 
       # Gather candidates from class hierarchy
-      old_candidates = [] of NamedTuple(type_id: Int32, func: Function)
+      old_candidates = [] of NamedTuple(type_id: Int32, func: Crystal::MIR::Function)
       ([class_name] + subclasses_for(class_name)).each do |name|
         if func = resolve_virtual_method_for_class(name, method_suffix, call.args.size)
           next unless mir_type = @mir_module.type_registry.get_by_name(name)
@@ -2400,7 +2494,7 @@ module Crystal
       method_suffix : String,
       arg_count : Int32? = nil,
       allow_module_method : Bool = false
-    ) : Function?
+    ) : Crystal::MIR::Function?
       cache_key = {class_name, method_suffix, arg_count, allow_module_method}
       if @resolve_virtual_cache.has_key?(cache_key)
         return @resolve_virtual_cache[cache_key]
@@ -2415,7 +2509,7 @@ module Crystal
       method_suffix : String,
       arg_count : Int32?,
       allow_module_method : Bool
-    ) : Function?
+    ) : Crystal::MIR::Function?
       # Pre-compute the base method name (before '$') once
       has_explicit_suffix = method_suffix.includes?('$')
       base_method = if dollar = method_suffix.index('$')
@@ -2439,7 +2533,7 @@ module Crystal
           prefix_with_underscore = String.build(exact_name.bytesize + 1) do |io|
             io << exact_name; io << '_'
           end
-          longer_match = nil.as(Function?)
+          longer_match = nil.as(Crystal::MIR::Function?)
           if class_funcs = @functions_by_class[current]?
             class_funcs.each do |candidate|
               if candidate.name.starts_with?(prefix_with_underscore)
@@ -2481,7 +2575,7 @@ module Crystal
             io << current; io << '#'; io << base_method
           end
           if class_funcs = @functions_by_class[current]?
-            candidates = [] of Function
+            candidates = [] of Crystal::MIR::Function
             class_funcs.each do |candidate|
               next unless candidate.name.starts_with?(instance_prefix)
               next unless candidate.params.size == arg_count + 1
@@ -2494,7 +2588,7 @@ module Crystal
               io << current; io << '.'; io << base_method
             end
             if class_funcs2 = @functions_by_class[current]?
-              candidates = [] of Function
+              candidates = [] of Crystal::MIR::Function
               class_funcs2.each do |candidate|
                 next unless candidate.name.starts_with?(module_prefix)
                 next unless candidate.params.size == arg_count
@@ -2561,6 +2655,21 @@ module Crystal
       TypeRef::INT32  # Default fallback
     end
 
+    # Helper to get the MIR type of a MIR value by finding it in the current function.
+    private def get_mir_value_type(mir_id : ValueId) : TypeRef?
+      if mir_func = @current_mir_func
+        mir_func.blocks.each do |block|
+          block.instructions.each do |inst|
+            return inst.type if inst.id == mir_id
+          end
+        end
+        mir_func.params.each_with_index do |param, idx|
+          return param.type if idx.to_u32 == mir_id
+        end
+      end
+      nil
+    end
+
     # Coerce call arguments to match function parameter types
     # This handles concrete type -> union type coercion (e.g., Int32 -> Int32 | Nil)
     private def coerce_call_args(
@@ -2581,7 +2690,8 @@ module Crystal
             next
           end
 
-          arg_type = if idx < hir_args.size
+          arg_type = get_mir_value_type(mir_arg) ||
+                     if idx < hir_args.size
                        get_arg_type(hir_args[idx])
                      else
                        TypeRef::INT32  # Fallback
@@ -3154,6 +3264,32 @@ module Crystal
       value = get_value(wrap.value)
       union_type = convert_type(wrap.type)
       variant_type_id = wrap.variant_type_id
+
+      if descriptor = @mir_module.get_union_descriptor(union_type)
+        hir_value_type = @hir_value_types[wrap.value]? || HIR::TypeRef::POINTER
+        mir_value_type = convert_type(hir_value_type)
+        if matched_variant = descriptor.variants.find { |variant| variant.type_ref == mir_value_type }
+          variant_type_id = matched_variant.type_id
+        elsif mir_value_type == TypeRef::POINTER
+          pointer_like = descriptor.variants.select do |variant|
+            next false if variant.type_ref == TypeRef::NIL || variant.type_ref == TypeRef::VOID
+            next true if variant.type_ref == TypeRef::POINTER || variant.type_ref == TypeRef::STRING
+
+            if variant_type = @mir_module.type_registry.get(variant.type_ref)
+              variant_type.kind == TypeKind::Reference ||
+                variant_type.kind == TypeKind::Struct ||
+                variant_type.kind == TypeKind::Tuple ||
+                variant_type.kind == TypeKind::Proc
+            else
+              false
+            end
+          end
+
+          if pointer_like.size == 1
+            variant_type_id = pointer_like.first.type_id
+          end
+        end
+      end
 
       # Create MIR UnionWrap instruction
       mir_wrap = MIR::UnionWrap.new(
