@@ -53,7 +53,7 @@ module CrystalV2
           @tokens = [] of Token
           @index = 0
           # Choose arena implementation (default: AstArena; PageArena via env)
-          if ENV["CRYSTAL_V2_PAGE_ARENA"]?
+          if ::CrystalV2::Compiler::BootstrapEnv.enabled?("CRYSTAL_V2_PAGE_ARENA")
             @arena = AstArena.new
           else
             @arena = AstArena.new
@@ -68,7 +68,7 @@ module CrystalV2
           @brace_depth = 0
           @no_type_declaration = 0                     # Phase 103: Type annotations enabled by default
           @string_pool = lexer.string_pool             # Week 1 Day 2: share string pool for deduplication
-          @debug_enabled = ENV["PARSER_DEBUG"]? == "1" # Enable debug via PARSER_DEBUG=1
+          @debug_enabled = ::CrystalV2::Compiler::BootstrapEnv.get?("PARSER_DEBUG") == "1" # Enable debug via PARSER_DEBUG=1
           @parsing_call_args = 0                       # Not parsing call args initially
           @macro_mode = 0
           @in_macro_expression = false # Not in macro expression initially
@@ -89,7 +89,7 @@ module CrystalV2
           # Ensure lexer can emit diagnostics into this parser's buffer
           lexer.diagnostics = @diagnostics
 
-          keep_trivia = ENV["CRYSTAL_V2_PARSER_KEEP_TRIVIA"]? != nil
+          keep_trivia = ::CrystalV2::Compiler::BootstrapEnv.enabled?("CRYSTAL_V2_PARSER_KEEP_TRIVIA")
           lexer.each_token(skip_trivia: !keep_trivia) { |token| @tokens << token }
           @lexer = nil
           @keep_trivia = keep_trivia
@@ -172,7 +172,7 @@ module CrystalV2
           @brace_depth = 0
           @no_type_declaration = 0                     # Phase 103: Type annotations enabled by default
           @string_pool = lexer.string_pool             # Week 1 Day 2: share string pool for deduplication
-          @debug_enabled = ENV["PARSER_DEBUG"]? == "1" # Enable debug via PARSER_DEBUG=1
+          @debug_enabled = ::CrystalV2::Compiler::BootstrapEnv.get?("PARSER_DEBUG") == "1" # Enable debug via PARSER_DEBUG=1
           @parsing_call_args = 0                       # Not parsing call args initially
           @macro_mode = 0
           @in_macro_expression = false # Not in macro expression initially
@@ -189,7 +189,7 @@ module CrystalV2
           @macro_expr_brace_cache = Hash(Int32, Bool).new
           @allow_inline_rescue = true
           @lib_depth = 0
-          keep_trivia = ENV["CRYSTAL_V2_PARSER_KEEP_TRIVIA"]? != nil
+          keep_trivia = ::CrystalV2::Compiler::BootstrapEnv.enabled?("CRYSTAL_V2_PARSER_KEEP_TRIVIA")
           lexer.each_token(skip_trivia: !keep_trivia) { |token| @tokens << token }
           @lexer = nil
           @keep_trivia = keep_trivia
@@ -809,6 +809,30 @@ module CrystalV2
                                  end
 
                       # Create binary expression: left op rhs
+                      # For index ||=, read via []? so missing hash keys are treated
+                      # as nil in the condition instead of raising through [].
+                      left_for_binary = left
+                      if assign_token.kind == Token::Kind::OrOrEq && left_kind == Frontend::NodeKind::Index
+                        if index_node = left_node.as?(IndexNode)
+                          query_member = @arena.add_typed(
+                            MemberAccessNode.new(
+                              index_node.span,
+                              index_node.object,
+                              @string_pool.intern("[]?".to_slice)
+                            )
+                          )
+                          left_for_binary = @arena.add_typed(
+                            CallNode.new(
+                              index_node.span,
+                              query_member,
+                              index_node.indexes,
+                              nil,
+                              nil
+                            )
+                          )
+                        end
+                      end
+
                       # Use left node's span for the cloned left reference
                       rhs_span = node_span(rhs)
                       binary_span = left_node.span.cover(rhs_span)
@@ -817,7 +841,7 @@ module CrystalV2
                         BinaryNode.new(
                           binary_span,
                           operator.to_slice,
-                          left,
+                          left_for_binary,
                           rhs
                         )
                       )
@@ -7662,13 +7686,37 @@ module CrystalV2
                                    return PREFIX_ERROR
                                  end
 
-                      # Create binary operation: left op rhs
+                      # Create binary operation: left op rhs.
+                      # For index ||=, read via []? so missing hash keys are treated
+                      # as nil in the condition instead of raising through [].
+                      left_for_binary = left
+                      if assign_token.kind == Token::Kind::OrOrEq && left_kind == Frontend::NodeKind::Index
+                        if index_node = left_node.as?(IndexNode)
+                          query_member = @arena.add_typed(
+                            MemberAccessNode.new(
+                              index_node.span,
+                              index_node.object,
+                              @string_pool.intern("[]?".to_slice)
+                            )
+                          )
+                          left_for_binary = @arena.add_typed(
+                            CallNode.new(
+                              index_node.span,
+                              query_member,
+                              index_node.indexes,
+                              nil,
+                              nil
+                            )
+                          )
+                        end
+                      end
+
                       op_slice = operator.to_slice
                       pooled_op = @string_pool.intern(op_slice)
                       @arena.add_typed(BinaryNode.new(
                         left_node.span.cover(@arena[rhs].span),
                         pooled_op,
-                        left,
+                        left_for_binary,
                         rhs
                       ))
                     else
@@ -7992,8 +8040,15 @@ module CrystalV2
               end
             end
             if arg.invalid?
+              if ENV.has_key?("DEBUG_ARG_FLOW")
+                STDERR.puts "[DEBUG_ARG_FLOW] invalid arg detected callee=#{String.new(callee_token.slice)} idx=#{arg.index}"
+              end
               @parsing_call_args -= 1
               return PREFIX_ERROR
+            end
+
+            if ENV.has_key?("DEBUG_ARG_FLOW")
+              STDERR.puts "[DEBUG_ARG_FLOW] parsed arg callee=#{String.new(callee_token.slice)} idx=#{arg.index} token_after=#{current_token.kind}"
             end
 
             skip_trivia
@@ -8043,30 +8098,39 @@ module CrystalV2
             end
 
             # Pattern: name: value
-            arg_node = @arena[arg]
-            if Frontend.node_kind(arg_node) == Frontend::NodeKind::Identifier &&
-               current_token.kind == Token::Kind::Colon
-              # This is named argument!
-              name_span = arg_node.span
-              name_slice = Frontend.node_literal(arg_node).not_nil! # Zero-copy slice
+            if current_token.kind == Token::Kind::Colon
+              arg_node = @arena[arg]
+              if Frontend.node_kind(arg_node) == Frontend::NodeKind::Identifier
+                # This is named argument!
+                name_span = arg_node.span
+                name_slice = Frontend.node_literal(arg_node).not_nil! # Zero-copy slice
 
-              advance          # consume ':'
-              consume_newlines # Allow newlines after colon in named arguments
+                advance          # consume ':'
+                consume_newlines # Allow newlines after colon in named arguments
 
-              # Parse value (using parse_op_assign like original Crystal)
-              value_expr = without_postfix_modifiers { parse_op_assign }
-              if value_expr.invalid?
-                @parsing_call_args -= 1
-                return PREFIX_ERROR
+                # Parse value (using parse_op_assign like original Crystal)
+                value_expr = without_postfix_modifiers { parse_op_assign }
+                if value_expr.invalid?
+                  @parsing_call_args -= 1
+                  return PREFIX_ERROR
+                end
+
+                value_span = @arena[value_expr].span
+
+                named_b << NamedArgument.new(name_slice, value_expr, name_span, value_span)
+                skip_trivia
+              else
+                args_b << arg
+                if ENV.has_key?("DEBUG_ARG_FLOW")
+                  STDERR.puts "[DEBUG_ARG_FLOW] positional arg appended idx=#{arg.index} size=#{args_b.size}"
+                end
               end
-
-              value_span = @arena[value_expr].span
-
-              named_b << NamedArgument.new(name_slice, value_expr, name_span, value_span)
-              skip_trivia
             else
               # Positional argument
               args_b << arg
+              if ENV.has_key?("DEBUG_ARG_FLOW")
+                STDERR.puts "[DEBUG_ARG_FLOW] positional arg appended idx=#{arg.index} size=#{args_b.size}"
+              end
             end
 
             # Check for comma (more arguments)
@@ -8153,20 +8217,29 @@ module CrystalV2
 
           # Materialize argument arrays from builders once
           args = args_b.to_a
-          named_args = named_b.to_a
+          named_args = named_b.size > 0 ? named_b.to_a : nil
+
+          if ENV.has_key?("DEBUG_ARG_FLOW")
+            if args.size > 0
+              STDERR.puts "[DEBUG_ARG_FLOW] materialized args size=#{args.size} last_idx=#{args.last.index}"
+            else
+              STDERR.puts "[DEBUG_ARG_FLOW] materialized args size=0"
+            end
+            STDERR.puts "[DEBUG_ARG_FLOW] materialized named_args size=#{named_args ? named_args.not_nil!.size : 0}"
+          end
 
           # Calculate span including last argument (positional or named) or block
           call_span = if !block_expr.nil?
                         # Include block in span
                         block_node = @arena[block_expr]
                         callee_token.span.cover(block_node.span)
-                      elsif named_args.size > 0
+                      elsif named_args
                         # Last named arg
-                        callee_token.span.cover(named_args.last.span)
+                        callee_token.span.cover(named_args.not_nil!.last.span)
                       elsif args.size > 0
-                        # Last positional arg
-                        last_arg = @arena[args.last]
-                        callee_token.span.cover(last_arg.span)
+                        # Positional arguments were parsed successfully; keep conservative
+                        # span to avoid dereferencing unstable arg ids on broken codegen paths.
+                        callee_token.span
                       else
                         callee_token.span
                       end
@@ -8176,7 +8249,7 @@ module CrystalV2
             callee,
             args,
             block_expr, # attach block if present
-            named_args.empty? ? nil : named_args
+            named_args
           ))
 
           # Restore flag
@@ -14058,23 +14131,33 @@ current_token.kind == Token::Kind::Identifier &&
           @arena[id].span
         end
 
-        private def cover_optional_spans(*spans : Span?) : Span
-          # Fast-path: avoid building arrays; compute min start and max end
+        private def cover_optional_spans(a : Span?, b : Span?, c : Span?) : Span
           min_start : Span? = nil
           max_end : Span? = nil
-          i = 0
-          while i < spans.size
-            Watchdog.check!
-            if s = spans.unsafe_fetch(i)
-              if min_start.nil? || s.start_offset < min_start.not_nil!.start_offset
-                min_start = s
-              end
-              if max_end.nil? || s.end_offset > max_end.not_nil!.end_offset
-                max_end = s
-              end
-            end
-            i += 1
+
+          if a
+            min_start = a
+            max_end = a
           end
+
+          if b
+            if min_start.nil? || b.start_offset < min_start.not_nil!.start_offset
+              min_start = b
+            end
+            if max_end.nil? || b.end_offset > max_end.not_nil!.end_offset
+              max_end = b
+            end
+          end
+
+          if c
+            if min_start.nil? || c.start_offset < min_start.not_nil!.start_offset
+              min_start = c
+            end
+            if max_end.nil? || c.end_offset > max_end.not_nil!.end_offset
+              max_end = c
+            end
+          end
+
           first = min_start
           last = max_end
           raise ArgumentError.new("cover_optional_spans requires at least one span") if first.nil? || last.nil?

@@ -1,6 +1,36 @@
 # Crystal v2 — Active Work (codegen branch)
 
 ## Known Bugs (codegen)
+- **2026-02-25 (latest): fixed root-cause `||=` lowering for index targets to use `[]?` query semantics**
+  - Root cause:
+    - parser compound-assignment desugaring rewrote `x ||= y` as `x = x || y` for all targets;
+    - for `Index` targets this read path used `[]` (not `[]?`), so generated condition became non-nilable/truthy and skipped fallback initialization;
+    - concrete stage2 crash pattern: `Module#create_function` path `(@functions_by_base_name[base_name] ||= [] of Function) << func` eventually passed null receiver into `Array(HIR::Function)#push`.
+  - Fixes applied:
+    - `src/compiler/frontend/parser.cr`
+      - in both compound-assignment parse paths, `OrOrEq` with `Index` LHS now builds binary read operand via `obj.[]?(...)` call node instead of raw `IndexNode`.
+  - New regression script:
+    - `regression_tests/stage1_oror_index_hash_repro.sh`
+    - status:
+      - `/tmp/stage1_dbg_oror_index_fix` -> `not reproduced`
+      - `src/crystal_v2` (current stage2) -> `reproduced (compile failed; segfault)`
+  - Fresh bootstrap timing (this run):
+    - stage1 (original compiler, release):
+      - `crystal build --release src/crystal_v2.cr -o /tmp/stage1_rel_oror_index_fix`
+      - **real 418.17s**
+    - stage2 (self-hosted, release, timeout-guarded 180s):
+      - `scripts/timeout_sample_lldb.sh -t 180 -s 8 -n 12 -o /tmp/stage2_rel_oror_index_fix_probe -- /tmp/stage1_rel_oror_index_fix --release src/crystal_v2.cr -o /tmp/stage2_rel_oror_index_fix`
+      - **exit 0**, **real 154.75s**
+      - speedup stage2 vs stage1: **~2.70x** (delta ~`-263.42s`)
+  - Current blocker after stage2:
+    - stage2 runtime (`src/crystal_v2 regression_tests/basic_sanity.cr ...`) still crashes (`exit 139`);
+    - new LLDB stop location moved forward to `String#single_byte_optimizable?` (`x0=0x3`), stack through:
+      - `String#calc_excess_left`
+      - `String#strip`
+      - `Crystal::HIR::AstToHir#sanitize_type_name_part`
+      - `Crystal::HIR::AstToHir#type_ref_for_name`.
+    - stage3 (`src/crystal_v2 --release src/crystal_v2.cr ...`) still crashes immediately (`exit 139`, ~1s).
+
 - **2026-02-25 (latest): fixed root-cause pruning of union virtual-dispatch targets (`A | B` index-call case)**
   - Root cause:
     - HIR RTA pruning in `HIR::Module#reachable_function_names` expanded virtual targets from **callee owner** only.
