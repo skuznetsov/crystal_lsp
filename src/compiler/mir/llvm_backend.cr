@@ -1466,6 +1466,9 @@ module Crystal::MIR
       when "llvm.va_end"      then "declare void @llvm.va_end(ptr)"
       # Debug trap
       when "llvm.debugtrap" then "declare void @llvm.debugtrap()"
+      # Pause / hint intrinsics
+      when "llvm.x86.sse2.pause" then "declare void @llvm.x86.sse2.pause()"
+      when "llvm.aarch64.hint"   then "declare void @llvm.aarch64.hint(i32)"
       # Read cycle counter
       when "llvm.readcyclecounter" then "declare i64 @llvm.readcyclecounter()"
       else
@@ -1636,6 +1639,9 @@ module Crystal::MIR
       when "llvm.va_end"      then {["ptr"], "void"}
       # Debug trap
       when "llvm.debugtrap" then {[] of String, "void"}
+      # Pause / hint intrinsics
+      when "llvm.x86.sse2.pause" then {[] of String, "void"}
+      when "llvm.aarch64.hint"   then {["i32"], "void"}
       # Read cycle counter
       when "llvm.readcyclecounter" then {[] of String, "i64"}
       else
@@ -5954,6 +5960,39 @@ module Crystal::MIR
         emit_raw "  %other_val = ptrtoint ptr %other to i32\n"
         emit_raw "  %result = icmp slt i32 %self_val, %other_val\n"
         emit_raw "  ret i1 %result\n"
+        emit_raw "}\n\n"
+        return true
+      elsif mangled == "String$Hmatches$Q$$Regex_Int32_Regex$CCMatchOptions"
+        # String#matches?(Regex, pos = 0, options: ...) : Bool
+        # stdlib path routes via Regex#match_data and expects the full Regex object layout.
+        # Our regex runtime stores {code*, match_data*}, so call PCRE2 directly here.
+        emit_raw "; String#matches?(Regex, ...) — runtime override\n"
+        emit_raw "define i1 @#{mangled}(ptr %self, ptr %regex, i32 %pos, i32 %options) {\n"
+        emit_raw "entry:\n"
+        emit_raw "  %self_null = icmp eq ptr %self, null\n"
+        emit_raw "  br i1 %self_null, label %ret_false, label %check_regex\n"
+        emit_raw "check_regex:\n"
+        emit_raw "  %regex_null = icmp eq ptr %regex, null\n"
+        emit_raw "  br i1 %regex_null, label %ret_false, label %load_regex\n"
+        emit_raw "load_regex:\n"
+        emit_raw "  %re = load ptr, ptr %regex\n"
+        emit_raw "  %md_slot = getelementptr i8, ptr %regex, i32 8\n"
+        emit_raw "  %md = load ptr, ptr %md_slot\n"
+        emit_raw "  %re_null = icmp eq ptr %re, null\n"
+        emit_raw "  %md_null = icmp eq ptr %md, null\n"
+        emit_raw "  %bad_regex = or i1 %re_null, %md_null\n"
+        emit_raw "  br i1 %bad_regex, label %ret_false, label %match\n"
+        emit_raw "match:\n"
+        emit_raw "  %bs_ptr = getelementptr i8, ptr %self, i32 4\n"
+        emit_raw "  %bytesize = load i32, ptr %bs_ptr\n"
+        emit_raw "  %data = getelementptr i8, ptr %self, i32 12\n"
+        emit_raw "  %bs64 = sext i32 %bytesize to i64\n"
+        emit_raw "  %pos64 = sext i32 %pos to i64\n"
+        emit_raw "  %rc = call i32 @pcre2_match_8(ptr %re, ptr %data, i64 %bs64, i64 %pos64, i32 0, ptr %md, ptr null)\n"
+        emit_raw "  %ok = icmp sge i32 %rc, 0\n"
+        emit_raw "  ret i1 %ok\n"
+        emit_raw "ret_false:\n"
+        emit_raw "  ret i1 false\n"
         emit_raw "}\n\n"
         return true
       elsif mangled.starts_with?("String$Hgsub$$Regex")
@@ -13275,7 +13314,7 @@ module Crystal::MIR
         # Store through alloca to create a named value (LLVM can't alias aggregates)
         val = value_ref(inst.value)
         emit "%#{base_name}.passthru = alloca #{union_type}, align 8"
-        emit "store #{union_type} #{val}, ptr %#{base_name}.passthru"
+        emit "store #{union_type} #{normalize_union_value(val, union_type)}, ptr %#{base_name}.passthru"
         emit "#{name} = load #{union_type}, ptr %#{base_name}.passthru"
         return
       end

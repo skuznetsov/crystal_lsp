@@ -2450,41 +2450,149 @@ module CrystalV2
 
       private def parse_link_annotation_args(text : String) : Array(String)
         libraries = [] of String
-        working = text.dup
-
-        # Match named args with quoted values: key: "value" or key: 'value'
-        working.scan(/(\w+)\s*:\s*["']([^"']*)["']/) do |match|
-          key = match[1]
-          value = match[2]
-          prefix = case key
-                   when "pkg_config" then "pkg_config:"
-                   when "framework"  then "framework:"
-                   when "dll"        then "dll:"
-                   else "#{key}:"
-                   end
-          libraries << "#{prefix}#{value}"
-        end
-
-        # Match named args with backtick values: key: `command`
-        working.scan(/(\w+)\s*:\s*`([^`]*)`/) do |match|
-          key = match[1]
-          value = "`#{match[2]}`"  # Re-add backticks for execution
-          prefix = case key
-                   when "pkg_config" then "pkg_config:"
-                   when "framework"  then "framework:"
-                   when "dll"        then "dll:"
-                   else "#{key}:"
-                   end
-          libraries << "#{prefix}#{value}"
-        end
-
-        working = working.gsub(/(\w+)\s*:\s*["'][^"']*["']/, "")
-        working = working.gsub(/(\w+)\s*:\s*`[^`]*`/, "")
-        working.scan(/["']([^"']*)["']/) do |match|
-          libraries << match[1]
+        split_link_annotation_args(text).each do |arg|
+          if named = split_link_named_arg(arg)
+            key, value_raw = named
+            value = normalize_link_arg_value(value_raw)
+            next if value.empty?
+            prefix = case key
+                     when "pkg_config" then "pkg_config:"
+                     when "framework"  then "framework:"
+                     when "dll"        then "dll:"
+                     else "#{key}:"
+                     end
+            libraries << "#{prefix}#{value}"
+          else
+            value = normalize_link_arg_value(arg)
+            libraries << value unless value.empty?
+          end
         end
 
         libraries
+      end
+
+      private def split_link_annotation_args(text : String) : Array(String)
+        args = [] of String
+        start = 0
+        paren_depth = 0
+        bracket_depth = 0
+        brace_depth = 0
+        quote : Char? = nil
+        escape = false
+        i = 0
+
+        while i < text.size
+          ch = text[i]
+          if quote
+            if escape
+              escape = false
+            elsif ch == '\\'
+              escape = true
+            elsif ch == quote
+              quote = nil
+            end
+            i += 1
+            next
+          end
+
+          case ch
+          when '"', '\'', '`'
+            quote = ch
+          when '('
+            paren_depth += 1
+          when ')'
+            paren_depth -= 1 if paren_depth > 0
+          when '['
+            bracket_depth += 1
+          when ']'
+            bracket_depth -= 1 if bracket_depth > 0
+          when '{'
+            brace_depth += 1
+          when '}'
+            brace_depth -= 1 if brace_depth > 0
+          when ','
+            if paren_depth == 0 && bracket_depth == 0 && brace_depth == 0
+              part = text[start, i - start].strip
+              args << part unless part.empty?
+              start = i + 1
+            end
+          end
+
+          i += 1
+        end
+
+        if start < text.size
+          part = text[start, text.size - start].strip
+          args << part unless part.empty?
+        end
+
+        args
+      end
+
+      private def split_link_named_arg(arg : String) : Tuple(String, String)?
+        paren_depth = 0
+        bracket_depth = 0
+        brace_depth = 0
+        quote : Char? = nil
+        escape = false
+        i = 0
+
+        while i < arg.size
+          ch = arg[i]
+          if quote
+            if escape
+              escape = false
+            elsif ch == '\\'
+              escape = true
+            elsif ch == quote
+              quote = nil
+            end
+            i += 1
+            next
+          end
+
+          case ch
+          when '"', '\'', '`'
+            quote = ch
+          when '('
+            paren_depth += 1
+          when ')'
+            paren_depth -= 1 if paren_depth > 0
+          when '['
+            bracket_depth += 1
+          when ']'
+            bracket_depth -= 1 if bracket_depth > 0
+          when '{'
+            brace_depth += 1
+          when '}'
+            brace_depth -= 1 if brace_depth > 0
+          when ':'
+            if paren_depth == 0 && bracket_depth == 0 && brace_depth == 0
+              key = arg[0, i].strip
+              return nil if key.empty?
+              value = arg[(i + 1)..].strip
+              return {key, value}
+            end
+          end
+
+          i += 1
+        end
+
+        nil
+      end
+
+      private def normalize_link_arg_value(raw : String) : String
+        value = raw.strip
+        return "" if value.empty?
+        return value unless value.size >= 2
+
+        first = value[0]
+        last = value[value.size - 1]
+        if (first == '"' && last == '"') || (first == '\'' && last == '\'')
+          return value[1, value.size - 2]
+        end
+
+        value
       end
 
       private def macro_literal_active_texts(

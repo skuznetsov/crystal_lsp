@@ -31970,27 +31970,35 @@ module Crystal::HIR
     private def evaluate_macro_flag(flag_name : String) : Bool
       # Remove leading/trailing quotes and colons
       clean_name = flag_name.strip.gsub(/^[:"']|["']$/, "")
+      active_flags = CrystalV2::Runtime.target_flags
       # Check against known compile flags - use macOS defaults for now
       case clean_name
-      when "darwin", "unix"
-        true # macOS is darwin and unix
+      when "darwin", "unix", "linux", "freebsd", "openbsd", "netbsd", "dragonfly",
+           "win32", "windows", "android", "wasi",
+           "x86_64", "i386", "x86", "aarch64", "arm64", "arm"
+        active_flags.includes?(clean_name)
       when "kqueue"
-        true # macOS uses kqueue for event loop
-      when "linux", "win32", "windows", "android", "wasi", "epoll", "libevent", "openbsd", "freebsd", "netbsd", "dragonfly"
-        false # Not linux/windows/android/bsd
-      when "x86_64", "aarch64", "arm64"
-        # Assume arm64 for modern Macs
-        clean_name == "aarch64" || clean_name == "arm64"
+        active_flags.includes?("darwin") || active_flags.includes?("freebsd") ||
+          active_flags.includes?("openbsd") || active_flags.includes?("netbsd") ||
+          active_flags.includes?("dragonfly")
+      when "epoll"
+        active_flags.includes?("linux")
+      when "libevent"
+        false
       when "release"
-        true # Assume release build
+        true
+      when "debug"
+        false
       when "execution_context", "preview_mt"
-        false # Not using execution context by default
+        false
+      when "use_pcre2"
+        true
       else
         # Check using macro-style syntax flag?("evloop=kqueue")
         if clean_name.starts_with?("evloop=")
-          clean_name == "evloop=kqueue" # macOS uses kqueue
+          clean_name == "evloop=kqueue" && evaluate_macro_flag("kqueue")
         else
-          COMPILE_FLAGS.includes?(clean_name)
+          active_flags.includes?(clean_name)
         end
       end
     end

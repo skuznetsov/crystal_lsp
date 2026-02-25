@@ -1,6 +1,52 @@
 # Crystal v2 — Active Work (codegen branch)
 
 ## Known Bugs (codegen)
+- **2026-02-25 (latest): fixed root-cause broken `@[Link(ldflags: ...)]` argument parsing from macro text (truncated backtick command / stray backtick token)**
+  - Root cause:
+    - `Compiler::CLI#parse_link_annotation_args` used regex extraction that stopped quoted values at the first inner `'`/`"` character;
+    - for OpenSSL link annotations (`printf %s '-lssl -lcrypto'`) this produced malformed entries like:
+      - `ldflags:\`command -v pkg-config ... || printf %s `
+      - stray positional entry `` ` ``
+    - malformed entries leaked into link command and triggered:
+      - `sh: --libs: command not found`
+      - `ld: library 'libssl' not found`
+  - Fixes applied:
+    - `src/compiler/cli.cr`
+      - replaced regex-based `parse_link_annotation_args` with quote/backtick-aware state-machine parsing:
+        - top-level comma splitting (`split_link_annotation_args`);
+        - top-level named-arg split by `:` (`split_link_named_arg`);
+        - normalized value extraction (`normalize_link_arg_value`) preserving backtick commands.
+      - removed temporary link-debug logging.
+  - New regression script:
+    - `regression_tests/stage1_link_ldflags_backtick_quote_repro.sh`
+    - status:
+      - `/tmp/stage1_dbg_link_fix1` -> `not reproduced`
+  - Additional validation:
+    - `regression_tests/stage2_env_optional_repro.sh /tmp/stage1_dbg_link_fix1` -> `not reproduced`
+  - Fresh bootstrap timing (this run):
+    - stage1 (original compiler, release):
+      - `crystal build --release src/crystal_v2.cr -o /tmp/stage1_rel_link_fix1`
+      - **real 7:04.58** (`424.58s`)
+    - stage2 (self-hosted, release, timeout-guarded 180s):
+      - `scripts/timeout_sample_lldb.sh -t 180 -s 8 -n 12 -o /tmp/stage2_rel_link_fix1_probe -- /tmp/stage1_rel_link_fix1 src/crystal_v2.cr --release -o /tmp/stage2_rel_link_fix1`
+      - **exit 0**, **real 2:55.34** (`175.34s`)
+      - speedup stage2 vs stage1: **~2.42x** (delta ~`-249.24s`)
+
+- **2026-02-25 (latest): fixed root-cause missing LLVM intrinsic signatures for architecture pause/hint**
+  - Root cause:
+    - MIR LLVM backend did not include signature/declaration mapping for:
+      - `llvm.x86.sse2.pause`
+      - `llvm.aarch64.hint(i32)`
+    - unknown-intrinsic fallback path dropped typed argument handling and emitted invalid call forms for `Intrinsics.pause` on aarch64 (`llvm.aarch64.hint()` without `i32` argument).
+  - Fixes applied:
+    - `src/compiler/mir/llvm_backend.cr`
+      - added declaration and signature entries for both intrinsics in:
+        - `emit_llvm_intrinsic_declaration`
+        - `parse_intrinsic_signature`
+  - Evidence:
+    - minimal repro (`Intrinsics.pause; puts "ok"`) with `/tmp/stage1_dbg_intrinsic_fix1` prints `ok`;
+    - `regression_tests/stage2_env_optional_repro.sh /tmp/stage1_dbg_intrinsic_fix1` -> `not reproduced`.
+
 - **2026-02-25 (latest): fixed root-cause mis-lowering of `while/until` short-circuit conditions in condition context**
   - Root cause:
     - `lower_while` and `lower_until` lowered loop conditions as value expressions (`lower_expr`) and branched on that value path;

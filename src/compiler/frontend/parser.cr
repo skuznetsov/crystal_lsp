@@ -7483,7 +7483,7 @@ module CrystalV2
               else
                 trim_gap = false
               end
-              buffer.write(token.slice)
+              buffer.write(macro_token_text_slice(token))
               buffer_end_token = token
               advance
             end
@@ -13041,8 +13041,19 @@ current_token.kind == Token::Kind::Identifier &&
           else
             trim_gap = false
           end
-          buffer.write(token.slice)
+          buffer.write(macro_token_text_slice(token))
           {token, trim_gap}
+        end
+
+        private def macro_token_text_slice(token : Token) : Slice(UInt8)
+          span = token.span
+          start = span.start_offset
+          finish = span.end_offset
+          if start >= 0 && finish >= start && finish <= @source.bytesize
+            len = finish - start
+            return @source.to_slice[start, len]
+          end
+          token.slice
         end
 
         private def append_macro_gap(buffer : IO::Memory, previous_token : Token, next_token : Token, trim_gap : Bool) : Bool
