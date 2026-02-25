@@ -1,6 +1,32 @@
 # Crystal v2 — Active Work (codegen branch)
 
 ## Known Bugs (codegen)
+- **2026-02-25 (latest): fixed root-cause null-entry crash in `Hash::Entry#deleted?` (pointer-slot ABI path)**
+  - Root cause:
+    - in current ABI, `Pointer(Entry)#clear` can zero hash-entry slots to null pointers;
+    - `Hash::Entry#deleted?` generated code dereferenced `self` unconditionally;
+    - runtime path (`Hash#delete_linear_scan` / `each_entry_with_index`) then crashed on null entry receiver (`EXC_BAD_ACCESS` in `Hash::Entry#deleted?`).
+  - Fixes applied:
+    - `src/compiler/mir/llvm_backend.cr`
+      - added null-safe override for `Hash::Entry#deleted?`:
+        - null receiver => `true` (deleted),
+        - non-null => load `@hash` by computed field offset and compare to `0`.
+      - disabled brittle hash layout hard-overrides for:
+        - `Hash#get_index(Int32)`,
+        - `Hash#get_entry(Int32)`,
+        - `Hash#set_entry(Int32, Hash::Entry(...))`,
+        and forced regular lowering (`return false`) for these paths.
+  - Evidence:
+    - targeted failing subset before fix:
+      - `file_join_splat`, `forall_nil_union_return`, `hash_compaction`, `hash_stress`, `test_byteformat_decode_u32`, `test_nested_macro_record`, `yield_suffix_unless`
+      - pass/fail: **0/7 pass** (for hash/yield related cases: crashes).
+    - targeted subset after fix (`/tmp/stage1_dbg_hash_deleted_fix2`):
+      - `PASS`: `hash_compaction`, `hash_stress`, `yield_suffix_unless`
+      - still failing (separate roots): `file_join_splat`, `forall_nil_union_return`, `test_byteformat_decode_u32`, `test_nested_macro_record`
+    - full regression sweep:
+      - `regression_tests/run_all.sh /tmp/stage1_dbg_link_fix1` -> **50 passed, 7 failed**
+      - `regression_tests/run_all.sh /tmp/stage1_dbg_hash_deleted_fix2` -> **53 passed, 4 failed**
+
 - **2026-02-25 (latest): fixed root-cause broken `@[Link(ldflags: ...)]` argument parsing from macro text (truncated backtick command / stray backtick token)**
   - Root cause:
     - `Compiler::CLI#parse_link_annotation_args` used regex extraction that stopped quoted values at the first inner `'`/`"` character;

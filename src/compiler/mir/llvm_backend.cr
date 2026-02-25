@@ -5606,11 +5606,83 @@ module Crystal::MIR
         return true
       end
 
+      # Hash::Entry#deleted? — pointer-slot-safe semantics.
+      # In our current ABI Hash entry slots can be zeroed pointers after clear/delete.
+      # Treat null entry pointer as deleted and otherwise read @hash by computed offset.
+      if mangled.includes?("Hash$CCEntry$L") && mangled.ends_with?("$Hdeleted$Q")
+        entry_prefix = mangled.sub("$Hdeleted$Q", "")
+        inner = entry_prefix.sub("Hash$CCEntry$L", "")
+        inner = inner.ends_with?("$R") ? inner[0...-2] : inner
+        sep_idx = inner.index("$C$_")
+        key_suffix = sep_idx ? inner[0...sep_idx] : ""
+        value_suffix = sep_idx ? inner[(sep_idx + 4)..] : ""
+
+        key_llvm_type = case key_suffix
+                        when "String" then "ptr"
+                        when "Int8", "UInt8", "Bool" then "i8"
+                        when "Int16", "UInt16" then "i16"
+                        when "Int32", "UInt32", "Char" then "i32"
+                        when "Int64", "UInt64" then "i64"
+                        when "Float32" then "float"
+                        when "Float64" then "double"
+                        else "ptr"
+                        end
+
+        value_llvm_type = case value_suffix
+                          when "String" then "ptr"
+                          when "Int8", "UInt8", "Bool" then "i8"
+                          when "Int16", "UInt16" then "i16"
+                          when "Int32", "UInt32", "Char" then "i32"
+                          when "Int64", "UInt64" then "i64"
+                          when "Float32" then "float"
+                          when "Float64" then "double"
+                          else "ptr"
+                          end
+
+        key_size, _key_align = case key_llvm_type
+                               when "i1", "i8" then {1, 1}
+                               when "i16" then {2, 2}
+                               when "i32", "float" then {4, 4}
+                               when "i64", "double", "ptr" then {8, 8}
+                               else {8, 8}
+                               end
+        value_size, value_align = case value_llvm_type
+                                  when "i1", "i8" then {1, 1}
+                                  when "i16" then {2, 2}
+                                  when "i32", "float" then {4, 4}
+                                  when "i64", "double", "ptr" then {8, 8}
+                                  else {8, 8}
+                                  end
+        value_offset = (key_size + value_align - 1) & ~(value_align - 1)
+        hash_offset = (value_offset + value_size + 3) & ~3
+
+        emit_raw "; #{mangled} — null-safe deleted? override\n"
+        emit_raw "define i1 @#{mangled}(ptr %self) {\n"
+        emit_raw "entry:\n"
+        emit_raw "  %is_null = icmp eq ptr %self, null\n"
+        emit_raw "  br i1 %is_null, label %ret_true, label %check_hash\n"
+        emit_raw "check_hash:\n"
+        emit_raw "  %hash_ptr = getelementptr i8, ptr %self, i32 #{hash_offset}\n"
+        emit_raw "  %h = load i32, ptr %hash_ptr\n"
+        emit_raw "  %is_deleted = icmp eq i32 %h, 0\n"
+        emit_raw "  ret i1 %is_deleted\n"
+        emit_raw "ret_true:\n"
+        emit_raw "  ret i1 true\n"
+        emit_raw "}\n\n"
+        return true
+      end
+
       # Hash#get_entry — fix stride and dereference pointer.
       # Our compiler heap-allocates Entry structs and stores pointers in the entries array.
       # malloc_entries allocates with stride 8 (ptr size), but get_entry uses sizeof(Entry body).
       # Fix: use stride 8 and load the stored pointer.
       if mangled.includes?("$Hget_index$$Int32") && mangled.includes?("Hash$L")
+        # Root-cause fix: disable layout-hardcoded Hash override.
+        # This path assumes pointer-based entry storage and injects custom
+        # bounds/null semantics that diverge from stdlib value-layout Hash::Entry.
+        # Fall back to regular lowering.
+        return false
+
         emit_raw "; #{mangled} — index decode + null-slot validation override\n"
         emit_raw "define i32 @#{mangled}(ptr %self, i32 %index) {\n"
         emit_raw "entry:\n"
@@ -5692,6 +5764,11 @@ module Crystal::MIR
       end
 
       if mangled.includes?("$Hget_entry$$Int32") && mangled.includes?("Hash$L")
+        # Root-cause fix: disable pointer-slot override.
+        # Hash entries are value structs; loading ptr from each slot corrupts
+        # entry reads and causes null/invalid receivers in deleted?/matches?.
+        return false
+
         emit_raw "; #{mangled} — fixed stride + pointer dereference override\n"
         emit_raw "define ptr @#{mangled}(ptr %self, i32 %index) {\n"
         emit_raw "entry:\n"
@@ -5708,6 +5785,11 @@ module Crystal::MIR
 
       # Hash#set_entry — fix stride to match malloc_entries (8 bytes per slot).
       if mangled.includes?("$Hset_entry$$Int32_Hash$CCEntry$L")
+        # Root-cause fix: disable pointer-slot override.
+        # Hash entries are stored by value; storing ptr payload into slots is ABI/layout
+        # incompatible and corrupts Hash internals.
+        return false
+
         emit_raw "; #{mangled} — fixed stride override\n"
         emit_raw "define void @#{mangled}(ptr %self, i32 %index, ptr %value) {\n"
         emit_raw "entry:\n"
