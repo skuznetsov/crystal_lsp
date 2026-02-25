@@ -34,7 +34,7 @@ module CrystalV2
         end
 
         private def debug(message : String)
-          if ENV["LEXER_DEBUG"]?
+          if ::CrystalV2::Compiler::BootstrapEnv.enabled?("LEXER_DEBUG")
             STDERR.puts message
           end
         end
@@ -63,7 +63,7 @@ module CrystalV2
 
           byte = current_byte
 
-          if ENV["STAGE2_DEBUG"]? && @offset < 200
+          if ::CrystalV2::Compiler::BootstrapEnv.enabled?("STAGE2_DEBUG") && @offset < 200
             STDOUT.puts "[LEXER_DBG] next_token offset=#{@offset} byte=#{byte} HASH=#{HASH} eq_hash=#{byte == HASH} is_ws=#{whitespace?(byte)} is_nl=#{byte == NEWLINE} id_start=#{identifier_start?(byte)}"
             STDOUT.flush
           end
@@ -215,7 +215,7 @@ module CrystalV2
 
           # Slice of the identifier
           id = bytes_range(from, @offset)
-          if ENV["STAGE2_DEBUG"]?
+          if ::CrystalV2::Compiler::BootstrapEnv.enabled?("STAGE2_DEBUG")
             STDOUT.puts "[LEXER_DBG] lex_id from=#{from} offset=#{@offset} rope_size=#{@rope.size} slice_size=#{id.size} expected=#{@offset - from}"
             STDOUT.flush
           end
@@ -1104,6 +1104,20 @@ module CrystalV2
             end
 
             if brace_depth > 0
+            if byte == DOUBLE_QUOTE || byte == SINGLE_QUOTE
+              quote = byte
+              scan_offset += 1
+              while scan_offset < @rope.size
+                b = @rope.bytes[scan_offset]
+                if b == '\\'.ord.to_u8 && scan_offset + 1 < @rope.size
+                  scan_offset += 2
+                  next
+                end
+                scan_offset += 1
+                break if b == quote
+              end
+              next
+            end
             # Detect heredoc start within interpolation for diagnostics
             if byte == '<'.ord.to_u8 && scan_offset + 2 < @rope.size && @rope.bytes[scan_offset + 1] == '<'.ord.to_u8 && @rope.bytes[scan_offset + 2] == '-'.ord.to_u8
               heredoc_inside_interpolation = true
@@ -1138,7 +1152,7 @@ module CrystalV2
                 break
               end
 
-              if brace_depth_fast == 0 && current_byte == HASH && @offset + 1 < @rope.size && @rope.bytes[@offset + 1] == LEFT_BRACE
+            if brace_depth_fast == 0 && current_byte == HASH && @offset + 1 < @rope.size && @rope.bytes[@offset + 1] == LEFT_BRACE
                 if @offset + 4 < @rope.size && @rope.bytes[@offset + 2] == '<'.ord.to_u8 && @rope.bytes[@offset + 3] == '<'.ord.to_u8 && @rope.bytes[@offset + 4] == '-'.ord.to_u8
                   heredoc_inside_interpolation = true
                 end
@@ -1146,6 +1160,20 @@ module CrystalV2
               advance(2)
               next
             elsif brace_depth_fast > 0
+              if current_byte == DOUBLE_QUOTE || current_byte == SINGLE_QUOTE
+                quote = current_byte
+                advance
+                while @offset < @rope.size
+                  b = current_byte
+                  if b == '\\'.ord.to_u8 && @offset + 1 < @rope.size
+                    advance(2)
+                    next
+                  end
+                  advance
+                  break if b == quote
+                end
+                next
+              end
               if current_byte == '<'.ord.to_u8 && @offset + 2 < @rope.size && @rope.bytes[@offset + 1] == '<'.ord.to_u8 && @rope.bytes[@offset + 2] == '-'.ord.to_u8
                 heredoc_inside_interpolation = true
               end
@@ -1184,6 +1212,24 @@ module CrystalV2
               brace_depth_processed += 1
               next
             elsif brace_depth_processed > 0
+              if current_byte == DOUBLE_QUOTE || current_byte == SINGLE_QUOTE
+                quote = current_byte
+                buffer.write_byte(current_byte)
+                advance
+                while @offset < @rope.size
+                  b = current_byte
+                  buffer.write_byte(b)
+                  if b == '\\'.ord.to_u8 && @offset + 1 < @rope.size
+                    advance
+                    buffer.write_byte(current_byte)
+                    advance
+                    next
+                  end
+                  advance
+                  break if b == quote
+                end
+                next
+              end
               if current_byte == '<'.ord.to_u8 && @offset + 2 < @rope.size && @rope.bytes[@offset + 1] == '<'.ord.to_u8 && @rope.bytes[@offset + 2] == '-'.ord.to_u8
                 heredoc_inside_interpolation = true
               end

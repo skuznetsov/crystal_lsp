@@ -1,6 +1,35 @@
 # Crystal v2 — Active Work (codegen branch)
 
 ## Known Bugs (codegen)
+- **2026-02-25 (latest): parser swallowed class members after interpolation text containing `"{%"`**
+  - Root cause localized in `src/compiler/frontend/lexer.cr`:
+    - `lex_string` interpolation tracking (`brace_depth`) counted `{`/`}` inside nested quoted literals while scanning `#{ ... }`.
+    - For patterns like `"...#{"x".includes?("{%")}..."` this over-incremented depth and made parser consume subsequent `def`s into the previous method body.
+  - Concrete impact:
+    - `CrystalV2::Compiler::CLI` class body was truncated to 34 members;
+    - `collect_top_level_nodes` span incorrectly extended to class end;
+    - helper methods (`extract_link_libraries_from_text`, `annotation_name_from_expr`, etc.) were not registered.
+  - Fix applied:
+    - in `lex_string`, while inside interpolation (`brace_depth > 0`), nested quoted literals (`"..."` and `'...'`) are now skipped as atomic tokens in:
+      - pre-scan pass (`scan_offset`),
+      - fast no-escape pass (`brace_depth_fast`),
+      - escape-processing pass (`brace_depth_processed`).
+  - New diagnostics/regression:
+    - added `DEBUG_CLASS_BODY_DUMP` in `src/compiler/hir/ast_to_hir.cr` for member-by-member class-body tracing;
+    - added `regression_tests/stage2_parser_interp_macro_marker_repro.sh`.
+  - Evidence:
+    - `regression_tests/stage2_parser_interp_macro_marker_repro.sh /tmp/stage1_dbg_classbody_probe1` -> `reproduced` (missing `method=b`);
+    - `regression_tests/stage2_parser_interp_macro_marker_repro.sh /tmp/stage1_dbg_parserfix1` -> `not reproduced`;
+    - `DEBUG_METHOD_REGISTER_FILTER=CrystalV2::Compiler::CLI` now includes:
+      - `extract_link_libraries_from_annotation`
+      - `extract_link_libraries_from_text`
+      - `parse_link_annotation_args`
+      - `macro_literal_active_texts`
+      - `annotation_name_from_expr`.
+  - Current bootstrap status after fix:
+    - stage2 probe still times out at 180s (`/tmp/stage2_dbg_parserfix1_180`);
+    - previous unresolved `CLI#collect_link_libraries_from_expr -> missing helper` pattern is gone.
+
 - **2026-02-24 (latest): stage2 `--release` bootstrap reaches link again; stage2 compiler binary still unstable**
   - New backend fixes in `src/compiler/mir/llvm_backend.cr`:
     - `emit_unary_op`: prefer actually emitted operand LLVM type (`@emitted_value_types`) and use `nil_variant_id_for_union_type` for union truthiness;
