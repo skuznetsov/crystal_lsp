@@ -12,3 +12,19 @@ end
 def lnct
   0_i64
 end
+
+module CrystalV2::Compiler::BootstrapEnv
+  def self.get?(key : String) : String?
+    ENV[key]?
+  rescue
+    nil
+  end
+
+  def self.get(key : String, default : String) : String
+    get?(key) || default
+  end
+
+  def self.enabled?(key : String) : Bool
+    !get?(key).nil?
+  end
+end

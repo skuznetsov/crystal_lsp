@@ -96,9 +96,17 @@ module CrystalV2
       end
 
       private def stage2_debug(msg : String, io : IO = STDERR) : Nil
-        if ENV["STAGE2_DEBUG"]? || ENV["STAGE2_BOOTSTRAP_TRACE"]?
+        if env_enabled?("STAGE2_DEBUG") || env_enabled?("STAGE2_BOOTSTRAP_TRACE")
           io.puts msg
         end
+      end
+
+      private def env_get(name : String) : String?
+        BootstrapEnv.get?(name)
+      end
+
+      private def env_enabled?(name : String) : Bool
+        !env_get(name).nil?
       end
 
       # Bootstrap-safe argument parser used as a fallback when OptionParser
@@ -309,9 +317,9 @@ module CrystalV2
 
       {% if flag?(:debug_hooks) %}
       private def setup_debug_hooks : Nil
-        return unless ENV["CRYSTAL_V2_DEBUG_HOOKS"]?
+        return unless env_enabled?("CRYSTAL_V2_DEBUG_HOOKS")
 
-        filter = ENV["CRYSTAL_V2_DEBUG_HOOKS_FILTER"]?
+        filter = env_get("CRYSTAL_V2_DEBUG_HOOKS_FILTER")
         io = STDERR
         emit = ->(event : String, data : String) do
           if filter && !event.includes?(filter) && !data.includes?(filter)
@@ -339,17 +347,17 @@ module CrystalV2
 
       def run(*, out_io : IO = STDOUT, err_io : IO = STDERR) : Int32
         options = Options.new
-        stage2_debug("[STAGE2_DEBUG] raw args join=#{@args.join("|")}", err_io)
+        stage2_debug("[STAGE2_DEBUG] raw args size=#{@args.size}", err_io)
         stage2_debug("[STAGE2_DEBUG] run start args_size=#{@args.size}", err_io)
         mm_stack_threshold_invalid = false
         parser_help = "Usage: crystal_v2 [options] <source.cr>\n\nOptions:"
         parser : OptionParser | Nil = nil
         parser_text = parser_help
 
-        if ENV["CRYSTAL2_SAFE_PARSER"]?
+        if !env_enabled?("CRYSTAL2_USE_OPTION_PARSER") || env_enabled?("CRYSTAL2_SAFE_PARSER")
           status = parse_args_safe(options, parser_help, err_io)
           return status if status != 0
-        elsif (minimal_parser = ENV["CRYSTAL2_MINIMAL_PARSER"]?)
+        elsif (minimal_parser = env_get("CRYSTAL2_MINIMAL_PARSER"))
           if minimal_parser == "2"
             parser = OptionParser.new do |p|
               p.banner = "Usage: crystal_v2 [options] <source.cr>\n\nOptions:"
@@ -553,8 +561,8 @@ module CrystalV2
         property ast_cache : Bool = false
         {% end %}
         property llvm_opt : Bool = true
-        property llvm_cache : Bool = ENV["CRYSTAL_V2_LLVM_CACHE"]? != "0"
-        property pipeline_cache : Bool = ENV["CRYSTAL_V2_PIPELINE_CACHE"]? != "0"
+        property llvm_cache : Bool = BootstrapEnv.get("CRYSTAL_V2_LLVM_CACHE", "1") != "0"
+        property pipeline_cache : Bool = BootstrapEnv.get("CRYSTAL_V2_PIPELINE_CACHE", "1") != "0"
         property link : Bool = true
         property emit_type_metadata : Bool = true
         property ltp_opt : Bool = true
@@ -690,8 +698,10 @@ module CrystalV2
           return 1
         end
 
+        # NOTE: Keep this as a constant-time summary.
+        # Iterating tuple payloads here is diagnostic-only and has triggered
+        # stage2 instability in self-hosted builds.
         total_exprs = 0
-        all_arenas.each { |t| total_exprs += t[1].size }
         log(options, out_io, "  Files: #{all_arenas.size}, Expressions: #{total_exprs}")
         stage2_debug("[STAGE2_DEBUG] lowering start (all_arenas=#{all_arenas.size})", err_io)
 
@@ -779,29 +789,45 @@ module CrystalV2
 
         flags = Runtime.target_flags
         stage2_debug("[STAGE2_DEBUG] top-level collection walk start", err_io)
-        all_arenas.each do |arena, exprs, file_path, source|
-          next if skip_file_directive?(source, flags)
-          pending_annotations = [] of Tuple(Frontend::AnnotationNode, Frontend::ArenaLike)
-          exprs.each do |expr_id|
-            collect_top_level_nodes(
-              arena,
-              expr_id,
-              def_nodes,
-              class_nodes,
-              module_nodes,
-              enum_nodes,
-              macro_nodes,
-              alias_nodes,
-              lib_nodes,
-              constant_exprs,
-              main_exprs,
-              pending_annotations,
-              acyclic_types,
-              flags,
-              sources_by_arena,
-              source
-            )
+        arena_i = 0
+        while arena_i < all_arenas.size
+          entry = all_arenas.unsafe_fetch(arena_i)
+          arena = entry[0]
+          exprs = entry[1]
+          file_path = entry[2]
+          source = entry[3]
+          safe_source = begin
+            File.read(file_path)
+          rescue
+            source
           end
+          unless skip_file_directive?(safe_source, flags)
+            pending_annotations = [] of Tuple(Frontend::AnnotationNode, Frontend::ArenaLike)
+            expr_i = 0
+            while expr_i < exprs.size
+              expr_id = exprs.unsafe_fetch(expr_i)
+              collect_top_level_nodes(
+                arena,
+                expr_id,
+                def_nodes,
+                class_nodes,
+                module_nodes,
+                enum_nodes,
+                macro_nodes,
+                alias_nodes,
+                lib_nodes,
+                constant_exprs,
+                main_exprs,
+                pending_annotations,
+                acyclic_types,
+                flags,
+                sources_by_arena,
+                safe_source
+              )
+              expr_i += 1
+            end
+          end
+          arena_i += 1
         end
         stage2_debug("[STAGE2_DEBUG] top-level collection done defs=#{def_nodes.size} classes=#{class_nodes.size} modules=#{module_nodes.size} constants=#{constant_exprs.size} main=#{main_exprs.size}", err_io)
 
@@ -855,7 +881,7 @@ module CrystalV2
 
         # Pre-scan constant definitions so nested classes can resolve outer constants
         # across reopened types (require order interleaves files).
-        debug_filter = ENV["DEBUG_PRE_SCAN_CONST"]?
+        debug_filter = env_get("DEBUG_PRE_SCAN_CONST")
         scan_constants_in_body = ->(owner : String, arena : Frontend::AstArena, body : Array(Frontend::ExprId)) do
           stack = [body]
           while current = stack.pop?
@@ -990,7 +1016,7 @@ module CrystalV2
         log(options, out_io, "    Modules: #{module_nodes.size}")
         module_nodes.each_with_index do |(n, a), i|
           hir_converter.arena = a
-          if options.progress && ENV["CRYSTAL_V2_PROGRESS_MODULE_NAMES"]?
+          if options.progress && env_enabled?("CRYSTAL_V2_PROGRESS_MODULE_NAMES")
             STDERR.puts "\n    Module #{i + 1}/#{module_nodes.size}: #{String.new(n.name)}"
           end
           hir_converter.register_module(n)
@@ -1376,7 +1402,7 @@ module CrystalV2
         emit_timings(options, out_io, timings, total_start)
         return 1
       rescue ex
-        if ENV.fetch("CRYSTAL2_STAGE2_DEBUG", "0") == "1"
+        if env_get("CRYSTAL2_STAGE2_DEBUG") == "1"
           err_io.puts "error: #{ex.class}: #{ex.message.inspect}"
           err_io.puts ex.backtrace.join("\n")
         else
@@ -1817,7 +1843,7 @@ module CrystalV2
       end
 
       private def require_cache_path(file_path : String) : String
-        cache_dir = ENV["XDG_CACHE_HOME"]? || path_join(ENV["HOME"]? || "/tmp", ".cache")
+        cache_dir = env_get("XDG_CACHE_HOME") || path_join(BootstrapEnv.get("HOME", "/tmp"), ".cache")
         hash = digest_string("v3:#{file_path}")
         path_join(cache_dir, "crystal_v2", "requires", "#{hash}.req")
       end
@@ -1961,7 +1987,7 @@ module CrystalV2
         when Frontend::VisibilityModifierNode
           collect_top_level_nodes(arena, node.expression, def_nodes, class_nodes, module_nodes, enum_nodes, macro_nodes, alias_nodes, lib_nodes, constant_exprs, main_exprs, pending_annotations, acyclic_types, flags, sources_by_arena, source, depth, collect_main_exprs)
         when Frontend::MacroIfNode
-          if ENV["DEBUG_MACRO_EXPAND"]?
+          if env_enabled?("DEBUG_MACRO_EXPAND")
             STDERR.puts "[DEBUG_MACRO_EXPAND] MacroIfNode condition=#{evaluate_macro_condition(arena, node.condition, flags).inspect}"
           end
           if raw_text = macro_if_raw_text(node, source)
@@ -1971,7 +1997,7 @@ module CrystalV2
             unless has_for_loop
               parsed_any = false
               combined = macro_literal_texts_from_raw(raw_text, flags).join
-              if ENV["DEBUG_MACRO_EXPAND"]?
+              if env_enabled?("DEBUG_MACRO_EXPAND")
                 STDERR.puts "[DEBUG_MACRO_EXPAND] MacroIfNode combined empty=#{combined.strip.empty?} has_percent=#{combined.includes?("{%")} size=#{combined.size}"
                 if combined.size < 200
                   STDERR.puts "[DEBUG_MACRO_EXPAND] MacroIfNode combined content=#{combined.inspect}"
@@ -1987,18 +2013,18 @@ module CrystalV2
                   end
                 end
               end
-              if ENV["DEBUG_MACRO_EXPAND"]? && parsed_any
+              if env_enabled?("DEBUG_MACRO_EXPAND") && parsed_any
                 STDERR.puts "[DEBUG_MACRO_EXPAND] MacroIfNode early return (parsed_any)"
               end
               return if parsed_any
             end
           end
-          if ENV["DEBUG_MACRO_EXPAND"]?
+          if env_enabled?("DEBUG_MACRO_EXPAND")
             STDERR.puts "[DEBUG_MACRO_EXPAND] MacroIfNode continuing to condition check (raw_text exists=#{!raw_text.nil?})"
           end
           condition = evaluate_macro_condition(arena, node.condition, flags)
           if condition == true
-            if ENV["DEBUG_MACRO_EXPAND"]?
+            if env_enabled?("DEBUG_MACRO_EXPAND")
               then_node = arena[node.then_body]
               STDERR.puts "[DEBUG_MACRO_EXPAND] MacroIfNode then_body type=#{then_node.class}"
             end
@@ -2016,7 +2042,7 @@ module CrystalV2
         when Frontend::MacroLiteralNode
           # Check if this literal has macro control flow ({% for %}, {% begin %}, etc.)
           has_control_flow = node.pieces.any? { |p| p.kind.control_start? }
-          if ENV["DEBUG_MACRO_EXPAND"]?
+          if env_enabled?("DEBUG_MACRO_EXPAND")
             STDERR.puts "[DEBUG_MACRO_EXPAND] MacroLiteralNode has_control_flow=#{has_control_flow} pieces=#{node.pieces.size}"
             node.pieces.each_with_index do |p, i|
               STDERR.puts "[DEBUG_MACRO_EXPAND]   piece[#{i}] kind=#{p.kind} keyword=#{p.control_keyword.inspect}"
@@ -2025,7 +2051,7 @@ module CrystalV2
           if has_control_flow
             # Use MacroExpander for full expansion of {% for %} loops, variable assignments, etc.
             if expanded = expand_macro_literal_via_expander(expr_id, arena, source, flags)
-              if ENV["DEBUG_MACRO_EXPAND"]?
+              if env_enabled?("DEBUG_MACRO_EXPAND")
                 STDERR.puts "[DEBUG_MACRO_EXPAND] expanded=#{expanded[0, [expanded.size, 200].min].inspect}"
               end
               unless expanded.strip.empty?
@@ -2115,7 +2141,7 @@ module CrystalV2
         values = resolve_top_level_macro_iterable(arena, node.iterable, source)
         return unless values
 
-        if ENV["DEBUG_MACRO_FOR"]?
+        if env_enabled?("DEBUG_MACRO_FOR")
           STDERR.puts "[DEBUG_MACRO_FOR] expand_top_level_macro_for: var=#{iter_vars.first} values=#{values.size} body_size=#{body_text.size}"
         end
 
@@ -2241,7 +2267,7 @@ module CrystalV2
           body_id,
           variables: {} of String => Semantic::MacroValue
         )
-        if ENV["DEBUG_MACRO_EXPAND"]?
+        if env_enabled?("DEBUG_MACRO_EXPAND")
           STDERR.puts "[DEBUG_MACRO_EXPAND] expand_literal returned #{expanded.bytesize} bytes, empty=#{expanded.strip.empty?}"
           if expanded.bytesize > 0 && expanded.bytesize < 500
             STDERR.puts "[DEBUG_MACRO_EXPAND] content=#{expanded.inspect}"

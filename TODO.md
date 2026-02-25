@@ -1,6 +1,32 @@
 # Crystal v2 — Active Work (codegen branch)
 
 ## Known Bugs (codegen)
+- **2026-02-25 (latest): fixed root-cause branch-state leakage in `lower_if` for inlined yield locals; stage2 moved forward to regex init failure**
+  - Root cause:
+    - `lower_if` restored only `ctx.locals` per branch, but did not restore `@inline_caller_locals_stack`;
+    - then-branch updates leaked into elsif/else merge, producing invalid phi incoming values and null receivers in stage2 parser path (`Span#cover` crash chain).
+  - Fixes applied:
+    - `src/compiler/hir/ast_to_hir.cr`
+      - in `lower_if`, snapshot/restore `@inline_caller_locals_stack` for then/elsif/else, aligned with per-branch local restore.
+    - `src/compiler/mir/llvm_backend.cr`
+      - disabled unstable fast builtin override for `Hash#[]?` (`$H$IDXQ$`) and forced fallback to regular lowering (`return false`) to avoid layout-dependent payload corruption.
+  - New evidence:
+    - standalone minimal repro (`/tmp/repro_phi_branch_span.cr`) now runs correctly with debug stage1 (previously segfaulted in `SpanLike#start_offset` via null receiver);
+    - targeted regressions with `/tmp/stage1_dbg_if_inline_fix`: 3/3 `not reproduced`.
+  - Fresh bootstrap timing (this run):
+    - stage1 (original compiler, release):
+      - `crystal build --release src/crystal_v2.cr -o /tmp/stage1_rel_if_inline_fix`
+      - **real 400.20s** (`6:40.38`)
+    - stage2 (self-hosted, release, timeout-guarded 180s):
+      - `scripts/timeout_sample_lldb.sh -t 180 -- /tmp/stage1_rel_if_inline_fix src/crystal_v2.cr --release -o /tmp/stage2_rel_if_inline_fix`
+      - **real 148.72s**, exit 0
+      - speedup stage2 vs stage1: **~2.69x** (delta ~`-251.48s`)
+  - Current blocker after fix:
+    - stage2 compiler (`src/crystal_v2`) now fails on regex path with
+      `Regex match error: NULL argument passed with non-zero length`;
+    - LLDB points to `Regex$CCPCRE2$Dget_error_message` from
+      `Crystal::HIR::AstToHir#value_literal_name?` -> `String#matches?` -> `Regex#match_data`.
+
 - **2026-02-25 (latest): fixed root-cause wrong union variant wrap for `String | Symbol` in HIR→MIR call coercion**
   - Root cause:
     - `HIRToMIR#coerce_call_args` used `get_arg_type(hir_id)` (HIR scan) to choose union variant when wrapping call args into union params;

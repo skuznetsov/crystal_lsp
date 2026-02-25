@@ -5721,6 +5721,13 @@ module Crystal::MIR
       # The HIR types []? as returning a nilable union (Nil | V), so both the
       # function definition and call site must use the union ABI.
       if mangled.includes?("$H$IDXQ$") && mangled.includes?("Hash$L")
+        # Root-cause stabilization: this fast override reconstructs Hash::Entry
+        # field layout heuristically (key/value size+alignment), which is not
+        # generally sound for all monomorphized key/value combinations.
+        # That causes payload corruption and downstream EXC_BAD_ACCESS in stage2.
+        # Fall back to regular lowering, which has correct ABI/layout handling.
+        return false
+
         # Extract value type from the Hash mangled name.
         # Hash$L<Key>$C$_<Value>$R → find first $C$_ after Hash$L, value is rest minus final $R
         hash_prefix = mangled.split("$H$IDXQ$").first
@@ -5739,6 +5746,11 @@ module Crystal::MIR
                          else
                            ""
                          end
+        # Fast []? override is only safe when Hash value payload is a plain scalar/pointer.
+        # For nilable/union values (for example V = NamedTuple(...)?) the entry @value field
+        # stores a full union object, not a plain pointer. Loading it as ptr corrupts payload
+        # (observed as [type_id, type_id, ptr_low, ...] in stage2 crash path).
+        return false if value_type_str.includes?("$Q") || value_type_str.includes?("$_$OR$_")
 
         # Default key LLVM type from parsed generic key suffix.
         key_llvm_type = case key_type_suffix
@@ -7772,6 +7784,7 @@ module Crystal::MIR
       @void_values.clear
       @array_info.clear
       @alloc_types.clear
+      @alloc_element_types.clear
       @inttoptr_value_ids.clear
       @phi_zext_conversions.clear
       @zext_value_names.clear

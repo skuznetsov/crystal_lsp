@@ -1285,7 +1285,15 @@ module CrystalV2
 
           if base_macro_value
             result = base_macro_value.call_method(member, [] of MacroValue, nil)
-            return result.to_macro_output unless result.is_a?(MacroNilValue)
+            unless result.is_a?(MacroNilValue)
+              return result.to_macro_output
+            end
+            # `name.value` should be empty when a TypeDeclaration has no default value.
+            # Falling back to `base_value` here turns nil into truthy text and corrupts
+            # getter/property macro expansion defaults.
+            if member == "value" || member == "default_value"
+              return ""
+            end
           end
 
           # For @type.name and chained calls, just return the type name
