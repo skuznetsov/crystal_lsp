@@ -1,6 +1,30 @@
 # Crystal v2 — Active Work (codegen branch)
 
 ## Known Bugs (codegen)
+- **2026-02-25 (latest): fixed root-cause mis-lowering of `while/until` short-circuit conditions in condition context**
+  - Root cause:
+    - `lower_while` and `lower_until` lowered loop conditions as value expressions (`lower_expr`) and branched on that value path;
+    - for `&&/||` chains this went through value-semantics lowering (`lower_short_circuit`) and produced unstable condition behavior in loop headers (seen as alias-chain runaway in `resolve_type_alias_chain` paths).
+  - Fixes applied:
+    - `src/compiler/hir/ast_to_hir.cr`
+      - `lower_while`: switched condition lowering to `lower_condition_branch(...)` with explicit `cond_true_block` / `cond_false_block` wrappers;
+      - `lower_while`: preserved a single normal-exit predecessor (`cond_false_block`) for exit/result phi wiring;
+      - `lower_until`: switched condition lowering to `lower_condition_branch(...)` with wrapper routing (`true -> exit`, `false -> body`).
+  - New regression script:
+    - `regression_tests/stage1_while_short_circuit_alias_repro.sh`
+    - status:
+      - `/tmp/stage1_dbg_cond_fix1` -> `not reproduced` (prints `10`, no timeout/leak/crash).
+  - Fresh bootstrap timing (this run):
+    - stage1 (original compiler, release):
+      - `crystal build --release src/crystal_v2.cr -o /tmp/stage1_rel_cond_loop_fix1`
+      - **real 410.35s**
+    - stage2 (self-hosted, release, timeout-guarded 180s):
+      - `scripts/timeout_sample_lldb.sh -t 180 -s 8 -n 12 -o /tmp/stage2_rel_cond_loop_fix1_probe -- /tmp/stage1_rel_cond_loop_fix1 src/crystal_v2.cr --release -o /tmp/stage2_rel_cond_loop_fix1`
+      - **exit 0**, **real 143.64s**
+      - speedup stage2 vs stage1: **~2.86x** (delta ~`-266.71s`)
+  - Current blocker after fix:
+    - stage2 bootstrap now completes in watchdog window, but remaining runtime/compatibility regressions still require targeted repro + root-cause passes.
+
 - **2026-02-25 (latest): fixed root-cause branch-state leakage in `lower_if` for inlined yield locals; stage2 moved forward to regex init failure**
   - Root cause:
     - `lower_if` restored only `ctx.locals` per branch, but did not restore `@inline_caller_locals_stack`;

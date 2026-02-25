@@ -29154,36 +29154,72 @@ module Crystal::HIR
     end
 
     # Get variant type_id for a value being assigned to union
-    # Returns the index of the matching variant, or -1 if not found
+    # Returns the declared variant.type_id of the matching variant, or -1 if not found.
+    # IMPORTANT: variant array index is not guaranteed to match runtime type_id.
     private def get_union_variant_id(union_type : TypeRef, value_type : TypeRef) : Int32
       mir_union_ref = hir_to_mir_type_ref(union_type)
       if descriptor = @union_descriptors[mir_union_ref]?
         mir_value_ref = hir_to_mir_type_ref(value_type)
         # First: exact TypeRef match
-        descriptor.variants.each_with_index do |variant, idx|
+        descriptor.variants.each do |variant|
           if variant.type_ref == mir_value_ref
-            return idx
+            return variant.type_id
+          end
+        end
+        # Nil/Void are interchangeable null variants in different lowering paths.
+        # Always accept either representation when caller asks for Nil or Void.
+        if value_type == TypeRef::NIL || value_type == TypeRef::VOID
+          descriptor.variants.each do |variant|
+            if variant.type_ref == MIR::TypeRef::NIL || variant.type_ref == MIR::TypeRef::VOID ||
+               variant.full_name == "Nil" || variant.full_name == "Void"
+              return variant.type_id
+            end
           end
         end
         # Second: name-based match (handles duplicate TypeRefs for same logical type,
         # e.g. Proc registered at class declaration vs Proc at method lowering)
         value_name = get_type_name_from_ref(value_type)
         unless value_name.empty?
-          descriptor.variants.each_with_index do |variant, idx|
+          descriptor.variants.each do |variant|
             if variant.full_name == value_name
-              return idx
+              return variant.type_id
             end
           end
           # Third: strip generic args and compare base names
           value_base = value_name.includes?('(') ? value_name[0, value_name.index('(').not_nil!] : value_name
           unless value_name.includes?(" | ") || value_name.includes?("___")
-            descriptor.variants.each_with_index do |variant, idx|
+            descriptor.variants.each do |variant|
               vname = variant.full_name
               next if vname == "Nil" || vname == "Void"
               vbase = vname.includes?('(') ? vname[0, vname.index('(').not_nil!] : vname
               if vbase == value_base && !vbase.empty?
-                return idx
+                return variant.type_id
               end
+            end
+          end
+        end
+      end
+
+      # Fallback when @union_descriptors is missing this union but type descriptor
+      # still carries textual union members. In this mode we must use positional ids.
+      if type_desc = @module.get_type_descriptor(union_type)
+        if type_desc.kind == TypeKind::Union
+          variant_names = split_union_type_name(type_desc.name)
+          value_name = get_type_name_from_ref(value_type)
+          nil_like = value_type == TypeRef::NIL || value_type == TypeRef::VOID ||
+                     value_name == "Nil" || value_name == "Void"
+
+          variant_names.each_with_index do |variant_name, idx|
+            if nil_like
+              return idx if variant_name == "Nil" || variant_name == "Void"
+              next
+            end
+
+            return idx if variant_name == value_name
+            if value_name.includes?('(')
+              value_base = value_name[0, value_name.index('(').not_nil!]
+              variant_base = variant_name.includes?('(') ? variant_name[0, variant_name.index('(').not_nil!] : variant_name
+              return idx if variant_base == value_base
             end
           end
         end
@@ -29207,12 +29243,12 @@ module Crystal::HIR
       return nil unless descriptor
 
       candidates = [] of Int32
-      descriptor.variants.each_with_index do |variant, idx|
+      descriptor.variants.each do |variant|
         hir_variant = mir_to_hir_type_ref(variant.type_ref)
         next if hir_variant == TypeRef::NIL || hir_variant == TypeRef::VOID
 
         if pointer_like_type?(hir_variant)
-          candidates << idx
+          candidates << variant.type_id
         end
       end
 
@@ -37814,11 +37850,20 @@ module Crystal::HIR
         end
       end
 
-      cond_id = lower_expr(ctx, node.condition)
-      # After lowering the condition, current_block may differ from cond_block
-      # (e.g., method calls create new blocks). The Branch is in THIS block.
-      cond_branch_block = ctx.current_block
-      ctx.terminate(Branch.new(cond_id, body_block, exit_block))
+      # Lower loop condition in condition-context (not value-context):
+      # this preserves correct short-circuit semantics for &&/|| and avoids
+      # value-semantics unions leaking into branch conditions.
+      cond_true_block = ctx.create_block
+      cond_false_block = ctx.create_block
+      lower_condition_branch(ctx, node.condition, cond_true_block, cond_false_block)
+
+      # Keep a single normal-exit predecessor for exit/result phis.
+      ctx.current_block = cond_true_block
+      ctx.terminate(Jump.new(body_block))
+
+      ctx.current_block = cond_false_block
+      ctx.terminate(Jump.new(exit_block))
+      cond_branch_block = cond_false_block
 
       # Body block
       ctx.current_block = body_block
@@ -38459,11 +38504,17 @@ module Crystal::HIR
         end
       end
 
-      cond_id = lower_expr(ctx, node.condition)
-      # Negate condition (until = while NOT condition)
-      neg_cond = UnaryOperation.new(ctx.next_id, TypeRef::BOOL, UnaryOp::Not, cond_id)
-      ctx.emit(neg_cond)
-      ctx.terminate(Branch.new(neg_cond.id, body_block, exit_block))
+      # Lower until condition in condition-context and route via wrappers:
+      # condition true => exit, condition false => body.
+      cond_true_block = ctx.create_block
+      cond_false_block = ctx.create_block
+      lower_condition_branch(ctx, node.condition, cond_true_block, cond_false_block)
+
+      ctx.current_block = cond_true_block
+      ctx.terminate(Jump.new(exit_block))
+
+      ctx.current_block = cond_false_block
+      ctx.terminate(Jump.new(body_block))
 
       # Body block
       ctx.current_block = body_block
@@ -43257,7 +43308,7 @@ module Crystal::HIR
       end
       call_arena = @arena
       if @current_class && @current_method
-        scope = "#{@current_class}##{@current_method}"
+        scope = "#{@current_class}##{@current_method}|#{@current_method_is_class ? 1 : 0}|#{type_param_map_debug_string}"
         if scope != @callsite_method_cache_scope
           @callsite_method_cache.clear
           @callsite_method_cache_scope = scope
@@ -45595,10 +45646,23 @@ module Crystal::HIR
       # NOTE: String#match(Regex) and Regex#match(String) are handled at the LLVM level
       # by fixing match_impl to call PCRE2 directly. See emit_regex_match_impl_override.
 
-      # Regex#matches?(String) → runtime regex match (bool)
-      if method_name == "matches?" && receiver_id && args.size == 1 && block_expr.nil?
+      # String#matches?(Regex) and Regex#matches?(String) → runtime regex match (bool)
+      if method_name == "matches?" && receiver_id && call_args.size == 1 && !args.empty? && block_expr.nil?
         recv_type = ctx.type_of(receiver_id)
+        arg0_type = ctx.type_of(args[0])
         recv_name = (recv_type == TypeRef::STRING || recv_type == TypeRef::POINTER || recv_type == TypeRef::VOID) ? "" : get_type_name_from_ref(recv_type)
+        arg0_name = (arg0_type == TypeRef::STRING || arg0_type == TypeRef::POINTER || arg0_type == TypeRef::VOID) ? "" : get_type_name_from_ref(arg0_type)
+
+        # String#matches?(Regex)
+        if (recv_type == TypeRef::STRING || recv_type == TypeRef::POINTER) &&
+           (arg0_name == "Regex" || arg0_name.includes?("Regex"))
+          ext_call = ExternCall.new(ctx.next_id, TypeRef::BOOL, "__crystal_v2_regex_match_q", [args[0], receiver_id])
+          ctx.emit(ext_call)
+          ctx.register_type(ext_call.id, TypeRef::BOOL)
+          return ext_call.id
+        end
+
+        # Regex#matches?(String)
         if recv_name == "Regex" || recv_name.includes?("Regex")
           ext_call = ExternCall.new(ctx.next_id, TypeRef::BOOL, "__crystal_v2_regex_match_q", [receiver_id, args[0]])
           ctx.emit(ext_call)
@@ -62546,6 +62610,7 @@ module Crystal::HIR
     # Checks if the union's type tag indicates Nil variant
     private def lower_nil_check_intrinsic(ctx : LoweringContext, value_id : ValueId, value_type : TypeRef) : ValueId
       nil_variant_id = get_union_variant_id(value_type, TypeRef::NIL)
+      nil_variant_id = get_union_variant_id(value_type, TypeRef::VOID) if nil_variant_id < 0
       if nil_variant_id < 0
         # Fallback: if we can't resolve a union variant, conservatively return false.
         # This should be rare (union descriptors are registered during AST->HIR conversion).
@@ -62572,13 +62637,14 @@ module Crystal::HIR
 
       mir_union_ref = hir_to_mir_type_ref(value_type)
       if descriptor = @union_descriptors[mir_union_ref]?
-        descriptor.variants.each_with_index do |variant, idx|
-          next if variant.type_ref == MIR::TypeRef::NIL
+        descriptor.variants.each do |variant|
+          next if variant.type_ref == MIR::TypeRef::NIL || variant.type_ref == MIR::TypeRef::VOID ||
+                  variant.full_name == "Nil" || variant.full_name == "Void"
           if non_nil_variant >= 0
             extra_non_nil = true
             break
           end
-          non_nil_variant = idx
+          non_nil_variant = variant.type_id
           non_nil_type_name = variant.full_name
           # Use full_name for semantic type (preserves enum type like Signal instead of storage Int32)
           non_nil_type = type_ref_for_name(variant.full_name)
@@ -62616,13 +62682,14 @@ module Crystal::HIR
 
       mir_union_ref = hir_to_mir_type_ref(value_type)
       if descriptor = @union_descriptors[mir_union_ref]?
-        descriptor.variants.each_with_index do |variant, idx|
-          next if variant.type_ref == MIR::TypeRef::NIL
+        descriptor.variants.each do |variant|
+          next if variant.type_ref == MIR::TypeRef::NIL || variant.type_ref == MIR::TypeRef::VOID ||
+                  variant.full_name == "Nil" || variant.full_name == "Void"
           if non_nil_variant >= 0
             extra_non_nil = true
             break
           end
-          non_nil_variant = idx
+          non_nil_variant = variant.type_id
           non_nil_type_name = variant.full_name
           # Use full_name for semantic type (preserves enum type like Signal instead of storage Int32)
           non_nil_type = type_ref_for_name(variant.full_name)
