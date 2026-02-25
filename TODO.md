@@ -1,6 +1,36 @@
 # Crystal v2 — Active Work (codegen branch)
 
 ## Known Bugs (codegen)
+- **2026-02-25 (latest): fixed root-cause return-type pollution from macro-generic tails (`IdentifierNode(F)`)**
+  - Root cause:
+    - `get_function_return_type` eagerly used `infer_return_type_from_body_without_callsite` for unresolved signatures.
+    - For Dragonbox generic methods with macro tail, body inference hit `IdentifierNode(F)` and incorrectly inferred `Float32/Float64`, polluting `@function_types`.
+    - Polluted signatures then mismatched lowered IR signatures (`ptr` producer vs `double` consumer), causing `opt` type errors.
+  - Fixes applied in `src/compiler/hir/ast_to_hir.cr`:
+    - return-type registration paths now consistently resolve `member_arena` first and reuse it for:
+      - `infer_concrete_return_type_from_body(...)`,
+      - `def_contains_yield?(...)`,
+      - `set_function_def_arena(...)`.
+    - disabled global callsite return-repair mutation block in `lower_call` (it rewrote global signatures from local context).
+    - restricted generic callsite return inference to defs with explicit return annotation.
+    - `infer_type_from_expr_inner` now treats bare type-parameter tokens (`T/F/...`) as non-runtime values in `PathNode`/`IdentifierNode` inference.
+    - guarded `set_function_type_entry` from downgrading known concrete return type to `Void`.
+  - New/updated evidence:
+    - `DEBUG_INFER_BODY_NAME=compute_round_up_for_shorter_interval_case` no longer produces `IdentifierNode(F) inferred=Float32/Float64` (now `inferred=nil`).
+    - `regression_tests/union_vdispatch_int_return.cr` now compiles and runs with debug stage1 (exit 0).
+    - quick regressions:
+      - `regression_tests/stage2_env_optional_repro.sh /tmp/stage1_dbg_rootcause_arena8` -> `not reproduced`
+      - `regression_tests/stage1_fetch_default_block_repro.sh /tmp/stage1_dbg_rootcause_arena8` -> `not reproduced`
+  - Fresh bootstrap timing:
+    - stage1 (original compiler, release): `crystal build --release src/crystal_v2.cr -o /tmp/stage1_rel_rootcause_arena8`
+      - **real 418.46s**
+    - stage2 (self-hosted, release, timeout-guarded 180s):  
+      `scripts/timeout_sample_lldb.sh -t 180 -s 8 -n 12 -o /tmp/stage2_rel_rootcause_arena8_probe -- /tmp/stage1_rel_rootcause_arena8 --release src/crystal_v2.cr -o /tmp/stage2_rel_rootcause_arena8`
+      - **real 103.09s**, exit 0
+      - speedup stage2 vs stage1: **~4.06x** (delta ~-315.37s)
+  - Known remaining compatibility issue:
+    - `-o` is still ignored on this stage2 path (binary written to `src/crystal_v2`).
+
 - **2026-02-25 (latest): parser swallowed class members after interpolation text containing `"{%"`**
   - Root cause localized in `src/compiler/frontend/lexer.cr`:
     - `lex_string` interpolation tracking (`brace_depth`) counted `{`/`}` inside nested quoted literals while scanning `#{ ... }`.

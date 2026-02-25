@@ -1553,7 +1553,31 @@ module Crystal::HIR
 
     # Centralized write path so type-key indexes can process only newly-added keys.
     private def set_function_type_entry(name : String, return_type : TypeRef) : Nil
-      is_new = !@function_types.has_key?(name)
+      old_type = @function_types[name]?
+      # Do not downgrade a known concrete return type to VOID.
+      # VOID writes are often provisional/failed inference states; allowing
+      # them to overwrite concrete types causes unstable codegen (different
+      # callsites can observe different signatures for the same function).
+      if old_type && old_type != TypeRef::VOID && return_type == TypeRef::VOID
+        if filter = env_get("DEBUG_SET_FTYPE")
+          if name.includes?(filter)
+            old_name = get_type_name_from_ref(old_type)
+            STDERR.puts "[SET_FTYPE_SKIP_VOID] name=#{name} old=#{old_name} current=#{@current_class || ""}##{@current_method || ""}"
+          end
+        end
+        return
+      end
+      is_new = old_type.nil?
+      if filter = env_get("DEBUG_SET_FTYPE")
+        if name.includes?(filter)
+          rt_name = get_type_name_from_ref(return_type)
+          STDERR.puts "[SET_FTYPE] name=#{name} type=#{rt_name} current=#{@current_class || ""}##{@current_method || ""}"
+          if env_get("DEBUG_SET_FTYPE_BT")
+            bt = caller.join("\n")
+            raise "DEBUG_SET_FTYPE_BT name=#{name} type=#{rt_name}\n#{bt}"
+          end
+        end
+      end
       @function_types[name] = return_type
       @pending_function_type_keys << name if is_new
     end
@@ -6294,27 +6318,15 @@ module Crystal::HIR
       func_def : CrystalV2::Compiler::Frontend::DefNode,
       fallback : CrystalV2::Compiler::Frontend::ArenaLike,
     ) : CrystalV2::Compiler::Frontend::ArenaLike
-      cache_key = func_def.object_id
-      if cached = @arena_for_def_cache[cache_key]?
-        return cached
-      end
-      result = resolve_arena_for_def_uncached(func_def, fallback)
-      @arena_for_def_cache[cache_key] = result
-      result
+      resolve_arena_for_def_uncached(func_def, fallback)
     end
 
     private def body_max_index_for_def(func_def : CrystalV2::Compiler::Frontend::DefNode) : Int32
-      key = func_def.object_id
-      if cached = @def_body_max_index_cache[key]?
-        return cached
+      if body = func_def.body
+        body.empty? ? -1 : body.max_of(&.index)
+      else
+        -1
       end
-      max_index = if body = func_def.body
-                    body.empty? ? -1 : body.max_of(&.index)
-                  else
-                    -1
-                  end
-      @def_body_max_index_cache[key] = max_index
-      max_index
     end
 
     @function_def_arenas_last_refresh_size : Int32 = 0
@@ -7584,6 +7596,11 @@ module Crystal::HIR
 
                     method_name = String.new(member.name)
                     base_name = join_owner_method_name(class_name, '#', method_name)
+                    member_arena = if arena_fits_def?(@arena, member)
+                                     @arena
+                                   else
+                                     resolve_arena_for_def(member, @arena)
+                                   end
 
                     # Early skip: if the class already defines this method (base_name), skip
                     # the expensive type resolution below. The class's own def takes priority.
@@ -7598,15 +7615,15 @@ module Crystal::HIR
                     defer = @defer_body_return_inference
                     return_type = if rt = member.return_type
                                     rt_name = String.new(rt)
-                                    inferred = !defer && module_like_type_name?(rt_name) ? infer_concrete_return_type_from_body(member, class_name) : nil
+                                    inferred = !defer && module_like_type_name?(rt_name) ? infer_concrete_return_type_from_body(member, class_name, member_arena) : nil
                                     inferred || type_ref_for_name(rt_name)
                                   elsif method_name.ends_with?('?')
                                     inferred = defer ? nil : infer_unannotated_query_return_type(method_name, type_ref_for_name(class_name))
-                                    inferred = infer_concrete_return_type_from_body(member, class_name) if inferred.nil? && !defer
+                                    inferred = infer_concrete_return_type_from_body(member, class_name, member_arena) if inferred.nil? && !defer
                                     inferred || TypeRef::BOOL
                                   else
                                     inferred = defer ? nil : infer_getter_return_type(member, ivars)
-                                    inferred = infer_concrete_return_type_from_body(member, class_name) if inferred.nil? && !defer
+                                    inferred = infer_concrete_return_type_from_body(member, class_name, member_arena) if inferred.nil? && !defer
                                     inferred = infer_unannotated_search_return_type(method_name, type_ref_for_name(class_name)) if inferred.nil? && !defer
                                     inferred || TypeRef::VOID
                                   end
@@ -7637,7 +7654,7 @@ module Crystal::HIR
                       end
                     end
                     if !has_block
-                      has_block = def_contains_yield?(member, @arena)
+                      has_block = def_contains_yield?(member, member_arena)
                     end
 
                     if method_name == "initialize"
@@ -7688,18 +7705,18 @@ module Crystal::HIR
                     end
                     register_function_type(full_name, return_type)
                     set_function_def_entry(full_name, member)
-                    set_function_def_arena(full_name, @arena)
+                    set_function_def_arena(full_name, member_arena)
                     if env_get("DEBUG_ARENA_WRITE") && (class_name.includes?("Slice") && method_name == "hash")
-                      arena_path = source_path_for(@arena) || "(unknown)"
-                      STDERR.puts "[ARENA_WRITE_MOD_INST] full=#{full_name} arena=#{arena_path}:#{@arena.size} module=#{module_full_name}"
+                      arena_path = source_path_for(member_arena) || "(unknown)"
+                      STDERR.puts "[ARENA_WRITE_MOD_INST] full=#{full_name} arena=#{arena_path}:#{member_arena.size} module=#{module_full_name}"
                     end
                     if should_register_base_name?(full_name, base_name, member, has_block)
                       set_function_def_entry(base_name, member)
-                      set_function_def_arena(base_name, @arena)
+                      set_function_def_arena(base_name, member_arena)
                     end
 
                     if body = member.body
-                      contains_yield = def_contains_yield?(member, @arena)
+                      contains_yield = def_contains_yield?(member, member_arena)
                       if !contains_yield && @yield_functions.includes?(full_name)
                         @yield_functions.delete(full_name)
                         debug_hook("yield.unregister", full_name)
@@ -7711,10 +7728,10 @@ module Crystal::HIR
                         debug_hook("yield.register", full_name)
                         if !has_block && !@function_defs.has_key?(base_name)
                           set_function_def_entry(base_name, member)
-                          set_function_def_arena(base_name, @arena)
+                          set_function_def_arena(base_name, member_arena)
                         end
                         set_function_def_entry(full_name, member)
-                        set_function_def_arena(full_name, @arena)
+                        set_function_def_arena(full_name, member_arena)
                       end
                     end
                   when CrystalV2::Compiler::Frontend::GetterNode
@@ -7850,6 +7867,11 @@ module Crystal::HIR
 
                     method_name = String.new(member.name)
                     base_name = "#{class_name}.#{method_name}"
+                    member_arena = if arena_fits_def?(@arena, member)
+                                     @arena
+                                   else
+                                     resolve_arena_for_def(member, @arena)
+                                   end
                     if env_get("DEBUG_EXTEND_REGISTER") && class_name.includes?("ImplInfo")
                       STDERR.puts "[EXTEND_REGISTER] class=#{class_name} method=#{method_name} base=#{base_name}"
                     end
@@ -7857,14 +7879,14 @@ module Crystal::HIR
                     type_literal_name = infer_type_literal_return_name_from_body(member, class_name)
                     return_type = if rt = member.return_type
                                     rt_name = String.new(rt)
-                                    inferred = module_like_type_name?(rt_name) ? infer_concrete_return_type_from_body(member, class_name) : nil
+                                    inferred = module_like_type_name?(rt_name) ? infer_concrete_return_type_from_body(member, class_name, member_arena) : nil
                                     inferred || type_ref_for_name(rt_name)
                                   elsif method_name.ends_with?('?')
                                     inferred = infer_unannotated_query_return_type(method_name, type_ref_for_name(class_name), count_non_block_params(member))
-                                    inferred ||= infer_concrete_return_type_from_body(member, class_name)
+                                    inferred ||= infer_concrete_return_type_from_body(member, class_name, member_arena)
                                     inferred || TypeRef::BOOL
                                   else
-                                    inferred = infer_concrete_return_type_from_body(member, class_name)
+                                    inferred = infer_concrete_return_type_from_body(member, class_name, member_arena)
                                     inferred ||= infer_unannotated_search_return_type(method_name, type_ref_for_name(class_name))
                                     inferred || TypeRef::VOID
                                   end
@@ -7910,7 +7932,7 @@ module Crystal::HIR
                     end
                     register_function_type(full_name, return_type)
                     set_function_def_entry(full_name, member)
-                    set_function_def_arena(full_name, @arena)
+                    set_function_def_arena(full_name, member_arena)
                   end
                 end
               end
@@ -8454,6 +8476,7 @@ module Crystal::HIR
     private def infer_concrete_return_type_from_body(
       node : CrystalV2::Compiler::Frontend::DefNode,
       self_type_name : String? = nil,
+      preferred_arena : CrystalV2::Compiler::Frontend::ArenaLike? = nil,
     ) : TypeRef?
       # Skip expensive body inference when we're inside ensure_monomorphized_type.
       # Return types will be inferred lazily when the method is actually called.
@@ -8470,7 +8493,7 @@ module Crystal::HIR
       old_method = @current_method
       old_class = @current_class
       old_def = @current_def_node
-      resolved_arena = resolve_arena_for_def(node, @arena)
+      resolved_arena = preferred_arena || resolve_arena_for_def(node, @arena)
       if self_type_name
         sep = if recv = node.receiver
                 String.new(recv) == "self" ? "." : "#"
@@ -8575,23 +8598,37 @@ module Crystal::HIR
           inferred_name = get_type_name_from_ref(inferred)
           expr_node = node_for_expr(expr_id)
           expr_kind = expr_node ? expr_node.class.name.split("::").last : "nil"
+          expr_detail = ""
+          case expr_node
+          when CrystalV2::Compiler::Frontend::IdentifierNode
+            expr_detail = "(#{String.new(expr_node.name)})"
+          when CrystalV2::Compiler::Frontend::MemberAccessNode
+            expr_detail = "(#{String.new(expr_node.member)})"
+          end
           snippet = nil
           if source = @sources_by_arena[resolved_arena]?
             snippet = slice_source_for_expr_in_arena(expr_id, resolved_arena, source)
           end
           snippet_label = snippet ? " snippet=#{snippet}" : ""
-          STDERR.puts "[INFER_BODY] method=#{method_name} expr=#{expr_kind} inferred=#{inferred_name}#{snippet_label}"
+          STDERR.puts "[INFER_BODY] method=#{method_name} expr=#{expr_kind}#{expr_detail} inferred=#{inferred_name}#{snippet_label}"
         end
         return inferred
       elsif debug_infer
         expr_node = node_for_expr(expr_id)
         expr_kind = expr_node ? expr_node.class.name.split("::").last : "nil"
+        expr_detail = ""
+        case expr_node
+        when CrystalV2::Compiler::Frontend::IdentifierNode
+          expr_detail = "(#{String.new(expr_node.name)})"
+        when CrystalV2::Compiler::Frontend::MemberAccessNode
+          expr_detail = "(#{String.new(expr_node.member)})"
+        end
         snippet = nil
         if source = @sources_by_arena[resolved_arena]?
           snippet = slice_source_for_expr_in_arena(expr_id, resolved_arena, source)
         end
         snippet_label = snippet ? " snippet=#{snippet}" : ""
-        STDERR.puts "[INFER_BODY] method=#{method_name} expr=#{expr_kind} inferred=nil#{snippet_label}"
+        STDERR.puts "[INFER_BODY] method=#{method_name} expr=#{expr_kind}#{expr_detail} inferred=nil#{snippet_label}"
       end
 
       expr_node = node_for_expr(expr_id)
@@ -9041,9 +9078,17 @@ module Crystal::HIR
         raw_path = collect_path_string(expr_node)
         absolute = raw_path.starts_with?("::")
         full_name = absolute ? raw_path[2..] : resolve_path_string_in_context(raw_path)
+        if type_param_like?(full_name) && @type_param_map.has_key?(full_name)
+          return nil
+        end
         if mapped = @type_param_map[full_name]?
           if literal = literal_for_type_param_value(mapped)
-            return literal[0]
+            # Bare type-parameter names (T, F, etc.) are type-level tokens in macro
+            # conditions/expansions, not runtime values. Treating them as value types
+            # pollutes return-type inference for methods whose body tail is a macro node.
+            unless type_param_like?(full_name)
+              return literal[0]
+            end
           end
         end
         if resolved = resolve_constant_name_in_context(full_name)
@@ -9300,6 +9345,9 @@ module Crystal::HIR
           ref_name = local_ref ? get_type_name_from_ref(local_ref) : "nil"
           STDERR.puts "[INT_CLASS] scope=#{@current_class || "nil"}##{@current_method || "nil"} locals_ref=#{ref_name} locals_name=#{local_name || "nil"}"
         end
+        if type_param_like?(name) && @type_param_map.has_key?(name)
+          return nil
+        end
         if name.starts_with?('@')
           if name.starts_with?("@@")
             cvar_name = name.lstrip('@')
@@ -9314,7 +9362,9 @@ module Crystal::HIR
         end
         if mapped = @type_param_map[name]?
           if literal = literal_for_type_param_value(mapped)
-            return literal[0]
+            unless type_param_like?(name)
+              return literal[0]
+            end
           end
         end
         if self_type_name && String.new(expr_node.name) == "self"
@@ -10945,18 +10995,23 @@ module Crystal::HIR
                                 end
               if is_class_method
                 base_name = "#{module_name}.#{method_name}"
+                member_arena = if arena_fits_def?(@arena, member)
+                                 @arena
+                               else
+                                 resolve_arena_for_def(member, @arena)
+                               end
                 return_type = nil.as(TypeRef?)
                 param_types = [] of TypeRef
                 has_block = false
                 with_namespace_override(module_name) do
                   return_type = if rt = member.return_type
                                   rt_name = String.new(rt)
-                                  inferred = module_like_type_name?(rt_name) ? infer_concrete_return_type_from_body(member) : nil
+                                  inferred = module_like_type_name?(rt_name) ? infer_concrete_return_type_from_body(member, nil, member_arena) : nil
                                   inferred || type_ref_for_name(rt_name)
                                 elsif method_name.ends_with?('?')
                                   TypeRef::BOOL
                                 else
-                                  infer_concrete_return_type_from_body(member) || TypeRef::VOID
+                                  infer_concrete_return_type_from_body(member, nil, member_arena) || TypeRef::VOID
                                 end
                   if params = member.params
                     params.each do |param|
@@ -10985,27 +11040,27 @@ module Crystal::HIR
                 end
                 return_type ||= TypeRef::VOID
                 if !has_block
-                  has_block = def_contains_yield?(member, @arena)
+                  has_block = def_contains_yield?(member, member_arena)
                 end
                 full_name = function_full_name_for_def(base_name, param_types, member.params, has_block)
                 register_function_type(full_name, return_type)
                 set_function_def_entry(full_name, member)
-                set_function_def_arena(full_name, @arena)
+                set_function_def_arena(full_name, member_arena)
                 if should_register_base_name?(full_name, base_name, member, has_block)
                   set_function_def_entry(base_name, member)
-                  set_function_def_arena(base_name, @arena)
+                  set_function_def_arena(base_name, member_arena)
                 end
 
                 # Track yield-functions for inline expansion (module methods).
-                if def_contains_yield?(member, @arena)
+                if def_contains_yield?(member, member_arena)
                   @yield_functions.add(full_name)
                   debug_hook("yield.register", full_name)
                   if !has_block && !@function_defs.has_key?(base_name)
                     set_function_def_entry(base_name, member)
-                    set_function_def_arena(base_name, @arena)
+                    set_function_def_arena(base_name, member_arena)
                   end
                   set_function_def_entry(full_name, member)
-                  set_function_def_arena(full_name, @arena)
+                  set_function_def_arena(full_name, member_arena)
                 end
               else
                 register_type_method_from_def(member, module_name)
@@ -11704,18 +11759,23 @@ module Crystal::HIR
           return
         end
         base_name = "#{module_name}.#{method_name}"
+        member_arena = if arena_fits_def?(@arena, member)
+                         @arena
+                       else
+                         resolve_arena_for_def(member, @arena)
+                       end
         return_type = nil.as(TypeRef?)
         param_types = [] of TypeRef
         has_block = false
         with_namespace_override(module_name) do
           return_type = if rt = member.return_type
                           rt_name = qualify_unqualified_type_in_namespace(String.new(rt), module_name)
-                          inferred = module_like_type_name?(rt_name) ? infer_concrete_return_type_from_body(member) : nil
+                          inferred = module_like_type_name?(rt_name) ? infer_concrete_return_type_from_body(member, nil, member_arena) : nil
                           inferred || type_ref_for_name(rt_name)
                         elsif method_name.ends_with?('?')
                           TypeRef::BOOL
                         else
-                          infer_concrete_return_type_from_body(member) || TypeRef::VOID
+                          infer_concrete_return_type_from_body(member, nil, member_arena) || TypeRef::VOID
                         end
           if params = member.params
             params.each do |param|
@@ -11738,7 +11798,7 @@ module Crystal::HIR
         return_type ||= TypeRef::VOID
         contains_yield = false
         if !has_block
-          contains_yield = def_contains_yield?(member, @arena)
+          contains_yield = def_contains_yield?(member, member_arena)
           has_block = contains_yield
         end
         if env_get("DEBUG_TRACE_REGISTER") && module_name == "Crystal" && method_name == "trace"
@@ -11770,29 +11830,29 @@ module Crystal::HIR
         end
         register_function_type(full_name, return_type)
         set_function_def_entry(full_name, member)
-        set_function_def_arena(full_name, @arena)
+        set_function_def_arena(full_name, member_arena)
         if env_get("DEBUG_ARENA_WRITE") && (module_name.includes?("Slice") || full_name.includes?("Slice")) && method_name == "hash"
-          arena_path = source_path_for(@arena) || "(unknown)"
-          STDERR.puts "[ARENA_WRITE_MOD_METHOD] full=#{full_name} base=#{base_name} module=#{module_name} arena=#{arena_path}:#{@arena.size}"
+          arena_path = source_path_for(member_arena) || "(unknown)"
+          STDERR.puts "[ARENA_WRITE_MOD_METHOD] full=#{full_name} base=#{base_name} module=#{module_name} arena=#{arena_path}:#{member_arena.size}"
         end
         if should_register_base_name?(full_name, base_name, member, has_block)
           set_function_def_entry(base_name, member)
-          set_function_def_arena(base_name, @arena)
+          set_function_def_arena(base_name, member_arena)
         elsif !has_block
-          prefer_non_yield_base_name(base_name, member, @arena)
-          prefer_lower_arity_base_name(base_name, member, @arena)
+          prefer_non_yield_base_name(base_name, member, member_arena)
+          prefer_lower_arity_base_name(base_name, member, member_arena)
         end
 
         # Track yield-functions for inline expansion
-        if def_contains_yield?(member, @arena)
+        if def_contains_yield?(member, member_arena)
           @yield_functions.add(full_name)
           debug_hook("yield.register", full_name)
           if !has_block && !@function_defs.has_key?(base_name)
             set_function_def_entry(base_name, member)
-            set_function_def_arena(base_name, @arena)
+            set_function_def_arena(base_name, member_arena)
           end
           set_function_def_entry(full_name, member)
-          set_function_def_arena(full_name, @arena)
+          set_function_def_arena(full_name, member_arena)
         end
       ensure
         @current_class = old_class
@@ -12202,9 +12262,6 @@ module Crystal::HIR
 
     private def register_type_method_from_def(member : CrystalV2::Compiler::Frontend::DefNode, type_name : String)
       method_name = String.new(member.name)
-      unless @arena_for_def_cache.has_key?(member.object_id)
-        @arena_for_def_cache[member.object_id] = @arena
-      end
       is_class_method = if recv = member.receiver
                           String.new(recv) == "self"
                         else
@@ -12215,6 +12272,28 @@ module Crystal::HIR
                   else
                     "#{type_name}##{method_name}"
                   end
+      member_arena = if arena_fits_def?(@arena, member)
+                       @arena
+                     else
+                       resolve_arena_for_def(member, @arena)
+                     end
+      if filter = env_get("DEBUG_SET_FTYPE")
+        if base_name.includes?(filter)
+          tail_desc = "none"
+          if body = member.body
+            if tail = body.last?
+              tail_node = member_arena[tail]
+              tail_desc = tail_node.class.name.split("::").last
+              if tail_node.is_a?(CrystalV2::Compiler::Frontend::BinaryNode)
+                tail_desc = "#{tail_desc}(#{tail_node.operator_string})"
+              elsif tail_node.is_a?(CrystalV2::Compiler::Frontend::MemberAccessNode)
+                tail_desc = "#{tail_desc}(#{String.new(tail_node.member)})"
+              end
+            end
+          end
+          STDERR.puts "[SET_FTYPE_PRE] base=#{base_name} tail=#{tail_desc} arena_size=#{member_arena.size}"
+        end
+      end
       enum_return_name : String? = nil
       if rt = member.return_type
         resolved_return = resolve_type_name_in_context(String.new(rt))
@@ -12225,11 +12304,11 @@ module Crystal::HIR
       return_type = if rt = member.return_type
                       annotation_type_ref(String.new(rt), type_name)
                     elsif method_name.ends_with?('?')
-                      inferred = infer_concrete_return_type_from_body(member, type_name)
+                      inferred = infer_concrete_return_type_from_body(member, type_name, member_arena)
                       inferred ||= infer_unannotated_query_return_type(method_name, type_ref_for_name(type_name))
                       inferred || TypeRef::BOOL
                     else
-                      infer_concrete_return_type_from_body(member, type_name) || TypeRef::VOID
+                      infer_concrete_return_type_from_body(member, type_name, member_arena) || TypeRef::VOID
                     end
       if is_class_method && return_type == TypeRef::VOID
         if enum_name = resolve_enum_name(type_name)
@@ -12256,7 +12335,7 @@ module Crystal::HIR
         end
       end
       if !has_block
-        has_block = def_contains_yield?(member, @arena)
+        has_block = def_contains_yield?(member, member_arena)
       end
       full_name = function_full_name_for_def(base_name, param_types, member.params, has_block)
       if filter = env_get("DEBUG_METHOD_REGISTER_FILTER")
@@ -12291,7 +12370,7 @@ module Crystal::HIR
         if prev_arena = @function_def_arenas[full_name]?
           set_function_def_arena(previous_full, prev_arena)
         else
-          set_function_def_arena(previous_full, @arena)
+          set_function_def_arena(previous_full, member_arena)
         end
         if prev_enum = @function_enum_return_names[full_name]? || @function_enum_return_names[base_name]?
           @function_enum_return_names[previous_full] = prev_enum
@@ -12300,10 +12379,10 @@ module Crystal::HIR
       end
       register_function_type(full_name, return_type)
       set_function_def_entry(full_name, member)
-      set_function_def_arena(full_name, @arena)
+      set_function_def_arena(full_name, member_arena)
       if env_get("DEBUG_ARENA_WRITE_TYPE") && (type_name.includes?("Slice") || full_name.includes?("Slice")) && method_name == "hash"
-        arena_path = source_path_for(@arena) || "(unknown)"
-        STDERR.puts "[ARENA_WRITE_TYPE] full=#{full_name} base=#{base_name} type=#{type_name} arena=#{arena_path}:#{@arena.size}"
+        arena_path = source_path_for(member_arena) || "(unknown)"
+        STDERR.puts "[ARENA_WRITE_TYPE] full=#{full_name} base=#{base_name} type=#{type_name} arena=#{arena_path}:#{member_arena.size}"
       end
       # Store type param map for lazy lowering of generic class methods.
       # When a monomorphized class registers its methods, the @type_param_map
@@ -12317,31 +12396,31 @@ module Crystal::HIR
       if alias_full_name
         register_function_type(alias_full_name, return_type) unless @function_types.has_key?(alias_full_name)
         set_function_def_entry(alias_full_name, member)
-        set_function_def_arena(alias_full_name, @arena)
+        set_function_def_arena(alias_full_name, member_arena)
         unless @type_param_map.empty?
           store_function_type_param_map(alias_full_name, strip_type_suffix(alias_full_name), @type_param_map)
         end
       end
       if should_register_base_name?(full_name, base_name, member, has_block)
         set_function_def_entry(base_name, member)
-        set_function_def_arena(base_name, @arena)
+        set_function_def_arena(base_name, member_arena)
       elsif !has_block
-        prefer_non_yield_base_name(base_name, member, @arena)
-        prefer_lower_arity_base_name(base_name, member, @arena)
+        prefer_non_yield_base_name(base_name, member, member_arena)
+        prefer_lower_arity_base_name(base_name, member, member_arena)
       end
 
       if body = member.body
-        if def_contains_yield?(member, @arena)
+        if def_contains_yield?(member, member_arena)
           @yield_functions.add(full_name)
           debug_hook("yield.register", full_name)
           # Don't let yield-based block overloads claim the bare base name.
           # This avoids routing no-block calls to block-only defs.
           if !has_block && !@function_defs.has_key?(base_name)
             set_function_def_entry(base_name, member)
-            set_function_def_arena(base_name, @arena)
+            set_function_def_arena(base_name, member_arena)
           end
           set_function_def_entry(full_name, member)
-          set_function_def_arena(full_name, @arena)
+          set_function_def_arena(full_name, member_arena)
         end
       end
     end
@@ -13216,6 +13295,11 @@ module Crystal::HIR
                 STDERR.puts "[DEBUG_MODULE_LOOKUP] register #{full_name}.#{method_name}"
               end
               base_name = "#{full_name}.#{method_name}"
+              member_arena = if arena_fits_def?(@arena, member)
+                               @arena
+                             else
+                               resolve_arena_for_def(member, @arena)
+                             end
               return_type = nil.as(TypeRef?)
               param_types = [] of TypeRef
               has_block = false
@@ -13224,12 +13308,12 @@ module Crystal::HIR
               with_namespace_override(full_name) do
                 return_type = if rt = member.return_type
                                 rt_name = qualify_unqualified_type_in_namespace(String.new(rt), full_name)
-                                inferred = module_like_type_name?(rt_name) ? infer_concrete_return_type_from_body(member) : nil
+                                inferred = module_like_type_name?(rt_name) ? infer_concrete_return_type_from_body(member, nil, member_arena) : nil
                                 inferred || type_ref_for_name(rt_name)
                               elsif method_name.ends_with?('?')
                                 TypeRef::BOOL
                               else
-                                infer_concrete_return_type_from_body(member) || TypeRef::VOID
+                                infer_concrete_return_type_from_body(member, nil, member_arena) || TypeRef::VOID
                               end
                 if params = member.params
                   params.each do |param|
@@ -13271,27 +13355,27 @@ module Crystal::HIR
                 end
               end
               if !has_block
-                has_block = def_contains_yield?(member, @arena)
+                has_block = def_contains_yield?(member, member_arena)
               end
               full_method_name = function_full_name_for_def(base_name, param_types, member.params, has_block)
               register_function_type(full_method_name, return_type)
               set_function_def_entry(full_method_name, member)
-              set_function_def_arena(full_method_name, @arena)
+              set_function_def_arena(full_method_name, member_arena)
               if should_register_base_name?(full_method_name, base_name, member, has_block)
                 set_function_def_entry(base_name, member)
-                set_function_def_arena(base_name, @arena)
+                set_function_def_arena(base_name, member_arena)
               end
 
               # Track yield-functions for inline expansion (nested module methods).
-              if def_contains_yield?(member, @arena)
+              if def_contains_yield?(member, member_arena)
                 @yield_functions.add(full_method_name)
                 debug_hook("yield.register", full_method_name)
                 unless @function_defs.has_key?(base_name)
                   set_function_def_entry(base_name, member)
-                  set_function_def_arena(base_name, @arena)
+                  set_function_def_arena(base_name, member_arena)
                 end
                 set_function_def_entry(full_method_name, member)
-                set_function_def_arena(full_method_name, @arena)
+                set_function_def_arena(full_method_name, member_arena)
               end
             when CrystalV2::Compiler::Frontend::ClassNode
               class_name = String.new(member.name)
@@ -14760,6 +14844,14 @@ module Crystal::HIR
                           else
                             "#{class_name}##{method_name}"
                           end
+              # Resolve arena once for this member and reuse it for both
+              # return inference and yield detection to keep registration
+              # anchored to the correct source context.
+              member_arena = if arena_fits_def?(@arena, member)
+                               @arena
+                             else
+                               resolve_arena_for_def(member, @arena)
+                             end
               # Register primitive from preceding @[Primitive(:name)] annotation
               if prim = @pending_primitive_kind
                 @pending_primitive_kind = nil
@@ -14778,7 +14870,7 @@ module Crystal::HIR
                               if env_get("DEBUG_ENUM_RETURN") && class_name == "File::Info" && method_name == "type"
                                 STDERR.puts "[DEBUG_ENUM_RETURN] class=#{class_name} rt=#{rt_name} resolved=#{resolved_rt_name} enum=#{enum_return_name || "(nil)"}"
                               end
-                              inferred = module_like_type_name?(rt_name) ? infer_concrete_return_type_from_body(member, class_name) : nil
+                              inferred = module_like_type_name?(rt_name) ? infer_concrete_return_type_from_body(member, class_name, member_arena) : nil
                               resolved = inferred || type_ref_for_name(rt_name)
                               if resolved == TypeRef::VOID && method_name.ends_with?('?')
                                 self_type = type_ref
@@ -14788,12 +14880,12 @@ module Crystal::HIR
                             elsif method_name.ends_with?('?')
                               self_type = type_ref
                               inferred = infer_unannotated_query_return_type(method_name, self_type)
-                              inferred ||= infer_concrete_return_type_from_body(member, class_name)
+                              inferred ||= infer_concrete_return_type_from_body(member, class_name, member_arena)
                               inferred || fallback_query_return_type(method_name)
                             else
                               # Try to infer return type from getter-style methods (single ivar access).
                               inferred = infer_getter_return_type(member, ivars)
-                              inferred = infer_concrete_return_type_from_body(member, class_name) if inferred.nil?
+                              inferred = infer_concrete_return_type_from_body(member, class_name, member_arena) if inferred.nil?
                               inferred ||= infer_unannotated_search_return_type(method_name, type_ref)
                               inferred || TypeRef::VOID
                             end
@@ -14826,12 +14918,6 @@ module Crystal::HIR
                 end
               end
               param_elapsed = param_start ? (Time.instant - param_start).total_milliseconds : nil
-              # Resolve arena once to avoid repeated resolution in def_contains_yield?
-              member_arena = if arena_fits_def?(@arena, member)
-                               @arena
-                             else
-                               resolve_arena_for_def(member, @arena)
-                             end
               contains_yield = if has_block
                                  def_contains_yield?(member, member_arena)
                                else
@@ -16024,12 +16110,17 @@ module Crystal::HIR
 
             method_name = String.new(member.name)
             base_method = "#{specialized_name}.#{method_name}"
+            member_arena = if arena_fits_def?(@arena, member)
+                             @arena
+                           else
+                             resolve_arena_for_def(member, @arena)
+                           end
 
             # Get return type
             return_type = if rt = member.return_type
                             type_ref_for_name(substitute_type_params_in_type_name(String.new(rt)))
                           else
-                            inferred = infer_concrete_return_type_from_body(member, specialized_name)
+                            inferred = infer_concrete_return_type_from_body(member, specialized_name, member_arena)
                             inferred || TypeRef::VOID
                           end
 
@@ -16061,7 +16152,7 @@ module Crystal::HIR
 
             register_function_type(full_name, return_type)
             set_function_def_entry(full_name, member)
-            set_function_def_arena(full_name, @arena)
+            set_function_def_arena(full_name, member_arena)
 
             # CRITICAL: Store type param map so lowering can resolve type param calls
             # e.g., ImplInfo.get_cache() -> ImplInfo_Float32.get_cache()
@@ -24303,6 +24394,15 @@ module Crystal::HIR
                 set_function_type_entry(name, resolved)
                 @function_base_return_types[base_name] = resolved unless base_name.includes?('$')
                 existing_type = resolved
+              end
+            end
+          elsif !existing_type.primitive?
+            owner_name = function_context_from_name(base_name)
+            if inferred = infer_return_type_from_body_without_callsite(def_node, owner_name)
+              if inferred != TypeRef::VOID && inferred != existing_type
+                set_function_type_entry(name, inferred)
+                @function_base_return_types[base_name] = inferred unless base_name.includes?('$')
+                existing_type = inferred
               end
             end
           end
@@ -47154,7 +47254,7 @@ module Crystal::HIR
       end
       if unresolved_generic_return_type?(return_type)
         def_node = @function_defs[mangled_method_name]? || @function_defs[base_method_name]?
-        if def_node
+        if def_node && def_node.return_type
           owner_name = receiver_id ? get_type_name_from_ref(ctx.type_of(receiver_id)) : @current_class
           if inferred = infer_return_type_from_callsite(def_node, owner_name, call_args, node.named_args, @current_class)
             if inferred != TypeRef::VOID && inferred != TypeRef::NIL
@@ -47377,6 +47477,13 @@ module Crystal::HIR
           end
         end
       end
+
+      # NOTE:
+      # Global return-type repair from callsites is intentionally disabled here.
+      # It mutates @function_types based on local call context and can pollute
+      # signatures for unrelated callsites (for example, assigning Float64 to a
+      # method that should return a carrier integer type), which then destabilizes
+      # codegen. Return types must be fixed at definition/lowering boundaries.
 
       if env_get("DEBUG_CALL_RETURN") && (mangled_method_name.includes?("PointerPairingHeap") || base_method_name.includes?("PointerPairingHeap"))
         STDERR.puts "[CALL_RETURN] after name=#{mangled_method_name} base=#{base_method_name} return=#{get_type_name_from_ref(return_type)}"
@@ -55169,6 +55276,13 @@ module Crystal::HIR
           end
         end
       end
+      if ctx.type_of(object_id) == TypeRef::VOID
+        if obj_node.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode)
+          if implicit_receiver_id = lower_implicit_zero_arg_index_receiver(ctx, obj_node)
+            object_id = implicit_receiver_id
+          end
+        end
+      end
       enum_name = nil
       case obj_node
       when CrystalV2::Compiler::Frontend::ConstantNode
@@ -55870,6 +55984,62 @@ module Crystal::HIR
         ctx.register_type(call.id, return_type)
         call.id
       end
+    end
+
+    private def lower_implicit_zero_arg_index_receiver(
+      ctx : LoweringContext,
+      obj_node : CrystalV2::Compiler::Frontend::IdentifierNode,
+    ) : ValueId?
+      method_name = String.new(obj_node.name)
+      return nil if method_name.empty?
+      return nil if method_name == "self"
+      return nil if method_name[0]?.try(&.uppercase?)
+      if local_id = ctx.lookup_local(method_name)
+        local_type = ctx.type_of(local_id)
+        return nil unless local_type == TypeRef::VOID
+      end
+
+      self_id = ctx.lookup_local("self")
+      if self_id.nil? && @current_class
+        self_id = emit_self(ctx)
+      end
+      return nil unless self_id
+      receiver_id = self_id.not_nil!
+
+      receiver_type = ctx.type_of(receiver_id)
+      if receiver_type == TypeRef::VOID
+        if current = @current_class
+          resolved_current = resolve_type_alias_chain(substitute_type_params_in_type_name(current))
+          inferred = type_ref_for_name(resolved_current)
+          if inferred != TypeRef::VOID
+            ctx.register_type(receiver_id, inferred)
+            receiver_type = inferred
+          end
+        end
+      end
+      return nil if receiver_type == TypeRef::VOID
+
+      arg_types = [] of TypeRef
+      resolved_name = resolve_method_call(ctx, receiver_id, method_name, arg_types, false)
+      resolved_base = strip_type_suffix(resolved_name)
+      has_target = @function_types.has_key?(resolved_name) ||
+                   @function_defs.has_key?(resolved_name) ||
+                   has_function_base?(resolved_base)
+      return nil unless has_target
+
+      lower_function_if_needed(resolved_name)
+      return_type = get_function_return_type(resolved_name)
+      if inferred_return = resolve_return_type_from_def(resolved_name, resolved_base, receiver_type)
+        if inferred_return != TypeRef::VOID && (return_type == TypeRef::VOID || return_type == TypeRef::POINTER)
+          return_type = inferred_return
+        end
+      end
+      return_type = TypeRef::POINTER if return_type == TypeRef::VOID
+
+      call = Call.new(ctx.next_id, return_type, receiver_id, resolved_name, [] of ValueId)
+      ctx.emit(call)
+      ctx.register_type(call.id, return_type)
+      call.id
     end
 
     private def lower_enum_predicate(ctx : LoweringContext, object_id : ValueId, member_name : String) : ValueId?
