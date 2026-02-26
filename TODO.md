@@ -1,6 +1,26 @@
 # Crystal v2 — Active Work (codegen branch)
 
 ## Known Bugs (codegen)
+- **2026-02-26 (latest): fixed root-cause `File.join(*parts)` / `Path.new(*parts)` splat instability (wrong overload + crash)**
+  - Root causes:
+    - allocator overload synthesis could override explicit `def self.new` overloads with matching signatures;
+    - module-like overload names (for `Enumerable` params) could collapse multiple concrete tuple arities into one lowered body;
+    - `params_compatible_with_args?` accepted typed splat tails without validating remaining argument types.
+  - Fixes applied (`src/compiler/hir/ast_to_hir.cr`):
+    - `generate_allocator_overload`: stop generating allocator overload when an explicit matching `.new` def exists;
+    - preserve/specialize requested mangled names for module-like defs when callsite suffix carries concrete collection types;
+    - remangle module-like entries in call resolution for concrete collection arg types;
+    - add strict typed-splat compatibility checks for remaining arguments (including union-variant checks).
+  - Evidence:
+    - `regression_tests/file_join_splat.cr` with `/tmp/stage1_dbg_envfix10`:
+      - compile: `0`
+      - run via `scripts/run_safe.sh`: `join_ok`, exit `0`
+    - before this fix chain: same repro produced wrong output (`join2=\x01`) and then segfault (`139`).
+  - Current remaining regressions (separate roots):
+    - `forall_nil_union_return` (`FAIL: identity(nil).nil? = false`)
+    - `test_byteformat_decode_u32` (segfault `139`)
+    - `test_nested_macro_record` (`nested_macro_record_bad`)
+
 - **2026-02-25 (latest): fixed root-cause null-entry crash in `Hash::Entry#deleted?` (pointer-slot ABI path)**
   - Root cause:
     - in current ABI, `Pointer(Entry)#clear` can zero hash-entry slots to null pointers;

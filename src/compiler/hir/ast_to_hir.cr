@@ -14006,7 +14006,12 @@ module Crystal::HIR
           enum_name = call_index < call_enum_names.size ? call_enum_names[call_index] : nil
           param_type_names << (type_ann_str || enum_name)
           if ta = param.type_annotation
-            update_typeof_local_name(param_name, String.new(ta))
+            concrete_name = get_type_name_from_ref(param_type)
+            if concrete_name.empty? || concrete_name == "Void" || concrete_name == "Unknown"
+              update_typeof_local_name(param_name, String.new(ta))
+            else
+              update_typeof_local_name(param_name, concrete_name)
+            end
           end
           param_literal = !param.is_block && !param.is_splat && !param.is_double_splat &&
                           call_index < call_literal_flags.size && call_literal_flags[call_index]
@@ -14123,6 +14128,10 @@ module Crystal::HIR
           end
           if idx = splat_param_types_index
             param_types[idx] = splat_type
+          end
+          splat_type_name = get_type_name_from_ref(splat_type)
+          if !splat_type_name.empty? && splat_type_name != "Void" && splat_type_name != "Unknown"
+            update_typeof_local_name(splat_param_name.not_nil!, splat_type_name)
           end
         end
         if env_get("DEBUG_IN_ANY_CATEGORY") && base_name == "Unicode.in_any_category?"
@@ -16934,41 +16943,11 @@ module Crystal::HIR
       return if overload_name == base_name
       return if @module.has_function?(overload_name)
 
-      # If an explicit def self.new with splat params exists that matches
-      # these call args, skip allocator generation — the explicit method
-      # body should be lowered instead. This handles cases like
-      # Path.new(name, *parts) which has custom logic (new(name).join(*parts))
-      # that can't be captured by the standard allocate+initialize pattern.
-      # BUT: only skip if the call args DON'T match the initialize signature.
-      # E.g., Path.new(String, Path::Kind) should still use the allocator
-      # because it exactly matches initialize(name, kind).
-      if matched = lookup_function_def_for_call(base_name, call_arg_types.size, false, call_arg_types)
-        matched_name, matched_def = matched
-        if matched_def.params
-          has_splat = matched_def.params.not_nil!.any? { |p| p.is_splat }
-          if has_splat
-            # Check if the call args match the initialize params (allocator pattern).
-            # If they do, use the allocator. If not, the explicit .new body is needed.
-            init_params = @init_params[class_name]? || [] of {String, TypeRef}
-            init_matches = false
-            if init_params.size > 0 && call_arg_types.size <= init_params.size
-              init_matches = true
-              call_arg_types.each_with_index do |call_type, idx|
-                next if call_type == TypeRef::VOID
-                break if idx >= init_params.size
-                init_type = init_params[idx][1]
-                next if init_type == TypeRef::VOID
-                if call_type != init_type && !needs_union_coercion?(call_type, init_type)
-                  init_matches = false
-                  break
-                end
-              end
-            end
-            unless init_matches
-              return
-            end
-          end
-        end
+      # Explicit `def self.new` must win over synthesized allocator overloads.
+      # If a source-defined overload already matches this callsite signature,
+      # do not generate an auto allocator for the same mangled name.
+      if lookup_function_def_for_call(base_name, call_arg_types.size, false, call_arg_types)
+        return
       end
 
       # When auto-allocator init params have a hard type mismatch with call args
@@ -18289,7 +18268,12 @@ module Crystal::HIR
           enum_name = call_index < call_enum_names.size ? call_enum_names[call_index] : nil
           param_type_names << (type_ann_str || enum_name)
           if ta = param.type_annotation
-            update_typeof_local_name(param_name, String.new(ta))
+            concrete_name = get_type_name_from_ref(param_type)
+            if concrete_name.empty? || concrete_name == "Void" || concrete_name == "Unknown"
+              update_typeof_local_name(param_name, String.new(ta))
+            else
+              update_typeof_local_name(param_name, concrete_name)
+            end
           end
           if param.is_block
             has_block = true
@@ -18347,6 +18331,10 @@ module Crystal::HIR
           end
           if idx = splat_param_types_index
             param_types[idx] = splat_type
+          end
+          splat_type_name = get_type_name_from_ref(splat_type)
+          if !splat_type_name.empty? && splat_type_name != "Void" && splat_type_name != "Unknown"
+            update_typeof_local_name(splat_param_name.not_nil!, splat_type_name)
           end
         end
       end
@@ -19217,6 +19205,7 @@ module Crystal::HIR
       return param_type unless param_desc
 
       call_desc = @module.get_type_descriptor(call_type)
+      call_name_fallback = get_type_name_from_ref(call_type)
 
       if call_desc
         if param_desc.kind == TypeKind::Module && call_desc.kind == TypeKind::Module
@@ -19231,6 +19220,54 @@ module Crystal::HIR
           if includers
             return call_type if includers.includes?(call_name) ||
                                 includers.any? { |inc| inc.ends_with?("::#{call_name}") }
+          end
+        elsif param_desc.kind == TypeKind::Module
+          param_name = resolve_type_alias_chain(param_desc.name)
+          param_base = strip_generic_args(param_name)
+          call_name = resolve_type_alias_chain(call_desc.name)
+          call_base = strip_generic_args(call_name)
+
+          # Collection module constraints commonly receive tuple/array/slice/static-array
+          # concrete values at call sites. Keep the concrete call type so lowered bodies
+          # don't fall back to module-vdispatch on value types.
+          if collection_module_type_name?(param_name) || collection_module_type_name?(param_base)
+            if call_desc.kind == TypeKind::Tuple ||
+               call_desc.name.starts_with?("Tuple(") ||
+               call_desc.name.starts_with?("Array(") ||
+               call_desc.name.starts_with?("Slice(") ||
+               call_desc.name.starts_with?("StaticArray(")
+              return call_type
+            end
+          end
+
+          included = @class_included_modules[call_name]? || @class_included_modules[call_base]?
+          if included
+            if included.any? { |m| m == param_name || m == param_base || m.ends_with?("::#{param_base}") }
+              return call_type
+            end
+          end
+        end
+      end
+
+      if call_desc.nil? && param_desc.kind == TypeKind::Module
+        param_name = resolve_type_alias_chain(param_desc.name)
+        param_base = strip_generic_args(param_name)
+        call_name = call_name_fallback
+        call_base = strip_generic_args(call_name)
+
+        if collection_module_type_name?(param_name) || collection_module_type_name?(param_base)
+          if call_name.starts_with?("Tuple(") ||
+             call_name.starts_with?("Array(") ||
+             call_name.starts_with?("Slice(") ||
+             call_name.starts_with?("StaticArray(")
+            return call_type
+          end
+        end
+
+        included = @class_included_modules[call_name]? || @class_included_modules[call_base]?
+        if included
+          if included.any? { |m| m == param_name || m == param_base || m.ends_with?("::#{param_base}") }
+            return call_type
           end
         end
       end
@@ -22144,6 +22181,66 @@ module Crystal::HIR
         next if param.is_block
         next if named_only_separator?(param)
         if param.is_splat || param.is_double_splat
+          if param.is_splat && !param.is_double_splat && (ta = param.type_annotation)
+            splat_type_name = String.new(ta)
+            if !splat_type_name.empty? && context
+              splat_type_name = normalize_declared_type_name(splat_type_name, context)
+            end
+
+            unless splat_type_name.empty? || splat_type_name == "_" || unresolved_type_param_annotation?(splat_type_name)
+              splat_resolved_name = resolve_type_alias_chain(splat_type_name)
+              unless unresolved_type_param_annotation?(splat_resolved_name)
+                splat_type = type_ref_for_name(splat_resolved_name)
+                splat_variants = splat_resolved_name.includes?('|') ? split_union_type_name(splat_resolved_name) : nil
+                check_idx = arg_idx
+                while check_idx < arg_types.size
+                  splat_arg_type = arg_types[check_idx]
+                  return false if splat_arg_type == TypeRef::VOID
+                  if module_like_type_name?(splat_resolved_name) || collection_module_type_name?(splat_resolved_name)
+                    return false if primitive_type?(splat_arg_type)
+                    check_idx += 1
+                    next
+                  end
+
+                  if splat_variants
+                    splat_arg_name = if splat_arg_desc = @module.get_type_descriptor(splat_arg_type)
+                                       resolve_type_alias_chain(splat_arg_desc.name)
+                                     else
+                                       resolve_type_alias_chain(get_type_name_from_ref(splat_arg_type))
+                                     end
+                    unless splat_arg_name.empty?
+                      variant_match = splat_variants.any? do |variant_name|
+                        resolved_variant = resolve_type_alias_chain(variant_name)
+                        resolved_variant == splat_arg_name ||
+                          strip_generic_args(resolved_variant) == strip_generic_args(splat_arg_name)
+                      end
+                      return false unless variant_match
+                    end
+                  end
+
+                  if splat_type != TypeRef::VOID && splat_arg_type != TypeRef::VOID
+                    if splat_arg_type != splat_type && !needs_union_coercion?(splat_arg_type, splat_type)
+                      if numeric_compatible?(splat_arg_type, splat_type)
+                        check_idx += 1
+                        next
+                      end
+                      if numeric_param_target_type(splat_resolved_name, splat_arg_type)
+                        check_idx += 1
+                        next
+                      end
+                      splat_arg_desc = @module.get_type_descriptor(splat_arg_type)
+                      if splat_arg_desc && resolve_type_alias_chain(splat_arg_desc.name) == splat_resolved_name
+                        check_idx += 1
+                        next
+                      end
+                      return false
+                    end
+                  end
+                  check_idx += 1
+                end
+              end
+            end
+          end
           return true
         end
         break if arg_idx >= arg_types.size
@@ -22176,7 +22273,7 @@ module Crystal::HIR
             next
           end
           param_resolved_name = resolved_name
-          if module_like_type_name?(resolved_name)
+          if module_like_type_name?(resolved_name) || collection_module_type_name?(resolved_name)
             return false if primitive_type?(arg_type)
             arg_idx += 1
             next
@@ -22259,6 +22356,34 @@ module Crystal::HIR
       true
     end
 
+    @[AlwaysInline]
+    private def collection_module_type_name?(name : String) : Bool
+      return false if name.empty?
+      return true if name == "Enumerable" || name.starts_with?("Enumerable(") || name.starts_with?("Enumerable::")
+      return true if name == "Indexable" || name.starts_with?("Indexable(") || name.starts_with?("Indexable::")
+      return true if name == "Iterable" || name.starts_with?("Iterable(") || name.starts_with?("Iterable::")
+      false
+    end
+
+    @[AlwaysInline]
+    private def concrete_collection_type_ref?(type_ref : TypeRef) : Bool
+      if desc = @module.get_type_descriptor(type_ref)
+        name = desc.name
+        return true if desc.kind == TypeKind::Tuple
+        return true if name.starts_with?("Tuple(") ||
+                       name.starts_with?("Array(") ||
+                       name.starts_with?("Slice(") ||
+                       name.starts_with?("StaticArray(")
+      else
+        name = get_type_name_from_ref(type_ref)
+        return true if name.starts_with?("Tuple(") ||
+                       name.starts_with?("Array(") ||
+                       name.starts_with?("Slice(") ||
+                       name.starts_with?("StaticArray(")
+      end
+      false
+    end
+
     private def params_match_score(
       def_node : CrystalV2::Compiler::Frontend::DefNode,
       arg_types : Array(TypeRef),
@@ -22323,15 +22448,13 @@ module Crystal::HIR
             # This ensures join(parts : Enumerable) beats join(part) (untyped)
             # when a Tuple is passed.
             if param_desc = @module.get_type_descriptor(param_type)
-              if param_desc.kind.module? || module_like_type_name?(param_desc.name)
-                collection_names = {"Enumerable", "Indexable", "Iterable"}
-                is_collection = collection_names.includes?(param_desc.name) ||
-                                collection_names.any? { |c| param_desc.name.starts_with?("#{c}(") }
-                if is_collection
-                  if ad = @module.get_type_descriptor(arg_type)
-                    if ad.kind.tuple? || ad.name.starts_with?("Tuple(") || ad.name.starts_with?("Array(")
-                      score += 1
-                    end
+              if (param_desc.kind.module? || module_like_type_name?(param_desc.name)) &&
+                 collection_module_type_name?(param_desc.name)
+                if ad = @module.get_type_descriptor(arg_type)
+                  if ad.kind.tuple? || ad.name.starts_with?("Tuple(") || ad.name.starts_with?("Array(")
+                    # Strong preference: tuple/array args should bind to collection
+                    # overloads over untyped scalar/splat overloads.
+                    score += 4
                   end
                 end
               end
@@ -22344,21 +22467,14 @@ module Crystal::HIR
             # collection overload over an untyped param. Don't give the
             # bonus for scalar types like String (which includes
             # Enumerable(Char) but shouldn't match collection overloads).
-            is_module_like = module_like_type_name?(resolved_name)
-            if is_module_like
-              collection_module = resolved_name == "Enumerable" ||
-                                  resolved_name == "Indexable" ||
-                                  resolved_name.starts_with?("Enumerable(") ||
-                                  resolved_name.starts_with?("Indexable(")
-              if collection_module
-                arg_desc = @module.get_type_descriptor(arg_type)
-                is_tuple = arg_desc && (arg_desc.kind.tuple? || arg_desc.name.starts_with?("Tuple(") ||
-                   arg_desc.name.starts_with?("Array("))
-                if is_tuple
-                  score += 1
-                end
-
-
+            if collection_module_type_name?(resolved_name)
+              arg_desc = @module.get_type_descriptor(arg_type)
+              is_tuple = arg_desc && (arg_desc.kind.tuple? || arg_desc.name.starts_with?("Tuple(") ||
+                 arg_desc.name.starts_with?("Array("))
+              if is_tuple
+                # Keep same preference even when the annotation is unresolved
+                # to a concrete module TypeRef (e.g. Enumerable::T).
+                score += 4
               end
             end
 
@@ -29710,7 +29826,12 @@ module Crystal::HIR
             enum_name = call_index < call_enum_names.size ? call_enum_names[call_index] : nil
             param_type_names << (param.type_annotation ? String.new(param.type_annotation.not_nil!) : enum_name)
             if ta = param.type_annotation
-              update_typeof_local_name(param_name, String.new(ta))
+              concrete_name = get_type_name_from_ref(param_type)
+              if concrete_name.empty? || concrete_name == "Void" || concrete_name == "Unknown"
+                update_typeof_local_name(param_name, String.new(ta))
+              else
+                update_typeof_local_name(param_name, concrete_name)
+              end
             end
             param_literal = !param.is_block && !param.is_splat && !param.is_double_splat &&
                             call_index < call_literal_flags.size && call_literal_flags[call_index]
@@ -29809,6 +29930,10 @@ module Crystal::HIR
           end
           if idx = splat_param_types_index
             param_types[idx] = splat_type
+          end
+          splat_type_name = get_type_name_from_ref(splat_type)
+          if !splat_type_name.empty? && splat_type_name != "Void" && splat_type_name != "Unknown"
+            update_typeof_local_name(splat_param_name.not_nil!, splat_type_name)
           end
         end
       end
@@ -41619,11 +41744,21 @@ module Crystal::HIR
                 resolved_entry_def = entry[1]
                 func_def = resolved_entry_def
                 arena = @function_def_arenas[resolved_entry_name]
-                target_name = if name.includes?('$') && def_has_untyped_regular_param?(resolved_entry_def)
-                                name
-                              else
-                                resolved_entry_name
-                              end
+                keep_requested_name = name.includes?('$') && (
+                  def_has_untyped_regular_param?(resolved_entry_def) ||
+                  (
+                    def_has_module_like_regular_param?(resolved_entry_def) &&
+                    begin
+                      if suffix_name = method_suffix(name)
+                        parsed_name_types = parse_types_from_suffix(strip_mangled_suffix_flags(suffix_name))
+                        parsed_name_types.any? { |t| concrete_collection_type_ref?(t) }
+                      else
+                        false
+                      end
+                    end
+                  )
+                )
+                target_name = keep_requested_name ? name : resolved_entry_name
                 lookup_branch = "callsite_args"
               end
             end
@@ -41641,11 +41776,14 @@ module Crystal::HIR
                 resolved_entry_def = entry[1]
                 func_def = resolved_entry_def
                 arena = @function_def_arenas[resolved_entry_name]
-                target_name = if name.includes?('$') && def_has_untyped_regular_param?(resolved_entry_def)
-                                name
-                              else
-                                resolved_entry_name
-                              end
+                keep_requested_name = name.includes?('$') && (
+                  def_has_untyped_regular_param?(resolved_entry_def) ||
+                  (
+                    def_has_module_like_regular_param?(resolved_entry_def) &&
+                    parsed_types.any? { |t| concrete_collection_type_ref?(t) }
+                  )
+                )
+                target_name = keep_requested_name ? name : resolved_entry_name
                 lookup_branch = "suffix_types"
               end
             end
@@ -42345,6 +42483,10 @@ module Crystal::HIR
         callsite_args = pending_callsite_args_for_def(func_def, name, target_name)
       end
       call_arg_types = callsite_args ? callsite_args.types : nil
+      if env_has?("DEBUG_JOIN_LOWER_ARGS") && name.includes?("Path#join$Enumerable")
+        call_types_dbg = call_arg_types ? call_arg_types.map { |t| get_type_name_from_ref(t) }.join(",") : "nil"
+        STDERR.puts "[JOIN_LOWER_ARGS] stage=initial name=#{name} target=#{target_name} call_arg_types=#{call_types_dbg}"
+      end
 
       # If we resolved to a block-accepting overload but the current target name
       # is non-block, try to switch to a non-block overload for the same callsite.
@@ -42513,7 +42655,24 @@ module Crystal::HIR
               changed = false
               parsed_types.each_with_index do |parsed, idx|
                 next if parsed == TypeRef::VOID
-                if merged[idx] != parsed
+                next if merged[idx] == parsed
+
+                keep_callsite = false
+                if call_desc = @module.get_type_descriptor(merged[idx])
+                  if parsed_desc = @module.get_type_descriptor(parsed)
+                    parsed_is_module_like = parsed_desc.kind == TypeKind::Module ||
+                                            module_like_type_name?(parsed_desc.name) ||
+                                            collection_module_type_name?(parsed_desc.name)
+                    call_is_concrete_collection = call_desc.kind == TypeKind::Tuple ||
+                                                  call_desc.name.starts_with?("Tuple(") ||
+                                                  call_desc.name.starts_with?("Array(") ||
+                                                  call_desc.name.starts_with?("Slice(") ||
+                                                  call_desc.name.starts_with?("StaticArray(")
+                    keep_callsite = parsed_is_module_like && call_is_concrete_collection
+                  end
+                end
+
+                unless keep_callsite
                   merged[idx] = parsed
                   changed = true
                 end
@@ -42531,6 +42690,10 @@ module Crystal::HIR
             end
           end
         end
+      end
+      if env_has?("DEBUG_JOIN_LOWER_ARGS") && name.includes?("Path#join$Enumerable")
+        call_types_dbg = call_arg_types ? call_arg_types.map { |t| get_type_name_from_ref(t) }.join(",") : "nil"
+        STDERR.puts "[JOIN_LOWER_ARGS] stage=after_suffix_merge name=#{name} target=#{target_name} call_arg_types=#{call_types_dbg}"
       end
       # Skip lowering functions with bare generic types when no concrete type info is available
       # This prevents emitting functions like Indexable.range_to_index_and_count$Range_Int32 which call Range#begin on bare Range
@@ -44867,8 +45030,29 @@ module Crystal::HIR
           receiver_id = nil if static_class_name # Static call, no receiver
           if method_name == "new"
             if class_info = @class_info[class_name_str]?
-              call_arg_types = call_args.map do |arg|
-                infer_type_from_expr(arg, @current_class) || TypeRef::VOID
+              call_arg_types = infer_arg_types_for_call(call_args, @current_class)
+              call_has_splat = call_args.any? { |arg_expr| call_arena[arg_expr].is_a?(CrystalV2::Compiler::Frontend::SplatNode) }
+              if call_has_splat
+                expanded_types = [] of TypeRef
+                call_args.each_with_index do |arg_expr, i|
+                  arg_node = call_arena[arg_expr]
+                  if arg_node.is_a?(CrystalV2::Compiler::Frontend::SplatNode)
+                    inner_type = infer_type_from_expr(arg_node.expr, @current_class) || TypeRef::VOID
+                    if inner_type != TypeRef::VOID
+                      desc = @module.get_type_descriptor(inner_type)
+                      if desc && (desc.kind == TypeKind::Tuple || desc.name.starts_with?("Tuple("))
+                        desc.type_params.each do |elem_type|
+                          expanded_types << elem_type unless elem_type == TypeRef::VOID
+                        end
+                        next
+                      end
+                    end
+                  end
+                  expanded_types << (i < call_arg_types.size ? call_arg_types[i] : TypeRef::VOID)
+                end
+                if expanded_types.size != call_arg_types.size
+                  call_arg_types = expanded_types
+                end
               end
               generate_allocator(class_name_str, class_info, call_arg_types)
             end
@@ -46277,16 +46461,17 @@ module Crystal::HIR
         end
       end
       arg_literals = args.map { |arg_id| ctx.type_literal?(arg_id) }
-      callsite_arg_types = splat_packed ? prepack_arg_types.dup : arg_types
-      callsite_arg_literals = splat_packed ? prepack_arg_literals.dup : arg_literals
+      use_prepack_callsite_types = splat_packed && args.size >= prepack_arg_types.size
+      callsite_arg_types = use_prepack_callsite_types ? prepack_arg_types.dup : arg_types.dup
+      callsite_arg_literals = use_prepack_callsite_types ? prepack_arg_literals.dup : arg_literals.dup
       callsite_arg_enum_names = nil
-      if splat_packed
+      if use_prepack_callsite_types
         callsite_arg_enum_names = prepack_arg_enum_names.try(&.dup)
       elsif enum_map = @enum_value_types
         names = args.map { |arg_id| enum_map[arg_id]? }
         callsite_arg_enum_names = names if names.any?
       end
-      if splat_packed && args.size > prepack_arg_types.size
+      if use_prepack_callsite_types && args.size > prepack_arg_types.size
         extra_ids = args[prepack_arg_types.size..-1] || [] of ValueId
         extra_ids.each do |arg_id|
           callsite_arg_types << ctx.type_of(arg_id)
@@ -46341,7 +46526,8 @@ module Crystal::HIR
       end
       if debug_env_filter_match?("DEBUG_CALL_TRACE", method_name, method_name, full_method_name || "")
         type_ids = arg_types.map(&.id)
-        STDERR.puts "[CALL_TRACE] stage=after_arg_types method=#{method_name} arg_types=#{type_ids.join(",")}"
+        type_names = arg_types.map { |t| get_type_name_from_ref(t) }
+        STDERR.puts "[CALL_TRACE] stage=after_arg_types method=#{method_name} arg_types=#{type_ids.join(",")} names=#{type_names.join("|")}"
       end
 
       # Refine class/module method resolution using concrete arg types once available.
@@ -46558,9 +46744,30 @@ module Crystal::HIR
       if env_has?("DEBUG_SLICE_EACH") && method_name == "each" && lookup_name.includes?("Slice")
         STDERR.puts "[SLICE_LOOKUP] lookup_name=#{lookup_name} full=#{full_method_name || "nil"} base=#{base_method_name} has_block=#{has_block_call} args=#{args.size}"
       end
+      resolved_by_lookup = false
       if entry = lookup_function_def_for_call(lookup_name, args.size, has_block_call, arg_types, has_splat, has_named_args)
+        resolved_by_lookup = true
         entry_name = entry[0]
         entry_def = entry[1]
+        # Avoid self-recursive overload capture when another compatible overload exists.
+        # This commonly happens around splat wrappers (e.g. join(*parts) -> join(parts))
+        # where selecting the current overload again can later be mis-lowered.
+        if receiver_id &&
+           !has_splat &&
+           !has_unknown_arg_types &&
+           entry_name == ctx.function.name
+          if alt_entry = lookup_alternative_non_recursive_overload_for_call(
+               lookup_name,
+               args.size,
+               has_block_call,
+               arg_types,
+               has_named_args,
+               entry_name
+             )
+            entry_name = alt_entry[0]
+            entry_def = alt_entry[1]
+          end
+        end
         if env_has?("DEBUG_SLICE_EACH") && method_name == "each" && (lookup_name.includes?("Slice") || entry_name.includes?("Flags"))
           STDERR.puts "[SLICE_LOOKUP_HIT] lookup=#{lookup_name} → entry=#{entry_name}"
         end
@@ -46569,7 +46776,17 @@ module Crystal::HIR
           # Entry key may encode only annotated params (e.g. IO#read_bytes$IO::ByteFormat).
           # When concrete callsite args are available for untyped params, preserve
           # specialization by remangling with full arg_types.
-          if !arg_types.empty? && def_has_untyped_regular_param?(entry_def) && arg_types.any? { |t| t != TypeRef::VOID } && !has_unknown_arg_types
+          if !arg_types.empty? &&
+             def_has_untyped_regular_param?(entry_def) &&
+             arg_types.any? { |t| t != TypeRef::VOID } && !has_unknown_arg_types
+            mangled_method_name = mangle_function_name(base_method_name, arg_types, has_block_call)
+          elsif !arg_types.empty? &&
+                def_has_module_like_regular_param?(entry_def) &&
+                arg_types.any? { |t| concrete_collection_type_ref?(t) } &&
+                !has_unknown_arg_types
+            # Module-like signatures (Enumerable/Indexable/...) must keep concrete
+            # collection specialization from callsite args to avoid reusing one
+            # lowered body across different Tuple/Array shapes.
             mangled_method_name = mangle_function_name(base_method_name, arg_types, has_block_call)
           elsif splat_packed && (entry_name.ends_with?("_splat") || entry_name.ends_with?("$splat"))
             # Splat functions must be monomorphized per tuple arity.
@@ -46619,6 +46836,7 @@ module Crystal::HIR
         else
           mangled_method_name = entry_name
         end
+
       end
       if receiver_id && debug_env_filter_match?("DEBUG_EACH_RESOLVE", method_name)
         recv_name = get_type_name_from_ref(ctx.type_of(receiver_id))
@@ -46672,10 +46890,11 @@ module Crystal::HIR
       if receiver_id
         # Preserve a callsite-mangled overload (typed args) to avoid collapsing
         # into base names like `IO#puts` that hide typed overloads.
-        needs_resolve = !(@function_types.has_key?(mangled_method_name) ||
-                          @function_defs.has_key?(mangled_method_name) ||
-                          @module.has_function?(mangled_method_name)) ||
-                        !mangled_method_name.includes?('$')
+        needs_resolve = !resolved_by_lookup &&
+                        (!(@function_types.has_key?(mangled_method_name) ||
+                           @function_defs.has_key?(mangled_method_name) ||
+                           @module.has_function?(mangled_method_name)) ||
+                         !mangled_method_name.includes?('$'))
         if needs_resolve
           named_count = node.named_args ? node.named_args.not_nil!.size : 0
           resolved_name = resolve_method_call(ctx, receiver_id, method_name, arg_types, has_block_call, has_named_args, named_count)
@@ -48766,6 +48985,33 @@ module Crystal::HIR
           end
         end
       end
+      if call_virtual && receiver_id
+        if recv_desc = @module.get_type_descriptor(ctx.type_of(receiver_id))
+          # Value types (Tuple/Struct/Primitive/Enum) don't carry a runtime type-id
+          # header, so module vdispatch on them is invalid. Prefer direct static
+          # resolution for these concrete receivers.
+          if recv_desc.kind == TypeKind::Tuple ||
+             recv_desc.kind == TypeKind::Struct ||
+             recv_desc.kind == TypeKind::Primitive
+            concrete_base = "#{recv_desc.name}##{method_name}"
+            if resolved = lookup_function_def_for_call(concrete_base, arg_types.size, has_block_call, arg_types, has_splat, has_named_args)
+              resolved_name = resolved[0]
+              base_method_name = strip_type_suffix(resolved_name)
+              if resolved_name.includes?('$')
+                mangled_method_name = resolved_name
+              elsif arg_types.any? { |t| t != TypeRef::VOID }
+                mangled_method_name = mangle_function_name(resolved_name, arg_types, has_block_call)
+              else
+                mangled_method_name = resolved_name
+              end
+            end
+            # Even if we didn't find a concrete owner overload, value receivers
+            # must not use runtime vdispatch (no type-id header). Keep the
+            # currently resolved method name and call it statically.
+            call_virtual = false
+          end
+        end
+      end
       if env_has?("DEBUG_VIRTUAL_CALLS") && receiver_id
         recv_type = ctx.type_of(receiver_id)
         recv_desc = @module.get_type_descriptor(recv_type)
@@ -48938,6 +49184,38 @@ module Crystal::HIR
                 candidate = mangle_function_name(module_base_name, arg_types, has_block_call)
                 lower_function_if_needed(candidate)
                 lower_function_if_needed(module_base_name) unless candidate == module_base_name
+              end
+            end
+          else
+            # Module-typed virtual calls can still have a concrete non-class receiver
+            # (for example Tuple/String/Path values dispatched through Enumerable).
+            # Ensure the concrete receiver implementation is lowered, otherwise
+            # vdispatch can miss that type and fall back to no-op/default branch.
+            receiver_owner = type_desc.name
+            ah = arg_types_hash(arg_types)
+            vf = vdispatch_flags(has_block_call)
+            key = {receiver_owner, method_name, ah, vf}
+            unless @virtual_targets_lowered.includes?(key)
+              @virtual_targets_lowered.add(key)
+              record_virtual_target(receiver_owner, method_name, arg_types, has_block_call, has_splat)
+
+              owners = [receiver_owner]
+              receiver_base = strip_generic_args(receiver_owner)
+              owners << receiver_base if receiver_base != receiver_owner
+              owners.uniq!
+
+              owners.each do |owner|
+                base_name = "#{owner}##{method_name}"
+                if resolved = lookup_function_def_for_call(base_name, arg_types.size, has_block_call, arg_types, has_splat)
+                  resolved_name = resolved[0]
+                  lower_function_if_needed(resolved_name)
+                  resolved_base = strip_type_suffix(resolved_name)
+                  lower_function_if_needed(resolved_base) unless resolved_name == resolved_base
+                else
+                  candidate = mangle_function_name(base_name, arg_types, has_block_call)
+                  lower_function_if_needed(candidate)
+                  lower_function_if_needed(base_name) unless candidate == base_name
+                end
               end
             end
           end
@@ -50422,6 +50700,12 @@ module Crystal::HIR
       call_has_named_args : Bool = false,
     ) : Tuple(String, CrystalV2::Compiler::Frontend::DefNode)?
       dbg_slice_lookup = env_has?("DEBUG_SLICE_EACH") && func_name.includes?("Slice") && func_name.includes?("each")
+      debug_join_lookup = false
+      if env_has?("DEBUG_JOIN_LOOKUP") && func_name.includes?("Path#join") && arg_types && arg_types.size == 1
+        if arg_desc = @module.get_type_descriptor(arg_types[0])
+          debug_join_lookup = arg_desc.name.starts_with?("Tuple(")
+        end
+      end
       unknown_args = arg_types && arg_types.all? { |t| t == TypeRef::VOID }
       if @function_lookup_cache_size != @function_defs.size
         @function_lookup_cache_size = @function_defs.size
@@ -50695,6 +50979,9 @@ module Crystal::HIR
           # For typed calls, prioritize type-match score first.
           # Arity is only a tie-breaker (needed for default-arg overloads like
           # [](Int32, count = ...) vs [](Range)).
+          if debug_join_lookup
+            STDERR.puts "[JOIN_LOOKUP] cand=#{name} compat=#{compatible} score=#{score} param_count=#{param_count} required=#{required} splat=#{has_splat} dsplat=#{has_double_splat} untyped=#{untyped_candidate}"
+          end
           if score > best_score || (score == best_score && param_count < best_param_count)
             best = def_node
             best_name = name
@@ -50752,6 +51039,9 @@ module Crystal::HIR
         STDERR.puts "[DEBUG_PUTS_LOOKUP] func=#{func_name} count=#{arg_count} args=#{type_names} best=#{best_name}"
       end
       result = {best_name, best}
+      if debug_join_lookup
+        STDERR.puts "[JOIN_LOOKUP] selected=#{best_name} score=#{best_score} param_count=#{best_param_count}"
+      end
       @function_lookup_cache[cache_key] = FunctionLookupEntry.new(result, base_epoch)
       @function_lookup_last_name_id = name_id
       @function_lookup_last_arg_count = arg_count
@@ -61454,17 +61744,41 @@ module Crystal::HIR
 
       call_desc = @module.get_type_descriptor(call_type)
       sig_desc = @module.get_type_descriptor(sig_type)
-      return false unless call_desc && sig_desc
+      return false unless sig_desc
 
-      call_name = resolve_type_alias_chain(call_desc.name)
       sig_name = resolve_type_alias_chain(sig_desc.name)
+      sig_base = strip_generic_args(sig_name)
+
+      call_name = if call_desc
+                    resolve_type_alias_chain(call_desc.name)
+                  else
+                    get_type_name_from_ref(call_type)
+                  end
+      call_base = strip_generic_args(call_name)
+
+      if sig_desc.kind == TypeKind::Module
+        if collection_module_type_name?(sig_name) || collection_module_type_name?(sig_base)
+          if call_name.starts_with?("Tuple(") ||
+             call_name.starts_with?("Array(") ||
+             call_name.starts_with?("Slice(") ||
+             call_name.starts_with?("StaticArray(")
+            return true
+          end
+        end
+
+        included = @class_included_modules[call_name]? || @class_included_modules[call_base]?
+        if included
+          return true if included.any? { |m| m == sig_name || m == sig_base || m.ends_with?("::#{sig_base}") }
+        end
+      end
+
+      return false unless call_desc
+
       return true if call_name == sig_name
 
       # Allow specialized generic instances to satisfy base generic restrictions:
       #   sig: Array, call: Array(Int32)
       #   sig: Pointer, call: Pointer(UInt8)
-      call_base = strip_generic_args(call_name)
-      sig_base = strip_generic_args(sig_name)
       return true if sig_name == sig_base && call_base == sig_base
 
       # Allow nested module names to satisfy module restrictions:
@@ -61614,6 +61928,96 @@ module Crystal::HIR
       end
 
       false
+    end
+
+    private def def_has_module_like_regular_param?(func_def : CrystalV2::Compiler::Frontend::DefNode) : Bool
+      params = func_def.params
+      return false unless params
+
+      params.each do |param|
+        next if named_only_separator?(param) || param.is_block || param.is_double_splat
+        next unless ta = param.type_annotation
+        type_name = resolve_type_alias_chain(String.new(ta))
+        base_name = strip_generic_args(type_name)
+        return true if module_like_type_name?(type_name) || module_like_type_name?(base_name)
+        return true if collection_module_type_name?(type_name) || collection_module_type_name?(base_name)
+      end
+
+      false
+    end
+
+    private def def_has_positional_splat_param?(func_def : CrystalV2::Compiler::Frontend::DefNode) : Bool
+      params = func_def.params
+      return false unless params
+
+      params.each do |param|
+        next if named_only_separator?(param) || param.is_block
+        return true if param.is_splat && !param.is_double_splat
+      end
+
+      false
+    end
+
+    private def lookup_alternative_non_recursive_overload_for_call(
+      func_name : String,
+      arg_count : Int32,
+      has_block : Bool,
+      arg_types : Array(TypeRef),
+      call_has_named_args : Bool,
+      excluded_name : String,
+    ) : Tuple(String, CrystalV2::Compiler::Frontend::DefNode)?
+      stripped_func = func_name.includes?('(') ? strip_generic_receiver_for_lookup(func_name) : func_name
+      overload_keys = function_def_overloads(func_name, stripped_func)
+      if overload_keys.empty?
+        base = strip_type_suffix(func_name)
+        if base != func_name
+          overload_keys = function_def_overloads(base)
+        end
+      end
+      return nil if overload_keys.empty?
+
+      best_name : String? = nil
+      best_def : CrystalV2::Compiler::Frontend::DefNode? = nil
+      best_score = Int32::MIN
+      best_param_count = Int32::MAX
+
+      overload_keys.each do |name|
+        next if name == excluded_name
+        def_node = @function_defs[name]?
+        next unless def_node
+
+        stats = function_param_stats(name, def_node)
+        _, _, _, _, skip = effective_arity_stats_for_call(stats, call_has_named_args)
+        next if skip
+        next if !call_has_named_args && stats.has_named_only
+
+        if has_block
+          next unless stats.has_block
+        else
+          next if stats.has_block
+        end
+
+        param_count, required, has_splat, has_double_splat, _ = effective_arity_stats_for_call(stats, call_has_named_args)
+        next if arg_count < required
+        next if arg_count > param_count && !has_splat && !has_double_splat
+
+        func_context = function_context_from_name(name)
+        next unless params_compatible_with_args?(def_node, arg_types, func_context)
+
+        score = params_match_score(def_node, arg_types, func_context)
+        score += 6 if def_has_module_like_regular_param?(def_node)
+        score -= 1 if has_splat || has_double_splat
+
+        if score > best_score || (score == best_score && param_count < best_param_count)
+          best_score = score
+          best_param_count = param_count
+          best_name = name
+          best_def = def_node
+        end
+      end
+
+      return nil unless best_name && best_def
+      {best_name, best_def}
     end
 
     private def type_ref_for_name(name : String) : TypeRef
