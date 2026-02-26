@@ -844,21 +844,15 @@ module Crystal::MIR
     end
 
     # Pre-compute return types for all functions.
-    # Detects functions whose MIR return_type is NIL (→ "void") but which actually
-    # return values (have Return instructions with a value).  For those functions the
-    # return type is corrected to "ptr", ensuring that both the function definition
-    # and call sites use a consistent non-void return type.
     #
-    # When MIR return_type is NIL the function typically returns a nilable or union
-    # type — these are always boxed as pointers.  We always use "ptr" rather than
-    # the defining instruction's scalar type (i32/i64) to avoid cross-block slot
-    # type mismatches downstream.
+    # Some MIR functions are declared as NIL (LLVM "void") but are consumed at call
+    # sites as non-void values (often unions). When this happens, backend function
+    # definitions and call sites must agree on one ABI return type.
     #
     # Two-phase approach:
-    # 1. Scan all functions' Return instructions.  For void-returning functions that
-    #    have Return(value), set return type to "ptr".
-    # 2. Scan all call sites.  If a call instruction has a non-void type for the
-    #    callee that is still void, upgrade to "ptr".
+    # 1. Record declared return type for each function.
+    # 2. Scan call sites and upgrade "void" callees to the observed non-void
+    #    call-site type. Prefer union ABI over ptr fallback when both appear.
     private def precompute_function_return_types(functions : Array(Function))
       # Build function lookup by ID for Call instruction resolution
       func_by_id = {} of FunctionId => Function
@@ -875,7 +869,7 @@ module Crystal::MIR
 
       # Phase 2: Scan call sites (Call only, not ExternCall) for better type info.
       # When a Call instruction's type is non-void and the callee is still void,
-      # upgrade to "ptr".
+      # upgrade to that observed call-site type.
       if !ENV["CRYSTAL_V2_NO_PRECOMPUTE_P2"]?
         functions.each do |func|
           func.blocks.each do |block|
@@ -886,11 +880,15 @@ module Crystal::MIR
                 callee_mangled = mangle_function_name(callee_func.name)
                 call_type = @type_mapper.llvm_type(inst.type)
                 next if call_type == "void"
-                # Only upgrade void → ptr; don't downgrade existing non-void types
+                # Upgrade void → observed call type.
+                # If we already have ptr but later observe a union use, prefer union ABI.
                 existing = @emitted_function_return_types[callee_mangled]?
                 if existing == "void"
-                  @emitted_function_return_types[callee_mangled] = "ptr"
-                  STDERR.puts "  [PRECOMPUTE-P2] #{callee_mangled}: void → ptr (call-site type: #{call_type})" if ENV["CRYSTAL_V2_PRECOMPUTE_DEBUG"]?
+                  @emitted_function_return_types[callee_mangled] = call_type
+                  STDERR.puts "  [PRECOMPUTE-P2] #{callee_mangled}: void → #{call_type}" if ENV["CRYSTAL_V2_PRECOMPUTE_DEBUG"]?
+                elsif existing == "ptr" && call_type.includes?(".union")
+                  @emitted_function_return_types[callee_mangled] = call_type
+                  STDERR.puts "  [PRECOMPUTE-P2] #{callee_mangled}: ptr → #{call_type}" if ENV["CRYSTAL_V2_PRECOMPUTE_DEBUG"]?
                 end
               end
             end
@@ -6396,6 +6394,11 @@ module Crystal::MIR
         mangled_name = mangle_function_name(func.name)
         @emitted_functions << mangled_name
         return_type = @type_mapper.llvm_type(func.return_type)
+        if return_type == "void"
+          if precomputed = @emitted_function_return_types[mangled_name]?
+            return_type = precomputed if precomputed != "void"
+          end
+        end
         @emitted_function_return_types[mangled_name] = return_type
         return
       end

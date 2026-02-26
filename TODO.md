@@ -1,6 +1,27 @@
 # Crystal v2 — Active Work (codegen branch)
 
 ## Known Bugs (codegen)
+- **2026-02-26 (latest): fixed root-cause `void -> ptr` return ABI pollution for union callsites**
+  - Root cause:
+    - `precompute_function_return_types` phase2 upgraded any `callee: void` to `ptr` on first non-void callsite.
+    - for functions declared as `Nil` in MIR but consumed as unions (for example `Hash(..., Nil)#[]?` in copy-propagation paths), this forced `define ptr ...` and propagated invalid `store <union> %rN(ptr)` in stage2.
+  - Fixes applied (`src/compiler/mir/llvm_backend.cr`):
+    - precompute phase2 now upgrades `void` to the observed `call_type` (not hardcoded `ptr`);
+    - when conflicting observations are `ptr` vs `union`, prefer `union` ABI;
+    - builtin-override bookkeeping now preserves precomputed non-void return type instead of re-overwriting it back to declared `void`.
+  - Expected effect:
+    - eliminate ptr/union ABI mismatch family (`expected %...union, got ptr`) without stdlib changes and without symptom masking.
+  - Evidence:
+    - `stage1` (original compiler, release):
+      - `crystal build --release src/crystal_v2.cr -o /tmp/stage1_rel_retabi_fix1 --error-trace`
+      - result: **real 404.97s**
+    - `stage2` (self-hosted via new stage1, release):
+      - `scripts/timeout_sample_lldb.sh -t 300 -s 8 -n 12 -o /tmp/stage2_rel_retabi_fix1_probe300 -- /tmp/stage1_rel_retabi_fix1 src/crystal_v2.cr --release -o /tmp/stage2_rel_retabi_fix1_t300`
+      - result: **exit 0**, **real 241.94s**
+    - speed delta (same host/session):
+      - stage1/stage2 ratio = **1.67x** (stage2 faster)
+    - intermediate watchdog (`-t 180`) no longer reports prior `opt` ptr/union mismatch errors; run timed out without error output.
+
 - **2026-02-26 (latest): fixed root-cause union slot type pollution (`union_is` -> constant true, `union_unwrap(Float32/64)` -> invalid ptr bitcast)**
   - Root cause:
     - cross-block slot allocation used mutable `@value_types[val_id]` only;
