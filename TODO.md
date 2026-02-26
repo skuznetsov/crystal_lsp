@@ -1,6 +1,31 @@
 # Crystal v2 — Active Work (codegen branch)
 
 ## Known Bugs (codegen)
+- **2026-02-26 (latest): fixed root-cause `.new` block-overload miss in class-method lowering (custom `Hash(K, V)` constructor segfault)**
+  - Root cause:
+    - in `AstToHir#lower_function_if_needed` class-method `new` path, explicit-overload probing always used `has_block = false`;
+    - for mangled targets like `Hash(FK, FE).new$Int32_block`, probe incorrectly reported "no explicit overload", forced allocator path, and produced recursive/invalid constructor lowering.
+  - Fixes applied (`src/compiler/hir/ast_to_hir.cr`):
+    - in `method == "new"` explicit overload probe, derive `expects_block_new` from `target_for_lower` suffix (`$block` / `_block`);
+    - call `lookup_function_def_for_call(..., expects_block_new, ...)` instead of hardcoded non-block lookup.
+  - Regression coverage:
+    - added `regression_tests/hash_new_initial_capacity_custom_types.cr` (`# EXPECT: 0`);
+    - added `regression_tests/stage1_hash_new_initial_capacity_repro.sh` for fast standalone repro iteration.
+  - Additional tooling hardening:
+    - `scripts/timeout_sample_lldb.sh`: hotspot symbol cleanup now strips residual numeric prefixes to keep LLDB breakpoint names valid.
+  - Evidence:
+    - before fix (`/tmp/stage1_dbg_ctorfix1`): `/tmp/hash_custom_collision_ctorfix1` crashed (`run_safe` exit `139`, frame in `Hash...new$Nil_Int32`);
+    - after fix (`/tmp/stage1_dbg_ctorfix2`): same repro prints `0`, exit `0`;
+    - MIR now contains separate constructor specializations:
+      - `Hash(FK, FE).new$Nil_Int32`
+      - `Hash(FK, FE).new$Int32_block`
+      - `Hash(FK, FE).new$Proc_Int32`
+    - release timing in this session:
+      - `stage1` (original compiler, `--release`): **real 426.84s**
+      - `stage2` (`/tmp/stage1_rel_ctorfix2`, `--release`, watchdog `180s`): **timeout (124)** at **real 189.53s**.
+  - Current blocker:
+    - stage2 release bootstrap still exceeds 180s watchdog, hotspot now in `MIR::LLVMIRGenerator#emit_function` (no longer `Hash(FK, FE).new` crash path).
+
 - **2026-02-26 (latest): fixed root-cause `void -> ptr` return ABI pollution for union callsites**
   - Root cause:
     - `precompute_function_return_types` phase2 upgraded any `callee: void` to `ptr` on first non-void callsite.

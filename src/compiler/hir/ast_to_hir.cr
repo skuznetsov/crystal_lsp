@@ -6577,6 +6577,24 @@ module Crystal::HIR
       end
     end
 
+    # Temporarily replace the active type-param map with an exact map.
+    # Unlike `with_type_param_map`, this does NOT inherit caller bindings.
+    # Used for deferred/lazy function lowering where leaking caller context
+    # (e.g. ValueId => ...) corrupts callee generic substitutions.
+    private def with_isolated_type_param_map(exact : Hash(String, String), &)
+      old_map = @type_param_map
+      return yield if old_map == exact
+
+      @type_param_map = exact.dup
+      @subst_cache_gen &+= 1
+      begin
+        yield
+      ensure
+        @type_param_map = old_map
+        @subst_cache_gen &+= 1
+      end
+    end
+
     private def with_namespace_override(namespace : String, &)
       old_namespace = @current_namespace_override
       @current_namespace_override = namespace
@@ -6703,7 +6721,59 @@ module Crystal::HIR
 
     private def store_function_type_param_map(full_name : String, base_name : String, params : Hash(String, String)) : Nil
       return if params.empty?
-      stored = params.dup
+
+      owner_name : String? = nil
+      owner_generic = false
+      if hash_idx = full_name.index('#')
+        owner_name = full_name[0, hash_idx]
+        owner_generic = owner_name.not_nil!.includes?('(')
+      elsif dot_idx = full_name.index('.')
+        owner_name = full_name[0, dot_idx]
+        owner_generic = owner_name.not_nil!.includes?('(')
+      end
+
+      # Keep only callee-relevant substitutions.
+      # Caller-context keys (for example `ValueId => ...`) must not leak into
+      # deferred maps because they later corrupt unrelated generic owners.
+      allowed_keys = Set(String).new
+      owner_param_map = {} of String => String
+      if owner = owner_name
+        if info = generic_owner_info(owner)
+          info[:map].each do |key, mapped|
+            allowed_keys.add(key)
+            owner_param_map[key] = mapped unless mapped.empty?
+          end
+        elsif owner_generic
+          owner_base = strip_generic_args(owner)
+          if template = @generic_templates[owner_base]?
+            template.type_params.each { |key| allowed_keys.add(key) }
+            if generic = split_generic_base_and_args(owner)
+              args = split_generic_type_args(generic[:args])
+              if args.size == template.type_params.size
+                template.type_params.each_with_index do |key, idx|
+                  arg = args[idx]?
+                  next unless arg
+                  owner_param_map[key] = arg unless arg.empty?
+                end
+              end
+            end
+          end
+        end
+      end
+
+      stored = {} of String => String
+      owner_param_map.each do |key, value|
+        stored[key] = value
+      end
+      params.each do |key, value|
+        next if value.empty?
+        next if owner_param_map.has_key?(key)
+        keep = allowed_keys.includes?(key) || short_type_param_name?(key) || key.starts_with?("__")
+        next unless keep
+        stored[key] = value
+      end
+      return if stored.empty?
+
       @function_type_param_maps[full_name] = stored
       @function_type_param_maps[base_name] = stored unless @function_type_param_maps.has_key?(base_name)
     end
@@ -20016,6 +20086,25 @@ module Crystal::HIR
 
       if @function_defs.has_key?(full_name) && (full_name == base_name || has_untyped)
         full_name = "#{base_name}$arity#{param_count}"
+      end
+
+      if existing = @function_defs[full_name]?
+        if base_name.ends_with?(".new")
+          existing_stats = function_param_stats(full_name, existing)
+          collision_suffix : String? = nil
+          if existing_stats.has_named_only != has_named_only
+            collision_suffix = has_named_only ? "_named" : "_positional"
+          elsif existing_stats.has_block != has_block
+            collision_suffix = has_block ? "_block" : "_noblock"
+          end
+
+          if collision_suffix
+            candidate = "#{full_name}#{collision_suffix}"
+            unless @function_defs.has_key?(candidate)
+              full_name = candidate
+            end
+          end
+        end
       end
 
       full_name
@@ -40762,9 +40851,14 @@ module Crystal::HIR
     private def find_method_in_generic_template(
       template : GenericClassTemplate,
       method_name : String,
+      expected_arg_count : Int32? = nil,
+      expect_block : Bool = false,
     ) : Tuple(CrystalV2::Compiler::Frontend::DefNode, CrystalV2::Compiler::Frontend::ArenaLike)?
       body = template.node.body
       return nil unless body
+
+      best_def : CrystalV2::Compiler::Frontend::DefNode? = nil
+      best_score = Int32::MIN
 
       body.each do |expr_id|
         member = template.arena[expr_id]
@@ -40777,6 +40871,52 @@ module Crystal::HIR
         when CrystalV2::Compiler::Frontend::DefNode
           def_name = member.name.nil? ? "" : String.new(member.name.not_nil!)
           if def_name == method_name
+            if expected = expected_arg_count
+              regular_param_count = 0
+              required_param_count = 0
+              has_splat_param = false
+              has_double_splat_param = false
+              has_block_param = false
+              if params = member.params
+                params.each do |param|
+                  next if named_only_separator?(param)
+                  if param.is_block
+                    has_block_param = true
+                    next
+                  end
+                  if param.is_double_splat
+                    has_double_splat_param = true
+                    next
+                  end
+                  if param.is_splat
+                    has_splat_param = true
+                    next
+                  end
+                  regular_param_count += 1
+                  required_param_count += 1 if param.default_value.nil?
+                end
+              end
+
+              if expect_block
+                next unless has_block_param
+              else
+                next if has_block_param
+              end
+              next if expected < required_param_count
+              next if expected > regular_param_count && !has_splat_param && !has_double_splat_param
+
+              score = 0
+              score += 20 if regular_param_count == expected
+              score += 10 if required_param_count == expected
+              score -= (regular_param_count - expected).abs
+              score -= 3 if has_splat_param || has_double_splat_param
+              if score > best_score
+                best_score = score
+                best_def = member
+              end
+              next
+            end
+
             if env_get("DEBUG_FIND_TEMPLATE") && method_name == "internal_representation"
               STDERR.puts "[FIND_TEMPLATE] found #{template.name}##{method_name}"
             end
@@ -40785,7 +40925,50 @@ module Crystal::HIR
         end
       end
 
+      if best = best_def
+        return {best, template.arena}
+      end
+
       nil
+    end
+
+    private def mangled_template_target_name(
+      requested_name : String,
+      base_name : String,
+      def_node : CrystalV2::Compiler::Frontend::DefNode,
+      def_arena : CrystalV2::Compiler::Frontend::ArenaLike,
+      expected_arg_count : Int32,
+    ) : String
+      return requested_name if requested_name.includes?('$')
+      return requested_name if expected_arg_count <= 0
+
+      param_types = [] of TypeRef
+      has_block = false
+      if params = def_node.params
+        params.each do |param|
+          next if named_only_separator?(param)
+          if param.is_block
+            has_block = true
+            next
+          end
+          param_type = if ta = param.type_annotation
+                         type_ref_for_name(String.new(ta))
+                       elsif param.is_double_splat
+                         type_ref_for_name("NamedTuple")
+                       else
+                         TypeRef::VOID
+                       end
+          param_types << param_type
+        end
+      end
+      unless has_block
+        has_block = def_contains_yield?(def_node, def_arena)
+      end
+
+      mangled = function_full_name_for_def(base_name, param_types, def_node.params, has_block)
+      return requested_name if mangled.empty?
+      return requested_name if mangled == base_name
+      mangled
     end
 
     # Check if a template method's param type annotations are compatible with
@@ -41513,6 +41696,18 @@ module Crystal::HIR
       if is_math_min_debug
         STDERR.puts "[MATH_MIN_LOWER_FUNC] LOOKUP name=#{name} target=#{target_name} base=#{base_name} direct_found=#{!!func_def}"
       end
+      lookup_suffix = name_parts.suffix
+      lookup_expected_param_count = lookup_suffix ? suffix_param_count(lookup_suffix) : 0
+      lookup_expect_block = if suffix = lookup_suffix
+                              suffix == "block" || suffix.ends_with?("_block")
+                            else
+                              false
+                            end
+      if lookup_expected_param_count == 0
+        if callsite = @pending_arg_types[name]? || @pending_arg_types[target_name]? || @pending_arg_types[base_name]?
+          lookup_expected_param_count = callsite.types.size
+        end
+      end
       if debug_lookup_name && name.includes?(debug_lookup_name) && func_def
         STDERR.puts "[DEBUG_LOOKUP_NAME] hit name=#{name} branch=#{lookup_branch} target=#{target_name}"
       end
@@ -41521,18 +41716,18 @@ module Crystal::HIR
           owner = name_parts.owner
           method_part = name_parts.method
           if method_part && !owner.includes?('(') && (template = @generic_templates[owner]?)
-            if found = find_method_in_generic_template(template, method_part)
+            if found = find_method_in_generic_template(template, method_part, lookup_expected_param_count, lookup_expect_block)
               func_def = found[0]
               arena = found[1]
-              target_name = name
+              target_name = mangled_template_target_name(name, base_name, found[0], found[1], lookup_expected_param_count)
               lookup_branch = "generic_template_prefer"
             elsif reopenings = @generic_reopenings[owner]?
               reopenings.each do |reopen_template|
-                found_in_reopen = find_method_in_generic_template(reopen_template, method_part)
+                found_in_reopen = find_method_in_generic_template(reopen_template, method_part, lookup_expected_param_count, lookup_expect_block)
                 next unless found_in_reopen
                 func_def = found_in_reopen[0]
                 arena = found_in_reopen[1]
-                target_name = name
+                target_name = mangled_template_target_name(name, base_name, found_in_reopen[0], found_in_reopen[1], lookup_expected_param_count)
                 lookup_branch = "generic_reopen_prefer"
                 break
               end
@@ -41686,7 +41881,7 @@ module Crystal::HIR
                 # Fallback: search the generic template's body for the method
                 unless func_def
                   if template = @generic_templates[info[:base]]?
-                    found_in_template = find_method_in_generic_template(template, method_part)
+                    found_in_template = find_method_in_generic_template(template, method_part, lookup_expected_param_count, lookup_expect_block)
                     if found_in_template && name_parts.suffix
                       # Verify the template method's param type annotations are compatible
                       # with the suffix types. Without this, Array#[]?(Range) could be
@@ -41698,14 +41893,14 @@ module Crystal::HIR
                     if found_in_template
                       func_def = found_in_template[0]
                       arena = found_in_template[1]
-                      target_name = name
+                      target_name = mangled_template_target_name(name, base_name, found_in_template[0], found_in_template[1], lookup_expected_param_count)
                       lookup_branch = "generic_template_body"
                     end
                     # Also search reopenings
                     unless func_def
                       if reopenings = @generic_reopenings[info[:base]]?
                         reopenings.each do |reopen_template|
-                          found_in_reopen = find_method_in_generic_template(reopen_template, method_part)
+                          found_in_reopen = find_method_in_generic_template(reopen_template, method_part, lookup_expected_param_count, lookup_expect_block)
                           if found_in_reopen && name_parts.suffix
                             found_in_reopen = nil unless template_method_matches_suffix?(
                               found_in_reopen[0], found_in_reopen[1], name_parts.suffix.not_nil!)
@@ -41713,7 +41908,7 @@ module Crystal::HIR
                           if found_in_reopen
                             func_def = found_in_reopen[0]
                             arena = found_in_reopen[1]
-                            target_name = name
+                            target_name = mangled_template_target_name(name, base_name, found_in_reopen[0], found_in_reopen[1], lookup_expected_param_count)
                             lookup_branch = "generic_reopen_body"
                             break
                           end
@@ -42980,7 +43175,7 @@ module Crystal::HIR
                 extra_params = extra_params.merge({"UC" => "UInt8", "T" => "Float64"})
               end
               merged_params = extra_type_params ? extra_params.merge(extra_type_params) : extra_params
-              with_type_param_map(merged_params) do
+              with_isolated_type_param_map(merged_params) do
                 with_namespace_override_or_clear(namespace_override) do
                   begin
                     # Arity mismatch fix: if func_def has fewer params than
@@ -43082,7 +43277,16 @@ module Crystal::HIR
                 end
                 if allocator_supported?(owner)
                   if explicit_new && has_call_types
-                    matched = lookup_function_def_for_call(base_new, call_arg_types.not_nil!.size, false, call_arg_types)
+                    expects_block_new = false
+                    if suffix = method_suffix(target_for_lower)
+                      expects_block_new = suffix == "block" || suffix.ends_with?("_block")
+                    end
+                    matched = lookup_function_def_for_call(
+                      base_new,
+                      call_arg_types.not_nil!.size,
+                      expects_block_new,
+                      call_arg_types
+                    )
                     unless matched
                       generate_allocator(owner, class_info, call_arg_types)
                       return
@@ -43099,7 +43303,7 @@ module Crystal::HIR
               old_class = @current_class
               @current_class = owner
               if extra_type_params
-                with_type_param_map(extra_type_params) do
+                with_isolated_type_param_map(extra_type_params) do
                   with_namespace_override_or_clear(namespace_override) do
                     lower_method(owner, class_info, func_def, call_arg_types, call_arg_literals, call_arg_enum_names, target_for_lower, force_class_method: force_class_method)
                   end
@@ -43120,7 +43324,7 @@ module Crystal::HIR
               else
                 # Apply type param map for generic module methods
                 if extra_type_params && !extra_type_params.empty?
-                  with_type_param_map(extra_type_params) do
+                  with_isolated_type_param_map(extra_type_params) do
                     lower_module_method(owner, func_def, call_arg_types, call_arg_literals, call_arg_enum_names, target_for_lower)
                   end
                 else
@@ -43130,7 +43334,7 @@ module Crystal::HIR
             else
               # Apply type param map for generic module methods
               if extra_type_params && !extra_type_params.empty?
-                with_type_param_map(extra_type_params) do
+                with_isolated_type_param_map(extra_type_params) do
                   lower_module_method(owner, func_def, call_arg_types, call_arg_literals, call_arg_enum_names, target_for_lower)
                 end
               else
@@ -43140,7 +43344,7 @@ module Crystal::HIR
           else
             # Use the call-site mangled name so top-level defs match call signatures.
             if extra_type_params && !extra_type_params.empty?
-              with_type_param_map(extra_type_params) do
+              with_isolated_type_param_map(extra_type_params) do
                 lower_def(func_def, call_arg_types, call_arg_literals, call_arg_enum_names, name)
               end
             else
@@ -46763,20 +46967,35 @@ module Crystal::HIR
         entry_name = entry[0]
         entry_def = entry[1]
         # Avoid self-recursive overload capture when another compatible overload exists.
-        # This commonly happens around splat wrappers (e.g. join(*parts) -> join(parts))
+        # This can happen in wrapper-style overloads (instance and class methods),
         # where selecting the current overload again can later be mis-lowered.
-        if receiver_id &&
-           !has_splat &&
-           !has_unknown_arg_types &&
+        if !has_splat &&
            entry_name == ctx.function.name
-          if alt_entry = lookup_alternative_non_recursive_overload_for_call(
-               lookup_name,
-               args.size,
-               has_block_call,
-               arg_types,
-               has_named_args,
-               entry_name
-             )
+          alt_entry = lookup_alternative_non_recursive_overload_for_call(
+            lookup_name,
+            args.size,
+            has_block_call,
+            arg_types,
+            has_named_args,
+            entry_name
+          )
+
+          # Some wrappers lower `{ ... }` to an explicit proc argument, so the call
+          # appears as non-block with one extra arg and can accidentally reselect self.
+          # Try a second lookup pass as a block call with the trailing arg removed.
+          if !alt_entry && !has_block_call && args.size > 0
+            alt_arg_types = arg_types[0, args.size - 1]
+            alt_entry = lookup_alternative_non_recursive_overload_for_call(
+              lookup_name,
+              args.size - 1,
+              true,
+              alt_arg_types,
+              has_named_args,
+              entry_name
+            )
+          end
+
+          if alt_entry
             entry_name = alt_entry[0]
             entry_def = alt_entry[1]
           end
@@ -47620,6 +47839,29 @@ module Crystal::HIR
                 record_pending_type_param_map(base_method_name, map)
               end
             end
+          end
+        end
+      end
+
+      # Last-resort self-recursion escape:
+      # Some wrapper calls carry a lowered proc argument with no explicit block node,
+      # so they can resolve to themselves as plain calls. If that happens, try the
+      # corresponding block overload using args minus the trailing proc argument.
+      if mangled_method_name == ctx.function.name &&
+         !has_block_call &&
+         block_expr.nil? &&
+         block_pass_expr.nil? &&
+         args.size > 0 &&
+         arg_types.size >= args.size
+        block_arg_types = arg_types[0, args.size - 1]
+        block_candidate = mangle_function_name(base_method_name, block_arg_types, true)
+        if block_candidate != mangled_method_name
+          lower_function_if_needed(block_candidate)
+          if @module.has_function?(block_candidate) ||
+             @function_types.has_key?(block_candidate) ||
+             @function_defs.has_key?(block_candidate)
+            mangled_method_name = block_candidate
+            has_block_call = true
           end
         end
       end
@@ -51020,6 +51262,36 @@ module Crystal::HIR
       end
 
       unless best && best_name
+        # Some constructor wrappers lower `&block` as an explicit trailing Proc
+        # argument. In that shape a non-block lookup can miss and recurse into
+        # the same wrapper. Retry once as block-call with trailing Proc removed.
+        if !has_block && !call_has_splat && arg_count > 0 && base_name.ends_with?(".new")
+          if call_arg_types = arg_types
+            trailing_arg_type = call_arg_types[arg_count - 1]
+            trailing_is_proc = false
+            if trailing_desc = @module.get_type_descriptor(trailing_arg_type)
+              trailing_is_proc = trailing_desc.kind == TypeKind::Proc ||
+                                 trailing_desc.name == "Proc" ||
+                                 trailing_desc.name.starts_with?("Proc(")
+            end
+
+            if trailing_is_proc
+              block_arg_types = call_arg_types[0, arg_count - 1]
+              if block_entry = lookup_function_def_for_call(func_name, arg_count - 1, true, block_arg_types, false, call_has_named_args)
+                @function_lookup_cache[cache_key] = FunctionLookupEntry.new(block_entry, base_epoch)
+                @function_lookup_last_name_id = name_id
+                @function_lookup_last_arg_count = arg_count
+                @function_lookup_last_args_hash = args_hash
+                @function_lookup_last_flags = flags
+                @function_lookup_last_base_epoch = base_epoch
+                @function_lookup_last_result = block_entry
+                @function_lookup_last_result_valid = true
+                return block_entry
+              end
+            end
+          end
+        end
+
         # If this is a block call and no overload matched, try a block-only lookup
         # on the base name (e.g., Foo#each_with_index$block).
         if has_block
@@ -55285,7 +55557,14 @@ module Crystal::HIR
         # stubs instead of the concrete implementation on the receiver type.
         if receiver_id && !parts.is_class
           receiver_type_name = get_type_name_from_ref(ctx.type_of(receiver_id))
-          if !receiver_type_name.empty? && receiver_type_name != "Nil"
+          # Keep lexical owner when receiver type is unresolved.
+          # Overriding @current_class with "Void"/"Unknown" breaks ivar lookup
+          # in inlined methods like Hash#each_entry_with_index (@first.upto ...),
+          # which then resolves calls against unrelated owners.
+          if !receiver_type_name.empty? &&
+             receiver_type_name != "Nil" &&
+             receiver_type_name != "Void" &&
+             receiver_type_name != "Unknown"
             @current_class = receiver_type_name
           end
         end

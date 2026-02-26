@@ -63,9 +63,11 @@ mkdir -p "$OUT_DIR"
 CMD=("$@")
 CMD_LOG="$OUT_DIR/command.log"
 SAMPLE_LOG="$OUT_DIR/sample.txt"
+SAMPLE_CHILD_LOG="$OUT_DIR/sample.child.txt"
 HOTSPOT_LOG="$OUT_DIR/hotspots.txt"
 LLDB_LOG="$OUT_DIR/lldb.txt"
 LLDB_CMDS="$OUT_DIR/lldb.commands"
+PROC_LOG="$OUT_DIR/processes.txt"
 
 echo "[run] ${CMD[*]}" | tee "$OUT_DIR/summary.txt"
 "${CMD[@]}" >"$CMD_LOG" 2>&1 &
@@ -94,15 +96,76 @@ fi
 
 echo "[timeout] ${TIMEOUT_SECS}s (pid=$PID)" | tee -a "$OUT_DIR/summary.txt"
 
+collect_descendants() {
+  local parent="$1"
+  local child=""
+  while read -r child; do
+    [[ -z "${child:-}" ]] && continue
+    echo "$child"
+    collect_descendants "$child"
+  done < <(pgrep -P "$parent" || true)
+}
+
+DESC_PIDS=()
+if command -v pgrep >/dev/null 2>&1; then
+  while read -r cpid; do
+    [[ -n "${cpid:-}" ]] && DESC_PIDS+=("$cpid")
+  done < <(collect_descendants "$PID")
+fi
+
+SAMPLE_PID="$PID"
+if [[ -n "${DESC_PIDS[*]:-}" ]]; then
+  while read -r cpid _cpu comm; do
+    [[ -z "${cpid:-}" ]] && continue
+    if [[ "$comm" != "bash" && "$comm" != "sh" ]] && kill -0 "$cpid" 2>/dev/null; then
+      SAMPLE_PID="$cpid"
+      break
+    fi
+  done < <(ps -o pid=,%cpu=,comm= -p "${DESC_PIDS[@]}" 2>/dev/null | sort -k2,2nr)
+fi
+if [[ "$SAMPLE_PID" == "$PID" && -n "${DESC_PIDS[*]:-}" ]]; then
+  while read -r cpid _cpu _comm; do
+    [[ -z "${cpid:-}" ]] && continue
+    if kill -0 "$cpid" 2>/dev/null; then
+      SAMPLE_PID="$cpid"
+      break
+    fi
+  done < <(ps -o pid=,%cpu=,comm= -p "${DESC_PIDS[@]}" 2>/dev/null | sort -k2,2nr)
+fi
+
+ps -o pid,ppid,pgid,stat,etime,%cpu,%mem,command -p "$PID" > "$PROC_LOG" 2>/dev/null || true
+if [[ -n "${DESC_PIDS[*]:-}" ]]; then
+  ps -o pid,ppid,pgid,stat,etime,%cpu,%mem,command -p "${DESC_PIDS[@]}" >> "$PROC_LOG" 2>/dev/null || true
+fi
+
 if command -v sample >/dev/null 2>&1; then
   sample "$PID" "$SAMPLE_SECS" -file "$SAMPLE_LOG" >/dev/null 2>&1 || true
+  if [[ "$SAMPLE_PID" != "$PID" ]]; then
+    sample "$SAMPLE_PID" "$SAMPLE_SECS" -file "$SAMPLE_CHILD_LOG" >/dev/null 2>&1 || true
+  fi
 else
   echo "sample tool not found" > "$SAMPLE_LOG"
 fi
 
-if [[ -s "$SAMPLE_LOG" ]]; then
-  grep -Eo '[A-Za-z_][A-Za-z0-9_:$#.<>\-]+' "$SAMPLE_LOG" \
-    | rg -v '^(Thread|Dispatch|kernel|libsystem|sample|All|Total|self|start|main)$' \
+HOTSPOT_SOURCE="$SAMPLE_LOG"
+if [[ -s "$SAMPLE_CHILD_LOG" ]]; then
+  HOTSPOT_SOURCE="$SAMPLE_CHILD_LOG"
+fi
+
+if [[ -s "$HOTSPOT_SOURCE" ]]; then
+  awk '
+    /\(in / {
+      line = $0
+      sub(/^[[:space:]]*[0-9]+[[:space:]]+/, "", line)
+      gsub(/^[+!|:[:space:]]+/, "", line)
+      while (sub(/^[0-9]+[[:space:]]+/, "", line)) {}
+      sub(/[[:space:]]+\(in .*/, "", line)
+      sub(/^[*~]+/, "", line)
+      while (sub(/^[0-9]+[[:space:]]+/, "", line)) {}
+      if (length(line) > 0) print line
+    }
+  ' "$HOTSPOT_SOURCE" \
+    | rg -v '^(Thread_|DispatchQueue_|Call|start|main|kevent)$' \
     | sort | uniq -c | sort -nr | head -n "$TOP_N" > "$HOTSPOT_LOG" || true
 fi
 
@@ -111,13 +174,14 @@ if [[ -n "$BREAKPOINTS" ]]; then
   IFS=',' read -r -a BP_SYMBOLS <<< "$BREAKPOINTS"
 elif [[ -s "$HOTSPOT_LOG" ]]; then
   while read -r _count sym; do
+    sym=$(printf '%s' "$sym" | sed -E 's/^[[:space:]]+//; s/^[0-9]+[[:space:]]+//; s/^[*~]+//')
     [[ -n "${sym:-}" ]] && BP_SYMBOLS+=("$sym")
   done < "$HOTSPOT_LOG"
 fi
 
-if (( USE_LLDB == 1 )) && command -v lldb >/dev/null 2>&1 && kill -0 "$PID" 2>/dev/null; then
+if (( USE_LLDB == 1 )) && command -v lldb >/dev/null 2>&1 && kill -0 "$SAMPLE_PID" 2>/dev/null; then
   {
-    echo "process attach --pid $PID"
+    echo "process attach --pid $SAMPLE_PID"
     for sym in "${BP_SYMBOLS[@]}"; do
       echo "breakpoint set --name $sym"
     done
@@ -129,11 +193,21 @@ if (( USE_LLDB == 1 )) && command -v lldb >/dev/null 2>&1 && kill -0 "$PID" 2>/d
 fi
 
 kill "$PID" 2>/dev/null || true
+for cpid in "${DESC_PIDS[@]:-}"; do
+  kill "$cpid" 2>/dev/null || true
+done
 wait "$PID" 2>/dev/null || true
 
 {
   echo "[killed] pid=$PID"
+  if [[ "$SAMPLE_PID" != "$PID" ]]; then
+    echo "[sample-pid] $SAMPLE_PID (descendant)"
+    echo "[sample-child] $SAMPLE_CHILD_LOG"
+  else
+    echo "[sample-pid] $SAMPLE_PID (parent)"
+  fi
   echo "[log] $CMD_LOG"
+  echo "[ps] $PROC_LOG"
   echo "[sample] $SAMPLE_LOG"
   if [[ -s "$HOTSPOT_LOG" ]]; then
     echo "[hotspots] $HOTSPOT_LOG"
