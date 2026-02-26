@@ -1,6 +1,32 @@
 # Crystal v2 — Active Work (codegen branch)
 
 ## Known Bugs (codegen)
+- **2026-02-26 (latest): fixed root-cause stage2 compile-time blowup in safe CLI parser (`Options` struct tuple-copy path)**
+  - Root cause:
+    - `CLI#parse_args_safe` was changed to return `{Int32, Options}`;
+    - `Options` is a `struct`, so tuple-return forced large value copies/merges in parser fallback path;
+    - this inflated `CLI#compile` IR and downstream LLVM backend work (`llc` SelectionDAG / reg-coalescing hot path), causing stage2 `--release` watchdog timeouts.
+  - Fixes applied (`src/compiler/cli.cr`):
+    - changed safe parser signature to `parse_args_safe(options_ptr : Pointer(Options), ...) : Int32`;
+    - mutate `options` via pointer-backed local and write back once at end;
+    - removed `{status, options}` tuple return/call-site unpacking.
+  - Evidence:
+    - stage1 (original compiler, `--release`):
+      - `crystal build --release src/crystal_v2.cr -o /tmp/stage1_rel_cliopts_ptrfix1 --error-trace`
+      - result: **real 420.32s** (`7:00.32`)
+    - stage2 (self-hosted, release, watchdog):
+      - `scripts/timeout_sample_lldb.sh -t 300 -s 8 -n 12 -o /tmp/stage2_rel_cliopts_ptrfix1_probe300 -- /tmp/stage1_rel_cliopts_ptrfix1 src/crystal_v2.cr --release -o /tmp/stage2_rel_cliopts_ptrfix1_t300`
+      - result: **exit 0**, **real 250.09s** (`4:10.09`)
+    - stage2 direct timing (no watchdog wrapper):
+      - `/tmp/stage1_rel_cliopts_ptrfix1 src/crystal_v2.cr --release -o /tmp/stage2_rel_cliopts_ptrfix1_direct`
+      - result: **real 182.93s** (`3:02.93`)
+    - speed delta (same host/session):
+      - stage1/stage2 ratio = **2.30x** (stage2 faster)
+  - Current blocker:
+    - stage2 bootstrap repro still crashes on second-stage use:
+      - `scripts/stage2_bootstrap_repro.sh /tmp/stage2_rel_cliopts_ptrfix1_direct` -> `exit 133` on `regression_tests/basic_sanity.cr`;
+      - lldb shows `EXC_BREAKPOINT` in `AstToHir#type_ref_for_name` (via `lower_main` -> `CLI#compile`).
+
 - **2026-02-26 (latest): fixed root-cause `.new$Proc_*` allocator suppression (Hash block-forwarding mutual recursion)**
   - Root cause:
     - `generate_allocator_overload` always skipped auto-allocator generation when any explicit `self.new` overload matched callsite arg types;

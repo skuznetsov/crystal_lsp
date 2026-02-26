@@ -111,7 +111,9 @@ module CrystalV2
 
       # Bootstrap-safe argument parser used as a fallback when OptionParser
       # misbehaves in self-hosted stage2 binaries.
-      private def parse_args_safe(options : Options, parser_help : String, err_io : IO) : Int32
+      private def parse_args_safe(options_ptr : Pointer(Options), parser_help : String, err_io : IO) : Int32
+        options = options_ptr.value
+        status = 0
         opt_level_invalid = false
         mm_stack_threshold_invalid = false
         emit_invalid : String? = nil
@@ -155,7 +157,8 @@ module CrystalV2
               i += 1
             else
               err_io.puts "Error: --emit expects a value"
-              return 1
+              status = 1
+              break
             end
           elsif arg.starts_with?("--emit=")
             emit_type = arg[7..-1]
@@ -172,7 +175,8 @@ module CrystalV2
               i += 1
             else
               err_io.puts "Error: --prelude expects a value"
-              return 1
+              status = 1
+              break
             end
           elsif arg.starts_with?("--prelude=")
             options.prelude_file = arg[10..-1]
@@ -205,7 +209,8 @@ module CrystalV2
               i += 1
             else
               err_io.puts "Error: --output expects a value"
-              return 1
+              status = 1
+              break
             end
           elsif arg.starts_with?("--output=")
             options.output = arg[9..-1]
@@ -241,7 +246,8 @@ module CrystalV2
               i += 1
             else
               err_io.puts "Error: --pgo-use expects a value"
-              return 1
+              status = 1
+              break
             end
           elsif arg.starts_with?("--pgo-use=")
             options.pgo_profile = arg[10..-1]
@@ -264,36 +270,39 @@ module CrystalV2
                 i += 1
               else
                 err_io.puts "Error: -o expects a value"
-                return 1
+                status = 1
+                break
               end
             end
           elsif arg.starts_with?("-")
             err_io.puts "Error: unknown option: #{arg}"
             err_io.puts parser_help
-            return 1
+            status = 1
+            break
           end
           i += 1
         end
 
-        if opt_level_invalid
+        if status == 0 && opt_level_invalid
           err_io.puts "Error: -O expects an integer"
           err_io.puts parser_help
-          return 1
+          status = 1
         end
 
-        if mm_stack_threshold_invalid
+        if status == 0 && mm_stack_threshold_invalid
           err_io.puts "Error: --mm-stack-threshold expects an integer"
           err_io.puts parser_help
-          return 1
+          status = 1
         end
 
-        if invalid_emit = emit_invalid
+        if status == 0 && (invalid_emit = emit_invalid)
           err_io.puts "Error: invalid --emit value: #{invalid_emit}"
           err_io.puts parser_help
-          return 1
+          status = 1
         end
 
-        0
+        options_ptr.value = options
+        status
       end
 
       # Workaround for File.join splat args being broken in stage2.
@@ -355,7 +364,7 @@ module CrystalV2
         parser_text = parser_help
 
         if !env_enabled?("CRYSTAL2_USE_OPTION_PARSER") || env_enabled?("CRYSTAL2_SAFE_PARSER")
-          status = parse_args_safe(options, parser_help, err_io)
+          status = parse_args_safe(pointerof(options), parser_help, err_io)
           return status if status != 0
         elsif (minimal_parser = env_get("CRYSTAL2_MINIMAL_PARSER"))
           if minimal_parser == "2"
@@ -450,7 +459,7 @@ module CrystalV2
           stage2_debug("[STAGE2_DEBUG] parser.parse ok", err_io)
         rescue ex : OptionParser::InvalidOption
           stage2_debug("[STAGE2_DEBUG] parser invalid option, fallback safe parser", err_io)
-          status = parse_args_safe(options, parser_help, err_io)
+          status = parse_args_safe(pointerof(options), parser_help, err_io)
           return status if status != 0
         end
         elsif parser.nil?
