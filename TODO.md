@@ -1,6 +1,30 @@
 # Crystal v2 — Active Work (codegen branch)
 
 ## Known Bugs (codegen)
+- **2026-02-26 (latest): stabilized yield-owner compatibility optimization (kept safe cache, reverted unsafe parent-chain variants)**
+  - Goal:
+    - reduce hot-path overhead in block fallback owner checks (`receiver_allows_yield_owner?`) without changing lowering semantics.
+  - Safe change kept (`src/compiler/hir/ast_to_hir.cr`):
+    - added `@yield_owner_compat_cache` (`receiver_base` -> `owner_base` -> `Bool`);
+    - invalidation is tied to hierarchy/module epochs:
+      - `@class_info_version`
+      - `@module_includers_version`.
+  - Root-cause experiments and outcome:
+    - attempted persistent parent-chain cache and per-lookup precomputed parent-chain path;
+    - both variants caused early stage2 release crash (`exit 11`) with
+      repeated recursion in `AstToHir#resolve_type_name_in_context` (stack overflow);
+    - both variants were reverted; only the safe compatibility cache remains.
+  - Evidence:
+    - debug sanity build:
+      - `crystal build src/crystal_v2.cr -o /tmp/stage1_dbg_yield_owner_cache_final --error-trace`
+      - result: `real 8.21s`.
+    - earlier stable release probe baseline for kept-safe variant:
+      - stage1 release: `real 409.63s` (`/tmp/stage1_rel_yield_owner_cache`);
+      - stage2 release probe (`300s` watchdog): timeout (`124`) with no early crash;
+      - hotspot still in type-name resolution / hashing family (`type_ref_for_name`, `resolve_type_name_in_context`, `String#hash`), not in runaway `receiver_allows_yield_owner?`.
+  - Current blocker:
+    - stage2 still exceeds 300s for this branch; next root-cause target is `resolve_type_name_in_context` recursion/hash churn path (not stdlib).
+
 - **2026-02-26 (latest): fixed root-cause recursive type-name pollution for composite types in `type_ref_for_name`**
   - Root cause:
     - `type_ref_for_name` applied `resolve_type_name_in_context` too early for composite type expressions (generic/named tuple shapes);

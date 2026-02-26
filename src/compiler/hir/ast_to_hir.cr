@@ -1171,6 +1171,10 @@ module Crystal::HIR
     # Cache method-short fallback for block lookups (shared across owners).
     @block_fallback_lookup_cache : Hash(BlockLookupKey, Tuple(String, CrystalV2::Compiler::Frontend::DefNode)?) = {} of BlockLookupKey => Tuple(String, CrystalV2::Compiler::Frontend::DefNode)?
     @block_fallback_method_candidates : Hash(String, Array(String)) = {} of String => Array(String)
+    # Cache receiver/owner compatibility for yield-owner filtering in block lookup.
+    @yield_owner_compat_cache : Hash(String, Hash(String, Bool)) = {} of String => Hash(String, Bool)
+    @yield_owner_compat_cache_class_info_version : Int32 = -1
+    @yield_owner_compat_cache_module_version : Int32 = -1
     # Cache function def lookup by callsite shape.
     @function_lookup_cache : Hash(FunctionLookupKey, FunctionLookupEntry) = Hash(FunctionLookupKey, FunctionLookupEntry).new(initial_capacity: 16384)
     @function_lookup_cache_size : Int32 = 0
@@ -22779,41 +22783,85 @@ module Crystal::HIR
       name
     end
 
+    private def ensure_yield_owner_compat_cache : Nil
+      if @yield_owner_compat_cache_class_info_version != @class_info_version ||
+         @yield_owner_compat_cache_module_version != @module_includers_version
+        @yield_owner_compat_cache.clear
+        @yield_owner_compat_cache_class_info_version = @class_info_version
+        @yield_owner_compat_cache_module_version = @module_includers_version
+      end
+    end
+
     private def receiver_allows_yield_owner?(receiver_base : String, owner_base : String) : Bool
+      ensure_yield_owner_compat_cache
+      owner_cache = @yield_owner_compat_cache[receiver_base]?
+      if owner_cache && owner_cache.has_key?(owner_base)
+        return owner_cache[owner_base]
+      end
+
+      result = false
       # Primitive receivers don't have full class_info chains; treat them as Object descendants
       # for yield-inline owner checks (e.g., Object#try on Int32).
       if owner_base == "Object"
-        return true if primitive_self_type(receiver_base)
+        result = true if primitive_self_type(receiver_base)
       end
-      return true if receiver_base == owner_base
-      owner_short = last_namespace_component_if_nested(owner_base)
-      if owner_short && !receiver_base.includes?("::")
-        return true if owner_short == receiver_base
-      end
-      current = receiver_base
-      while current
-        info = @class_info[current]?
-        break unless info
-        parent = info.parent_name
-        if parent
-          return true if parent == owner_base
-          if owner_short
-            parent_short = last_namespace_component_if_nested(parent)
-            return true if parent_short && parent_short == owner_short
+      unless result
+        if receiver_base == owner_base
+          result = true
+        else
+          owner_short = last_namespace_component_if_nested(owner_base)
+          if owner_short && !receiver_base.includes?("::")
+            result = true if owner_short == receiver_base
+          end
+          unless result
+            current = receiver_base
+            while current
+              info = @class_info[current]?
+              break unless info
+              parent = info.parent_name
+              if parent
+                if parent == owner_base
+                  result = true
+                  break
+                end
+                if owner_short
+                  parent_short = last_namespace_component_if_nested(parent)
+                  if parent_short && parent_short == owner_short
+                    result = true
+                    break
+                  end
+                end
+              end
+              current = parent
+            end
+          end
+          unless result
+            if modules = @class_included_modules[receiver_base]?
+              modules.each do |mod|
+                if mod == owner_base
+                  result = true
+                  break
+                end
+                if owner_short
+                  mod_short = last_namespace_component_if_nested(mod)
+                  if mod_short && mod_short == owner_short
+                    result = true
+                    break
+                  end
+                end
+              end
+            end
           end
         end
-        current = parent
       end
-      if modules = @class_included_modules[receiver_base]?
-        modules.each do |mod|
-          return true if mod == owner_base
-          if owner_short
-            mod_short = last_namespace_component_if_nested(mod)
-            return true if mod_short && mod_short == owner_short
-          end
-        end
+
+      target_cache = owner_cache || begin
+        created = {} of String => Bool
+        @yield_owner_compat_cache[receiver_base] = created
+        created
       end
-      false
+      target_cache[owner_base] = result
+      result
     end
 
     # Check if module `owner` includes module `target` (directly or transitively).
