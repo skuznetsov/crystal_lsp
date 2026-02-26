@@ -1,6 +1,35 @@
 # Crystal v2 — Active Work (codegen branch)
 
 ## Known Bugs (codegen)
+- **2026-02-26 (latest): fixed root bottleneck in block-fallback owner filtering and stabilized exposed type-name recursion loop**
+  - Root causes:
+    - `lookup_block_function_def_for_call` fallback path filtered candidates via `receiver_allows_yield_owner?` for each candidate name; for hot methods (`each`/`initialize`/etc.) candidate lists grew to hundreds/thousands, causing repeated class-info hash lookups and heavy compile-time churn;
+    - after reducing this cost, a latent recursion loop in `resolve_type_name_in_context` became reachable in release stage2 path, causing stack-overflow crashes (alternating recursive frames in the same resolver).
+  - Fixes applied (`src/compiler/hir/ast_to_hir.cr`):
+    - added cached receiver-scoped allow-set (`yield_allowed_owner_set`) for fallback owner filtering:
+      - precompute allowed owners from receiver, parent chain, and included modules;
+      - use O(1) set membership in fallback loop instead of per-candidate hierarchy traversal;
+      - cache invalidated on `@class_info_version` / `@module_includers_version`;
+    - added recursion guard for `resolve_type_name_in_context`:
+      - tracks in-progress names with `@resolve_type_name_stack`;
+      - returns current name on cycle to prevent infinite recursion/stack overflow.
+  - Evidence:
+    - stage1 release:
+      - `crystal build --release src/crystal_v2.cr -o /tmp/stage1_rel_allowset_guard --error-trace`
+      - result: **real 422.19s**.
+    - stage2 smoke (60s watchdog):
+      - no early crash; timeout `124`;
+      - hotspot moved away from `receiver_allows_yield_owner?` to type-resolution (`type_ref_for_name` / `create_union_type`).
+    - stage2 release probe (300s watchdog):
+      - `scripts/timeout_sample_lldb.sh -t 300 ... /tmp/stage1_rel_allowset_guard src/crystal_v2.cr --release ...`
+      - timeout `124`, **no early stack-overflow crash**;
+      - dominant hotspots now:
+        - `AstToHir#type_ref_for_name`
+        - `AstToHir#create_union_type`
+        - `AstToHir#split_union_type_name`
+  - Current blocker:
+    - next root-cause branch is union/type-name churn (`type_ref_for_name`/`create_union_type`) under stage2 release bootstrap; owner-filter bottleneck is no longer dominant.
+
 - **2026-02-26 (latest): stabilized yield-owner compatibility optimization (kept safe cache, reverted unsafe parent-chain variants)**
   - Goal:
     - reduce hot-path overhead in block fallback owner checks (`receiver_allows_yield_owner?`) without changing lowering semantics.

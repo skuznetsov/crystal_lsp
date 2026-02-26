@@ -1151,6 +1151,8 @@ module Crystal::HIR
     # Recursion guard for unresolved_generic_type_arg? to avoid cyclic alias/union loops.
     @unresolved_generic_arg_stack : Set(String) = Set(String).new
     @unresolved_generic_arg_depth : Int32 = 0
+    # Recursion guard for resolve_type_name_in_context to prevent alias/context loops.
+    @resolve_type_name_stack : Set(String) = Set(String).new
 
     # Cached ENV lookups — avoid repeated C library getenv() calls.
     @env_cache : Hash(String, String?) = {} of String => String?
@@ -1171,6 +1173,10 @@ module Crystal::HIR
     # Cache method-short fallback for block lookups (shared across owners).
     @block_fallback_lookup_cache : Hash(BlockLookupKey, Tuple(String, CrystalV2::Compiler::Frontend::DefNode)?) = {} of BlockLookupKey => Tuple(String, CrystalV2::Compiler::Frontend::DefNode)?
     @block_fallback_method_candidates : Hash(String, Array(String)) = {} of String => Array(String)
+    # Cached allowed owner names for receiver-based block fallback filtering.
+    @yield_allowed_owner_cache : Hash(String, Set(String)) = {} of String => Set(String)
+    @yield_allowed_owner_cache_class_info_version : Int32 = -1
+    @yield_allowed_owner_cache_module_version : Int32 = -1
     # Cache receiver/owner compatibility for yield-owner filtering in block lookup.
     @yield_owner_compat_cache : Hash(String, Hash(String, Bool)) = {} of String => Hash(String, Bool)
     @yield_owner_compat_cache_class_info_version : Int32 = -1
@@ -22792,6 +22798,45 @@ module Crystal::HIR
       end
     end
 
+    private def ensure_yield_allowed_owner_cache : Nil
+      if @yield_allowed_owner_cache_class_info_version != @class_info_version ||
+         @yield_allowed_owner_cache_module_version != @module_includers_version
+        @yield_allowed_owner_cache.clear
+        @yield_allowed_owner_cache_class_info_version = @class_info_version
+        @yield_allowed_owner_cache_module_version = @module_includers_version
+      end
+    end
+
+    private def yield_allowed_owner_set(receiver_base : String) : Set(String)
+      ensure_yield_allowed_owner_cache
+      if cached = @yield_allowed_owner_cache[receiver_base]?
+        return cached
+      end
+
+      allowed = Set(String).new
+      allowed << receiver_base
+      if recv_short = last_namespace_component_if_nested(receiver_base)
+        allowed << recv_short
+      end
+      get_parent_chain(receiver_base).each do |parent|
+        allowed << parent
+        if parent_short = last_namespace_component_if_nested(parent)
+          allowed << parent_short
+        end
+      end
+      if modules = @class_included_modules[receiver_base]?
+        modules.each do |mod|
+          allowed << mod
+          if mod_short = last_namespace_component_if_nested(mod)
+            allowed << mod_short
+          end
+        end
+      end
+      allowed << "Object"
+      @yield_allowed_owner_cache[receiver_base] = allowed
+      allowed
+    end
+
     private def receiver_allows_yield_owner?(receiver_base : String, owner_base : String) : Bool
       ensure_yield_owner_compat_cache
       owner_cache = @yield_owner_compat_cache[receiver_base]?
@@ -25649,6 +25694,19 @@ module Crystal::HIR
     end
 
     private def resolve_type_name_in_context(name : String) : String
+      return name if name.empty?
+      if @resolve_type_name_stack.includes?(name)
+        return name
+      end
+      @resolve_type_name_stack << name
+      begin
+        resolve_type_name_in_context_impl(name)
+      ensure
+        @resolve_type_name_stack.delete(name)
+      end
+    end
+
+    private def resolve_type_name_in_context_impl(name : String) : String
       return name if name.empty?
       name = normalize_missing_generic_parens(name)
       if mapped = @type_param_map[name]?
@@ -51735,15 +51793,22 @@ module Crystal::HIR
           @block_lookup_cache[cache_key] = result
           return result
         end
+        fallback_candidates = block_fallback_candidates_for_method(method_short)
         best_owner_base : String? = nil
-        block_fallback_candidates_for_method(method_short).each do |name|
+        allowed_owner_set = receiver_base ? yield_allowed_owner_set(receiver_base) : nil
+        fallback_candidates.each do |name|
           def_node = @function_defs[name]?
           next unless def_node
           candidate_owner_base : String? = nil
           if receiver_base
             owner = method_owner_from_name(name)
             candidate_owner_base = strip_generic_args(owner)
-            next unless receiver_allows_yield_owner?(receiver_base, candidate_owner_base)
+            owner_allowed = allowed_owner_set.not_nil!.includes?(candidate_owner_base)
+            unless owner_allowed
+              owner_short = last_namespace_component_if_nested(candidate_owner_base)
+              owner_allowed = owner_short ? allowed_owner_set.not_nil!.includes?(owner_short) : false
+            end
+            next unless owner_allowed
           end
 
           stats = function_param_stats(name, def_node)
