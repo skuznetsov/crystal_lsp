@@ -10860,11 +10860,27 @@ module Crystal::MIR
           val_type = @value_types[val]?
           const_val = @constant_values[val]?
           val_llvm_type = val_type ? @type_mapper.llvm_type(val_type) : nil
+          emitted_llvm_type = @emitted_value_types["%r#{val}"]?
+          slot_llvm_type = @cross_block_slot_types[val]?
+          effective_llvm_type = if slot_llvm_type && slot_llvm_type.includes?(".union")
+                                  slot_llvm_type
+                                elsif emitted_llvm_type && emitted_llvm_type.includes?(".union")
+                                  emitted_llvm_type
+                                else
+                                  val_llvm_type
+                                end
+
+          # If we already know this incoming as a union value (via slot/emitted type),
+          # it must not trigger ptr-phi fallback.
+          if effective_llvm_type && effective_llvm_type.includes?(".union")
+            next false
+          end
+
           if val_type && union_descriptor
             # If the incoming type is a known union variant, don't treat ptr as a mismatch.
             next false if union_descriptor.variants.any? { |variant| variant.type_ref == val_type }
           end
-          if val_llvm_type != "ptr"
+          if effective_llvm_type != "ptr"
             def_inst = find_def_inst(val)
             if def_inst && def_inst.is_a?(UnionUnwrap) && @type_mapper.llvm_type(def_inst.type) == "ptr"
               next true
@@ -10873,7 +10889,7 @@ module Crystal::MIR
           # Has ptr type, OR has no known type (forward reference that might be ptr)
           # But exclude constants which have known values
           # Also check if the incoming value is from a block that might have ptr phis
-          (val_llvm_type == "ptr") ||
+          (effective_llvm_type == "ptr") ||
           (val_type.nil? && const_val.nil?) ||
           # If const_val is "null", it's being used as ptr
           (const_val == "null")
@@ -13634,6 +13650,22 @@ module Crystal::MIR
                    end
       base_name = name.lstrip('%')
 
+      # value_ref can degrade a cross-block union value to ptr via fromslot casts.
+      # For union type_id checks we need the raw union struct value.
+      if union_type.includes?(".union")
+        emitted_from_ref = @emitted_value_types[union_val]?
+        unless emitted_from_ref && emitted_from_ref.includes?(".union")
+          if slot_name = @cross_block_slots[inst.union_value]?
+            c = @cond_counter
+            @cond_counter += 1
+            raw_union_val = "%#{base_name}.raw_union.#{c}"
+            emit "#{raw_union_val} = load #{union_type}, ptr %#{slot_name}"
+            record_emitted_type(raw_union_val, union_type)
+            union_val = raw_union_val
+          end
+        end
+      end
+
       # Check if LLVM type is actually a union struct (not just ptr)
       if union_type.includes?(".union")
         # Store union value to stack to get pointer for GEP
@@ -13702,6 +13734,22 @@ module Crystal::MIR
                      static_union_type
                    end
       base_name = name.lstrip('%')
+
+      # value_ref can degrade a cross-block union value to ptr via fromslot casts.
+      # For union variant checks we need the raw union struct value.
+      if union_type.includes?(".union")
+        emitted_from_ref = @emitted_value_types[union_val]?
+        unless emitted_from_ref && emitted_from_ref.includes?(".union")
+          if slot_name = @cross_block_slots[inst.union_value]?
+            c = @cond_counter
+            @cond_counter += 1
+            raw_union_val = "%#{base_name}.raw_union.#{c}"
+            emit "#{raw_union_val} = load #{union_type}, ptr %#{slot_name}"
+            record_emitted_type(raw_union_val, union_type)
+            union_val = raw_union_val
+          end
+        end
+      end
 
       # Check if LLVM type is actually a union struct (not just ptr)
       if union_type.includes?(".union")
@@ -15858,10 +15906,32 @@ module Crystal::MIR
       nil
     end
 
+    # Find first non-Nil variant index for a union LLVM type name.
+    private def first_non_nil_variant_id_for_union_type(llvm_type : String) : Int32?
+      variants = union_variant_tokens_for_llvm_union(llvm_type)
+      variants.each_with_index do |v, i|
+        base = v.split("$L").first.split("$CC").last
+        return i unless base == "Nil"
+      end
+      nil
+    end
+
     # Coerce a union value to a specific union LLVM type when the emitted source type
     # differs from the expected destination union type.
     private def coerce_union_value_for_type(base_name : String, val : String, expected_union_type : String) : String
-      actual_union_type = @emitted_value_types[val]? || expected_union_type
+      actual_union_type = @emitted_value_types[val]?
+      if actual_union_type.nil?
+        if m = val.match(/^%r(\d+)/)
+          vid = ValueId.new(m[1].to_u32)
+          if tref = @value_types[vid]?
+            actual_union_type = @type_mapper.llvm_type(tref)
+          end
+        end
+      end
+      if actual_union_type.nil? && (val == "0" || val == "null")
+        actual_union_type = "ptr"
+      end
+      actual_union_type ||= expected_union_type
       if actual_union_type.includes?(".union") && actual_union_type != expected_union_type
         emit "%#{base_name}.u2u_src_ptr = alloca #{actual_union_type}, align 8"
         emit "store #{actual_union_type} #{normalize_union_value(val, actual_union_type)}, ptr %#{base_name}.u2u_src_ptr"
@@ -15877,6 +15947,34 @@ module Crystal::MIR
         emit "store ptr %#{base_name}.u2u_payload_as_ptr, ptr %#{base_name}.u2u_dst_payload_ptr, align 4"
         emit "%#{base_name}.u2u_val = load #{expected_union_type}, ptr %#{base_name}.u2u_dst_ptr"
         "%#{base_name}.u2u_val"
+      elsif expected_union_type.includes?(".union") && !actual_union_type.includes?(".union")
+        # Scalar/pointer to union wrapping.
+        nil_variant = nil_variant_id_for_union_type(expected_union_type) || 0
+        non_nil_variant = first_non_nil_variant_id_for_union_type(expected_union_type) || (nil_variant == 0 ? 1 : 0)
+        emit "%#{base_name}.s2u_ptr = alloca #{expected_union_type}, align 8"
+        emit "store #{expected_union_type} zeroinitializer, ptr %#{base_name}.s2u_ptr"
+        emit "%#{base_name}.s2u_type_id_ptr = getelementptr #{expected_union_type}, ptr %#{base_name}.s2u_ptr, i32 0, i32 0"
+
+        if val == "null" || val == "0"
+          emit "store i32 #{nil_variant}, ptr %#{base_name}.s2u_type_id_ptr"
+        elsif actual_union_type == "ptr"
+          emit "%#{base_name}.s2u_is_nil = icmp eq ptr #{val}, null"
+          emit "%#{base_name}.s2u_type_id = select i1 %#{base_name}.s2u_is_nil, i32 #{nil_variant}, i32 #{non_nil_variant}"
+          emit "store i32 %#{base_name}.s2u_type_id, ptr %#{base_name}.s2u_type_id_ptr"
+          emit "%#{base_name}.s2u_payload_ptr = getelementptr #{expected_union_type}, ptr %#{base_name}.s2u_ptr, i32 0, i32 1"
+          emit "store ptr #{val}, ptr %#{base_name}.s2u_payload_ptr, align 4"
+        else
+          emit "store i32 #{non_nil_variant}, ptr %#{base_name}.s2u_type_id_ptr"
+          emit "%#{base_name}.s2u_payload_ptr = getelementptr #{expected_union_type}, ptr %#{base_name}.s2u_ptr, i32 0, i32 1"
+          if actual_union_type == "void"
+            emit "store i8 0, ptr %#{base_name}.s2u_payload_ptr, align 4"
+          else
+            emit "store #{actual_union_type} #{val}, ptr %#{base_name}.s2u_payload_ptr, align 4"
+          end
+        end
+
+        emit "%#{base_name}.s2u_val = load #{expected_union_type}, ptr %#{base_name}.s2u_ptr"
+        "%#{base_name}.s2u_val"
       else
         normalize_union_value(val, expected_union_type)
       end

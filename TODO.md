@@ -21,6 +21,12 @@
     - post-fix (`/tmp/stage1_rel_unionfix`, watchdog 180s):
       - same immediate `opt` error is not reproduced;
       - current hotspot moved to long LLVM backend pass (`emit_extern_call` / `mangle_name`) and remains the active blocker.
+    - deeper stage2 `--release` runs (240s watchdog) now fail later with a new union-phi family:
+      - `opt: ... expected '%Nil | IO | String.union', got ptr` (`%r8` / `%r9.union_ptr`)
+      - `opt: ... expected '%Nil | UInt32.union', got ptr` (`%r7` / `%r12.union_ptr`)
+  - Current blocker:
+    - union phi fallback in `emit_phi` still leaks `ptr` incoming values into union contexts (directly or via downstream `union_unwrap`), producing invalid `store <union> %rN(ptr)` IR;
+    - needs a root fix in union-phi normalization/predecessor wrapping path, not further symptom masking in stdlib.
 
 - **2026-02-26 (latest): fixed root-cause `forall T` callsite return-type pollution (`identity(nil).nil?` false)**
   - Root causes:
