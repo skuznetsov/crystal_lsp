@@ -14100,14 +14100,14 @@ module Crystal::HIR
               extra_type_params[param_name] = type_name
               # Map forall type parameter name (e.g. T) to concrete type when the
               # parameter annotation is a bare type variable (e.g. `default : T`).
-              if type_ann_str && type_param_like?(type_ann_str) && !extra_type_params.has_key?(type_ann_str)
+              if type_ann_str && unresolved_type_param_annotation?(type_ann_str) && !extra_type_params.has_key?(type_ann_str)
                 extra_type_params[type_ann_str] = type_name
               end
             end
           end
           # Also map forall type params from non-literal call-site arguments
           # (e.g. passing a variable of known type to a `forall T` parameter).
-          if !param_literal && type_ann_str && type_param_like?(type_ann_str) && !extra_type_params.has_key?(type_ann_str)
+          if !param_literal && type_ann_str && unresolved_type_param_annotation?(type_ann_str) && !extra_type_params.has_key?(type_ann_str)
             if call_type_for_param != TypeRef::VOID
               ct_name = get_type_name_from_ref(call_type_for_param)
               if !ct_name.empty? && ct_name != "Void" && ct_name != "Unknown"
@@ -14120,7 +14120,7 @@ module Crystal::HIR
             # types (e.g. `Pointer(Void)`), so return annotations/casts can resolve.
             if type_ann_str.ends_with?('*')
               elem_param = type_ann_str[0, type_ann_str.bytesize - 1].strip
-              if type_param_like?(elem_param) && !extra_type_params.has_key?(elem_param)
+              if unresolved_type_param_annotation?(elem_param) && !extra_type_params.has_key?(elem_param)
                 ct_name = get_type_name_from_ref(call_type_for_param)
                 if info = split_generic_base_and_args(ct_name)
                   if info[:base] == "Pointer"
@@ -17013,11 +17013,36 @@ module Crystal::HIR
       return if overload_name == base_name
       return if @module.has_function?(overload_name)
 
-      # Explicit `def self.new` must win over synthesized allocator overloads.
-      # If a source-defined overload already matches this callsite signature,
-      # do not generate an auto allocator for the same mangled name.
-      if lookup_function_def_for_call(base_name, call_arg_types.size, false, call_arg_types)
-        return
+      # Explicit `def self.new` should usually win over synthesized allocator overloads.
+      # Exception: wrapper-style `.new` forwarding that passes a Proc argument can be
+      # lowered as a plain call and incorrectly bind to a generic explicit overload
+      # (for example `default_value : V`) instead of the initialize-backed allocator.
+      # In that case, keep generating the allocator overload for this concrete shape.
+      if explicit_match = lookup_function_def_for_call(base_name, call_arg_types.size, false, call_arg_types)
+        explicit_name, explicit_def = explicit_match
+        allow_allocator_overload = false
+
+        if base_name.ends_with?(".new") && def_has_untyped_regular_param?(explicit_def)
+          has_proc_arg = call_arg_types.any? do |arg_type|
+            if arg_desc = @module.get_type_descriptor(arg_type)
+              arg_desc.kind == TypeKind::Proc ||
+                arg_desc.name == "Proc" ||
+                arg_desc.name.starts_with?("Proc(")
+            else
+              false
+            end
+          end
+
+          if has_proc_arg
+            if init_base = resolve_method_with_inheritance(class_name, "initialize")
+              init_match = lookup_function_def_for_call(init_base, call_arg_types.size, false, call_arg_types, false, true)
+              init_match ||= lookup_function_def_for_call(init_base, call_arg_types.size, false, call_arg_types)
+              allow_allocator_overload = !!init_match
+            end
+          end
+        end
+
+        return unless allow_allocator_overload
       end
 
       # When auto-allocator init params have a hard type mismatch with call args
@@ -18318,13 +18343,13 @@ module Crystal::HIR
               extra_type_params[param_name] = type_name
               # Map forall type parameter name (e.g. T) to concrete type when the
               # parameter annotation is a bare type variable (e.g. `default : T`).
-              if type_ann_str && type_param_like?(type_ann_str) && !extra_type_params.has_key?(type_ann_str)
+              if type_ann_str && unresolved_type_param_annotation?(type_ann_str) && !extra_type_params.has_key?(type_ann_str)
                 extra_type_params[type_ann_str] = type_name
               end
             end
           end
           # Also map forall type params from non-literal call-site arguments.
-          if !param_literal && type_ann_str && type_param_like?(type_ann_str) && !extra_type_params.has_key?(type_ann_str)
+          if !param_literal && type_ann_str && unresolved_type_param_annotation?(type_ann_str) && !extra_type_params.has_key?(type_ann_str)
             if call_type_for_param != TypeRef::VOID
               ct_name = get_type_name_from_ref(call_type_for_param)
               if !ct_name.empty? && ct_name != "Void" && ct_name != "Unknown"
@@ -29944,13 +29969,13 @@ module Crystal::HIR
                 extra_type_params[param_name] = type_name
                 # Map forall type parameter name (e.g. T) to concrete type when the
                 # parameter annotation is a bare type variable (e.g. `default : T`).
-                if type_ann_str && type_param_like?(type_ann_str) && !extra_type_params.has_key?(type_ann_str)
+                if type_ann_str && unresolved_type_param_annotation?(type_ann_str) && !extra_type_params.has_key?(type_ann_str)
                   extra_type_params[type_ann_str] = type_name
                 end
               end
             end
             # Also map forall type params from non-literal call-site arguments.
-            if !param_literal && type_ann_str && type_param_like?(type_ann_str) && !extra_type_params.has_key?(type_ann_str)
+            if !param_literal && type_ann_str && unresolved_type_param_annotation?(type_ann_str) && !extra_type_params.has_key?(type_ann_str)
               if call_type_for_param != TypeRef::VOID
                 ct_name = get_type_name_from_ref(call_type_for_param)
                 if !ct_name.empty? && ct_name != "Void" && ct_name != "Unknown"
@@ -29963,7 +29988,7 @@ module Crystal::HIR
               # types (e.g. `Pointer(Void)`), so return annotations/casts can resolve.
               if type_ann_str.ends_with?('*')
                 elem_param = type_ann_str[0, type_ann_str.bytesize - 1].strip
-                if type_param_like?(elem_param) && !extra_type_params.has_key?(elem_param)
+                if unresolved_type_param_annotation?(elem_param) && !extra_type_params.has_key?(elem_param)
                   ct_name = get_type_name_from_ref(call_type_for_param)
                   if info = split_generic_base_and_args(ct_name)
                     if info[:base] == "Pointer"
@@ -41866,15 +41891,25 @@ module Crystal::HIR
                     target_name = name
                     lookup_branch = "generic_owner_template_mangled"
                   else
-                    mangled_prefix = "#{template_base}$"
-                    function_def_overloads(template_base).each do |key|
-                      next if key == template_base
-                      next unless key.starts_with?(mangled_prefix)
-                      func_def = @function_defs[key]
-                      arena = @function_def_arenas[key]
-                      target_name = name
-                      lookup_branch = "generic_owner_template_prefix"
-                      break
+                    parsed_suffix = strip_mangled_suffix_flags(suffix)
+                    parsed_types = parse_types_from_suffix(parsed_suffix)
+                    suffix_has_block = suffix == "block" || suffix.ends_with?("_block")
+                    suffix_has_splat = suffix.ends_with?("_splat") || suffix.ends_with?("_double_splat")
+                    if entry = lookup_function_def_for_call(
+                         template_base,
+                         parsed_types.size,
+                         suffix_has_block,
+                         parsed_types,
+                         suffix_has_splat
+                       )
+                      resolved_entry_name = entry[0]
+                      resolved_entry_def = entry[1]
+                      if resolved_entry_name.starts_with?("#{template_base}$")
+                        func_def = resolved_entry_def
+                        arena = @function_def_arenas[resolved_entry_name]
+                        target_name = name
+                        lookup_branch = "generic_owner_template_lookup"
+                      end
                     end
                   end
                 end

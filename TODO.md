@@ -1,6 +1,34 @@
 # Crystal v2 — Active Work (codegen branch)
 
 ## Known Bugs (codegen)
+- **2026-02-26 (latest): fixed root-cause `.new$Proc_*` allocator suppression (Hash block-forwarding mutual recursion)**
+  - Root cause:
+    - `generate_allocator_overload` always skipped auto-allocator generation when any explicit `self.new` overload matched callsite arg types;
+    - for `Hash(String, AstArena | VirtualArena | PageArena).new(initial_capacity: 8) { ... }`, this let `new$Proc_Int32` bind to explicit generic `default_value : V` path instead of initialize-backed allocator;
+    - result was mutual recursion chain in generated IR (`new$Int32_block -> new$Proc_Int32 -> new$Int32_block`).
+  - Fixes applied (`src/compiler/hir/ast_to_hir.cr`):
+    - in `generate_allocator_overload`, keep explicit-overload precedence by default, but allow allocator-overload generation for `.new` Proc-forwarding shapes when:
+      - explicit match is untyped/generic,
+      - call args include `Proc`,
+      - matching `initialize` overload exists for this call shape.
+  - Evidence:
+    - fast IR repro:
+      - `/tmp/stage1_dbg_procalloc_fix1 /tmp/repro_hash_arenalike_fullunion.cr --emit llvm-ir > /tmp/repro_hash_arenalike_fullunion_fix1.ll`
+      - now:
+        - `new$Int32_block` calls `new$Proc_Int32`;
+        - `new$Proc_Int32` is allocator body (`malloc` + `Hash#initialize$$Proc_Int32`);
+        - no back-edge call to `new$Int32_block`.
+    - regression probe:
+      - `regression_tests/stage1_hash_new_initial_capacity_repro.sh /tmp/stage1_dbg_procalloc_fix1`
+      - result: `not reproduced`.
+    - release timing (this session):
+      - `stage1` (original compiler, `--release`): **real 443.43s** (`7:23.43`)
+      - `stage2` (`/tmp/stage1_rel_procalloc_fix1`, `--release`):
+        - watchdog `180s`: timeout (`124`), hotspot in `MIR::LLVMIRGenerator#emit_function`/`emit_instruction`;
+        - watchdog `300s`: timeout (`124`), hotspot shifted to LLVM backend (`SelectionDAGISel::CodeGenAndEmitDAG`, register coalescing, symbol sorting).
+  - Current blocker:
+    - stage2 no longer reproduces this constructor recursion family on fast repro, but full bootstrap remains unstable/too slow (>300s in current run); next step is root-cause profiling of backend-time explosion branch (not stdlib changes).
+
 - **2026-02-26 (latest): fixed root-cause `.new` block-overload miss in class-method lowering (custom `Hash(K, V)` constructor segfault)**
   - Root cause:
     - in `AstToHir#lower_function_if_needed` class-method `new` path, explicit-overload probing always used `has_block = false`;
