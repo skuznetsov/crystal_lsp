@@ -2048,6 +2048,13 @@ module Crystal::HIR
     @array_type_for_element_nil_cache : Set(TypeRef)
     @hash_type_for_entry_cache : Hash({TypeRef, TypeRef}, NamedTuple(type: TypeRef, name: String))
     @type_name_normalize_cache : Hash(String, String)
+    # Recursion guards for sanitize_type_name/sanitize_type_name_part.
+    @sanitize_type_name_in_progress : Set(String)
+    @sanitize_type_part_in_progress : Set(String)
+    @sanitize_type_depth : Int32
+    # Guard generic param -> type_ref resolution against recursive cycles.
+    @generic_param_resolution_in_progress : Set(String)
+    @generic_param_resolution_log_count : Int32
     # Cache for normalize_declared_type_name keyed on (type_name, context, subst_cache_gen).
     @normalize_decl_cache : Hash({String, String?, UInt64}, String)
     # Guard against recursive union construction (A | B where A aliases back to union).
@@ -2146,6 +2153,21 @@ module Crystal::HIR
 
     @inline_yield_return_stack : Array(InlineReturnContext) = [] of InlineReturnContext
     @inline_yield_return_override_stack : Array(InlineReturnOverride) = [] of InlineReturnOverride
+
+    # Block-local `next` handling context (e.g. iterator/predicate blocks).
+    # `next value` should return from the block invocation, not from the enclosing function.
+    class InlineNextContext
+      getter exit_block : BlockId
+      getter incoming : Array({BlockId, ValueId})
+      getter expected_type : TypeRef
+      getter dead_blocks : Set(BlockId)
+
+      def initialize(@exit_block : BlockId, @incoming : Array({BlockId, ValueId}), @expected_type : TypeRef)
+        @dead_blocks = Set(BlockId).new
+      end
+    end
+
+    @inline_next_stack : Array(InlineNextContext) = [] of InlineNextContext
     # Loop context stack: tracks exit_block (for break) and cond_block (for next)
     @loop_exit_stack : Array(BlockId) = [] of BlockId
     @loop_cond_stack : Array(BlockId) = [] of BlockId
@@ -2154,6 +2176,9 @@ module Crystal::HIR
     @loop_break_info_stack : Array(Array({BlockId, Hash(String, ValueId)})) = [] of Array({BlockId, Hash(String, ValueId)})
     # Track break values for while expression result (break VALUE passes value out of while)
     @loop_break_value_stack : Array(Array({BlockId, ValueId})) = [] of Array({BlockId, ValueId})
+    # Dead continuation blocks created after control-flow exits (`next`/`break`).
+    # These blocks are synthetic and must not be treated as flowing branches.
+    @control_flow_dead_blocks : Set({FunctionId, BlockId}) = Set({FunctionId, BlockId}).new
     @virtual_targets_lowered : Set({String, String, UInt64, UInt8}) = Set({String, String, UInt64, UInt8}).new
     # Cache for collect_subclasses — class hierarchy doesn't change during compilation.
     @subclasses_cache : Hash(String, Array(String)) = {} of String => Array(String)
@@ -2164,6 +2189,11 @@ module Crystal::HIR
     record VirtualTarget, method_name : String, arg_types : Array(TypeRef), has_block : Bool, has_splat : Bool
     @virtual_targets_by_parent : Hash(String, Array(VirtualTarget)) = {} of String => Array(VirtualTarget)
     @virtual_targets_recorded : Set(String) = Set(String).new
+
+    @[AlwaysInline]
+    private def control_flow_dead_block?(ctx : LoweringContext, block_id : BlockId) : Bool
+      @control_flow_dead_blocks.includes?({ctx.function.id, block_id})
+    end
 
     # Captures computed for block literals (body_block -> captures).
     @block_captures : Hash(BlockId, Array(CapturedVar)) = {} of BlockId => Array(CapturedVar)
@@ -2374,6 +2404,11 @@ module Crystal::HIR
       @array_type_for_element_nil_cache = Set(TypeRef).new
       @hash_type_for_entry_cache = {} of {TypeRef, TypeRef} => NamedTuple(type: TypeRef, name: String)
       @type_name_normalize_cache = Hash(String, String).new(initial_capacity: 4096)
+      @sanitize_type_name_in_progress = Set(String).new
+      @sanitize_type_part_in_progress = Set(String).new
+      @sanitize_type_depth = 0
+      @generic_param_resolution_in_progress = Set(String).new
+      @generic_param_resolution_log_count = 0
       @normalize_decl_cache = Hash({String, String?, UInt64}, String).new(initial_capacity: 4096)
       @union_in_progress = Set(String).new
       @resolved_type_name_cache_global = Hash(String, ResolvedTypeNameCacheEntry).new(initial_capacity: 8192)
@@ -14457,7 +14492,7 @@ module Crystal::HIR
       # BUT don't add return after raise (which sets Unreachable terminator)
       block = ctx.get_block(ctx.current_block)
       block_has_raise = block.instructions.any? { |inst| inst.is_a?(Raise) }
-      if block.terminator.is_a?(Unreachable) && !block_has_raise
+      if block.terminator.is_a?(Unreachable) && !block_has_raise && !control_flow_dead_block?(ctx, ctx.current_block)
         block.terminator = Return.new(last_value)
       end
 
@@ -18873,7 +18908,7 @@ module Crystal::HIR
       # BUT don't add return after raise (which sets Unreachable terminator)
       block = ctx.get_block(ctx.current_block)
       block_has_raise = block.instructions.any? { |inst| inst.is_a?(Raise) }
-      if block.terminator.is_a?(Unreachable) && !block_has_raise
+      if block.terminator.is_a?(Unreachable) && !block_has_raise && !control_flow_dead_block?(ctx, ctx.current_block)
         block.terminator = Return.new(last_value)
       end
 
@@ -24538,6 +24573,104 @@ module Crystal::HIR
     # ============================================================
     # End AST Reachability
     # ============================================================
+
+    private def contains_next?(body : Array(ExprId)) : Bool
+      body.any? { |expr_id| contains_next_in_expr?(expr_id) }
+    end
+
+    private def contains_next_in_expr?(expr_id : ExprId) : Bool
+      return false if expr_id.invalid?
+      node = @arena[expr_id]
+      case node
+      when CrystalV2::Compiler::Frontend::NextNode
+        true
+      when CrystalV2::Compiler::Frontend::AssignNode
+        contains_next_in_expr?(node.target) || contains_next_in_expr?(node.value)
+      when CrystalV2::Compiler::Frontend::MemberAccessNode
+        contains_next_in_expr?(node.object)
+      when CrystalV2::Compiler::Frontend::CallNode
+        if callee_id = node.callee
+          return true if contains_next_in_expr?(callee_id)
+        end
+        if args = node.args
+          args.each do |arg|
+            return true if contains_next_in_expr?(arg)
+          end
+        end
+        if block_id = node.block
+          return true if contains_next_in_expr?(block_id)
+        end
+        if named = node.named_args
+          named.each do |na|
+            return true if contains_next_in_expr?(na.value)
+          end
+        end
+        false
+      when CrystalV2::Compiler::Frontend::UnaryNode
+        contains_next_in_expr?(node.operand)
+      when CrystalV2::Compiler::Frontend::BinaryNode
+        contains_next_in_expr?(node.left) || contains_next_in_expr?(node.right)
+      when CrystalV2::Compiler::Frontend::GroupingNode
+        contains_next_in_expr?(node.expression)
+      when CrystalV2::Compiler::Frontend::MacroExpressionNode
+        contains_next_in_expr?(node.expression)
+      when CrystalV2::Compiler::Frontend::IfNode
+        contains_next_in_expr?(node.condition) ||
+          contains_next?(node.then_body) ||
+          (node.elsifs && node.elsifs.not_nil!.any? do |branch|
+            contains_next_in_expr?(branch.condition) || contains_next?(branch.body)
+          end) ||
+          (node.else_body ? contains_next?(node.else_body.not_nil!) : false)
+      when CrystalV2::Compiler::Frontend::UnlessNode
+        contains_next_in_expr?(node.condition) ||
+          contains_next?(node.then_branch) ||
+          (node.else_branch ? contains_next?(node.else_branch.not_nil!) : false)
+      when CrystalV2::Compiler::Frontend::WhileNode
+        contains_next_in_expr?(node.condition) || contains_next?(node.body)
+      when CrystalV2::Compiler::Frontend::UntilNode
+        contains_next_in_expr?(node.condition) || contains_next?(node.body)
+      when CrystalV2::Compiler::Frontend::LoopNode
+        contains_next?(node.body)
+      when CrystalV2::Compiler::Frontend::BlockNode
+        contains_next?(node.body)
+      when CrystalV2::Compiler::Frontend::ProcLiteralNode
+        contains_next?(node.body)
+      when CrystalV2::Compiler::Frontend::CaseNode
+        node.when_branches.any? { |w| contains_next?(w.body) } ||
+          (node.else_branch ? contains_next?(node.else_branch.not_nil!) : false)
+      when CrystalV2::Compiler::Frontend::ArrayLiteralNode
+        return true if node.elements.any? { |el| contains_next_in_expr?(el) }
+        node.of_type ? contains_next_in_expr?(node.of_type.not_nil!) : false
+      when CrystalV2::Compiler::Frontend::TupleLiteralNode
+        node.elements.any? { |el| contains_next_in_expr?(el) }
+      when CrystalV2::Compiler::Frontend::HashLiteralNode
+        node.entries.any? do |entry|
+          contains_next_in_expr?(entry.key) || contains_next_in_expr?(entry.value)
+        end
+      when CrystalV2::Compiler::Frontend::NamedTupleLiteralNode
+        node.entries.any? { |entry| contains_next_in_expr?(entry.value) }
+      when CrystalV2::Compiler::Frontend::StringInterpolationNode
+        node.pieces.any? do |piece|
+          piece.kind == CrystalV2::Compiler::Frontend::StringPiece::Kind::Expression &&
+            piece.expr && contains_next_in_expr?(piece.expr.not_nil!)
+        end
+      when CrystalV2::Compiler::Frontend::IndexNode
+        return true if contains_next_in_expr?(node.object)
+        node.indexes.any? { |idx| contains_next_in_expr?(idx) }
+      when CrystalV2::Compiler::Frontend::RangeNode
+        contains_next_in_expr?(node.begin_expr) || contains_next_in_expr?(node.end_expr)
+      when CrystalV2::Compiler::Frontend::BeginNode
+        return true if contains_next?(node.body)
+        if clauses = node.rescue_clauses
+          return true if clauses.any? { |cl| contains_next?(cl.body) }
+        end
+        return true if node.else_body && contains_next?(node.else_body.not_nil!)
+        return true if node.ensure_body && contains_next?(node.ensure_body.not_nil!)
+        false
+      else
+        false
+      end
+    end
 
     private def contains_return_in_expr?(expr_id : ExprId) : Bool
       return false if expr_id.invalid?
@@ -30254,7 +30387,7 @@ module Crystal::HIR
       # BUT don't add return after raise (which sets Unreachable terminator)
       block = ctx.get_block(ctx.current_block)
       block_has_raise = block.instructions.any? { |inst| inst.is_a?(Raise) }
-      if block.terminator.is_a?(Unreachable) && !block_has_raise
+      if block.terminator.is_a?(Unreachable) && !block_has_raise && !control_flow_dead_block?(ctx, ctx.current_block)
         block.terminator = Return.new(last_value)
       end
 
@@ -30542,7 +30675,7 @@ module Crystal::HIR
 
       # Return void (stdlib's fun main handles the return value)
       block = ctx.get_block(ctx.current_block)
-      if block.terminator.is_a?(Unreachable)
+      if block.terminator.is_a?(Unreachable) && !control_flow_dead_block?(ctx, ctx.current_block)
         block.terminator = Return.new(nil)
       end
 
@@ -36376,7 +36509,9 @@ module Crystal::HIR
       then_locals = ctx.save_locals
       then_block_data = ctx.get_block(ctx.current_block)
       then_has_noreturn = then_block_data.instructions.any? { |inst| inst.is_a?(Raise) }
-      then_flows_to_merge = then_block_data.terminator.is_a?(Unreachable) && !then_has_noreturn
+      then_flows_to_merge = then_block_data.terminator.is_a?(Unreachable) &&
+                            !then_has_noreturn &&
+                            !control_flow_dead_block?(ctx, then_exit)
       if then_flows_to_merge
         ctx.terminate(Jump.new(merge_block))
       end
@@ -36393,7 +36528,9 @@ module Crystal::HIR
       else_locals = ctx.save_locals
       else_block_data = ctx.get_block(ctx.current_block)
       else_has_noreturn = else_block_data.instructions.any? { |inst| inst.is_a?(Raise) }
-      else_flows_to_merge = else_block_data.terminator.is_a?(Unreachable) && !else_has_noreturn
+      else_flows_to_merge = else_block_data.terminator.is_a?(Unreachable) &&
+                            !else_has_noreturn &&
+                            !control_flow_dead_block?(ctx, else_exit)
       if else_flows_to_merge
         ctx.terminate(Jump.new(merge_block))
       end
@@ -37379,7 +37516,9 @@ module Crystal::HIR
 
       then_block_data = ctx.get_block(ctx.current_block)
       then_has_noreturn = then_block_data.instructions.any? { |inst| inst.is_a?(Raise) || inst.is_a?(Return) }
-      then_flows_to_merge = then_block_data.terminator.is_a?(Unreachable) && !then_has_noreturn
+      then_flows_to_merge = then_block_data.terminator.is_a?(Unreachable) &&
+                            !then_has_noreturn &&
+                            !control_flow_dead_block?(ctx, then_exit_block)
       if then_flows_to_merge
         ctx.terminate(Jump.new(merge_block))
       end
@@ -37425,7 +37564,9 @@ module Crystal::HIR
 
           elsif_block_data = ctx.get_block(ctx.current_block)
           elsif_has_noreturn = elsif_block_data.instructions.any? { |inst| inst.is_a?(Raise) || inst.is_a?(Return) }
-          elsif_flows_to_merge = elsif_block_data.terminator.is_a?(Unreachable) && !elsif_has_noreturn
+          elsif_flows_to_merge = elsif_block_data.terminator.is_a?(Unreachable) &&
+                                 !elsif_has_noreturn &&
+                                 !control_flow_dead_block?(ctx, elsif_exit_block)
           if elsif_flows_to_merge
             ctx.terminate(Jump.new(merge_block))
           end
@@ -37458,7 +37599,9 @@ module Crystal::HIR
 
       else_block_data = ctx.get_block(ctx.current_block)
       else_has_noreturn = else_block_data.instructions.any? { |inst| inst.is_a?(Raise) || inst.is_a?(Return) }
-      else_flows_to_merge = else_block_data.terminator.is_a?(Unreachable) && !else_has_noreturn
+      else_flows_to_merge = else_block_data.terminator.is_a?(Unreachable) &&
+                            !else_has_noreturn &&
+                            !control_flow_dead_block?(ctx, else_exit_block)
       if else_flows_to_merge
         ctx.terminate(Jump.new(merge_block))
       end
@@ -37881,7 +38024,9 @@ module Crystal::HIR
       # Check if then branch flows to merge (not terminated by return/raise)
       then_block_data = ctx.get_block(ctx.current_block)
       then_has_noreturn = then_block_data.instructions.any? { |inst| inst.is_a?(Raise) || inst.is_a?(Return) }
-      then_flows_to_merge = then_block_data.terminator.is_a?(Unreachable) && !then_has_noreturn
+      then_flows_to_merge = then_block_data.terminator.is_a?(Unreachable) &&
+                            !then_has_noreturn &&
+                            !control_flow_dead_block?(ctx, then_exit)
       if then_flows_to_merge
         ctx.terminate(Jump.new(merge_block))
       end
@@ -37906,7 +38051,9 @@ module Crystal::HIR
       # Check if else branch flows to merge
       else_block_data = ctx.get_block(ctx.current_block)
       else_has_noreturn = else_block_data.instructions.any? { |inst| inst.is_a?(Raise) || inst.is_a?(Return) }
-      else_flows_to_merge = else_block_data.terminator.is_a?(Unreachable) && !else_has_noreturn
+      else_flows_to_merge = else_block_data.terminator.is_a?(Unreachable) &&
+                            !else_has_noreturn &&
+                            !control_flow_dead_block?(ctx, else_exit)
       if else_flows_to_merge
         ctx.terminate(Jump.new(merge_block))
       end
@@ -38856,7 +39003,9 @@ module Crystal::HIR
       # Check if then branch flows to merge
       then_block_data = ctx.get_block(ctx.current_block)
       then_has_noreturn = then_block_data.instructions.any? { |inst| inst.is_a?(Raise) }
-      then_flows_to_merge = then_block_data.terminator.is_a?(Unreachable) && !then_has_noreturn
+      then_flows_to_merge = then_block_data.terminator.is_a?(Unreachable) &&
+                            !then_has_noreturn &&
+                            !control_flow_dead_block?(ctx, then_exit)
       if then_flows_to_merge
         ctx.terminate(Jump.new(merge_block))
       end
@@ -38870,7 +39019,9 @@ module Crystal::HIR
       # Check if else branch flows to merge
       else_block_data = ctx.get_block(ctx.current_block)
       else_has_noreturn = else_block_data.instructions.any? { |inst| inst.is_a?(Raise) }
-      else_flows_to_merge = else_block_data.terminator.is_a?(Unreachable) && !else_has_noreturn
+      else_flows_to_merge = else_block_data.terminator.is_a?(Unreachable) &&
+                            !else_has_noreturn &&
+                            !control_flow_dead_block?(ctx, else_exit)
       if else_flows_to_merge
         ctx.terminate(Jump.new(merge_block))
       end
@@ -39658,7 +39809,9 @@ module Crystal::HIR
         # Check if branch flows to merge
         when_block_data = ctx.get_block(ctx.current_block)
         when_has_noreturn = when_block_data.instructions.any? { |inst| inst.is_a?(Raise) }
-        when_flows_to_merge = when_block_data.terminator.is_a?(Unreachable) && !when_has_noreturn
+        when_flows_to_merge = when_block_data.terminator.is_a?(Unreachable) &&
+                              !when_has_noreturn &&
+                              !control_flow_dead_block?(ctx, exit_block)
 
         if when_flows_to_merge
           # Save branch locals before jumping to merge (only if flowing)
@@ -39710,7 +39863,9 @@ module Crystal::HIR
       # Check if else branch flows to merge
       else_block_data = ctx.get_block(ctx.current_block)
       else_has_noreturn = else_block_data.instructions.any? { |inst| inst.is_a?(Raise) }
-      else_flows_to_merge = else_block_data.terminator.is_a?(Unreachable) && !else_has_noreturn
+      else_flows_to_merge = else_block_data.terminator.is_a?(Unreachable) &&
+                            !else_has_noreturn &&
+                            !control_flow_dead_block?(ctx, else_exit)
 
       if else_flows_to_merge
         # Save else branch locals (only if flowing)
@@ -40028,6 +40183,7 @@ module Crystal::HIR
       end
       # Start a new unreachable block for any dead code after break
       dead_block = ctx.create_block
+      @control_flow_dead_blocks.add({ctx.function.id, dead_block})
       ctx.switch_to_block(dead_block)
       nil_lit = Literal.new(ctx.next_id, TypeRef::NIL, nil)
       ctx.emit(nil_lit)
@@ -40035,7 +40191,41 @@ module Crystal::HIR
     end
 
     private def lower_next(ctx : LoweringContext, node : CrystalV2::Compiler::Frontend::NextNode) : ValueId
-      if cond_block = @loop_cond_stack.last?
+      if next_ctx = @inline_next_stack.last?
+        next_value = if val_expr = node.value
+                       lower_expr(ctx, val_expr)
+                     else
+                       # Predicate-style block semantics: `next` with no value is falsy.
+                       if next_ctx.expected_type == TypeRef::BOOL
+                         false_for_next = Literal.new(ctx.next_id, TypeRef::BOOL, 0_i64)
+                         ctx.emit(false_for_next)
+                         false_for_next.id
+                       else
+                         nil_for_next = Literal.new(ctx.next_id, TypeRef::NIL, nil)
+                         ctx.emit(nil_for_next)
+                         nil_for_next.id
+                       end
+                     end
+
+        expected_type = next_ctx.expected_type
+        if expected_type != TypeRef::VOID && expected_type != TypeRef::NIL
+          next_value_type = ctx.type_of(next_value)
+          if next_value_type != expected_type && next_value_type != TypeRef::VOID
+            next_value = coerce_value_to_type(ctx, next_value, expected_type)
+          end
+        end
+
+        next_ctx.incoming << {ctx.current_block, next_value}
+        ctx.terminate(Jump.new(next_ctx.exit_block))
+
+        dead_block = ctx.create_block
+        next_ctx.dead_blocks.add(dead_block)
+        @control_flow_dead_blocks.add({ctx.function.id, dead_block})
+        ctx.switch_to_block(dead_block)
+        nil_lit = Literal.new(ctx.next_id, TypeRef::NIL, nil)
+        ctx.emit(nil_lit)
+        return nil_lit.id
+      elsif cond_block = @loop_cond_stack.last?
         # Patch phi nodes with current variable values so the loop header
         # sees updated variables when we jump back from this block
         if phi_nodes = @loop_phi_stack.last?
@@ -40064,10 +40254,29 @@ module Crystal::HIR
         end
         ctx.terminate(Jump.new(cond_block))
       else
-        ctx.terminate(Unreachable.new)
+        # `next` outside a loop (for example inside iterator blocks/procs)
+        # returns from the current block/proc invocation.
+        next_value = if val_expr = node.value
+                       lower_expr(ctx, val_expr)
+                     else
+                       nil_for_next = Literal.new(ctx.next_id, TypeRef::NIL, nil)
+                       ctx.emit(nil_for_next)
+                       nil_for_next.id
+                     end
+
+        ret_type = ctx.function.return_type
+        if ret_type != TypeRef::VOID && ret_type != TypeRef::NIL
+          next_value_type = ctx.type_of(next_value)
+          if next_value_type != ret_type && next_value_type != TypeRef::VOID
+            next_value = coerce_value_to_type(ctx, next_value, ret_type)
+          end
+        end
+
+        ctx.terminate(Return.new(next_value))
       end
       # Start a new unreachable block for any dead code after next
       dead_block = ctx.create_block
+      @control_flow_dead_blocks.add({ctx.function.id, dead_block})
       ctx.switch_to_block(dead_block)
       nil_lit = Literal.new(ctx.next_id, TypeRef::NIL, nil)
       ctx.emit(nil_lit)
@@ -53983,7 +54192,42 @@ module Crystal::HIR
       ctx.register_type(index_get.id, element_type)
       ctx.register_local(param_name, index_get.id)
 
-      predicate_result = lower_body(ctx, block.body)
+      predicate_exit_block = ctx.create_block
+      predicate_incoming = [] of Tuple(BlockId, ValueId)
+      predicate_next_ctx = InlineNextContext.new(predicate_exit_block, predicate_incoming, TypeRef::BOOL)
+
+      begin
+        @inline_next_stack << predicate_next_ctx
+        predicate_result = lower_body(ctx, block.body)
+      ensure
+        @inline_next_stack.pop?
+      end
+
+      if ctx.get_block(ctx.current_block).terminator.is_a?(Unreachable) &&
+         !predicate_next_ctx.dead_blocks.includes?(ctx.current_block)
+        predicate_next_ctx.incoming << {ctx.current_block, predicate_result}
+        ctx.terminate(Jump.new(predicate_exit_block))
+      end
+
+      ctx.switch_to_block(predicate_exit_block)
+      predicate_result = if predicate_next_ctx.incoming.empty?
+                           false_lit = Literal.new(ctx.next_id, TypeRef::BOOL, 0_i64)
+                           ctx.emit(false_lit)
+                           false_lit.id
+                         elsif predicate_next_ctx.incoming.size == 1
+                           predicate_next_ctx.incoming.first[1]
+                         else
+                           predicate_phi = Phi.new(ctx.next_id, TypeRef::BOOL)
+                           predicate_next_ctx.incoming.each do |(blk, val)|
+                             predicate_phi.add_incoming(blk, val)
+                           end
+                           ctx.emit(predicate_phi)
+                           predicate_phi.id
+                         end
+
+      if ctx.type_of(predicate_result) != TypeRef::BOOL
+        predicate_result = coerce_value_to_type(ctx, predicate_result, TypeRef::BOOL)
+      end
       ctx.pop_scope
 
       if predicate_result
@@ -54081,7 +54325,42 @@ module Crystal::HIR
       ctx.register_type(index_get.id, element_type)
       ctx.register_local(param_name, index_get.id)
 
-      predicate_result = lower_body(ctx, block.body)
+      predicate_exit_block = ctx.create_block
+      predicate_incoming = [] of Tuple(BlockId, ValueId)
+      predicate_next_ctx = InlineNextContext.new(predicate_exit_block, predicate_incoming, TypeRef::BOOL)
+
+      begin
+        @inline_next_stack << predicate_next_ctx
+        predicate_result = lower_body(ctx, block.body)
+      ensure
+        @inline_next_stack.pop?
+      end
+
+      if ctx.get_block(ctx.current_block).terminator.is_a?(Unreachable) &&
+         !predicate_next_ctx.dead_blocks.includes?(ctx.current_block)
+        predicate_next_ctx.incoming << {ctx.current_block, predicate_result}
+        ctx.terminate(Jump.new(predicate_exit_block))
+      end
+
+      ctx.switch_to_block(predicate_exit_block)
+      predicate_result = if predicate_next_ctx.incoming.empty?
+                           false_lit = Literal.new(ctx.next_id, TypeRef::BOOL, 0_i64)
+                           ctx.emit(false_lit)
+                           false_lit.id
+                         elsif predicate_next_ctx.incoming.size == 1
+                           predicate_next_ctx.incoming.first[1]
+                         else
+                           predicate_phi = Phi.new(ctx.next_id, TypeRef::BOOL)
+                           predicate_next_ctx.incoming.each do |(blk, val)|
+                             predicate_phi.add_incoming(blk, val)
+                           end
+                           ctx.emit(predicate_phi)
+                           predicate_phi.id
+                         end
+
+      if ctx.type_of(predicate_result) != TypeRef::BOOL
+        predicate_result = coerce_value_to_type(ctx, predicate_result, TypeRef::BOOL)
+      end
       ctx.pop_scope
 
       if predicate_result
@@ -54364,7 +54643,42 @@ module Crystal::HIR
       ctx.register_type(index_get.id, element_type)
       ctx.register_local(param_name, index_get.id)
 
-      predicate_result = lower_body(ctx, block.body)
+      predicate_exit_block = ctx.create_block
+      predicate_incoming = [] of Tuple(BlockId, ValueId)
+      predicate_next_ctx = InlineNextContext.new(predicate_exit_block, predicate_incoming, TypeRef::BOOL)
+
+      begin
+        @inline_next_stack << predicate_next_ctx
+        predicate_result = lower_body(ctx, block.body)
+      ensure
+        @inline_next_stack.pop?
+      end
+
+      if ctx.get_block(ctx.current_block).terminator.is_a?(Unreachable) &&
+         !predicate_next_ctx.dead_blocks.includes?(ctx.current_block)
+        predicate_next_ctx.incoming << {ctx.current_block, predicate_result}
+        ctx.terminate(Jump.new(predicate_exit_block))
+      end
+
+      ctx.switch_to_block(predicate_exit_block)
+      predicate_result = if predicate_next_ctx.incoming.empty?
+                           false_lit = Literal.new(ctx.next_id, TypeRef::BOOL, 0_i64)
+                           ctx.emit(false_lit)
+                           false_lit.id
+                         elsif predicate_next_ctx.incoming.size == 1
+                           predicate_next_ctx.incoming.first[1]
+                         else
+                           predicate_phi = Phi.new(ctx.next_id, TypeRef::BOOL)
+                           predicate_next_ctx.incoming.each do |(blk, val)|
+                             predicate_phi.add_incoming(blk, val)
+                           end
+                           ctx.emit(predicate_phi)
+                           predicate_phi.id
+                         end
+
+      if ctx.type_of(predicate_result) != TypeRef::BOOL
+        predicate_result = coerce_value_to_type(ctx, predicate_result, TypeRef::BOOL)
+      end
       ctx.pop_scope
 
       if predicate_result
@@ -54446,7 +54760,42 @@ module Crystal::HIR
       ctx.register_type(index_get.id, element_type)
       ctx.register_local(param_name, index_get.id)
 
-      predicate_result = lower_body(ctx, block.body)
+      predicate_exit_block = ctx.create_block
+      predicate_incoming = [] of Tuple(BlockId, ValueId)
+      predicate_next_ctx = InlineNextContext.new(predicate_exit_block, predicate_incoming, TypeRef::BOOL)
+
+      begin
+        @inline_next_stack << predicate_next_ctx
+        predicate_result = lower_body(ctx, block.body)
+      ensure
+        @inline_next_stack.pop?
+      end
+
+      if ctx.get_block(ctx.current_block).terminator.is_a?(Unreachable) &&
+         !predicate_next_ctx.dead_blocks.includes?(ctx.current_block)
+        predicate_next_ctx.incoming << {ctx.current_block, predicate_result}
+        ctx.terminate(Jump.new(predicate_exit_block))
+      end
+
+      ctx.switch_to_block(predicate_exit_block)
+      predicate_result = if predicate_next_ctx.incoming.empty?
+                           false_lit = Literal.new(ctx.next_id, TypeRef::BOOL, 0_i64)
+                           ctx.emit(false_lit)
+                           false_lit.id
+                         elsif predicate_next_ctx.incoming.size == 1
+                           predicate_next_ctx.incoming.first[1]
+                         else
+                           predicate_phi = Phi.new(ctx.next_id, TypeRef::BOOL)
+                           predicate_next_ctx.incoming.each do |(blk, val)|
+                             predicate_phi.add_incoming(blk, val)
+                           end
+                           ctx.emit(predicate_phi)
+                           predicate_phi.id
+                         end
+
+      if ctx.type_of(predicate_result) != TypeRef::BOOL
+        predicate_result = coerce_value_to_type(ctx, predicate_result, TypeRef::BOOL)
+      end
       ctx.pop_scope
 
       if predicate_result
@@ -55306,7 +55655,9 @@ module Crystal::HIR
       value_exit_block = ctx.current_block
       block_data = ctx.get_block(value_exit_block)
       value_has_noreturn = block_data.instructions.any? { |inst| inst.is_a?(Raise) || inst.is_a?(Return) }
-      value_flows_to_merge = block_data.terminator.is_a?(Unreachable) && !value_has_noreturn
+      value_flows_to_merge = block_data.terminator.is_a?(Unreachable) &&
+                             !value_has_noreturn &&
+                             !control_flow_dead_block?(ctx, value_exit_block)
       if value_flows_to_merge
         ctx.terminate(Jump.new(merge_block))
       end
@@ -55471,6 +55822,10 @@ module Crystal::HIR
           )
           return inline_yield_fallback_call(ctx, inline_key, receiver_id, call_args, block, block_param_types)
         end
+      end
+      if contains_next?(block.body)
+        debug_hook("inline.yield.skip", "callee=#{inline_key} reason=block_contains_next")
+        return inline_yield_fallback_call(ctx, inline_key, receiver_id, call_args, block, block_param_types)
       end
 
       if func_body = func_def.body
@@ -61486,102 +61841,212 @@ module Crystal::HIR
       end
     end
 
-    # Sanitize malformed type names with unbalanced parentheses
-    private def sanitize_type_name(name : String) : String
-      name = normalize_missing_generic_parens(name)
-      # Handle union types by sanitizing each part separately, without splitting
-      # unions nested inside generics.
-      if name.includes?('|')
-        parts = split_union_type_name(name).map { |part| sanitize_type_name_part(part.strip) }
-        return parts.join(" | ")
+    @[AlwaysInline]
+    private def sanitize_type_guard_key(name : String) : String
+      name
+    end
+
+    @[AlwaysInline]
+    private def type_param_token_char?(byte : UInt8) : Bool
+      ((byte >= 48_u8 && byte <= 57_u8) ||
+       (byte >= 65_u8 && byte <= 90_u8) ||
+       (byte >= 97_u8 && byte <= 122_u8) ||
+       byte == 95_u8)
+    end
+
+    private def contains_type_param_token?(name : String, token : String) : Bool
+      return false if token.empty?
+
+      token_bytes = token.bytesize
+      name_bytes = name.bytesize
+      from = 0
+
+      while idx = name.index(token, from)
+        left_ok = idx == 0 || !type_param_token_char?(name.byte_at(idx - 1))
+        right_idx = idx + token_bytes
+        right_ok = right_idx >= name_bytes || !type_param_token_char?(name.byte_at(right_idx))
+        return true if left_ok && right_ok
+        from = idx + token_bytes
       end
 
-      sanitize_type_name_part(name)
+      false
+    end
+
+    private def has_unresolved_short_type_param_token?(name : String) : Bool
+      unresolved = false
+      name.scan(/(^|[^A-Za-z0-9_])([A-Z])(?=$|[^A-Za-z0-9_])/) do |match|
+        token = match[2]
+        unless @type_param_map.has_key?(token)
+          unresolved = true
+          break
+        end
+      end
+      unresolved
+    end
+
+    private def materializable_unknown_named_type?(name : String) : Bool
+      stripped = name.strip
+      return false if stripped.empty?
+      return false if stripped.includes?('|') || stripped.includes?("->")
+      return false if stripped.includes?('(') || stripped.includes?(')')
+      return false if stripped.includes?('{') || stripped.includes?('}')
+      return false if stripped.includes?('[') || stripped.includes?(']')
+      return false if stripped.includes?(',') || stripped.includes?('?')
+
+      tokenized = stripped.starts_with?("::") ? stripped[2..] : stripped
+      return false unless tokenized
+      return false if tokenized.empty?
+
+      tokenized.split("::").all? { |part| !part.empty? && simple_identifier_token?(part) }
+    end
+
+    # Sanitize malformed type names with unbalanced parentheses
+    private def sanitize_type_name(name : String) : String
+      normalized = normalize_missing_generic_parens(name)
+      guard_key = sanitize_type_guard_key(normalized)
+      # Guard against recursive/self-referential sanitization loops.
+      # We prefer returning the current normalized form over unbounded recursion.
+      return normalized if @sanitize_type_name_in_progress.includes?(guard_key)
+      return normalized if @sanitize_type_depth >= 80
+
+      @sanitize_type_depth += 1
+      @sanitize_type_name_in_progress << guard_key
+      begin
+        if env_get("DEBUG_SANITIZE_SPIRAL") && @sanitize_type_depth > 30 && @generic_param_resolution_log_count < 800
+          STDERR.puts "[SANITIZE_DEPTH] depth=#{@sanitize_type_depth} name=#{normalized}"
+          @generic_param_resolution_log_count += 1
+        end
+        # Handle union types by sanitizing each part separately, without splitting
+        # unions nested inside generics.
+        if normalized.includes?('|')
+          parts = split_union_type_name(normalized).map do |part|
+            piece = part.strip
+            if piece.empty? || piece == normalized
+              piece
+            else
+              sanitize_type_name_part(piece)
+            end
+          end
+          return parts.join(" | ")
+        end
+
+        sanitize_type_name_part(normalized)
+      ensure
+        @sanitize_type_name_in_progress.delete(guard_key)
+        @sanitize_type_depth -= 1 if @sanitize_type_depth > 0
+      end
     end
 
     private def sanitize_type_name_part(name : String) : String
       name = normalize_missing_generic_parens(name)
+      guard_key = sanitize_type_guard_key(name)
+      return name if @sanitize_type_part_in_progress.includes?(guard_key)
+      return name if @sanitize_type_depth >= 80
 
-      if info = split_generic_base_and_args(name)
-        args = split_generic_type_args(info[:args]).map do |arg|
-          sanitize_type_name(arg.strip)
+      @sanitize_type_depth += 1
+      @sanitize_type_part_in_progress << guard_key
+      begin
+        if env_get("DEBUG_SANITIZE_SPIRAL") && @sanitize_type_depth > 30 && @generic_param_resolution_log_count < 800
+          STDERR.puts "[SANITIZE_PART_DEPTH] depth=#{@sanitize_type_depth} name=#{name}"
+          @generic_param_resolution_log_count += 1
         end
-        name = "#{info[:base]}(#{args.join(", ")})"
-      end
 
-      # Count parens to check balance
-      open_count = name.count('(')
-      close_count = name.count(')')
+        # Fast-path: sanitizer is for malformed names. If parentheses are already
+        # balanced, avoid recursive generic-argument sanitization to prevent
+        # runaway growth on deeply nested but valid composite types.
+        open_count = name.count('(')
+        close_count = name.count(')')
+        return name if open_count == close_count
 
-      return name if open_count == close_count
+        if info = split_generic_base_and_args(name)
+          args = split_generic_type_args(info[:args]).map do |arg|
+            stripped = arg.strip
+            stripped_key = sanitize_type_guard_key(stripped)
+            if stripped.empty? || stripped == name ||
+               @sanitize_type_name_in_progress.includes?(stripped_key) ||
+               @sanitize_type_part_in_progress.includes?(stripped_key)
+              stripped
+            else
+              sanitize_type_name(stripped)
+            end
+          end
+          name = "#{info[:base]}(#{args.join(", ")})"
+          open_count = name.count('(')
+          close_count = name.count(')')
+          return name if open_count == close_count
+        end
 
-      # Remove extra closing parens - find and remove unbalanced ones
-      if close_count > open_count
-        result = String::Builder.new
-        depth = 0
-        extra_close = close_count - open_count
+        # Remove extra closing parens - find and remove unbalanced ones
+        if close_count > open_count
+          result = String::Builder.new
+          depth = 0
+          extra_close = close_count - open_count
 
-        name.each_char do |c|
-          case c
-          when '('
-            depth += 1
-            result << c
-          when ')'
-            if depth > 0
-              depth -= 1
+          name.each_char do |c|
+            case c
+            when '('
+              depth += 1
               result << c
-            else
-              # This is an unbalanced close paren
-              if extra_close > 0
-                extra_close -= 1
-                # Skip this paren
-              else
+            when ')'
+              if depth > 0
+                depth -= 1
                 result << c
-              end
-            end
-          else
-            result << c
-          end
-        end
-
-        return normalize_missing_generic_parens(result.to_s)
-      end
-
-      # Remove extra opening parens from the end (less common)
-      if open_count > close_count
-        result = String::Builder.new
-        depth = 0
-        extra_open = open_count - close_count
-
-        # Reverse scan to find unbalanced opens at end
-        chars = name.chars.reverse
-        kept_chars = [] of Char
-
-        chars.each do |c|
-          case c
-          when ')'
-            depth += 1
-            kept_chars << c
-          when '('
-            if depth > 0
-              depth -= 1
-              kept_chars << c
-            else
-              if extra_open > 0
-                extra_open -= 1
               else
-                kept_chars << c
+                # This is an unbalanced close paren
+                if extra_close > 0
+                  extra_close -= 1
+                  # Skip this paren
+                else
+                  result << c
+                end
               end
+            else
+              result << c
             end
-          else
-            kept_chars << c
           end
+
+          return normalize_missing_generic_parens(result.to_s)
         end
 
-        return normalize_missing_generic_parens(kept_chars.reverse.join)
-      end
+        # Remove extra opening parens from the end (less common)
+        if open_count > close_count
+          result = String::Builder.new
+          depth = 0
+          extra_open = open_count - close_count
 
-      name
+          # Reverse scan to find unbalanced opens at end
+          chars = name.chars.reverse
+          kept_chars = [] of Char
+
+          chars.each do |c|
+            case c
+            when ')'
+              depth += 1
+              kept_chars << c
+            when '('
+              if depth > 0
+                depth -= 1
+                kept_chars << c
+              else
+                if extra_open > 0
+                  extra_open -= 1
+                else
+                  kept_chars << c
+                end
+              end
+            else
+              kept_chars << c
+            end
+          end
+
+          return normalize_missing_generic_parens(kept_chars.reverse.join)
+        end
+
+        name
+      ensure
+        @sanitize_type_part_in_progress.delete(guard_key)
+        @sanitize_type_depth -= 1 if @sanitize_type_depth > 0
+      end
     end
 
     # Fix cases like "TupleString, String" (missing parens around args).
@@ -62501,7 +62966,7 @@ module Crystal::HIR
 
       absolute_name = lookup_name.starts_with?("::")
       lookup_ns_idx0 = namespace_separator_index(lookup_name)
-      if pre_resolved_lookup_name.nil? && !absolute_name && !has_union
+      if pre_resolved_lookup_name.nil? && !absolute_name && !has_complex_shape
         should_resolve_in_context = true
         if idx = lookup_ns_idx0
           head = lookup_name[0, idx]
@@ -62585,6 +63050,9 @@ module Crystal::HIR
       resolved_alias = resolve_type_alias_chain(lookup_name)
       lookup_name = resolved_alias if resolved_alias != lookup_name
       lookup_name = normalize_missing_generic_parens(lookup_name || "")
+      if union_type_name?(lookup_name)
+        lookup_name = normalize_union_type_name(lookup_name)
+      end
       lookup_has_generic = lookup_name.includes?('(')
       lookup_has_ns = !!namespace_separator_index(lookup_name)
       cache_key_name = absolute_name ? "::#{lookup_name}" : lookup_name
@@ -62616,6 +63084,15 @@ module Crystal::HIR
       end
       cache_key = type_cache_key(cache_key_name)
       debug_hook_type_cache(orig_name, type_cache_context || "", cache_key, lookup_name)
+
+      # If a composite type expression still contains unresolved short type params
+      # (for example `... | U`), don't recurse into union/generic materialization.
+      # This prevents runaway sanitize/type_ref/create_union cycles.
+      if (lookup_name.includes?('|') || lookup_name.includes?('(') || lookup_name.includes?(',') || lookup_name.ends_with?('?')) &&
+         has_unresolved_short_type_param_token?(lookup_name)
+        @type_cache.delete(cache_key)
+        return TypeRef::VOID
+      end
 
       if lookup_name.ends_with?('?')
         base_name = lookup_name[0, lookup_name.size - 1]
@@ -62848,10 +63325,11 @@ module Crystal::HIR
           param_name = param.strip
           next false if param_name.empty?
           next false if @type_param_map.has_key?(param_name)
+          unresolved_short_token = has_unresolved_short_type_param_token?(param_name)
           if template = @generic_templates[base_name]?
-            template.type_params.includes?(param_name)
+            template.type_params.any? { |tp| contains_type_param_token?(param_name, tp) } || unresolved_short_token
           else
-            param_name.matches?(/\A[A-Z]\z/)
+            param_name.matches?(/\A[A-Z]\z/) || unresolved_short_token
           end
         end
         if unresolved_param
@@ -62860,37 +63338,62 @@ module Crystal::HIR
         end
 
         resolve_generic_param_type = ->(param : String) do
-          ref = type_ref_for_name(param)
-          if ref == TypeRef::VOID
-            stripped = param.strip
-            if !stripped.empty? && stripped != "_" && !short_type_param_name?(stripped)
-              resolved = stripped
-              # Avoid keeping VOID for named types that should resolve (e.g. nested aliases).
-              if resolved_alias = @type_aliases[stripped]?
-                ref = type_ref_for_name(resolved_alias.not_nil!)
-              elsif current_class_name = @current_class
-                if scoped_alias = @type_aliases["#{current_class_name}::#{stripped}"]?
-                  ref = type_ref_for_name(scoped_alias.not_nil!)
-                end
-              end
+          resolve_key = param
+          debug_candidate = param.includes?('|') || param.includes?("Tuple(") || param.includes?("->")
+          if env_get("DEBUG_TYPE_PARAM_RESOLUTION") && debug_candidate && @generic_param_resolution_log_count < 1200
+            STDERR.puts "[TYPE_PARAM_RESOLVE] param=#{param} in_progress=#{@generic_param_resolution_in_progress.size}"
+            @generic_param_resolution_log_count += 1
+          end
+          if @generic_param_resolution_in_progress.includes?(resolve_key)
+            if env_get("DEBUG_TYPE_PARAM_RESOLUTION") && debug_candidate && @generic_param_resolution_log_count < 1200
+              STDERR.puts "[TYPE_PARAM_CYCLE] param=#{param}"
+              @generic_param_resolution_log_count += 1
+            end
+            cycle_name = param.strip
+            if !cycle_name.empty? && union_type_name?(cycle_name)
+              create_union_type(normalize_union_type_name(cycle_name))
+            else
+              TypeRef::VOID
+            end
+          else
+            @generic_param_resolution_in_progress << resolve_key
+            begin
+              ref = type_ref_for_name(param)
               if ref == TypeRef::VOID
-                resolved = resolve_type_alias_chain(resolve_type_name_in_context(stripped))
-                if resolved != stripped
-                  ref = type_ref_for_name(resolved)
-                end
-              end
-              if ref == TypeRef::VOID && !type_param_like?(stripped)
-                unless resolved == "Void" || resolved == "Unknown"
-                  if union_type_name?(resolved)
-                    ref = create_union_type(normalize_union_type_name(resolved))
-                  else
-                    ref = @module.intern_type(TypeDescriptor.new(TypeKind::Class, resolved))
+                stripped = param.strip
+                allow_materialize = materializable_unknown_named_type?(stripped)
+                if !stripped.empty? && stripped != "_" && !short_type_param_name?(stripped)
+                  resolved = stripped
+                  # Avoid keeping VOID for named types that should resolve (e.g. nested aliases).
+                  if resolved_alias = @type_aliases[stripped]?
+                    ref = type_ref_for_name(resolved_alias.not_nil!)
+                  elsif current_class_name = @current_class
+                    if scoped_alias = @type_aliases["#{current_class_name}::#{stripped}"]?
+                      ref = type_ref_for_name(scoped_alias.not_nil!)
+                    end
+                  end
+                  if ref == TypeRef::VOID
+                    resolved = resolve_type_alias_chain(resolve_type_name_in_context(stripped))
+                    if resolved != stripped
+                      ref = type_ref_for_name(resolved)
+                    end
+                  end
+                  if ref == TypeRef::VOID && allow_materialize && !type_param_like?(stripped)
+                    unless resolved == "Void" || resolved == "Unknown"
+                      if union_type_name?(resolved)
+                        ref = create_union_type(normalize_union_type_name(resolved))
+                      else
+                        ref = @module.intern_type(TypeDescriptor.new(TypeKind::Class, resolved))
+                      end
+                    end
                   end
                 end
               end
+              ref
+            ensure
+              @generic_param_resolution_in_progress.delete(resolve_key)
             end
           end
-          ref
         end
 
         # Intern a parameterized type descriptor so downstream passes can recover element/key/value types.
@@ -63078,7 +63581,12 @@ module Crystal::HIR
         if !@type_param_map.empty?
           resolved = substitute_type_params_in_type_name(resolved)
         end
-        resolved = resolve_type_name_in_context(resolved) unless absolute
+        # Resolve context only for plain identifiers. Composite type expressions
+        # (NamedTuple(...), Array(...), Proc, unions) must be resolved structurally
+        # in type_ref_for_name to avoid namespace pollution and recursive growth.
+        if !absolute && simple_identifier_token?(resolved)
+          resolved = resolve_type_name_in_context(resolved)
+        end
         if type_param_like?(resolved)
           mapped = @type_param_map[resolved]?
           if mapped && mapped != resolved

@@ -1,6 +1,26 @@
 # Crystal v2 — Active Work (codegen branch)
 
 ## Known Bugs (codegen)
+- **2026-02-26 (latest): fixed root-cause recursive type-name pollution for composite types in `type_ref_for_name`**
+  - Root cause:
+    - `type_ref_for_name` applied `resolve_type_name_in_context` too early for composite type expressions (generic/named tuple shapes);
+    - this polluted type strings during union/generic resolution and fed recursive `type_ref_for_name` ↔ `create_union_type` loops, ending in stack overflow on stage2 build path.
+  - Fixes applied (`src/compiler/hir/ast_to_hir.cr`):
+    - in early context-resolution branch, require `!has_complex_shape` (resolve only plain names there);
+    - in `create_union_type`, resolve union variant context only for plain identifiers (`simple_identifier_token?`), leaving composite variants to structural resolution.
+  - Evidence:
+    - stage1 (original compiler, `--release`):
+      - `crystal build --release src/crystal_v2.cr -o /tmp/stage1_rel_contextshape_fix --error-trace`
+      - result: **real 413.75s**.
+    - stage2 probe (self-hosted, watchdog 180s):
+      - `scripts/timeout_sample_lldb.sh -t 180 -s 8 -n 12 --no-lldb -o /tmp/stage2_probe_contextshape_fix -- /tmp/stage1_dbg_contextshape_fix src/crystal_v2.cr --release -o /tmp/stage2_probe_contextshape_fix_bin`
+      - result: timeout (`124`) **without stack-overflow crash**; hotspot moved away from recursive type-resolution path.
+    - stage2 release attempt (self-hosted, watchdog 300s):
+      - `scripts/timeout_sample_lldb.sh -t 300 -s 8 -n 12 --no-lldb -o /tmp/stage2_rel_contextshape_fix_probe300 -- /usr/bin/time -p /tmp/stage1_rel_contextshape_fix src/crystal_v2.cr --release -o /tmp/stage2_rel_contextshape_fix`
+      - result: timeout (`124`), no output binary produced yet.
+  - Current blocker:
+    - crash-class regression (stack overflow) on this path is removed, but stage2 `--release` still exceeds 300s; current hotspot is compile-time hashing / owner checks (`receiver_allows_yield_owner?`, hash lookups).
+
 - **2026-02-26 (latest): fixed root-cause stage2 compile-time blowup in safe CLI parser (`Options` struct tuple-copy path)**
   - Root cause:
     - `CLI#parse_args_safe` was changed to return `{Int32, Options}`;
