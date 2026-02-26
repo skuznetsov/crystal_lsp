@@ -6782,6 +6782,21 @@ module Crystal::MIR
       # Create alloca slots for cross-block values to fix dominance issues
       @cross_block_values.each do |val_id|
         val_type = @value_types[val_id]?
+        # Prefer the defining instruction type when it is a union.
+        # @value_types can be polluted by later ABI/type adaptation, which may
+        # collapse a union value to i32/ptr and break union_is/union_unwrap.
+        if def_inst = find_def_inst(val_id)
+          def_type = def_inst.type
+          def_llvm = @type_mapper.llvm_type(def_type)
+          if val_type
+            current_llvm = @type_mapper.llvm_type(val_type)
+            if def_llvm.includes?(".union") && !current_llvm.includes?(".union")
+              val_type = def_type
+            end
+          else
+            val_type = def_type
+          end
+        end
         next unless val_type
         llvm_type = @type_mapper.llvm_type(val_type)
         if ENV["DEBUG_SLOT_TYPES"]? && func.name.includes?("Path#basename") && val_id == 35
@@ -11174,76 +11189,8 @@ module Crystal::MIR
 
       raw_callee_name = callee_func.try(&.name)
 
-      # Detect self-recursive delegate functions (e.g., deprecated overloads that delegate
-      # via named parameters our compiler can't resolve). Redirect to a different overload
-      # with the same base name to avoid infinite recursion / stack overflow.
-      if callee_func && callee_func.id == func.id
-        mangled_self = mangle_function_name(func.name)
-        base_name = mangled_self.split("$$").first
-        alternatives = @module.functions.select do |f|
-          next false if f.id == func.id
-          alt_mangled = mangle_function_name(f.name)
-          alt_mangled.starts_with?(base_name + "$$") || alt_mangled == base_name
-        end
-        if alt = alternatives.find { |f| f.blocks.size > 2 || (f.blocks.size > 0 && f.blocks.any? { |b| b.instructions.size > 2 }) }
-          alt_mangled = mangle_function_name(alt.name)
-          alt_ret_type = @type_mapper.llvm_type(alt.return_type)
-          alt_ret_type = @emitted_function_return_types[alt_mangled]? || alt_ret_type
-          arg_strs = [] of String
-          alt.params.each_with_index do |param, i|
-            if i < inst.args.size
-              arg_val = value_ref(inst.args[i])
-              arg_type = lookup_value_llvm_type(inst.args[i])
-              expected_type = @type_mapper.llvm_type(param.type)
-              expected_type = "ptr" if expected_type == "void"
-              # LLVM doesn't allow void-typed call arguments. Treat Nil-like values as ptr null.
-              if arg_type == "void"
-                arg_type = "ptr"
-                arg_val = "null"
-              elsif arg_type == "ptr" && arg_val == "0"
-                arg_val = "null"
-              end
-              if arg_type != expected_type
-                c = @cond_counter
-                @cond_counter += 1
-                if arg_type == "ptr" && expected_type.starts_with?('i')
-                  emit "%selfrecur_cast.#{c} = ptrtoint ptr #{arg_val} to #{expected_type}"
-                  arg_val = "%selfrecur_cast.#{c}"
-                  arg_type = expected_type
-                elsif arg_type.starts_with?('i') && expected_type == "ptr"
-                  emit "%selfrecur_cast.#{c} = inttoptr #{arg_type} #{arg_val} to ptr"
-                  arg_val = "%selfrecur_cast.#{c}"
-                  arg_type = expected_type
-                elsif arg_type.starts_with?('i') && expected_type.starts_with?('i')
-                  actual_bits = arg_type[1..].to_i? || 32
-                  expected_bits = expected_type[1..].to_i? || 32
-                  if actual_bits < expected_bits
-                    emit "%selfrecur_cast.#{c} = sext #{arg_type} #{arg_val} to #{expected_type}"
-                  elsif actual_bits > expected_bits
-                    emit "%selfrecur_cast.#{c} = trunc #{arg_type} #{arg_val} to #{expected_type}"
-                  else
-                    emit "%selfrecur_cast.#{c} = bitcast #{arg_type} #{arg_val} to #{expected_type}"
-                  end
-                  arg_val = "%selfrecur_cast.#{c}"
-                  arg_type = expected_type
-                end
-              end
-              arg_strs << "#{arg_type} #{arg_val}"
-            end
-          end
-          # Track the redirected callee so it gets a declare/stub if not emitted
-          alt_arg_types = arg_strs.map { |s| s.split(' ', 2).first }
-          @called_crystal_functions[alt_mangled] ||= {(alt_ret_type == "void" ? "ptr" : alt_ret_type), arg_strs.size, alt_arg_types}
-          if alt_ret_type == "void"
-            emit "call void @#{alt_mangled}(#{arg_strs.join(", ")})"
-            @void_values << inst.id
-          else
-            emit "#{name} = call #{alt_ret_type} @#{alt_mangled}(#{arg_strs.join(", ")})"
-            @value_types[inst.id] = alt.return_type
-          end
-          return
-        end
-      end
+      # Keep direct self-recursive calls intact. Overload retargeting must be resolved
+      # in HIR/MIR; backend-level substitution can silently redirect to wrong overloads.
 
       # Intercept Array#sum() with no args (only self) to avoid infinite recursion
       # from overload name collision (sum() and sum(initial) get same mangled name)
@@ -13483,14 +13430,22 @@ module Crystal::MIR
       # Get payload from union, assuming type_id matches
       # Union may be passed by value - need to store to stack first
       union_val = value_ref(inst.union_value)
-      union_type_ref = @value_types[inst.union_value]? || TypeRef::POINTER
+      def_union_type_ref = find_def_inst(inst.union_value).try(&.type)
+      union_type_ref = if def_union_type_ref && @type_mapper.llvm_type(def_union_type_ref).includes?(".union")
+                         def_union_type_ref
+                       else
+                         @value_types[inst.union_value]? || def_union_type_ref || TypeRef::POINTER
+                       end
       static_union_type = @type_mapper.llvm_type(union_type_ref)
       slot_union_type = @cross_block_slot_types[inst.union_value]?
       emitted_union_type = @emitted_value_types[union_val]?
+      def_union_type = def_union_type_ref ? @type_mapper.llvm_type(def_union_type_ref) : nil
       union_type = if emitted_union_type && emitted_union_type.includes?(".union")
                      emitted_union_type
                    elsif slot_union_type && slot_union_type.includes?(".union")
                      slot_union_type
+                   elsif def_union_type && def_union_type.includes?(".union")
+                     def_union_type
                    else
                      static_union_type
                    end
@@ -13658,11 +13613,22 @@ module Crystal::MIR
       # Load type_id from union
       # Union may be passed by value - need to store to stack first
       union_val = value_ref(inst.union_value)
-      union_type_ref = @value_types[inst.union_value]? || TypeRef::POINTER
+      def_union_type_ref = find_def_inst(inst.union_value).try(&.type)
+      union_type_ref = if def_union_type_ref && @type_mapper.llvm_type(def_union_type_ref).includes?(".union")
+                         def_union_type_ref
+                       else
+                         @value_types[inst.union_value]? || def_union_type_ref || TypeRef::POINTER
+                       end
       static_union_type = @type_mapper.llvm_type(union_type_ref)
+      slot_union_type = @cross_block_slot_types[inst.union_value]?
       emitted_union_type = @emitted_value_types[union_val]?
+      def_union_type = def_union_type_ref ? @type_mapper.llvm_type(def_union_type_ref) : nil
       union_type = if emitted_union_type && emitted_union_type.includes?(".union")
                      emitted_union_type
+                   elsif slot_union_type && slot_union_type.includes?(".union")
+                     slot_union_type
+                   elsif def_union_type && def_union_type.includes?(".union")
+                     def_union_type
                    else
                      static_union_type
                    end
@@ -13716,11 +13682,22 @@ module Crystal::MIR
       # Check if union is specific variant
       # Union may be passed by value (from load) - need to store to stack first
       union_val = value_ref(inst.union_value)
-      union_type_ref = @value_types[inst.union_value]? || TypeRef::POINTER
+      def_union_type_ref = find_def_inst(inst.union_value).try(&.type)
+      union_type_ref = if def_union_type_ref && @type_mapper.llvm_type(def_union_type_ref).includes?(".union")
+                         def_union_type_ref
+                       else
+                         @value_types[inst.union_value]? || def_union_type_ref || TypeRef::POINTER
+                       end
       static_union_type = @type_mapper.llvm_type(union_type_ref)
+      slot_union_type = @cross_block_slot_types[inst.union_value]?
       emitted_union_type = @emitted_value_types[union_val]?
+      def_union_type = def_union_type_ref ? @type_mapper.llvm_type(def_union_type_ref) : nil
       union_type = if emitted_union_type && emitted_union_type.includes?(".union")
                      emitted_union_type
+                   elsif slot_union_type && slot_union_type.includes?(".union")
+                     slot_union_type
+                   elsif def_union_type && def_union_type.includes?(".union")
+                     def_union_type
                    else
                      static_union_type
                    end

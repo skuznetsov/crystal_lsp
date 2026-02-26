@@ -1,6 +1,27 @@
 # Crystal v2 — Active Work (codegen branch)
 
 ## Known Bugs (codegen)
+- **2026-02-26 (latest): fixed root-cause union slot type pollution (`union_is` -> constant true, `union_unwrap(Float32/64)` -> invalid ptr bitcast)**
+  - Root cause:
+    - cross-block slot allocation used mutable `@value_types[val_id]` only;
+    - for `%99` in `AstToHir#macro_for_iterable_values` this drifted from union (`Type#8139`) to scalar (`i32`);
+    - downstream:
+      - `union_is` entered non-union fallback and emitted constants (`add i1 0, 1`);
+      - `union_unwrap` for variants `Float32/Float64` emitted invalid IR (`%r344 = bitcast ptr %r99.fromslot.212 to ptr`).
+  - Fixes applied (`src/compiler/mir/llvm_backend.cr`):
+    - in cross-block slot allocation, prefer defining instruction type when it is a union (instead of polluted `@value_types`);
+    - in `emit_union_unwrap`, `emit_union_type_id_get`, `emit_union_is`, prefer union source type from defining instruction / slot / emitted type before falling back to mutable state.
+  - Evidence:
+    - pre-fix (`/tmp/stage1_rel_rootfix`): stage2 failed with
+      - `opt: ... error: '%r99.fromslot.212' defined with type 'i32' but expected 'ptr'`
+      - location: `/tmp/stage2_dbg_from_rel.ll:600364`.
+    - MIR correlation (`/tmp/stage2_mir_only.mir`):
+      - `%344 = union_unwrap %99 as variant 81 : Float32`
+      - `%347 = union_unwrap %99 as variant 82 : Float64`.
+    - post-fix (`/tmp/stage1_rel_unionfix`, watchdog 180s):
+      - same immediate `opt` error is not reproduced;
+      - current hotspot moved to long LLVM backend pass (`emit_extern_call` / `mangle_name`) and remains the active blocker.
+
 - **2026-02-26 (latest): fixed root-cause `forall T` callsite return-type pollution (`identity(nil).nil?` false)**
   - Root causes:
     - callsite `T => concrete` bindings were recorded as pending maps, but `resolve_return_type_from_def` did not read pending maps;
