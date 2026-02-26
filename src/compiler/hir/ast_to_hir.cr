@@ -27920,6 +27920,11 @@ module Crystal::HIR
       if !receiver_map.empty?
         merged.merge!(receiver_map)
       end
+      if pending = @pending_type_param_maps[mangled_method_name]?
+        merged.merge!(pending) unless pending.empty?
+      elsif pending = @pending_type_param_maps[base_method_name]?
+        merged.merge!(pending) unless pending.empty?
+      end
 
       if merged.empty?
         resolved = if qualified_return_type == return_type_name && !owner_override.empty? && !return_type_name.includes?("::")
@@ -30021,9 +30026,11 @@ module Crystal::HIR
 
       # Ensure function type is registered even when caller skipped register_function (e.g. conditional defs).
       if existing = @function_types[full_name]?
-        if existing == TypeRef::VOID ||
+        if (full_name.includes?('$') && return_type != TypeRef::VOID && existing != return_type) ||
+           existing == TypeRef::VOID ||
            (existing == TypeRef::NIL && return_type != TypeRef::NIL) ||
-           (existing == TypeRef::POINTER && return_type != TypeRef::POINTER)
+           (existing == TypeRef::POINTER && return_type != TypeRef::POINTER) ||
+           (unresolved_generic_return_type?(existing) && !unresolved_generic_return_type?(return_type))
           register_function_type(full_name, return_type)
         end
       else
@@ -43132,7 +43139,13 @@ module Crystal::HIR
             end
           else
             # Use the call-site mangled name so top-level defs match call signatures.
-            lower_def(func_def, call_arg_types, call_arg_literals, call_arg_enum_names, name)
+            if extra_type_params && !extra_type_params.empty?
+              with_type_param_map(extra_type_params) do
+                lower_def(func_def, call_arg_types, call_arg_literals, call_arg_enum_names, name)
+              end
+            else
+              lower_def(func_def, call_arg_types, call_arg_literals, call_arg_enum_names, name)
+            end
           end
         end
       ensure
@@ -49378,7 +49391,10 @@ module Crystal::HIR
         resolved_return_type = get_function_return_type(base_method_name)
       end
       if resolved_return_type != TypeRef::VOID && resolved_return_type != TypeRef::NIL && resolved_return_type != return_type
-        if !(unresolved_generic_return_type?(resolved_return_type) && !unresolved_generic_return_type?(return_type))
+        resolved_name = get_type_name_from_ref(resolved_return_type)
+        resolved_placeholder = unresolved_generic_return_type?(resolved_return_type) || type_param_like?(resolved_name)
+        if !resolved_placeholder &&
+           !(unresolved_generic_return_type?(resolved_return_type) && !unresolved_generic_return_type?(return_type))
           # Don't downgrade nilable union to non-union for nilable query methods
           unless is_nilable_query && is_union_or_nilable_type?(return_type)
             return_type = resolved_return_type
@@ -49389,9 +49405,13 @@ module Crystal::HIR
       if func = @module.function_by_name(mangled_method_name)
         func_rt = func.return_type
         if func_rt != TypeRef::VOID && func_rt != TypeRef::NIL && func_rt != return_type
-          # Don't downgrade nilable union to non-union for nilable query methods
-          unless is_nilable_query && is_union_or_nilable_type?(return_type)
-            return_type = func_rt
+          func_rt_name = get_type_name_from_ref(func_rt)
+          func_placeholder = unresolved_generic_return_type?(func_rt) || type_param_like?(func_rt_name)
+          unless func_placeholder
+            # Don't downgrade nilable union to non-union for nilable query methods
+            unless is_nilable_query && is_union_or_nilable_type?(return_type)
+              return_type = func_rt
+            end
           end
         end
       end
@@ -62747,8 +62767,8 @@ module Crystal::HIR
         resolved = resolve_type_name_in_context(resolved) unless absolute
         if type_param_like?(resolved)
           mapped = @type_param_map[resolved]?
-          if mapped.nil? || mapped == resolved
-            resolved = "Pointer"
+          if mapped && mapped != resolved
+            resolved = mapped
           end
         end
         absolute ? "::#{resolved}" : resolved

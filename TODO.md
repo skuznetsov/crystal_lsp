@@ -1,6 +1,40 @@
 # Crystal v2 — Active Work (codegen branch)
 
 ## Known Bugs (codegen)
+- **2026-02-26 (latest): fixed root-cause `forall T` callsite return-type pollution (`identity(nil).nil?` false)**
+  - Root causes:
+    - callsite `T => concrete` bindings were recorded as pending maps, but `resolve_return_type_from_def` did not read pending maps;
+    - top-level function lowering path (`lower_function_if_needed` -> `lower_def`) did not apply `extra_type_params` for callsite-specialized generic defs;
+    - call return fallback trusted stale registered/lowered return types even when candidate type was a generic placeholder (`T`), overriding explicit `Nil`.
+  - Fixes applied (`src/compiler/hir/ast_to_hir.cr`):
+    - `resolve_return_type_from_def`: merge non-consuming pending type-param maps for mangled/base names;
+    - `lower_function_if_needed`: apply `with_type_param_map(extra_type_params)` for top-level `lower_def` path;
+    - call return fallback: ignore placeholder candidates (`unresolved generic` / `type_param_like`) from `@function_types` and lowered function return when choosing final call return type;
+    - `lower_def`: allow refreshing mangled (`$`-suffixed) function type entries with concrete lowered return types.
+  - Additional hardening:
+    - `create_union_type`: stop coercing unresolved type params to `Pointer` during union variant normalization (preserve callsite specialization path).
+  - Evidence:
+    - minimal repro (`/tmp/forall_type_probe2.cr`) with `/tmp/stage1_dbg_forall_fix9`:
+      - compile: `0`
+      - run: prints `true` for `identity_forall(nil).nil?`
+    - `regression_tests/forall_nil_union_return.cr` with `/tmp/stage1_dbg_forall_fix9`:
+      - compile: `0`
+      - run via `scripts/run_safe.sh`: `forall_nil_ok`, exit `0`
+    - adversary check:
+      - `regression_tests/file_join_splat.cr` remains `join_ok` (exit `0`)
+  - Current remaining regressions (separate roots):
+    - `test_byteformat_decode_u32` (segfault `139`)
+    - `test_nested_macro_record` (`nested_macro_record_bad`)
+  - Current bootstrap status after this fix chain:
+    - stage1 (original compiler, release):
+      - `crystal build --release src/crystal_v2.cr -o /tmp/stage1_rel_forall_fix9`
+      - **real 464.35s**
+    - stage2 (self-hosted, release, watchdog 180s):
+      - `scripts/timeout_sample_lldb.sh -t 180 -s 8 -n 12 -o /tmp/stage2_rel_forall_fix9_probe -- /tmp/stage1_rel_forall_fix9 src/crystal_v2.cr --release -o /tmp/stage2_rel_forall_fix9`
+      - fails before timeout (**real 151.55s**) with:
+        - `opt: ... error: null must be a pointer type`
+        - `src/crystal_v2.ll:2206399: %r85 = sub i32 %r84, null`
+
 - **2026-02-26 (latest): fixed root-cause `File.join(*parts)` / `Path.new(*parts)` splat instability (wrong overload + crash)**
   - Root causes:
     - allocator overload synthesis could override explicit `def self.new` overloads with matching signatures;
