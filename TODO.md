@@ -1,6 +1,26 @@
 # Crystal v2 — Active Work (codegen branch)
 
 ## Known Bugs (codegen)
+- **2026-02-27 (latest): fixed root-cause `Array#select/#reject` dynamic intrinsic PHI predecessor mismatch**
+  - Root cause (`src/compiler/hir/ast_to_hir.cr`):
+    - in `lower_array_select_dynamic` / `lower_array_reject_dynamic`, `count_incr_phi` used `body_block` as predecessor for the "keep current count" path;
+    - actual CFG predecessor is `predicate_exit_block` (after predicate evaluation), so PHI incoming was malformed and result count could reset on non-matching elements.
+  - Fix:
+    - changed PHI incoming predecessor from `body_block` to `predicate_exit_block` in both intrinsics.
+  - Evidence:
+    - `/usr/bin/time -p crystal build src/crystal_v2.cr -o /tmp/stage1_dbg_selectphi_fix --error-trace` -> `exit 0` (**real 8.49s**)
+    - `arr.select { |x| x % 2 == 0 }` repro:
+      - before: `size=0`
+      - after: `size=2 first=0 last=2`
+    - `arr.reject { |x| x % 2 == 0 }` repro:
+      - after: `size=2 first=1 last=3`
+    - mini-oracles:
+      - `./regression_tests/run_mini_oracles.sh /tmp/stage1_dbg_selectphi_fix` -> **2/5 PASS** (`test_nested_macro_record`, `test_select_map_stress`)
+  - Remaining failures (mini-oracles):
+    - `file_join_splat`
+    - `forall_nil_union_return`
+    - `test_byteformat_decode_u32` (segfault)
+
 - **2026-02-27 (latest): fixed root-cause macro parameter loss and added nested generic substitution inference (partial stage2 stabilization)**
   - Root causes:
     - parser discarded macro parameter declarations after validation, forcing brittle source-slice fallback in HIR macro expansion;

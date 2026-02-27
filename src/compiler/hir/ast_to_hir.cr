@@ -55079,7 +55079,10 @@ module Crystal::HIR
       # Incr block: increment index, update phis
       ctx.current_block = incr_block
       count_incr_phi = Phi.new(ctx.next_id, TypeRef::INT32)
-      count_incr_phi.add_incoming(body_block, result_count_phi.id)
+      # False predicate path reaches incr_block from predicate_exit_block
+      # (not from body_block). Using body_block here drops/poisons the carried
+      # count and can reset select() result size on non-matching elements.
+      count_incr_phi.add_incoming(predicate_exit_block, result_count_phi.id)
       count_incr_phi.add_incoming(copy_block, new_count.id)
       ctx.emit(count_incr_phi)
 
@@ -55213,7 +55216,9 @@ module Crystal::HIR
       # Incr block
       ctx.current_block = incr_block
       count_incr_phi = Phi.new(ctx.next_id, TypeRef::INT32)
-      count_incr_phi.add_incoming(body_block, result_count_phi.id)
+      # True predicate path (keep original count) reaches incr_block from
+      # predicate_exit_block; body_block itself never branches directly here.
+      count_incr_phi.add_incoming(predicate_exit_block, result_count_phi.id)
       count_incr_phi.add_incoming(copy_block, new_count.id)
       ctx.emit(count_incr_phi)
 
