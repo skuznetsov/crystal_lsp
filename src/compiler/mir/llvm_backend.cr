@@ -7066,9 +7066,17 @@ module Crystal::MIR
 
             val_type = @value_types[val_id]?
             val_llvm_type = val_type ? @type_mapper.llvm_type(val_type) : nil
+            slot_llvm_type = @cross_block_slot_types[val_id]?
+            effective_val_llvm_type = if slot_llvm_type && slot_llvm_type.includes?(".union")
+                                        slot_llvm_type
+                                      else
+                                        val_llvm_type
+                                      end
 
             # Only handle union-to-different-union case
-            next unless val_llvm_type && val_llvm_type.includes?(".union") && val_llvm_type != phi_llvm_type
+            next unless effective_val_llvm_type &&
+                        effective_val_llvm_type.includes?(".union") &&
+                        effective_val_llvm_type != phi_llvm_type
 
             # Check if conversion for this dst type already registered
             existing = @phi_union_to_union_converts[{pred_block_id, val_id}]?
@@ -7079,7 +7087,7 @@ module Crystal::MIR
             suffix = existing ? ".#{existing.size}" : ""
             convert_name = "r#{val_id}.u2u.#{pred_block_id}#{suffix}"
             arr = @phi_union_to_union_converts[{pred_block_id, val_id}] ||= [] of {String, String, String}
-            arr << {convert_name, val_llvm_type, phi_llvm_type}
+            arr << {convert_name, effective_val_llvm_type, phi_llvm_type}
           end
         end
       end
@@ -13458,14 +13466,19 @@ module Crystal::MIR
       # real emitted type differs from both MIR type and earlier local inference.
       # Re-check using emitted SSA type right before final store emission.
       final_val_type = @emitted_value_types[val]? || actual_val_type || val_type_str
-      if val.starts_with?('%') && final_val_type && final_val_type != llvm_type
-        if llvm_type.starts_with?('i') && final_val_type == "ptr"
+      if final_val_type && final_val_type != llvm_type
+        if llvm_type.includes?(".union")
+          c = @cond_counter
+          @cond_counter += 1
+          val = coerce_union_value_for_type("gs_final.#{c}", val, llvm_type)
+          record_emitted_type(val, llvm_type) if val.starts_with?('%')
+        elsif val.starts_with?('%') && llvm_type.starts_with?('i') && final_val_type == "ptr"
           c = @cond_counter
           @cond_counter += 1
           emit "%global_ptrtoint.#{c} = ptrtoint ptr #{val} to #{llvm_type}"
           val = "%global_ptrtoint.#{c}"
           record_emitted_type(val, llvm_type)
-        elsif llvm_type == "ptr" && final_val_type.starts_with?('i') && !final_val_type.includes?(".union")
+        elsif val.starts_with?('%') && llvm_type == "ptr" && final_val_type.starts_with?('i') && !final_val_type.includes?(".union")
           c = @cond_counter
           @cond_counter += 1
           emit "%global_inttoptr.#{c} = inttoptr #{final_val_type} #{val} to ptr"
@@ -16104,6 +16117,33 @@ module Crystal::MIR
         # Scalar/pointer to union wrapping.
         nil_variant = nil_variant_id_for_union_type(expected_union_type) || 0
         non_nil_variant = first_non_nil_variant_id_for_union_type(expected_union_type) || (nil_variant == 0 ? 1 : 0)
+        source_type_ref = nil.as(TypeRef?)
+        if m = val.match(/^%r(\d+)/)
+          source_type_ref = @value_types[ValueId.new(m[1].to_u32)]?
+        end
+        source_type_ref ||= find_type_ref_for_llvm_type(actual_union_type)
+
+        if expected_union_ref = find_type_ref_for_llvm_type(expected_union_type)
+          if expected_desc = @module.get_union_descriptor(expected_union_ref)
+            if source_type_ref
+              if source_variant = expected_desc.variants.find { |variant| variant.type_ref == source_type_ref }
+                non_nil_variant = source_variant.type_id
+              else
+                source_llvm_type = @type_mapper.llvm_type(source_type_ref)
+                if source_variant = expected_desc.variants.find { |variant|
+                     variant.type_id != nil_variant && @type_mapper.llvm_type(variant.type_ref) == source_llvm_type
+                   }
+                  non_nil_variant = source_variant.type_id
+                end
+              end
+            elsif source_variant = expected_desc.variants.find { |variant|
+                    variant.type_id != nil_variant && @type_mapper.llvm_type(variant.type_ref) == actual_union_type
+                  }
+              non_nil_variant = source_variant.type_id
+            end
+          end
+        end
+
         emit "%#{base_name}.s2u_ptr = alloca #{expected_union_type}, align 8"
         emit "store #{expected_union_type} zeroinitializer, ptr %#{base_name}.s2u_ptr"
         emit "%#{base_name}.s2u_type_id_ptr = getelementptr #{expected_union_type}, ptr %#{base_name}.s2u_ptr, i32 0, i32 0"

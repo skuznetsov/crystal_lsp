@@ -1,6 +1,33 @@
 # Crystal v2 — Active Work (codegen branch)
 
 ## Known Bugs (codegen)
+- **2026-02-27 (latest): fixed root-cause union global-store mismatch from `fromslot.cast` values (`opt` reject in stage2)**
+  - Root cause (`src/compiler/mir/llvm_backend.cr`):
+    - `emit_global_store` reconciled only ptr/int mismatches in the final emitted-SSA safety net;
+    - when `value_ref` produced `%rN.fromslot.cast.*` scalar SSA and target global was a union (closure classvar cell), backend emitted:
+      - `store %...union %rN.fromslot.cast..., ptr @...`
+      - where `%rN.fromslot.cast...` had actual scalar type (`i32`), causing `opt` type mismatch.
+    - scalar->union wrapping in `coerce_union_value_for_type` also used a weak default variant choice (`first_non_nil_variant`), which could encode wrong union tags.
+  - Fixes applied (`src/compiler/mir/llvm_backend.cr`):
+    - in `emit_global_store` final safety net, added mandatory union coercion path:
+      - if `final_val_type != llvm_type` and destination is union, coerce via `coerce_union_value_for_type` before final store;
+    - hardened `coerce_union_value_for_type` scalar->union path:
+      - resolve source type from `%rN` / LLVM type;
+      - choose destination union variant by exact `TypeRef` match when available, else by LLVM type match;
+      - fall back only if no precise match exists.
+  - Evidence:
+    - stage1 release (original compiler):
+      - `/usr/bin/time -p crystal build --release src/crystal_v2.cr -o /tmp/stage1_rel_union_store_fix16 --error-trace`
+      - result: **real 429.05s**
+    - stage2 release (self-hosted by fixed stage1):
+      - `scripts/timeout_sample_lldb.sh -t 420 -s 8 -n 12 -o /tmp/stage2_rel_union_store_fix16_t420_probe -- /usr/bin/time -p /tmp/stage1_rel_union_store_fix16 src/crystal_v2.cr --release -o /tmp/stage2_rel_union_store_fix16_t420`
+      - result: **exit 0**, **real 110.95s**
+    - speed delta (same host/session):
+      - stage1/stage2 ratio = **3.87x** (stage2 faster)
+    - targeted regressions:
+      - `regression_tests/stage1_hash_find_entry_union_idx_repro.sh /tmp/stage1_rel_union_store_fix16` -> `not reproduced`
+      - `regression_tests/stage1_hash_literal_index_repro.sh /tmp/stage1_rel_union_store_fix16` -> `not reproduced`
+
 - **2026-02-27 (latest): fixed root-cause LLVM `i32/i64` mismatch in union-wrapped integer binary ops (`opt` reject)**
   - Root cause (`src/compiler/mir/llvm_backend.cr`):
     - in `MIR::LLVMIRGenerator#emit_binary_op`, the `wrap_union_result` arithmetic path emitted raw integer ops before operand-width normalization;
