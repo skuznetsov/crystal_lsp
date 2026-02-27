@@ -6270,6 +6270,16 @@ module Crystal::HIR
       arena[expr_id]
     end
 
+    private def node_for_call_expr(
+      call_arena : CrystalV2::Compiler::Frontend::ArenaLike,
+      expr_id : ExprId,
+    ) : CrystalV2::Compiler::Frontend::Node?
+      if expr_id.index >= 0 && expr_id.index < call_arena.size
+        return with_arena(call_arena) { @arena[expr_id] }
+      end
+      node_for_expr(expr_id)
+    end
+
     private def span_fits_source?(arena : CrystalV2::Compiler::Frontend::ArenaLike, span : CrystalV2::Compiler::Frontend::Span) : Bool
       if source = @sources_by_arena[arena]?
         return false if span.end_offset > source.bytesize
@@ -23789,9 +23799,30 @@ module Crystal::HIR
 
     private def yield_return_function_for_call(mangled_name : String, base_name : String) : Bool
       result = yield_return_function?(mangled_name) || yield_return_function?(base_name)
-      if mangled_base = strip_type_suffix(mangled_name)
-        result ||= yield_return_function?(mangled_base)
+
+      mangled_base = strip_type_suffix(mangled_name)
+      base_base = strip_type_suffix(base_name)
+
+      result ||= yield_return_function?(mangled_base) unless mangled_base.empty?
+      result ||= yield_return_function?(base_base) unless base_base.empty?
+
+      # Yield wrappers are often registered as `$block` variants while call-site names
+      # can be plain base or type-specialized forms. Check both stripped `$block`
+      # aliases to avoid false negatives (for example with_brace_newlines_skipped).
+      unless mangled_base.empty?
+        result ||= yield_return_function?("#{mangled_base}$block")
       end
+      unless base_base.empty?
+        result ||= yield_return_function?("#{base_base}$block")
+      end
+
+      if yield_name = yield_function_name_for(base_name)
+        result ||= yield_return_function?(yield_name)
+      end
+      if yield_name = yield_function_name_for(mangled_name)
+        result ||= yield_return_function?(yield_name)
+      end
+
       STDERR.puts "[YIELD_RETURN] call mangled=#{mangled_name} base=#{base_name} result=#{result}" if env_get("DEBUG_YIELD_RETURN")
       result
     end
@@ -31793,6 +31824,12 @@ module Crystal::HIR
       when CrystalV2::Compiler::Frontend::ReturnNode
         lower_return(ctx, node)
       when CrystalV2::Compiler::Frontend::YieldNode
+        if env_get("DEBUG_WITH_BRACE_CALL")
+          inline_name = @inline_yield_name_stack.last? || ""
+          if inline_name.includes?("with_brace_newlines_skipped") || ctx.function.name.includes?("parse_hash_or_tuple")
+            STDERR.puts "[WITH_BRACE_YIELD_DISPATCH] func=#{ctx.function.name} inline=#{inline_name} stack=#{@inline_yield_block_stack.size}"
+          end
+        end
         if blk = @inline_yield_block_stack.last?
           inline_block_body(ctx, node, blk)
         else
@@ -40318,11 +40355,27 @@ module Crystal::HIR
         func_name = caller_name
       end
       base_name = strip_type_suffix(func_name)
+      lookup_names = [func_name, base_name]
+      if yield_name = yield_function_name_for(func_name)
+        lookup_names << yield_name
+        lookup_names << strip_type_suffix(yield_name)
+      end
+      if yield_name = yield_function_name_for(base_name)
+        lookup_names << yield_name
+        lookup_names << strip_type_suffix(yield_name)
+      end
+      lookup_names = lookup_names.uniq
 
       fallback_return = -> do
-        if block_ret_name = @function_type_param_maps.dig?(func_name, "__block_return__") ||
-                            @function_type_param_maps.dig?(base_name, "__block_return__") ||
-                            @type_param_map["__block_return__"]?
+        block_ret_name = nil
+        lookup_names.each do |lookup_name|
+          if br = @function_type_param_maps.dig?(lookup_name, "__block_return__")
+            block_ret_name = br
+            break
+          end
+        end
+        block_ret_name ||= @type_param_map["__block_return__"]?
+        if block_ret_name
           block_ret_name = block_ret_name.strip
           if !block_ret_name.empty? && block_ret_name != "Void" && block_ret_name != "Unknown"
             block_ret = type_ref_for_name(block_ret_name)
@@ -40334,7 +40387,15 @@ module Crystal::HIR
 
         candidate = ctx.function.return_type
         if candidate == TypeRef::VOID || candidate == TypeRef::NIL
-          candidate = @function_types[func_name]? || @function_types[base_name]? || @function_base_return_types[base_name]? || TypeRef::VOID
+          lookup_names.each do |lookup_name|
+            if t = @function_types[lookup_name]?
+              candidate = t
+              break if candidate != TypeRef::VOID && candidate != TypeRef::NIL
+            end
+          end
+          if candidate == TypeRef::VOID || candidate == TypeRef::NIL
+            candidate = @function_base_return_types[base_name]? || TypeRef::VOID
+          end
         end
         if candidate == TypeRef::VOID || candidate == TypeRef::NIL
           nil
@@ -40343,10 +40404,18 @@ module Crystal::HIR
         end
       end
 
-      func_def = @function_defs[func_name]? || @function_defs[base_name]?
+      func_def = nil
+      lookup_names.each do |lookup_name|
+        if defn = @function_defs[lookup_name]?
+          func_def = defn
+          func_name = lookup_name
+          base_name = strip_type_suffix(lookup_name)
+          break
+        end
+      end
       return fallback_return.call unless func_def
 
-      block_param = func_def.params.try(&.find(&.is_block))
+      block_param = func_def.not_nil!.params.try(&.find(&.is_block))
       return fallback_return.call unless block_param
 
       block_type = block_param.type_annotation
@@ -44278,7 +44347,7 @@ module Crystal::HIR
 
       if block_expr.nil? && !call_args.empty?
         last_id = call_args.last
-        last_node = @arena[last_id]
+        last_node = node_for_expr(last_id)
         case last_node
         when CrystalV2::Compiler::Frontend::BlockNode
           block_expr = last_id
@@ -44297,9 +44366,10 @@ module Crystal::HIR
         end
       end
       if block_expr
-        block_node = @arena[block_expr]
+        block_node = node_for_call_expr(call_arena, block_expr)
         if block_node.is_a?(CrystalV2::Compiler::Frontend::BlockNode)
-          @block_node_arenas[block_node.object_id] ||= @arena
+          block_arena = call_arena
+          @block_node_arenas[block_node.object_id] ||= block_arena
         end
       end
 
@@ -47889,7 +47959,7 @@ module Crystal::HIR
       proc_for_inline : CrystalV2::Compiler::Frontend::ProcLiteralNode? = nil
       block_param_types_inline : Array(TypeRef)? = nil
       if block_expr
-        blk_node = @arena[block_expr]
+        blk_node = node_for_expr(block_expr)
         if blk_node.is_a?(CrystalV2::Compiler::Frontend::BlockNode)
           block_param_types_inline = block_param_types_for_call(mangled_method_name, base_method_name, receiver_id ? ctx.type_of(receiver_id) : nil)
           if method_name == "try" && receiver_id
@@ -47936,7 +48006,7 @@ module Crystal::HIR
           end
         end
         if block_for_inline
-          @block_node_arenas[block_for_inline.object_id] = @arena
+          @block_node_arenas[block_for_inline.object_id] ||= @arena
         end
         if env_get("DEBUG_YIELD_TRACE") && (method_name == "char_at" || method_name == "fetch" || method_name == "upto" ||
            method_name == "byte_range" ||
@@ -48276,7 +48346,7 @@ module Crystal::HIR
       # This is a common pattern that builds a string using an IO-like builder
       if full_method_name == "String.build"
         if blk_expr = block_expr
-          blk_node = @arena[blk_expr]
+          blk_node = node_for_call_expr(call_arena, blk_expr)
           if blk_node.is_a?(CrystalV2::Compiler::Frontend::BlockNode)
             return lower_string_build_intrinsic(ctx, blk_node, args.first?)
           end
@@ -48286,7 +48356,7 @@ module Crystal::HIR
       # Check for block (ExprId -> must lower to BlockNode) - for non-inline calls only
       # This is after yield function check so we don't emit dead block code
       block_id = if block_expr
-                   blk_node = @arena[block_expr]
+                   blk_node = node_for_call_expr(call_arena, block_expr)
                    if blk_node.is_a?(CrystalV2::Compiler::Frontend::BlockNode)
                      block_param_types = block_param_types_for_call(mangled_method_name, base_method_name, receiver_id ? ctx.type_of(receiver_id) : nil)
                      if method_name == "try" && receiver_id
@@ -49342,6 +49412,67 @@ module Crystal::HIR
             return index_get.id
           end
         end
+
+        # Nilable/union tuple receiver: keep tuple fast-path for expressions like
+        # `if entry_index = find_entry_with_index(key); entry_index[0]; end`.
+        # Without this, we can fall through to generic `[]` call resolution and
+        # pick a helper with an incorrect narrowed return type (e.g. Int32 instead
+        # of Entry(K, V) for index 0), which corrupts union payload ABI.
+        if index_recv_type_desc && index_recv_type_desc.kind == TypeKind::Union
+          tuple_params = [] of Array(TypeRef)
+          mir_ref = hir_to_mir_type_ref(index_receiver_type)
+          if union_desc = @union_descriptors[mir_ref]?
+            union_desc.variants.each do |variant|
+              next if variant.type_ref == TypeRef::NIL
+              variant_hir_ref = mir_to_hir_type_ref(variant.type_ref)
+              if variant_desc = @module.get_type_descriptor(variant_hir_ref)
+                if variant_desc.kind == TypeKind::Tuple || variant_desc.name.starts_with?("Tuple(")
+                  tp = variant_desc.type_params.reject { |p| p == TypeRef::VOID }
+                  tuple_params << tp unless tp.empty?
+                end
+              end
+            end
+          end
+
+          if !tuple_params.empty?
+            element_type = TypeRef::INT32
+            union_idx_val : Int32? = nil
+            arg_id = args[0]
+            if hir_val = ctx.value_for(arg_id)
+              if hir_val.is_a?(Literal) && hir_val.value.is_a?(Int64)
+                union_idx_val = hir_val.value.as(Int64).to_i
+              end
+            end
+
+            elem_types = tuple_params.compact_map do |tp|
+              if union_idx_val && union_idx_val >= 0 && union_idx_val < tp.size
+                tp[union_idx_val]
+              elsif !tp.empty?
+                tp.first
+              else
+                nil
+              end
+            end
+
+            if !elem_types.empty?
+              unique_types = elem_types.uniq
+              if unique_types.size == 1
+                element_type = unique_types.first
+              else
+                names = unique_types.map { |t| get_type_name_from_ref(t) }
+                union_name = names.join(" | ")
+                element_type = type_ref_for_name(union_name)
+                element_type = TypeRef::INT32 if element_type == TypeRef::VOID
+              end
+            end
+
+            element_type = TypeRef::INT32 if element_type == TypeRef::VOID
+            index_get = IndexGet.new(ctx.next_id, element_type, index_receiver_id, arg_id)
+            ctx.emit(index_get)
+            ctx.register_type(index_get.id, element_type)
+            return index_get.id
+          end
+        end
       end
 
       # ptr.value= or ptr[index]= -> PointerStore
@@ -50310,12 +50441,35 @@ module Crystal::HIR
       # When the call has a block that was NOT inlined (we've reached the regular Call
       # emission path), convert the block to a Proc and append to args. The callee's
       # &block parameter expects a function pointer, not null.
-      if block_expr && block_id
-        blk_node = @arena[block_expr]
+      if block_expr
+        blk_node = node_for_call_expr(call_arena, block_expr)
         if blk_node.is_a?(CrystalV2::Compiler::Frontend::BlockNode)
-          block_arena_for_proc = @block_node_arenas[blk_node.object_id]? || resolve_arena_for_block(blk_node, @arena) || @arena
-          proc_id = lower_block_to_proc(ctx, blk_node, block_param_types, block_arena_for_proc)
-          args << proc_id
+          block_param_types_for_proc = block_param_types_for_call(mangled_method_name, base_method_name, receiver_id ? ctx.type_of(receiver_id) : nil)
+          if method_name == "try" && receiver_id
+            if non_nil = non_nil_type_for_union(ctx.type_of(receiver_id))
+              block_param_types_for_proc = [non_nil]
+            elsif block_param_types_for_proc.nil?
+              block_param_types_for_proc = [ctx.type_of(receiver_id)]
+            end
+          end
+          # Late fallback: if the block callback wasn't materialized earlier
+          # (cross-arena or deferred resolution path), materialize it here to
+          # avoid emitting `...$$block(..., null)` calls.
+          block_id ||= lower_block_to_block_id(ctx, blk_node, block_param_types_for_proc)
+          if block_id
+            owner_arena = call_arena
+            block_arena_for_proc = @block_node_arenas[blk_node.object_id]? || resolve_arena_for_block(blk_node, owner_arena) || owner_arena
+            proc_id = lower_block_to_proc(ctx, blk_node, block_param_types_for_proc, block_arena_for_proc)
+            args << proc_id
+            if env_get("DEBUG_WITH_BRACE_CALL") && (method_name == "with_brace_newlines_skipped" || base_method_name.includes?("with_brace_newlines_skipped") || mangled_method_name.includes?("with_brace_newlines_skipped"))
+              STDERR.puts "[WITH_BRACE_FALLBACK] stage=proc_appended method=#{method_name} base=#{base_method_name} mangled=#{mangled_method_name} block_id=#{block_id} args=#{args.size}"
+            end
+          elsif env_get("DEBUG_WITH_BRACE_CALL") && (method_name == "with_brace_newlines_skipped" || base_method_name.includes?("with_brace_newlines_skipped") || mangled_method_name.includes?("with_brace_newlines_skipped"))
+            STDERR.puts "[WITH_BRACE_FALLBACK] stage=block_missing method=#{method_name} base=#{base_method_name} mangled=#{mangled_method_name} args=#{args.size}"
+          end
+        elsif env_get("DEBUG_WITH_BRACE_CALL") && (method_name == "with_brace_newlines_skipped" || base_method_name.includes?("with_brace_newlines_skipped") || mangled_method_name.includes?("with_brace_newlines_skipped"))
+          node_kind = blk_node ? blk_node.class.name : "nil"
+          STDERR.puts "[WITH_BRACE_FALLBACK] stage=not_block_node method=#{method_name} base=#{base_method_name} mangled=#{mangled_method_name} node=#{node_kind} args=#{args.size}"
         end
       end
 
@@ -50340,6 +50494,17 @@ module Crystal::HIR
       end
 
       call = Call.new(ctx.next_id, return_type, receiver_id, mangled_method_name, args, block_id, call_virtual)
+      if env_get("DEBUG_BLOCK_CALL_ABI") && has_block_call
+        block_dbg = block_id ? block_id.to_s : "nil"
+        recv_dbg = receiver_id ? get_type_name_from_ref(ctx.type_of(receiver_id)) : "nil"
+        STDERR.puts "[BLOCK_CALL_ABI] caller=#{ctx.function.name} method=#{method_name} base=#{base_method_name} mangled=#{mangled_method_name} recv=#{recv_dbg} block_expr=#{!block_expr.nil?} block_pass=#{!block_pass_expr.nil?} block_id=#{block_dbg} args=#{args.size} call_virtual=#{call_virtual}"
+      end
+      if env_get("DEBUG_WITH_BRACE_CALL") && (method_name == "with_brace_newlines_skipped" || base_method_name.includes?("with_brace_newlines_skipped") || mangled_method_name.includes?("with_brace_newlines_skipped"))
+        arg_types_dbg = args.map { |arg_id| get_type_name_from_ref(ctx.type_of(arg_id)) }
+        block_dbg = block_id ? block_id.to_s : "nil"
+        recv_dbg = receiver_id ? get_type_name_from_ref(ctx.type_of(receiver_id)) : "nil"
+        STDERR.puts "[WITH_BRACE_CALL_EMIT] method=#{method_name} base=#{base_method_name} mangled=#{mangled_method_name} recv=#{recv_dbg} has_block_call=#{has_block_call} block_id=#{block_dbg} args=#{args.size} arg_types=#{arg_types_dbg.join(",")} call_virtual=#{call_virtual}"
+      end
       ctx.emit(call)
       ctx.register_type(call.id, return_type)
       if function_returns_type_literal?(mangled_method_name, base_method_name)
@@ -51643,6 +51808,9 @@ module Crystal::HIR
           STDERR.puts "[SLICE_LOOKUP_FN]   ALL overload lookups empty for #{func_name}"
         end
       end
+      if !func_name.includes?("$$block") && !overload_keys.empty?
+        overload_keys = overload_keys.reject { |name| name.includes?("$$block") }
+      end
       prefer_non_named = false
       unless call_has_named_args
         prefer_non_named = overload_keys.any? do |name|
@@ -51909,6 +52077,11 @@ module Crystal::HIR
           STDERR.puts "[LOOKUP_BLOCK] checking name=#{name} func_name=#{func_name}"
         end
         next unless name == func_name || name.starts_with?(func_name_dollar)
+        # Internal block thunks (e.g. `Foo#bar$$block`) are implementation details
+        # and must never be selected as call targets. Selecting them here turns a
+        # regular block call into a direct thunk call with null closure proc,
+        # which then collapses caller CFG into `ret null`/`unreachable`.
+        next if name.includes?("$$block")
         def_node = @function_defs[name]?
         next unless def_node
         stats = function_param_stats(name, def_node)
@@ -51975,6 +52148,7 @@ module Crystal::HIR
         best_owner_base : String? = nil
         allowed_owner_set = receiver_base ? yield_allowed_owner_set(receiver_base) : nil
         fallback_candidates.each do |name|
+          next if name.includes?("$$block")
           def_node = @function_defs[name]?
           next unless def_node
           candidate_owner_base : String? = nil
@@ -52055,7 +52229,10 @@ module Crystal::HIR
       candidates = [] of String
       @method_index.each_value do |owner_methods|
         if names = owner_methods[method_short]?
-          names.each { |name| candidates << name }
+          names.each do |name|
+            next if name.includes?("$$block")
+            candidates << name
+          end
         end
       end
       @block_fallback_method_candidates[method_short] = candidates
@@ -55983,18 +56160,76 @@ module Crystal::HIR
       block : CrystalV2::Compiler::Frontend::BlockNode,
       block_param_types : Array(TypeRef)? = nil,
     ) : ValueId
+      if env_get("DEBUG_WITH_BRACE_CALL") && inline_key.includes?("with_brace_newlines_skipped")
+        recv_dbg = receiver_id ? get_type_name_from_ref(ctx.type_of(receiver_id)) : "nil"
+        STDERR.puts "[WITH_BRACE_INLINE] stage=fallback_emit callee=#{inline_key} caller=#{ctx.function.name} recv=#{recv_dbg} args=#{call_args.size}"
+      end
       @suppress_force_lower_return_type_depth += 1
       begin
         # Register call-site argument types so that when the function is deferred
         # to the work queue, lower_method has type info for untyped parameters.
         # Without this, functions like read_section?(name, &) whose params lack
         # type annotations are silently skipped during deferred lowering.
+        base_inline_name = strip_type_suffix(inline_key)
         callsite_arg_types = call_args.map { |arg| ctx.type_of(arg) }
         remember_callsite_arg_types(inline_key, callsite_arg_types, nil, nil, true)
-        lower_function_if_needed(inline_key)
-        return_type = get_function_return_type(inline_key)
+        if inline_key != base_inline_name
+          remember_callsite_arg_types(base_inline_name, callsite_arg_types, nil, nil, true)
+        end
+        caller_arena = @arena
         block_id = lower_block_to_block_id(ctx, block, block_param_types)
-        call = Call.new(ctx.next_id, return_type, receiver_id, inline_key, call_args, block_id)
+        block_return_name = block_return_type_name(ctx, block_id) ||
+                            inline_block_return_type_name(block, block_param_types, @current_class)
+        if block_return_name
+          if type_param_name = block_return_type_param_name(inline_key, base_inline_name)
+            block_param_map = {type_param_name => block_return_name}
+            record_pending_type_param_map(inline_key, block_param_map)
+            record_pending_type_param_map(base_inline_name, block_param_map) unless base_inline_name.empty?
+          end
+
+          {inline_key, base_inline_name}.each do |fn|
+            next if fn.empty?
+            if existing = @function_type_param_maps[fn]?
+              @function_type_param_maps[fn] = existing.merge({"__block_return__" => block_return_name})
+            else
+              @function_type_param_maps[fn] = {"__block_return__" => block_return_name}
+            end
+          end
+        end
+
+        lower_function_if_needed(inline_key)
+        if inline_key != base_inline_name
+          lower_function_if_needed(base_inline_name)
+        end
+
+        return_type = get_function_return_type(inline_key)
+        if return_type == TypeRef::VOID && inline_key != base_inline_name
+          return_type = get_function_return_type(base_inline_name)
+        end
+
+        if block_return_name
+          if inferred = resolve_block_dependent_return_type(inline_key, base_inline_name, block_return_name)
+            return_type = inferred
+          end
+          if yield_return_function_for_call(inline_key, base_inline_name)
+            inferred = type_ref_for_name(block_return_name)
+            return_type = inferred if inferred != TypeRef::VOID
+          end
+        end
+
+        fallback_args = call_args.dup
+        provided_arg_count = fallback_args.size + (receiver_id ? 1 : 0)
+        needs_proc_arg = if target_func = @module.function_by_name(inline_key)
+                           target_func.params.size > provided_arg_count
+                        else
+                           inline_key.includes?("$block")
+                         end
+        if needs_proc_arg
+          block_arena_for_proc = @block_node_arenas[block.object_id]? || resolve_arena_for_block(block, caller_arena) || caller_arena
+          proc_id = lower_block_to_proc(ctx, block, block_param_types, block_arena_for_proc)
+          fallback_args << proc_id
+        end
+        call = Call.new(ctx.next_id, return_type, receiver_id, inline_key, fallback_args, block_id)
         ctx.emit(call)
         ctx.register_type(call.id, return_type)
         call.id
@@ -56031,8 +56266,14 @@ module Crystal::HIR
     ) : ValueId
       block_contains_return = contains_return?(block.body)
       fallback_allowed = !block_contains_return
+      force_inline_with_next = inline_key.includes?("with_brace_newlines_skipped") || inline_key.includes?("with_brace_newlines_as_separators")
+      debug_with_brace = env_get("DEBUG_WITH_BRACE_CALL") && force_inline_with_next
+      if debug_with_brace
+        STDERR.puts "[WITH_BRACE_INLINE] stage=enter callee=#{inline_key} caller=#{ctx.function.name} block_contains_return=#{block_contains_return} fallback_allowed=#{fallback_allowed}"
+      end
 
       if env_has?("CRYSTAL_V2_DISABLE_INLINE_YIELD") && fallback_allowed
+        STDERR.puts "[WITH_BRACE_INLINE] stage=disabled_inline callee=#{inline_key} caller=#{ctx.function.name}" if debug_with_brace
         return inline_yield_fallback_call(ctx, inline_key, receiver_id, call_args, block, block_param_types)
       end
       ctx.push_scope(ScopeKind::Block)
@@ -56045,6 +56286,7 @@ module Crystal::HIR
       caller_arena = @arena
       repeat_count = @inline_yield_name_stack.count(inline_key)
       if @inline_yield_name_stack.size >= max_depth || repeat_count >= max_repeat
+        STDERR.puts "[WITH_BRACE_INLINE] stage=depth_guard callee=#{inline_key} caller=#{ctx.function.name} depth=#{@inline_yield_name_stack.size} repeat=#{repeat_count}" if debug_with_brace
         if env_has?("DEBUG_YIELD_INLINE")
           STDERR.puts "[INLINE_YIELD] skipping inline: #{inline_key} (depth=#{@inline_yield_name_stack.size}, max=#{max_depth}, repeat=#{repeat_count}, max_repeat=#{max_repeat})"
         end
@@ -56061,6 +56303,7 @@ module Crystal::HIR
       # against runaway recursion.
       max_block_body_depth = (env_get("INLINE_YIELD_MAX_BLOCK_BODY_DEPTH") || "1").to_i
       if @inline_yield_block_body_depth > max_block_body_depth
+        STDERR.puts "[WITH_BRACE_INLINE] stage=block_body_depth_guard callee=#{inline_key} caller=#{ctx.function.name} depth=#{@inline_yield_block_body_depth}" if debug_with_brace
         if env_has?("DEBUG_YIELD_INLINE")
           STDERR.puts "[INLINE_YIELD] skipping nested block-body inline: #{inline_key} depth=#{@inline_yield_block_body_depth}"
         end
@@ -56085,10 +56328,12 @@ module Crystal::HIR
           if receiver_id
             receiver_type_map = type_param_map_for_receiver_type(ctx.type_of(receiver_id))
             if receiver_type_map.empty?
+              STDERR.puts "[WITH_BRACE_INLINE] stage=unresolved_generic_receiver callee=#{inline_key} caller=#{ctx.function.name}" if debug_with_brace
               debug_hook("inline.yield.skip", "callee=#{inline_key} receiver=#{receiver} reason=unresolved_generic")
               return inline_yield_fallback_call(ctx, inline_key, receiver_id, call_args, block, block_param_types)
             end
           else
+            STDERR.puts "[WITH_BRACE_INLINE] stage=missing_receiver_for_generic callee=#{inline_key} caller=#{ctx.function.name}" if debug_with_brace
             debug_hook("inline.yield.skip", "callee=#{inline_key} receiver=#{receiver} reason=unresolved_generic")
             return inline_yield_fallback_call(ctx, inline_key, receiver_id, call_args, block, block_param_types)
           end
@@ -56107,6 +56352,7 @@ module Crystal::HIR
 
       block_arena = resolve_arena_for_block(block, caller_arena)
       unless block_arena
+        STDERR.puts "[WITH_BRACE_INLINE] stage=block_arena_missing callee=#{inline_key} caller=#{ctx.function.name}" if debug_with_brace
         debug_hook("inline.yield.block_arena_missing", "callee=#{inline_key} caller=#{ctx.function.name}")
         return inline_yield_fallback_call(ctx, inline_key, receiver_id, call_args, block, block_param_types)
       end
@@ -56118,12 +56364,18 @@ module Crystal::HIR
             "inline.yield.block_arena_mismatch",
             "callee=#{inline_key} max=#{max_index} arena=#{block_arena.size}"
           )
+          STDERR.puts "[WITH_BRACE_INLINE] stage=block_arena_mismatch callee=#{inline_key} caller=#{ctx.function.name} max=#{max_index} arena=#{block_arena.size}" if debug_with_brace
           return inline_yield_fallback_call(ctx, inline_key, receiver_id, call_args, block, block_param_types)
         end
       end
       if contains_next?(block.body)
-        debug_hook("inline.yield.skip", "callee=#{inline_key} reason=block_contains_next")
-        return inline_yield_fallback_call(ctx, inline_key, receiver_id, call_args, block, block_param_types)
+        if !force_inline_with_next
+          STDERR.puts "[WITH_BRACE_INLINE] stage=block_contains_next callee=#{inline_key} caller=#{ctx.function.name}" if debug_with_brace
+          debug_hook("inline.yield.skip", "callee=#{inline_key} reason=block_contains_next")
+          return inline_yield_fallback_call(ctx, inline_key, receiver_id, call_args, block, block_param_types)
+        elsif debug_with_brace
+          STDERR.puts "[WITH_BRACE_INLINE] stage=block_contains_next_force_inline callee=#{inline_key} caller=#{ctx.function.name}"
+        end
       end
 
       if func_body = func_def.body
@@ -56133,6 +56385,7 @@ module Crystal::HIR
             STDERR.puts "[INLINE_CRASH] callee=#{inline_key} body_size=#{func_body.size} max_index=#{max_index}"
           end
           if max_index < 0 || max_index >= callee_arena.size
+            STDERR.puts "[WITH_BRACE_INLINE] stage=callee_arena_mismatch callee=#{inline_key} caller=#{ctx.function.name} max=#{max_index} arena=#{callee_arena.size}" if debug_with_brace
             debug_hook("inline.yield.arena_mismatch", "callee=#{inline_key} max=#{max_index} arena=#{callee_arena.size}")
             return inline_yield_fallback_call(ctx, inline_key, receiver_id, call_args, block, block_param_types)
           end
@@ -56174,6 +56427,9 @@ module Crystal::HIR
         @inline_yield_block_param_types_stack << block_param_types
         @inline_yield_block_return_stack << nil
         pushed_block = true
+        if debug_with_brace
+          STDERR.puts "[WITH_BRACE_INLINE] stage=after_push callee=#{inline_key} caller=#{ctx.function.name} stack=#{@inline_yield_block_stack.size}"
+        end
         inline_return = InlineReturnContext.new(ctx.create_block, [] of {BlockId, ValueId}, ctx.function.id)
         @inline_yield_return_stack << inline_return
 
@@ -56325,7 +56581,21 @@ module Crystal::HIR
                   # Without this, methods that store blocks as Procs (e.g., OptionParser#on)
                   # would receive null instead of a valid function pointer.
                   block_arena_for_proc = @block_node_arenas[block.object_id]? || resolve_arena_for_block(block, caller_arena) || caller_arena
+                  # Keep lexical `self` from the caller while lowering block→proc.
+                  # Inline callee binds `self` to receiver_id for its own body, but
+                  # block literals passed at the callsite must capture caller `self`.
+                  saved_inline_self = ctx.lookup_local("self")
+                  saved_inline_self_type = saved_inline_self ? ctx.type_of(saved_inline_self) : TypeRef::VOID
+                  caller_self_for_block = caller_locals["self"]?
+                  if caller_self_for_block
+                    ctx.register_local("self", caller_self_for_block)
+                    ctx.register_type(caller_self_for_block, ctx.type_of(caller_self_for_block))
+                  end
                   proc_id = lower_block_to_proc(ctx, block, block_param_types, block_arena_for_proc)
+                  if saved_inline_self
+                    ctx.register_local("self", saved_inline_self)
+                    ctx.register_type(saved_inline_self, saved_inline_self_type)
+                  end
                   ctx.register_local(param_name, proc_id)
                   ctx.register_type(proc_id, ctx.type_of(proc_id))
                 elsif idx < call_args.size
@@ -57370,6 +57640,22 @@ module Crystal::HIR
             if vdesc.kind == TypeKind::Tuple || vdesc.name.starts_with?("Tuple(")
               tp = vdesc.type_params.reject { |p| p == TypeRef::VOID }
               tuple_params << tp unless tp.empty?
+            end
+          end
+        end
+        if tuple_params.empty?
+          # Fallback path: when @union_descriptors is missing this union key,
+          # recover tuple variants from the textual union type.
+          split_union_type_name(type_desc.name).each do |variant_name|
+            next if variant_name == "Nil"
+            next unless variant_name.starts_with?("Tuple(") && variant_name.ends_with?(')')
+            if info = split_generic_base_and_args(variant_name)
+              next unless info[:base] == "Tuple"
+              params = split_generic_type_args(info[:args]).compact_map do |arg_name|
+                ref = type_ref_for_name(arg_name)
+                ref == TypeRef::VOID ? nil : ref
+              end
+              tuple_params << params unless params.empty?
             end
           end
         end
@@ -61414,9 +61700,18 @@ module Crystal::HIR
       owner_method = @current_method
       owner_is_class = @current_method_is_class
       if previous_owner = @block_owner[block_node.object_id]?
-        owner_class ||= previous_owner[:class_name]
-        owner_method ||= previous_owner[:method_name]
-        if owner_class.nil? && owner_method.nil?
+        # Prefer lexical owner metadata when available.
+        # In inline lowering, @current_class/@current_method may temporarily point
+        # to the inlined callee, while the block itself is lexically owned by the
+        # caller. Using callee owner here breaks ivar resolution inside block procs
+        # (e.g. @tokens resolved against wrong class, then degraded to offset=0).
+        lexical_owner_class = previous_owner[:class_name]
+        lexical_owner_method = previous_owner[:method_name]
+        if lexical_owner_class || lexical_owner_method
+          owner_class = lexical_owner_class
+          owner_method = lexical_owner_method
+          owner_is_class = previous_owner[:is_class]
+        elsif owner_class.nil? && owner_method.nil?
           owner_is_class = previous_owner[:is_class]
         end
       end

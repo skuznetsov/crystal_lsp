@@ -4010,7 +4010,7 @@ module CrystalV2
             @arena.add_typed(BreakNode.new(break_token.span, nil))
           else
             # Break with value
-            value = parse_expression(0)
+            value = without_postfix_modifiers { parse_expression(0) }
             return PREFIX_ERROR if value.invalid?
 
             value_span = node_span(value)
@@ -4021,13 +4021,27 @@ module CrystalV2
         end
 
         # Phase 12: Parse next expression
-        # Grammar: next
+        # Grammar: next [value]
         private def parse_next : ExprId
           next_token = current_token
           advance
+          skip_trivia
 
-          # Next has no value in Crystal
-          @arena.add_typed(NextNode.new(next_token.span))
+          # next without value if: newline, EOF, end, else, elsif, postfix modifiers
+          token = current_token
+          if token.kind.in?(Token::Kind::Newline, Token::Kind::EOF, Token::Kind::End, Token::Kind::Else, Token::Kind::Elsif, Token::Kind::If, Token::Kind::Unless, Token::Kind::While, Token::Kind::Until) ||
+             (token.kind == Token::Kind::Colon && @no_type_declaration > 0)
+            # next without value (colon check handles ternary: flag ? next : else_val)
+            @arena.add_typed(NextNode.new(next_token.span, nil))
+          else
+            # next with value
+            value = without_postfix_modifiers { parse_expression(0) }
+            return PREFIX_ERROR if value.invalid?
+
+            value_span = node_span(value)
+            next_span = next_token.span.cover(value_span)
+            @arena.add_typed(NextNode.new(next_span, value))
+          end
         end
 
         # Phase 10: Parse yield expression

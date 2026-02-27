@@ -1044,8 +1044,9 @@ module CrystalV2
           NodeKind::Next
         end
 
+        getter value : ExprId?
 
-        def initialize(@span : Span)
+        def initialize(@span : Span, @value : ExprId? = nil)
         end
       end
 
