@@ -1,6 +1,27 @@
 # Crystal v2 — Active Work (codegen branch)
 
 ## Known Bugs (codegen)
+- **2026-02-27 (latest): fixed root-cause alias-resolution cache pollution that miscompiled `IO::FileDescriptor#fd` and crashed startup (`EXC_BAD_ACCESS 0x3`)**
+  - Root cause (`src/compiler/hir/ast_to_hir.cr`):
+    - `resolve_type_alias_chain` cached by bare alias name only (`"Handle"`), but `Handle` is context-sensitive;
+    - after cache pollution, `Atomic(Handle)` monomorphization in `IO::FileDescriptor#fd` bound to wrong specialization (`Atomic(Handle)#get`) instead of `Atomic(Int32)#get`;
+    - resulting HIR/MIR emitted pointer-shaped load chain for fd, leading to runtime crash in stdio bootstrap path.
+  - Fix:
+    - made alias-chain cache key context-aware for unqualified names (includes namespace/class context);
+    - added contextual/included alias resolution seed before walking alias chain for unqualified names.
+  - Evidence:
+    - stage1 debug (current tree):
+      - `/usr/bin/time -p crystal build src/crystal_v2.cr -o /tmp/stage1_dbg_aliasfix --error-trace`
+      - result: **real 8.78s**
+    - minimal crash repro (`puts "ok"`) compiled by fixed stage1:
+      - `/usr/bin/time -p /tmp/stage1_dbg_aliasfix /tmp/repro_fd_from_stdio.cr -o /tmp/repro_fd_from_stdio_bin_aliasfix`
+      - result: **real 12.56s**
+      - `scripts/run_safe.sh /tmp/repro_fd_from_stdio_bin_aliasfix 5 512` → **exit 0**, output `ok`
+    - HIR proof after fix:
+      - `IO::FileDescriptor#fd` now calls `Atomic(Int32)#get$Atomic::Ordering` (not `Atomic(Handle)#get$Atomic::Ordering`).
+  - Regression script:
+    - `regression_tests/stage1_io_fd_handle_alias_repro.sh /tmp/stage1_dbg_aliasfix` → `not reproduced`.
+
 - **2026-02-27 (latest): stabilized default stage2 `--release` bootstrap by hardening metadata emission against `IO::Memory` 2GB ceiling**
   - Root causes and fixes (`src/compiler/mir/llvm_backend.cr`):
     - backend IR can approach ~1.9GB on full stage2 builds; metadata emission then overflows `IO::Memory` and raises `IO::EOFError`;

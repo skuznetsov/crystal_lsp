@@ -1153,6 +1153,12 @@ module Crystal::HIR
     @unresolved_generic_arg_depth : Int32 = 0
     # Recursion guard for resolve_type_name_in_context to prevent alias/context loops.
     @resolve_type_name_stack : Set(String) = Set(String).new
+    # Cache for split_union_type_name (pure function of input string).
+    @split_union_type_cache : Hash(String, Array(String)) = {} of String => Array(String)
+    @split_union_type_cache_size : Int32 = 0
+    @split_union_type_cache_limit : Int32 = 20000
+    @split_union_last_input : String? = nil
+    @split_union_last_output : Array(String)? = nil
 
     # Cached ENV lookups — avoid repeated C library getenv() calls.
     @env_cache : Hash(String, String?) = {} of String => String?
@@ -20341,6 +20347,20 @@ module Crystal::HIR
     end
 
     private def split_union_type_name(type_name : String) : Array(String)
+      if last_input = @split_union_last_input
+        if last_input == type_name
+          if last_output = @split_union_last_output
+            return last_output
+          end
+        end
+      end
+      if cached = @split_union_type_cache[type_name]?
+        @split_union_last_input = type_name
+        @split_union_last_output = cached
+        return cached
+      end
+
+      parsed = nil.as(Array(String)?)
       if !type_name.includes?('|') && type_name.includes?("___")
         parts = [] of String
         start = 0
@@ -20360,31 +20380,47 @@ module Crystal::HIR
         end
         tail = type_name[start, size - start].strip
         parts << tail unless tail.empty?
-        return parts unless parts.empty?
+        parsed = parts unless parts.empty?
       end
-      parts = [] of String
-      depth = 0
-      start = 0
-      i = 0
-      while i < type_name.bytesize
-        ch = type_name.byte_at(i).unsafe_chr
-        case ch
-        when '(', '{', '['
-          depth += 1
-        when ')', '}', ']'
-          depth -= 1 if depth > 0
-        when '|'
-          if depth == 0
-            part = type_name[start, i - start].strip
-            parts << part unless part.empty?
-            start = i + 1
+
+      unless parsed
+        parts = [] of String
+        depth = 0
+        start = 0
+        i = 0
+        while i < type_name.bytesize
+          ch = type_name.byte_at(i).unsafe_chr
+          case ch
+          when '(', '{', '['
+            depth += 1
+          when ')', '}', ']'
+            depth -= 1 if depth > 0
+          when '|'
+            if depth == 0
+              part = type_name[start, i - start].strip
+              parts << part unless part.empty?
+              start = i + 1
+            end
           end
+          i += 1
         end
-        i += 1
+        tail = type_name[start, type_name.size - start].strip
+        parts << tail unless tail.empty?
+        parsed = parts
       end
-      tail = type_name[start, type_name.size - start].strip
-      parts << tail unless tail.empty?
-      parts
+
+      result = parsed.not_nil!
+      if @split_union_type_cache_size >= @split_union_type_cache_limit
+        @split_union_type_cache.clear
+        @split_union_type_cache_size = 0
+      end
+      unless @split_union_type_cache.has_key?(type_name)
+        @split_union_type_cache[type_name] = result
+        @split_union_type_cache_size += 1
+      end
+      @split_union_last_input = type_name
+      @split_union_last_output = result
+      result
     end
 
     @[AlwaysInline]
@@ -26683,21 +26719,35 @@ module Crystal::HIR
     end
 
     private def resolve_type_alias_chain(name : String) : String
-      if cached = @resolved_type_alias_cache[name]?
+      contextual = !name.includes?("::")
+      cache_key = if contextual
+                    ns_override = @current_namespace_override || ""
+                    current = @current_class || ""
+                    "#{name}\u0000#{ns_override}\u0000#{current}"
+                  else
+                    name
+                  end
+      if cached = @resolved_type_alias_cache[cache_key]?
         return cached
       end
 
-      chain = [] of String
-      resolved = @type_aliases[name]? || LIBC_TYPE_ALIASES[name]? || name
-      chain << name if resolved != name
+      seed = name
+      if contextual
+        if contextual_target = resolve_contextual_type_alias_name(name)
+          seed = contextual_target
+        elsif included_name = resolve_included_type_name(name)
+          seed = included_name
+        end
+      end
+
+      resolved = @type_aliases[seed]? || LIBC_TYPE_ALIASES[seed]? || seed
       depth = 0
       while (next_resolved = @type_aliases[resolved]? || LIBC_TYPE_ALIASES[resolved]?) && next_resolved != resolved && depth < 10
-        chain << resolved
         resolved = next_resolved
         depth += 1
       end
-      chain.each { |entry| @resolved_type_alias_cache[entry] = resolved }
-      @resolved_type_alias_cache[name] = resolved
+
+      @resolved_type_alias_cache[cache_key] = resolved
       resolved
     end
 
@@ -63292,11 +63342,9 @@ module Crystal::HIR
       # NOTE: Don't treat nested unions inside generics as unions here.
       # create_union_type handles its own caching.
       if union_type_name?(lookup_name)
-        variants = split_union_type_name(lookup_name)
-        if variants.size > 1
-          result = create_union_type(absolute_name ? "::#{lookup_name}" : lookup_name)
-          return result
-        end
+        result = create_union_type(absolute_name ? "::#{lookup_name}" : lookup_name)
+        store_type_cache(cache_key, result)
+        return result
       end
 
       if !lookup_name.empty? && !lookup_has_ns
@@ -63451,29 +63499,60 @@ module Crystal::HIR
         end
 
         resolve_generic_param_type = ->(param : String) do
-          resolve_key = param
-          debug_candidate = param.includes?('|') || param.includes?("Tuple(") || param.includes?("->")
+          stripped_param = param.strip
+          resolved_param = resolve_type_alias_chain(stripped_param)
+          resolve_key = resolved_param
+          if !resolve_key.empty? && union_type_name?(resolve_key)
+            normalized_union = normalize_union_type_name(resolve_key)
+            canonical_parts = split_union_type_name(normalized_union).map do |entry|
+              part = entry.strip
+              part.starts_with?("::") ? part[2..] : part
+            end
+            resolve_key = normalize_union_type_name(canonical_parts.join(" | "))
+          elsif resolve_key.starts_with?("::")
+            resolve_key = resolve_key[2..]
+          end
+          resolve_key = stripped_param if resolve_key.empty?
+          debug_candidate = resolve_key.includes?('|') || resolve_key.includes?("Tuple(") || resolve_key.includes?("->")
           if env_get("DEBUG_TYPE_PARAM_RESOLUTION") && debug_candidate && @generic_param_resolution_log_count < 1200
-            STDERR.puts "[TYPE_PARAM_RESOLVE] param=#{param} in_progress=#{@generic_param_resolution_in_progress.size}"
+            STDERR.puts "[TYPE_PARAM_RESOLVE] param=#{resolve_key} in_progress=#{@generic_param_resolution_in_progress.size}"
             @generic_param_resolution_log_count += 1
           end
           if @generic_param_resolution_in_progress.includes?(resolve_key)
             if env_get("DEBUG_TYPE_PARAM_RESOLUTION") && debug_candidate && @generic_param_resolution_log_count < 1200
-              STDERR.puts "[TYPE_PARAM_CYCLE] param=#{param}"
+              STDERR.puts "[TYPE_PARAM_CYCLE] param=#{resolve_key}"
               @generic_param_resolution_log_count += 1
             end
-            cycle_name = param.strip
+            cycle_name = resolve_key
             if !cycle_name.empty? && union_type_name?(cycle_name)
-              create_union_type(normalize_union_type_name(cycle_name))
+              union_key = type_cache_key(cycle_name)
+              if cached_union = @type_cache[union_key]?
+                cached_union
+              else
+                provisional_union = @module.intern_type(TypeDescriptor.new(TypeKind::Union, cycle_name))
+                store_type_cache(union_key, provisional_union)
+                provisional_union
+              end
             else
               TypeRef::VOID
             end
           else
             @generic_param_resolution_in_progress << resolve_key
             begin
-              ref = type_ref_for_name(param)
+              ref = if !resolve_key.empty? && union_type_name?(resolve_key)
+                      union_key = type_cache_key(resolve_key)
+                      if cached_union = @type_cache[union_key]?
+                        cached_union
+                      else
+                        provisional_union = @module.intern_type(TypeDescriptor.new(TypeKind::Union, resolve_key))
+                        store_type_cache(union_key, provisional_union)
+                        provisional_union
+                      end
+                    else
+                      type_ref_for_name(resolve_key)
+                    end
               if ref == TypeRef::VOID
-                stripped = param.strip
+                stripped = stripped_param
                 allow_materialize = materializable_unknown_named_type?(stripped)
                 if !stripped.empty? && stripped != "_" && !short_type_param_name?(stripped)
                   resolved = stripped
@@ -63667,8 +63746,14 @@ module Crystal::HIR
 
     # Create a union type from "Type1 | Type2 | Type3" syntax
     private def create_union_type(name : String) : TypeRef
+      input_name = normalize_union_type_name(name)
+      input_cache_key = type_cache_key(input_name)
+      if cached = @type_cache[input_cache_key]?
+        return cached unless cached == TypeRef::VOID
+      end
+
       # Parse variant type names (handle both "Type1 | Type2" and "Type1|Type2")
-      variant_names = split_union_type_name(name)
+      variant_names = split_union_type_name(input_name)
       if variant_names.empty?
         return TypeRef::VOID
       end
