@@ -9,6 +9,7 @@ Usage:
 Options:
   -t, --timeout SEC       Timeout before sampling (default: 180)
   -s, --sample SEC        sample(1) duration in seconds (default: 10)
+  -l, --lldb-timeout SEC  LLDB attach/backtrace timeout (default: 20)
   -n, --top N             Number of hotspot symbols (default: 5)
   -o, --out DIR           Output directory (default: /tmp/timeout_sample_<ts>_<pid>)
   -b, --breakpoints LIST  Comma-separated LLDB breakpoint symbols
@@ -19,6 +20,7 @@ USAGE
 
 TIMEOUT_SECS=180
 SAMPLE_SECS=10
+LLDB_TIMEOUT_SECS=20
 TOP_N=5
 OUT_DIR=""
 BREAKPOINTS=""
@@ -30,6 +32,8 @@ while [[ $# -gt 0 ]]; do
       TIMEOUT_SECS="${2:-}"; shift 2 ;;
     -s|--sample)
       SAMPLE_SECS="${2:-}"; shift 2 ;;
+    -l|--lldb-timeout)
+      LLDB_TIMEOUT_SECS="${2:-}"; shift 2 ;;
     -n|--top)
       TOP_N="${2:-}"; shift 2 ;;
     -o|--out)
@@ -72,6 +76,8 @@ PROC_LOG="$OUT_DIR/processes.txt"
 echo "[run] ${CMD[*]}" | tee "$OUT_DIR/summary.txt"
 "${CMD[@]}" >"$CMD_LOG" 2>&1 &
 PID=$!
+PGID="$(ps -o pgid= -p "$PID" 2>/dev/null | tr -d '[:space:]' || true)"
+SELF_PGID="$(ps -o pgid= -p "$$" 2>/dev/null | tr -d '[:space:]' || true)"
 START_TS=$(date +%s)
 TIMED_OUT=0
 
@@ -85,8 +91,10 @@ while kill -0 "$PID" 2>/dev/null; do
 done
 
 if (( TIMED_OUT == 0 )); then
+  set +e
   wait "$PID"
   STATUS=$?
+  set -e
   {
     echo "[exit] status=$STATUS"
     echo "[log] $CMD_LOG"
@@ -183,18 +191,49 @@ if (( USE_LLDB == 1 )) && command -v lldb >/dev/null 2>&1 && kill -0 "$SAMPLE_PI
   {
     echo "process attach --pid $SAMPLE_PID"
     for sym in "${BP_SYMBOLS[@]}"; do
-      echo "breakpoint set --name $sym"
+      qsym="${sym//\\/\\\\}"
+      qsym="${qsym//\"/\\\"}"
+      echo "breakpoint set --name \"$qsym\""
     done
     echo "thread backtrace all"
     echo "process detach"
     echo "quit"
   } > "$LLDB_CMDS"
-  lldb -b -s "$LLDB_CMDS" > "$LLDB_LOG" 2>&1 || true
+  lldb -b -s "$LLDB_CMDS" > "$LLDB_LOG" 2>&1 &
+  LLDB_PID=$!
+  LLDB_START_TS=$(date +%s)
+  LLDB_TIMED_OUT=0
+  while kill -0 "$LLDB_PID" 2>/dev/null; do
+    NOW_TS=$(date +%s)
+    if (( NOW_TS - LLDB_START_TS >= LLDB_TIMEOUT_SECS )); then
+      LLDB_TIMED_OUT=1
+      kill -TERM "$LLDB_PID" 2>/dev/null || true
+      sleep 1
+      kill -KILL "$LLDB_PID" 2>/dev/null || true
+      break
+    fi
+    sleep 1
+  done
+  wait "$LLDB_PID" 2>/dev/null || true
+  if (( LLDB_TIMED_OUT == 1 )); then
+    echo "[lldb-timeout] ${LLDB_TIMEOUT_SECS}s" >> "$LLDB_LOG"
+  fi
 fi
 
+if [[ -n "${PGID:-}" && "${PGID:-}" != "${SELF_PGID:-}" ]]; then
+  kill -TERM "-$PGID" 2>/dev/null || true
+fi
 kill "$PID" 2>/dev/null || true
 for cpid in "${DESC_PIDS[@]:-}"; do
   kill "$cpid" 2>/dev/null || true
+done
+sleep 1
+if [[ -n "${PGID:-}" && "${PGID:-}" != "${SELF_PGID:-}" ]]; then
+  kill -KILL "-$PGID" 2>/dev/null || true
+fi
+kill -KILL "$PID" 2>/dev/null || true
+for cpid in "${DESC_PIDS[@]:-}"; do
+  kill -KILL "$cpid" 2>/dev/null || true
 done
 wait "$PID" 2>/dev/null || true
 
