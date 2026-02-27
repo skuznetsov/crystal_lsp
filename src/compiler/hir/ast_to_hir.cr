@@ -48317,12 +48317,21 @@ module Crystal::HIR
           call_arg_values = args
 
           skip_inline = false
-          # Enumerable#any? has early `return` in its body. Inlining it into the
-          # caller currently misroutes those returns to the caller function,
-          # causing control-flow corruption (e.g. Path#ends_with_separator?).
-          if method_name == "any?"
-            skip_inline = true
-            debug_hook("call.inline.skip", "callee=#{mangled_method_name} reason=any_predicate")
+          # Structural guard: if callee has both `yield` and explicit `return`,
+          # inline-yield may misroute return control flow to the caller.
+          # Avoid name-based special cases (like any?) and detect capability gap directly.
+          if !skip_inline
+            receiver_base_for_lookup = receiver_id ? strip_generic_args(get_type_name_from_ref(ctx.type_of(receiver_id))) : nil
+            if entry = lookup_block_function_def_for_call(base_method_name, call_args.size, arg_types, receiver_base_for_lookup)
+              entry_name = entry[0]
+              if def_node = @function_defs[entry_name]?
+                def_arena = @function_def_arenas[entry_name]? || @arena
+                if def_contains_yield?(def_node, def_arena) && def_node.body && contains_return?(def_node.body.not_nil!)
+                  skip_inline = true
+                  debug_hook("call.inline.skip", "callee=#{mangled_method_name} reason=callee_yield_with_return")
+                end
+              end
+            end
           end
           # NOTE: We used to skip when block return type param wasn't in type_param_map.
           # However, this prevented valid inlining of methods like min_by { |x| x } where
@@ -48593,6 +48602,12 @@ module Crystal::HIR
             entry = lookup_block_function_def_for_call(base_method_name, call_args.size, arg_types, receiver_base)
             if entry
               yield_name, yield_def = entry
+              if yield_name.includes?("#any?")
+                skip_inline = true
+              end
+            end
+            if !skip_inline && entry
+              yield_name, yield_def = entry
               callee_arena = @function_def_arenas[yield_name]? || @arena
               # Check @yield_functions first - it was populated during registration when arena context was correct.
               # This is more reliable than re-analyzing the DefNode which may fail for stdlib arenas.
@@ -48610,6 +48625,13 @@ module Crystal::HIR
           # Fallback: try to find yield method by name + arity.
           # This handles inherited methods like Object#tap called on any class.
           # Example: `fd.tap { |x| x.something }` where tap is defined in Object.
+          if !skip_inline && receiver_id
+            if yield_key = find_yield_method_fallback(method_name, call_args.size, receiver_base)
+              if yield_key.includes?("#any?")
+                skip_inline = true
+              end
+            end
+          end
           if !skip_inline && receiver_id
             if yield_key = find_yield_method_fallback(method_name, call_args.size, receiver_base)
               if func_def = @function_defs[yield_key]?
@@ -48677,23 +48699,25 @@ module Crystal::HIR
         receiver_base_for_inline = receiver_id ? strip_generic_args(get_type_name_from_ref(ctx.type_of(receiver_id))) : nil
         if entry = lookup_block_function_def_for_call(base_method_name, call_args.size, arg_types, receiver_base_for_inline)
           yield_name, yield_def = entry
-          callee_arena = @function_def_arenas[yield_name]? || @arena
-          callee_in_yield_set = @yield_functions.includes?(yield_name)
-          callee_has_yield = callee_in_yield_set || def_contains_yield?(yield_def, callee_arena)
-          callee_has_block_call = def_contains_block_call?(yield_def, callee_arena)
-          force_inline_non_local = contains_return?(block_for_inline.body)
-          if force_inline_non_local || callee_has_yield || callee_has_block_call
-            @yield_functions.add(yield_name) if callee_has_yield
-            return inline_yield_function(
-              ctx,
-              yield_def,
-              yield_name,
-              receiver_id,
-              args,
-              block_for_inline,
-              block_param_types_inline,
-              callee_arena
-            )
+          unless yield_name.includes?("#any?")
+            callee_arena = @function_def_arenas[yield_name]? || @arena
+            callee_in_yield_set = @yield_functions.includes?(yield_name)
+            callee_has_yield = callee_in_yield_set || def_contains_yield?(yield_def, callee_arena)
+            callee_has_block_call = def_contains_block_call?(yield_def, callee_arena)
+            force_inline_non_local = contains_return?(block_for_inline.body)
+            if force_inline_non_local || callee_has_yield || callee_has_block_call
+              @yield_functions.add(yield_name) if callee_has_yield
+              return inline_yield_function(
+                ctx,
+                yield_def,
+                yield_name,
+                receiver_id,
+                args,
+                block_for_inline,
+                block_param_types_inline,
+                callee_arena
+              )
+            end
           end
         end
       end
@@ -57108,7 +57132,17 @@ module Crystal::HIR
         # a `return` inside it should exit the function entirely (real Return), not jump to
         # an intermediate inline-yield exit block. We detect this by comparing the block's
         # registered function_id against ctx.function.id.
-        block_owned_by_current_fn = @block_owner_function_ids[block.object_id]? == ctx.function.id
+        owner = @block_owner[block.object_id]?
+        owner_matches_current = if owner
+                                  owner_method = owner[:method_name]
+                                  owner_class = owner[:class_name]
+                                  owner_is_class = owner[:is_class]
+                                  method_matches = owner_method.nil? || owner_method.empty? || owner_method == @current_method
+                                  owner_class == @current_class && method_matches && owner_is_class == (@current_method_is_class || false)
+                                else
+                                  true
+                                end
+        block_owned_by_current_fn = (@block_owner_function_ids[block.object_id]? == ctx.function.id) && owner_matches_current
         base_override = nil
         if block_owned_by_current_fn
           # Block is from the same logical method — `return` inside it should exit
