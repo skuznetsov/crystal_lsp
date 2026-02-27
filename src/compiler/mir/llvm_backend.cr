@@ -5496,6 +5496,46 @@ module Crystal::MIR
       # Hash#key_hash for primitive Int32 keys — bypass broken Object#hash vdispatch.
       # Primitives get inttoptr'd to ptr but vdispatch tries to load type_id from the raw address → crash.
       # Fix: compute hash directly using Crystal::Hasher.permute(sext(key, i64)).result.
+      # Enum keys hit the same broken path in generic key_hash lowering (via Object#hash on inttoptr(enum_value)).
+      # Handle enum keys here as integer-like values using direct hasher permute.
+      if mangled.includes?("$Hkey_hash$$") && mangled.includes?("Hash$L") && func.params.size >= 2
+        key_type_ref = func.params[1].type
+        if key_type = @module.type_registry.get(key_type_ref)
+          if key_type.kind.enum?
+            key_llvm_type = @type_mapper.llvm_type(key_type_ref)
+            if key_llvm_type.starts_with?('i') && !key_llvm_type.includes?(".")
+              emit_raw "; #{mangled} — direct enum hash override (bypass vdispatch)\n"
+              emit_raw "define i32 @#{mangled}(ptr %self, #{key_llvm_type} %key) {\n"
+              emit_raw "entry:\n"
+              emit_raw "  %hasher = call ptr @Crystal$CCHasher$Dnew(i64 0, i64 0)\n"
+              if key_llvm_type == "i64"
+                emit_raw "  %key64 = add i64 %key, 0\n"
+              else
+                key_bits = key_llvm_type[1..].to_i? || 32
+                if key_bits < 64
+                  emit_raw "  %key64 = sext #{key_llvm_type} %key to i64\n"
+                elsif key_bits > 64
+                  emit_raw "  %key64 = trunc #{key_llvm_type} %key to i64\n"
+                else
+                  emit_raw "  %key64 = add i64 %key, 0\n"
+                end
+              end
+              emit_raw "  %hasher2 = call ptr @Crystal$CCHasher$Hpermute$$UInt64(ptr %hasher, i64 %key64)\n"
+              emit_raw "  %hash64 = call i64 @Crystal$CCHasher$Hresult(ptr %hasher2)\n"
+              emit_raw "  %hash32 = trunc i64 %hash64 to i32\n"
+              emit_raw "  %is_zero = icmp eq i32 %hash32, 0\n"
+              emit_raw "  br i1 %is_zero, label %ret_max, label %ret_hash\n"
+              emit_raw "ret_max:\n"
+              emit_raw "  ret i32 -1\n"
+              emit_raw "ret_hash:\n"
+              emit_raw "  ret i32 %hash32\n"
+              emit_raw "}\n\n"
+              return true
+            end
+          end
+        end
+      end
+
       if mangled.ends_with?("$Hkey_hash$$Int32") && mangled.includes?("Hash$L")
         emit_raw "; #{mangled} — direct Int32 hash override (bypass vdispatch)\n"
         emit_raw "define i32 @#{mangled}(ptr %self, i32 %key) {\n"
