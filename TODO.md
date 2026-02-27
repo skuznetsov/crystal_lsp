@@ -1,6 +1,28 @@
 # Crystal v2 — Active Work (codegen branch)
 
 ## Known Bugs (codegen)
+- **2026-02-27 (latest): fixed root-cause `Void`↔`Nil` union type-id remap mismatch in LLVM backend (unblocks `forall_nil_union_return`)**
+  - Root cause (`src/compiler/mir/llvm_backend.cr`):
+    - union-to-union conversion path (`emit_union_type_id_remap`) treated variant names literally and did not map null variants across naming forms (`Void` vs `Nil`);
+    - in real path `String | Void -> Nil | String` (from inlined `fetch` + block default), remap translated `String` but left `Void` unchanged, so returned nil got encoded with non-nil destination type_id.
+  - Fix:
+    - hardened remap to treat null variants as equivalent in both descriptor-based and token-fallback remap:
+      - `Void` and `Nil` now map to each other when converting union type ids;
+    - updated null-variant helper fallbacks to recognize both `Nil` and `Void`.
+  - Evidence:
+    - build:
+      - `/usr/bin/time -p crystal build src/crystal_v2.cr -o /tmp/stage1_dbg_union_remap_fix --error-trace` -> `exit 0`, **real 6.83s**
+    - targeted oracle:
+      - `bash regression_tests/run_mini_oracles.sh /tmp/stage1_dbg_union_remap_fix regression_tests/forall_nil_union_return.cr` -> **PASS**
+    - full mini-oracles:
+      - `bash regression_tests/run_mini_oracles.sh /tmp/stage1_dbg_union_remap_fix` -> **3/5 PASS**
+      - passed: `forall_nil_union_return`, `test_nested_macro_record`, `test_select_map_stress`
+      - remaining: `file_join_splat`, `test_byteformat_decode_u32` (segfault)
+    - hash regression probes stay green:
+      - `stage1_hash_find_entry_union_idx_repro.sh` -> `not reproduced`
+      - `stage1_hash_literal_index_repro.sh` -> `not reproduced`
+      - `stage1_const_hash_or_chain_repro.sh` -> `not reproduced`
+
 - **2026-02-27 (latest): removed hardcoded `ExprId` `Hash#key_hash` override; kept generic ABI wrapper-path**
   - Context:
     - previous local WIP contained a symbol-string hardcode for `Frontend::ExprId` in `llvm_backend` `key_hash` override path;

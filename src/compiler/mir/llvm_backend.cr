@@ -16077,6 +16077,11 @@ module Crystal::MIR
       remap_pairs = [] of {Int32, Int32}
       src_desc.variants.each do |variant|
         dst_id = dst_by_name[variant.full_name]?
+        if dst_id.nil? && null_like_union_variant_name?(variant.full_name)
+          if dst_null = dst_desc.variants.find { |v| null_like_union_variant_name?(v.full_name) }
+            dst_id = dst_null.type_id
+          end
+        end
         if dst_id.nil?
           if by_ref = dst_desc.variants.find { |v| v.type_ref == variant.type_ref }
             dst_id = by_ref.type_id
@@ -16086,6 +16091,15 @@ module Crystal::MIR
       end
 
       remap_pairs
+    end
+
+    private def null_like_union_variant_name?(name : String) : Bool
+      name == "Nil" || name == "Void"
+    end
+
+    private def null_like_union_variant_token?(token : String) : Bool
+      base = token.split("$L").first.split("$CC").last
+      base == "Nil" || base == "Void"
     end
 
     private def union_type_id_remap_needed?(src_union_ref : TypeRef, dst_union_ref : TypeRef) : Bool
@@ -16123,7 +16137,13 @@ module Crystal::MIR
 
         pairs = [] of {Int32, Int32}
         src_variants.each_with_index do |variant, src_idx|
-          dst_idx = dst_index_by_name[variant]? || src_idx.to_i32
+          dst_idx = dst_index_by_name[variant]?
+          if dst_idx.nil? && null_like_union_variant_token?(variant)
+            if null_dst = dst_variants.index { |v| null_like_union_variant_token?(v) }
+              dst_idx = null_dst.to_i32
+            end
+          end
+          dst_idx ||= src_idx.to_i32
           pairs << {src_idx.to_i32, dst_idx}
         end
         remap_pairs = pairs
@@ -16148,21 +16168,43 @@ module Crystal::MIR
     # Union type names list variants alphabetically separated by $_$OR$_.
     # Returns nil if the union doesn't contain a Nil variant.
     private def nil_variant_id_for_union_type(llvm_type : String) : Int32?
+      if union_ref = find_type_ref_for_llvm_type(llvm_type)
+        if union_desc = @module.get_union_descriptor(union_ref)
+          if nil_variant = union_desc.variants.find { |variant|
+               name = variant.full_name
+               name == "Nil" || name == "Void"
+             }
+            return nil_variant.type_id
+          end
+        end
+      end
+
       variants = union_variant_tokens_for_llvm_union(llvm_type)
       variants.each_with_index do |v, i|
         # Strip generic args ($L...$R) and namespace separators ($CC)
         base = v.split("$L").first.split("$CC").last
-        return i if base == "Nil"
+        return i if base == "Nil" || base == "Void"
       end
       nil
     end
 
     # Find first non-Nil variant index for a union LLVM type name.
     private def first_non_nil_variant_id_for_union_type(llvm_type : String) : Int32?
+      if union_ref = find_type_ref_for_llvm_type(llvm_type)
+        if union_desc = @module.get_union_descriptor(union_ref)
+          if variant = union_desc.variants.find { |v|
+               name = v.full_name
+               name != "Nil" && name != "Void"
+             }
+            return variant.type_id
+          end
+        end
+      end
+
       variants = union_variant_tokens_for_llvm_union(llvm_type)
       variants.each_with_index do |v, i|
         base = v.split("$L").first.split("$CC").last
-        return i unless base == "Nil"
+        return i unless base == "Nil" || base == "Void"
       end
       nil
     end
