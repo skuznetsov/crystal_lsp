@@ -1013,17 +1013,38 @@ module CrystalV2
           stage2_debug("[STAGE2_DEBUG] recompute_c_struct_sizes call", err_io)
           hir_converter.recompute_c_struct_sizes
         end
+        stage2_debug("[STAGE2_DEBUG] recompute_c_struct_sizes returned", err_io)
         log(options, out_io, "    Aliases: #{alias_nodes.size}")
-        alias_nodes.each { |n, a| hir_converter.arena = a; hir_converter.register_alias(n) }
+        alias_count = alias_nodes.size
+        stage2_debug("[STAGE2_DEBUG] alias register start count=#{alias_count}", err_io)
+        alias_nodes.each_with_index do |(n, a), i|
+          if i < 3 || i == alias_count - 1
+            stage2_debug("[STAGE2_DEBUG] alias register idx=#{i + 1}/#{alias_count}", err_io)
+          end
+          hir_converter.arena = a
+          hir_converter.register_alias(n)
+        end
+        stage2_debug("[STAGE2_DEBUG] alias register done", err_io)
         log(options, out_io, "    Macros: #{macro_nodes.size}")
+        macro_count = macro_nodes.size
+        stage2_debug("[STAGE2_DEBUG] macro register start count=#{macro_count}", err_io)
         macro_nodes.each_with_index do |(n, a), i|
+          if i < 3 || (i % 50 == 0) || i == macro_count - 1
+            stage2_debug("[STAGE2_DEBUG] macro register idx=#{i + 1}/#{macro_count}", err_io)
+          end
           STDERR.print "\r    Registered macro #{i+1}/#{macro_nodes.size}" if options.progress
           hir_converter.arena = a
           hir_converter.register_macro(n)
         end
+        stage2_debug("[STAGE2_DEBUG] macro register done", err_io)
         STDERR.puts if options.progress
         log(options, out_io, "    Modules: #{module_nodes.size}")
+        module_count = module_nodes.size
+        stage2_debug("[STAGE2_DEBUG] module register start count=#{module_count}", err_io)
         module_nodes.each_with_index do |(n, a), i|
+          if i < 3 || (i % 50 == 0) || i == module_count - 1
+            stage2_debug("[STAGE2_DEBUG] module register idx=#{i + 1}/#{module_count}", err_io)
+          end
           hir_converter.arena = a
           if options.progress && env_enabled?("CRYSTAL_V2_PROGRESS_MODULE_NAMES")
             STDERR.puts "\n    Module #{i + 1}/#{module_nodes.size}: #{String.new(n.name)}"
@@ -1033,17 +1054,29 @@ module CrystalV2
             STDERR.print "\r    Registered module #{i + 1}/#{module_nodes.size}"
           end
         end
+        stage2_debug("[STAGE2_DEBUG] module register done", err_io)
         STDERR.puts if options.progress
         log(options, out_io, "    Classes: #{class_nodes.size}")
+        class_count = class_nodes.size
+        stage2_debug("[STAGE2_DEBUG] class register start count=#{class_count}", err_io)
         class_nodes.each_with_index do |(n, a), i|
+          if i < 3 || (i % 50 == 0) || i == class_count - 1
+            stage2_debug("[STAGE2_DEBUG] class register idx=#{i + 1}/#{class_count}", err_io)
+          end
           hir_converter.arena = a
           hir_converter.register_class(n)
           STDERR.print "\r    Registered class #{i+1}/#{class_nodes.size}" if options.progress && (i % 10 == 0 || i == class_nodes.size - 1)
         end
+        stage2_debug("[STAGE2_DEBUG] class register done", err_io)
         STDERR.puts if options.progress
 
+        constant_count = constant_exprs.size
+        stage2_debug("[STAGE2_DEBUG] constant register start count=#{constant_count}", err_io)
         log(options, out_io, "    Constants: #{constant_exprs.size}")
-        constant_exprs.each do |expr_id, arena|
+        constant_exprs.each_with_index do |(expr_id, arena), i|
+          if i < 3 || i == constant_count - 1
+            stage2_debug("[STAGE2_DEBUG] constant register idx=#{i + 1}/#{constant_count}", err_io)
+          end
           hir_converter.arena = arena
           node = arena[expr_id]
           case node
@@ -1056,31 +1089,47 @@ module CrystalV2
             end
           end
         end
+        stage2_debug("[STAGE2_DEBUG] constant register done", err_io)
 
         # Flush pending monomorphizations now that all templates are registered
+        stage2_debug("[STAGE2_DEBUG] flush_pending_monomorphizations start", err_io)
         log(options, out_io, "  Flushing pending monomorphizations...")
         hir_converter.flush_pending_monomorphizations
+        stage2_debug("[STAGE2_DEBUG] flush_pending_monomorphizations done", err_io)
 
         # Refresh union descriptors now that all types are registered
+        stage2_debug("[STAGE2_DEBUG] refresh_union_descriptors start", err_io)
         hir_converter.refresh_union_descriptors
+        stage2_debug("[STAGE2_DEBUG] refresh_union_descriptors done", err_io)
         # Refresh generic type params that were captured as VOID before aliases existed
+        stage2_debug("[STAGE2_DEBUG] refresh_void_type_params start", err_io)
         hir_converter.refresh_void_type_params
+        stage2_debug("[STAGE2_DEBUG] refresh_void_type_params done", err_io)
 
         # Pass 2: Register function signatures
+        def_count = def_nodes.size
+        stage2_debug("[STAGE2_DEBUG] pass2 register_functions start count=#{def_count}", err_io)
         log(options, out_io, "  Pass 2: Registering #{def_nodes.size} function signatures...")
         def_nodes.each_with_index do |(n, a), i|
+          if i < 3 || (i % 100 == 0) || i == def_count - 1
+            stage2_debug("[STAGE2_DEBUG] pass2 register_functions idx=#{i + 1}/#{def_count}", err_io)
+          end
           hir_converter.arena = a
           hir_converter.register_function(n)
           STDERR.print "\r    Registered function #{i+1}/#{def_nodes.size}" if options.progress && (i % 50 == 0 || i == def_nodes.size - 1)
         end
+        stage2_debug("[STAGE2_DEBUG] pass2 register_functions done", err_io)
         STDERR.puts if options.progress
 
         # Fix inherited ivars: ensure subclasses include parent ivars with correct offsets.
         # Must run before function lowering since GEP offsets are baked into HIR instructions.
+        stage2_debug("[STAGE2_DEBUG] fixup_inherited_ivars start", err_io)
         hir_converter.fixup_inherited_ivars
+        stage2_debug("[STAGE2_DEBUG] fixup_inherited_ivars done", err_io)
 
         # Pass 3: Lower bodies (lazy)
         # Only lower top-level expressions; function bodies are lowered on demand.
+        stage2_debug("[STAGE2_DEBUG] pass3 lowering setup", err_io)
         log(options, out_io, "  Pass 3: Lowering bodies (lazy)...")
 
         # Create main function from top-level expressions (or user-defined main)
@@ -1367,12 +1416,21 @@ module CrystalV2
         end
         llvm_gen.constant_initial_values = const_init unless const_init.empty?
 
-        llvm_ir = llvm_gen.generate
-        log(options, out_io, "  LLVM IR size: #{llvm_ir.size} bytes")
+        ll_file = options.output + ".ll"
+
+        llvm_ir = ""
+        if options.emit_llvm
+          llvm_ir = llvm_gen.generate
+          log(options, out_io, "  LLVM IR size: #{llvm_ir.size} bytes")
+          File.write(ll_file, llvm_ir)
+        else
+          File.open(ll_file, "w") do |io|
+            llvm_gen.generate(io)
+          end
+          log(options, out_io, "  LLVM IR size: #{File.size(ll_file)} bytes")
+        end
         timings["llvm"] = (Time.instant - llvm_start).total_milliseconds if options.stats
 
-        ll_file = options.output + ".ll"
-        File.write(ll_file, llvm_ir)
         log(options, out_io, "  Wrote: #{ll_file}")
 
         if options.emit_llvm

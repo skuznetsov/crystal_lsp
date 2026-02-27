@@ -351,8 +351,8 @@ module Crystal::MIR
   class LLVMIRGenerator
     @module : Module
     @type_mapper : LLVMTypeMapper
-    @output : IO::Memory
-    @toplevel_output : IO::Memory? = nil  # Route top-level defs here during block buffering
+    @output : IO
+    @toplevel_output : IO? = nil  # Route top-level defs here during block buffering
     @indent : Int32
     @value_names : Hash(ValueId, String)
     @block_names : Hash(BlockId, String)
@@ -682,7 +682,11 @@ module Crystal::MIR
       pointer_word_bytes_u64
     end
 
-    def generate : String
+    def generate(output : IO? = nil) : String
+      @output = output || IO::Memory.new
+      @toplevel_output = nil
+      generated_in_memory = output.nil?
+
       STDERR.puts "  [LLVM] emit_header..." if @progress
       emit_header
       STDERR.puts "  [LLVM] emit_type_definitions..." if @progress
@@ -924,7 +928,11 @@ module Crystal::MIR
       emit_type_name_table
 
       STDERR.puts "  [LLVM] finalizing output..." if @progress
-      @output.to_s
+      if generated_in_memory
+        @output.as(IO::Memory).to_s
+      else
+        ""
+      end
     end
 
     # Pre-compute return types for all functions.
@@ -6803,15 +6811,22 @@ module Crystal::MIR
 
       # Emit block IR with allocas replaced by no-ops (comments).
       # The alloca SSA names are now defined in the entry block.
-      block_ir.each_line do |line|
-        stripped = line.lstrip
-        if stripped.includes?("= alloca ") && !stripped.starts_with?(';')
-          # Replace with comment — the alloca is now in the entry block
-          emit_raw "  ; hoisted: #{stripped}\n"
-        else
-          emit_raw line
-          emit_raw "\n"
+      begin
+        block_ir.each_line do |line|
+          stripped = line.lstrip
+          if stripped.includes?("= alloca ") && !stripped.starts_with?(';')
+            # Replace with comment — the alloca is now in the entry block
+            emit_raw "  ; hoisted: #{stripped}\n"
+          else
+            emit_raw line
+            emit_raw "\n"
+          end
         end
+      rescue ex : IO::EOFError
+        if ENV["CRYSTAL2_STAGE2_DEBUG"]? == "1" || ENV["STAGE2_BOOTSTRAP_TRACE"]?
+          STDERR.puts "[LLVM_EMIT_EOF] func=#{func.name} blocks=#{func.blocks.size} block_ir_bytes=#{block_ir.bytesize} hoisted_allocas=#{hoisted_allocas.size}"
+        end
+        raise ex
       end
 
       emit_raw "}\n\n"

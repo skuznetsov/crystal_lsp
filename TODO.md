@@ -7061,3 +7061,39 @@ crystal build -Ddebug_hooks src/crystal_v2.cr -o bin/crystal_v2 --no-debug
   - Next action:
     - stabilize large-function emission in `llvm_backend` (avoid IO::Memory overflow in `emit_function` buffering path),
       then re-run full stage2 bootstrap timings.
+
+- **2026-02-27 (new): stage2 bootstrapped successfully after LLVM IR streaming; stage3 still crashes**
+  - Fix implemented:
+    - `src/compiler/mir/llvm_backend.cr`
+      - `LLVMIRGenerator#generate` now supports streaming output to external IO (not only `IO::Memory`).
+    - `src/compiler/cli.cr`
+      - normal compile path now streams LLVM IR directly to `#{output}.ll` file instead of materializing the whole module as a giant in-memory string.
+      - `--emit llvm-ir` path still keeps in-memory behavior for stdout emission.
+  - Validation:
+    - Stage1 release build (original compiler):
+      - `/usr/bin/time -p crystal build --release src/crystal_v2.cr -o /tmp/stage1_rel_stream_fix --error-trace`
+      - **real 404.46s**
+    - Stage2 release build (new stage1):
+      - `scripts/timeout_sample_lldb.sh -t 420 -- /usr/bin/time -p /tmp/stage1_rel_stream_fix src/crystal_v2.cr --release -o /tmp/stage2_rel_stream_fix`
+      - **success**, **real 110.83s**
+      - artifacts:
+        - `/tmp/stage2_rel_stream_fix` (35M)
+        - `/tmp/stage2_rel_stream_fix.ll` (3.5G, streamed)
+        - `/tmp/stage2_rel_stream_fix.ll.opt.ll` (741M)
+    - Stage1 vs stage2 speed ratio:
+      - `404.46 / 110.83 = 3.65x` faster stage2
+  - Stage3 status (new blocker):
+    - `scripts/timeout_sample_lldb.sh -t 420 -- /usr/bin/time -p /tmp/stage2_rel_stream_fix src/crystal_v2.cr --release -o /tmp/stage3_rel_stream_fix`
+      - fails immediately with **exit 139**
+    - LLDB repro:
+      - `lldb --batch -o run -k 'thread backtrace all' -- /tmp/stage2_rel_stream_fix src/crystal_v2.cr --release -o /tmp/stage3_rel_stream_fix`
+      - crash:
+        - `EXC_BAD_ACCESS` at `Array(String)#check_needs_resize`
+        - stack head:
+          - `Array$LString$R$Hcheck_needs_resize`
+          - `CrystalV2::Compiler::Frontend::Parser#initialize$Lexer`
+          - `CrystalV2::Compiler::CLI#parse_file_recursive`
+          - `CrystalV2::Compiler::CLI#compile`
+  - Interpretation:
+    - stage2 bootstrap now reaches and passes full codegen/linking path.
+    - remaining instability is stage3 runtime crash in parser startup, likely still bad codegen/runtime ABI issue around Array(String) growth path.
