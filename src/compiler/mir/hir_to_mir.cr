@@ -1540,6 +1540,11 @@ module Crystal
       end
 
       if func
+        if ENV["DEBUG_JOIN_MIR_CALL"]? &&
+           @current_lowering_func_name.includes?("Path#join$Tuple") &&
+           call.method_name.includes?("Path#join")
+          STDERR.puts "[JOIN_MIR_CALL] current=#{@current_lowering_func_name} call=#{call.method_name} resolved=#{func.name}"
+        end
         callee_id = func.id
         # Build hir_args that matches mir_args ordering (receiver first, then explicit args)
         hir_args_for_coerce = if recv = call.receiver
@@ -1568,7 +1573,7 @@ module Crystal
         end
 
         coerced_args = coerce_call_args(builder, effective_args, effective_hir_args, func)
-        return builder.call(callee_id, coerced_args, convert_type(call.type))
+        return builder.call(callee_id, coerced_args, func.return_type)
       end
 
       # Built-in print functions (fallback only when no user-defined function exists).
@@ -2504,6 +2509,54 @@ module Crystal
       result
     end
 
+    @[AlwaysInline]
+    private def default_arg_variant_name?(candidate_name : String, exact_name : String) : Bool
+      return false unless candidate_name.starts_with?(exact_name)
+      return false unless candidate_name.bytesize > exact_name.bytesize + 1
+
+      idx = exact_name.bytesize
+      return false unless candidate_name.byte_at(idx).unsafe_chr == '_'
+      idx += 1
+
+      digit_count = 0
+      while idx < candidate_name.bytesize
+        ch = candidate_name.byte_at(idx).unsafe_chr
+        if ch >= '0' && ch <= '9'
+          digit_count += 1
+          idx += 1
+          next
+        end
+        return digit_count > 0 && ch == '$'
+      end
+      digit_count > 0
+    end
+
+    @[AlwaysInline]
+    private def same_method_family_name?(candidate_name : String, method_prefix : String) : Bool
+      return false unless candidate_name.starts_with?(method_prefix)
+      return true if candidate_name.bytesize == method_prefix.bytesize
+
+      next_ch = candidate_name.byte_at(method_prefix.bytesize).unsafe_chr
+      return true if next_ch == '$'
+
+      if next_ch == '_'
+        idx = method_prefix.bytesize + 1
+        digit_count = 0
+        while idx < candidate_name.bytesize
+          ch = candidate_name.byte_at(idx).unsafe_chr
+          if ch >= '0' && ch <= '9'
+            digit_count += 1
+            idx += 1
+            next
+          end
+          return digit_count > 0 && ch == '$'
+        end
+        return digit_count > 0
+      end
+
+      false
+    end
+
     private def _resolve_virtual_walk(
       class_name : String,
       method_suffix : String,
@@ -2530,13 +2583,10 @@ module Crystal
 
         if func = @mir_module.get_function(exact_name)
           # Check for naming collision using class index instead of full scan
-          prefix_with_underscore = String.build(exact_name.bytesize + 1) do |io|
-            io << exact_name; io << '_'
-          end
           longer_match = nil.as(Crystal::MIR::Function?)
           if class_funcs = @functions_by_class[current]?
             class_funcs.each do |candidate|
-              if candidate.name.starts_with?(prefix_with_underscore)
+              if default_arg_variant_name?(candidate.name, exact_name)
                 if lm_prev = longer_match
                   longer_match = candidate if candidate.params.size > lm_prev.params.size
                 else
@@ -2577,7 +2627,7 @@ module Crystal
           if class_funcs = @functions_by_class[current]?
             candidates = [] of Crystal::MIR::Function
             class_funcs.each do |candidate|
-              next unless candidate.name.starts_with?(instance_prefix)
+              next unless same_method_family_name?(candidate.name, instance_prefix)
               next unless candidate.params.size == arg_count + 1
               candidates << candidate
             end
@@ -2590,7 +2640,7 @@ module Crystal
             if class_funcs2 = @functions_by_class[current]?
               candidates = [] of Crystal::MIR::Function
               class_funcs2.each do |candidate|
-                next unless candidate.name.starts_with?(module_prefix)
+                next unless same_method_family_name?(candidate.name, module_prefix)
                 next unless candidate.params.size == arg_count
                 candidates << candidate
               end
@@ -2722,6 +2772,11 @@ module Crystal
       # First check MIR module's union_descriptors (most authoritative)
       return true if @mir_module.union_descriptors.has_key?(type)
 
+      # Then check MIR type registry kind (covers late/instantiated union refs).
+      if type_desc = @mir_module.type_registry.get(type)
+        return type_desc.kind == TypeKind::Union
+      end
+
       # Fall back to checking HIR types
       if type.id >= HIR::TypeRef::FIRST_USER_TYPE
         @hir_module.types.each_with_index do |desc, idx|
@@ -2743,7 +2798,28 @@ module Crystal
               return variant.type_id
             end
           end
-          # For pointer-like types (classes), try matching against POINTER variant
+
+          if concrete_type == TypeRef::POINTER
+            pointer_like = descriptor.variants.select do |variant|
+              next false if variant.type_ref == TypeRef::NIL || variant.type_ref == TypeRef::VOID
+              next true if variant.type_ref == TypeRef::POINTER || variant.type_ref == TypeRef::STRING
+
+              if variant_type = @mir_module.type_registry.get(variant.type_ref)
+                variant_type.kind == TypeKind::Reference ||
+                  variant_type.kind == TypeKind::Struct ||
+                  variant_type.kind == TypeKind::Tuple ||
+                  variant_type.kind == TypeKind::Proc
+              else
+                false
+              end
+            end
+
+            if pointer_like.size == 1
+              return pointer_like.first.type_id
+            end
+          end
+
+          # For other pointer-like concrete types, try matching against POINTER variant
           if concrete_type != TypeRef::NIL
             descriptor.variants.each do |variant|
               if variant.type_ref == TypeRef::POINTER
@@ -2759,6 +2835,25 @@ module Crystal
       else
         0
       end
+    end
+
+    private def coerce_return_value(
+      builder : MIR::Builder,
+      value : ValueId,
+      value_hir_type : HIR::TypeRef,
+      return_hir_type : HIR::TypeRef
+    ) : ValueId
+      value_mir_type = get_mir_value_type(value) || convert_type(value_hir_type)
+      return_mir_type = convert_type(return_hir_type)
+
+      return value if value_mir_type == return_mir_type
+
+      if is_union_type?(return_mir_type) && !is_union_type?(value_mir_type)
+        variant_id = get_union_variant_id(value_mir_type, return_mir_type)
+        return builder.union_wrap(value, variant_id, return_mir_type)
+      end
+
+      value
     end
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -3697,7 +3792,12 @@ module Crystal
       case term
       when HIR::Return
         if v = term.value
-          builder.ret(get_value(v))
+          value = get_value(v)
+          if hir_func = @current_hir_func
+            value_hir_type = @hir_value_types[v]? || hir_func.return_type
+            value = coerce_return_value(builder, value, value_hir_type, hir_func.return_type)
+          end
+          builder.ret(value)
         else
           builder.ret
         end

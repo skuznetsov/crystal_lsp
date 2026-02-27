@@ -14062,6 +14062,12 @@ module Crystal::HIR
                        else
                          TypeRef::VOID
                        end
+          if param.is_block && param_type == TypeRef::VOID
+            # Keep implicit &block callback as a real runtime value.
+            # Using VOID here lets later MIR lowering erase the argument,
+            # which can turn call_indirect into a null call target.
+            param_type = TypeRef::POINTER
+          end
           if type_ann_str && bare_generic_annotation?(type_ann_str)
             # Keep the generic base type for dispatch; allow callsite refinement.
             param_type = type_ref_for_name(strip_generic_args(type_ann_str))
@@ -14511,6 +14517,8 @@ module Crystal::HIR
       if block.terminator.is_a?(Unreachable) && !block_has_raise && !control_flow_dead_block?(ctx, ctx.current_block)
         block.terminator = Return.new(last_value)
       end
+
+      normalize_function_return_terminators(ctx, func.return_type)
 
       @enum_value_types = old_enum_value_types
       @closure_ref_cells = saved_closure_ref_cells_mm
@@ -18305,6 +18313,12 @@ module Crystal::HIR
                        else
                          TypeRef::VOID
                        end
+          if param.is_block && param_type == TypeRef::VOID
+            # Keep implicit &block callback as a real runtime value.
+            # Using VOID here lets later MIR lowering erase the argument,
+            # which can turn call_indirect into a null call target.
+            param_type = TypeRef::POINTER
+          end
           if type_ann_str && bare_generic_annotation?(type_ann_str)
             # Keep the generic base type for dispatch; allow callsite refinement.
             param_type = type_ref_for_name(strip_generic_args(type_ann_str))
@@ -18927,6 +18941,8 @@ module Crystal::HIR
       if block.terminator.is_a?(Unreachable) && !block_has_raise && !control_flow_dead_block?(ctx, ctx.current_block)
         block.terminator = Return.new(last_value)
       end
+
+      normalize_function_return_terminators(ctx, return_type)
 
       @current_typeof_locals = old_typeof_locals
       @current_typeof_local_names = old_typeof_local_names
@@ -23204,33 +23220,43 @@ module Crystal::HIR
         changed = false
         iterations += 1
         @lib_structs.each do |struct_name|
-          info = @class_info[struct_name]?
-          next unless info && info.is_struct && !info.ivars.empty?
+          begin
+            info = @class_info[struct_name]?
+            next unless info && info.is_struct && !info.ivars.empty?
 
-          # Recompute size from fields using current (possibly updated) type sizes
-          offset = 0_i32
-          new_ivars = [] of IVarInfo
-          source_ivars = info.ivars
-          ivar_idx = 0
-          while ivar_idx < source_ivars.size
-            ivar = source_ivars[ivar_idx]
-            offset = align_offset(offset, type_alignment(ivar.type, true))
-            new_ivars << IVarInfo.new(ivar.name, ivar.type, offset, ivar.default_expr_id, ivar.default_arena)
-            offset += field_storage_size(ivar.type, true)
-            ivar_idx += 1
-          end
+            # Recompute size from fields using current (possibly updated) type sizes
+            offset = 0_i32
+            new_ivars = [] of IVarInfo
+            source_ivars = info.ivars
+            ivar_idx = 0
+            while ivar_idx < source_ivars.size
+              ivar = source_ivars[ivar_idx]
+              offset = align_offset(offset, type_alignment(ivar.type, true))
+              new_ivars << IVarInfo.new(ivar.name, ivar.type, offset, ivar.default_expr_id, ivar.default_arena)
+              offset += field_storage_size(ivar.type, true)
+              ivar_idx += 1
+            end
 
-          if !new_ivars.empty?
-            max_align = new_ivars.max_of { |iv| type_alignment(iv.type, true) }
-            offset = align_offset(offset, max_align)
-          end
+            if !new_ivars.empty?
+              max_align = new_ivars.max_of { |iv| type_alignment(iv.type, true) }
+              offset = align_offset(offset, max_align)
+            end
 
-          if offset != info.size
-            new_info = ClassInfo.new(info.name, info.type_ref, new_ivars, info.class_vars, offset, info.is_struct, info.parent_name)
-            @class_info[struct_name] = new_info
-            @class_info_by_type_id[info.type_ref.id] = new_info
-            @class_info_version += 1
-            changed = true
+            if offset != info.size
+              new_info = ClassInfo.new(info.name, info.type_ref, new_ivars, info.class_vars, offset, info.is_struct, info.parent_name)
+              @class_info[struct_name] = new_info
+              @class_info_by_type_id[info.type_ref.id] = new_info
+              @class_info_version += 1
+              changed = true
+            end
+          rescue ex
+            if ENV["DEBUG_C_STRUCT_RECOMPUTE"]? || ENV["STAGE2_BOOTSTRAP_TRACE"]?
+              STDERR.puts "[C_STRUCT_RECOMPUTE_FAIL] struct=#{struct_name} ex=#{ex.class} msg=#{ex.message.inspect}"
+              if bt = ex.backtrace?
+                bt.first(12).each { |line| STDERR.puts "[C_STRUCT_RECOMPUTE_FAIL]   #{line}" }
+              end
+            end
+            raise ex
           end
         end
       end
@@ -23540,6 +23566,48 @@ module Crystal::HIR
       saw_return && ok
     end
 
+    # Methods that lexically pass through `yield` as their tail expression
+    # (optionally wrapped in begin/ensure) should be treated as block-return-
+    # dependent even without explicit `return yield`.
+    private def yield_passthrough_only?(body : Array(ExprId)) : Bool
+      return false if body.empty?
+      return false unless contains_yield?(body)
+      return false unless tail_is_yield_passthrough_expr?(body.last)
+
+      body.each do |expr_id|
+        _, ok = scan_return_yield(expr_id)
+        return false unless ok
+      end
+      true
+    end
+
+    private def tail_is_yield_passthrough_expr?(expr_id : ExprId) : Bool
+      loop do
+        expr_node = @arena[expr_id]
+        case expr_node
+        when CrystalV2::Compiler::Frontend::GroupingNode
+          expr_id = expr_node.expression
+        when CrystalV2::Compiler::Frontend::MacroExpressionNode
+          expr_id = expr_node.expression
+        when CrystalV2::Compiler::Frontend::YieldNode
+          return true
+        when CrystalV2::Compiler::Frontend::CallNode
+          callee = @arena[expr_node.callee]
+          return callee.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode) &&
+            String.new(callee.name) == "yield"
+        when CrystalV2::Compiler::Frontend::BeginNode
+          if clauses = expr_node.rescue_clauses
+            return false unless clauses.empty?
+          end
+          return false if expr_node.else_body
+          return false if expr_node.body.empty?
+          expr_id = expr_node.body.last
+        else
+          return false
+        end
+      end
+    end
+
     private def tail_is_return?(body : Array(ExprId)) : Bool
       return false if body.empty?
       expr_id = body.last
@@ -23709,7 +23777,7 @@ module Crystal::HIR
         if body = def_node.body
           arena = @function_def_arenas[name]? || @arena
           with_arena(arena) do
-            if yield_return_only?(body)
+            if yield_return_only?(body) || yield_passthrough_only?(body)
               @yield_return_functions.add(name)
               STDERR.puts "[YIELD_RETURN] mark=#{name}" if env_get("DEBUG_YIELD_RETURN")
             end
@@ -30172,6 +30240,12 @@ module Crystal::HIR
                          else
                            TypeRef::VOID # Unknown type
                          end
+            if param.is_block && param_type == TypeRef::VOID
+              # Keep implicit &block callback as a real runtime value.
+              # Using VOID here lets later MIR lowering erase the argument,
+              # which can turn call_indirect into a null call target.
+              param_type = TypeRef::POINTER
+            end
             if param_type == TypeRef::VOID && type_ann_str && type_ann_str.includes?('|')
               union_name = normalize_union_type_name(type_ann_str)
               union_ref = create_union_type(union_name)
@@ -30546,6 +30620,8 @@ module Crystal::HIR
       if block.terminator.is_a?(Unreachable) && !block_has_raise && !control_flow_dead_block?(ctx, ctx.current_block)
         block.terminator = Return.new(last_value)
       end
+
+      normalize_function_return_terminators(ctx, return_type)
 
       # Infer return type from last expression if not explicitly specified
       # This handles methods with implicit returns like `def root_buffer; @buffer - @offset; end`
@@ -40207,6 +40283,29 @@ module Crystal::HIR
       nil_lit.id
     end
 
+    private def normalize_function_return_terminators(ctx : LoweringContext, return_type : TypeRef) : Nil
+      saved_block = ctx.current_block
+      return if return_type == TypeRef::VOID
+
+      ctx.function.blocks.each_with_index do |block, idx|
+        ret = block.terminator.as?(Return)
+        next unless ret
+        value_id = ret.value
+        next unless value_id
+
+        value_type = ctx.type_of(value_id)
+        next if value_type == return_type || value_type == TypeRef::VOID
+
+        ctx.current_block = idx.to_u32
+        coerced_id = coerce_value_to_type(ctx, value_id, return_type)
+        block.terminator = Return.new(coerced_id)
+      end
+    ensure
+      if saved = saved_block
+        ctx.current_block = saved
+      end
+    end
+
     private def infer_yield_return_type(ctx : LoweringContext) : TypeRef?
       func_name = ctx.function.name
       if @inline_yield_block_body_depth > 0 && @current_class && @current_method
@@ -48220,6 +48319,35 @@ module Crystal::HIR
                    nil
                  end
 
+      # Late inline pass for block-calls that survived the early inline filters.
+      # This catches yield/block functions that can still be safely inlined once the
+      # final mangled target is known. Keeping these calls non-inlined can leave
+      # unresolved with_block callbacks for later MIR lowering.
+      if block_for_inline && !disable_inline_yield
+        receiver_base_for_inline = receiver_id ? strip_generic_args(get_type_name_from_ref(ctx.type_of(receiver_id))) : nil
+        if entry = lookup_block_function_def_for_call(base_method_name, call_args.size, arg_types, receiver_base_for_inline)
+          yield_name, yield_def = entry
+          callee_arena = @function_def_arenas[yield_name]? || @arena
+          callee_in_yield_set = @yield_functions.includes?(yield_name)
+          callee_has_yield = callee_in_yield_set || def_contains_yield?(yield_def, callee_arena)
+          callee_has_block_call = def_contains_block_call?(yield_def, callee_arena)
+          force_inline_non_local = contains_return?(block_for_inline.body)
+          if force_inline_non_local || callee_has_yield || callee_has_block_call
+            @yield_functions.add(yield_name) if callee_has_yield
+            return inline_yield_function(
+              ctx,
+              yield_def,
+              yield_name,
+              receiver_id,
+              args,
+              block_for_inline,
+              block_param_types_inline,
+              callee_arena
+            )
+          end
+        end
+      end
+
       # Tuple has implicit splat type param T; map it from concrete tuple elements at the callsite.
       if receiver_id
         if recv_desc = @module.get_type_descriptor(ctx.type_of(receiver_id))
@@ -55901,7 +56029,10 @@ module Crystal::HIR
       block_param_types : Array(TypeRef)?,
       callee_arena : CrystalV2::Compiler::Frontend::ArenaLike,
     ) : ValueId
-      if env_has?("CRYSTAL_V2_DISABLE_INLINE_YIELD")
+      block_contains_return = contains_return?(block.body)
+      fallback_allowed = !block_contains_return
+
+      if env_has?("CRYSTAL_V2_DISABLE_INLINE_YIELD") && fallback_allowed
         return inline_yield_fallback_call(ctx, inline_key, receiver_id, call_args, block, block_param_types)
       end
       ctx.push_scope(ScopeKind::Block)
@@ -55917,7 +56048,9 @@ module Crystal::HIR
         if env_has?("DEBUG_YIELD_INLINE")
           STDERR.puts "[INLINE_YIELD] skipping inline: #{inline_key} (depth=#{@inline_yield_name_stack.size}, max=#{max_depth}, repeat=#{repeat_count}, max_repeat=#{max_repeat})"
         end
-        return inline_yield_fallback_call(ctx, inline_key, receiver_id, call_args, block, block_param_types)
+        if fallback_allowed
+          return inline_yield_fallback_call(ctx, inline_key, receiver_id, call_args, block, block_param_types)
+        end
       end
       base_inline_name = strip_type_suffix(inline_key)
       # Nested inline-yield inside an inlined block body is the main source of
@@ -55931,7 +56064,9 @@ module Crystal::HIR
         if env_has?("DEBUG_YIELD_INLINE")
           STDERR.puts "[INLINE_YIELD] skipping nested block-body inline: #{inline_key} depth=#{@inline_yield_block_body_depth}"
         end
-        return inline_yield_fallback_call(ctx, inline_key, receiver_id, call_args, block, block_param_types)
+        if fallback_allowed
+          return inline_yield_fallback_call(ctx, inline_key, receiver_id, call_args, block, block_param_types)
+        end
       end
       namespace_override = function_namespace_override_for(inline_key, base_inline_name)
       debug_inline_self = false

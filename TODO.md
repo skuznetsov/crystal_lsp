@@ -7028,3 +7028,36 @@ crystal build -Ddebug_hooks src/crystal_v2.cr -o bin/crystal_v2 --no-debug
       - `/tmp/stage1_dbg_* /tmp/bytes_index_probe2.cr -o ... && scripts/run_safe.sh ...`
       - `/tmp/stage1_dbg_* regression_tests/lexer_next_token_repro.cr -o ... && scripts/run_safe.sh ...`
       - `regression_tests/stage2_bootstrap_minimal_repro.sh /tmp/stage2_*`
+
+- **2026-02-27 (new): stage2 mismatch localized to call-return typing; moved failure to LLVM output ceiling**
+  - Implemented compiler-side fixes (no stdlib changes):
+    - `src/compiler/mir/hir_to_mir.cr`
+      - improved union coercion helpers for returns/args (`get_union_variant_id` pointer-like handling,
+        `coerce_return_value`, `is_union_type?` with MIR type-registry check).
+      - direct call lowering now uses callee MIR signature return type (`func.return_type`) instead of
+        blindly trusting `call.type`.
+    - `src/compiler/hir/ast_to_hir.cr`
+      - added `normalize_function_return_terminators` pass and wired it into major lowering paths
+        (`lower_module_method`, `lower_method`, `lower_def`) to coerce mismatched `return` terminators
+        to declared function return type.
+  - Repro/verification highlights:
+    - Stage1 release (original compiler):
+      - `/usr/bin/time -p crystal build --release src/crystal_v2.cr -o /tmp/stage1_rel_callret_fix --error-trace`
+      - result: **real 403.96s**
+    - Stage2 release with timeout guard:
+      - `scripts/timeout_sample_lldb.sh -t 180 -- /usr/bin/time -p /tmp/stage1_rel_callret_fix src/crystal_v2.cr --release -o /tmp/stage2_rel_callret_fix`
+      - result: **no longer `ptr vs union` opt verifier error**; now fails with `error: End of file reached` at ~90s.
+    - MIR probe confirms the previous ABI mismatch path changed:
+      - `Hash(String, ClassInfo)#fetch$Int32_Nil` now calls `find_entry$Int32` as `Type#7701` (callee return type),
+        instead of old mismatched `Type#4142`.
+  - New current blocker (post-fix):
+    - With `CRYSTAL2_STAGE2_DEBUG=1` and `--emit llvm-ir`, failure is localized to:
+      - `src/compiler/mir/llvm_backend.cr:6814` (`emit_function`)
+      - function: `Crystal::HIR::AstToHir#collect_class_var_assignment_types$CrystalV2::Compiler::Frontend::ExprId_String_Nil | String`
+      - diagnostics: `blocks=3348`, `block_ir_bytes=564485091`, `hoisted_allocas=6159`
+      - stack head:
+        - `IO::Memory#increase_capacity_by` -> `slice.cr:write` -> `llvm_backend.cr:6814`
+    - This is now an LLVM IR emission memory-ceiling issue (IO::Memory growth), not the prior union call ABI mismatch.
+  - Next action:
+    - stabilize large-function emission in `llvm_backend` (avoid IO::Memory overflow in `emit_function` buffering path),
+      then re-run full stage2 bootstrap timings.
