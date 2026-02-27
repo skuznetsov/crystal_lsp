@@ -6477,12 +6477,13 @@ module Crystal::MIR
     end
 
     private def emit_function(func : Function)
+      mangled_name = mangle_function_name(func.name)
+
       if emit_builtin_override(func)
         # Builtin overrides emit raw LLVM directly and can return before the regular
         # emission path marks the function as emitted. Keep the bookkeeping in sync,
         # otherwise the final "missing function stubs" pass may emit a duplicate
         # definition for an already-defined function.
-        mangled_name = mangle_function_name(func.name)
         @emitted_functions << mangled_name
         return_type = @type_mapper.llvm_type(func.return_type)
         if return_type == "void"
@@ -6519,7 +6520,7 @@ module Crystal::MIR
       prepass_collect_constants(func)
 
       # Set current func name BEFORE prepass
-      @current_func_name = mangle_function_name(func.name)
+      @current_func_name = mangled_name
 
       # Pre-pass: detect cross-block values that need alloca slots for dominance
       prepass_detect_cross_block_values(func)
@@ -6797,7 +6798,6 @@ module Crystal::MIR
           hoisted_allocas << line
         end
       end
-
       # Emit hoisted allocas in entry block (before the br)
       hoisted_allocas.each do |alloca_line|
         emit_raw alloca_line
@@ -9748,6 +9748,38 @@ module Crystal::MIR
       else
         if wrap_union_result
           # Compute raw integer result first, then wrap into the union type expected by MIR.
+          if result_type.starts_with?('i') && result_type != "i1"
+            left_runtime_type = @emitted_value_types[left]? || operand_type_str
+            right_runtime_type = @emitted_value_types[right]? || right_type_str
+            result_bits = result_type[1..].to_i? || 32
+
+            if left_runtime_type.starts_with?('i') && left_runtime_type != result_type
+              left_bits = left_runtime_type[1..].to_i? || 32
+              if left_bits < result_bits
+                left_type = @value_types[inst.left]?
+                ext_op = (left_type && unsigned_type_ref?(left_type)) ? "zext" : "sext"
+                emit "%binop#{inst.id}.wrap_left_to_result = #{ext_op} #{left_runtime_type} #{left} to #{result_type}"
+                left = "%binop#{inst.id}.wrap_left_to_result"
+              elsif left_bits > result_bits
+                emit "%binop#{inst.id}.wrap_left_to_result = trunc #{left_runtime_type} #{left} to #{result_type}"
+                left = "%binop#{inst.id}.wrap_left_to_result"
+              end
+            end
+
+            if right_runtime_type.starts_with?('i') && right_runtime_type != result_type
+              right_bits = right_runtime_type[1..].to_i? || 32
+              if right_bits < result_bits
+                right_type_ref = @value_types[inst.right]?
+                ext_op = (right_type_ref && unsigned_type_ref?(right_type_ref)) ? "zext" : "sext"
+                emit "%binop#{inst.id}.wrap_right_to_result = #{ext_op} #{right_runtime_type} #{right} to #{result_type}"
+                right = "%binop#{inst.id}.wrap_right_to_result"
+              elsif right_bits > result_bits
+                emit "%binop#{inst.id}.wrap_right_to_result = trunc #{right_runtime_type} #{right} to #{result_type}"
+                right = "%binop#{inst.id}.wrap_right_to_result"
+              end
+            end
+          end
+
           raw_name = "%binop#{inst.id}.raw"
 
           emit "#{raw_name} = #{op} #{result_type} #{left}, #{right}"
@@ -9841,9 +9873,16 @@ module Crystal::MIR
         # Ensure operands match result_type for arithmetic ops
         # If operand is larger than result_type, use operand type instead (don't truncate)
         if result_type.starts_with?('i') && result_type != "i1"
+          # Prefer real emitted SSA types when available: @value_types can still be
+          # stale/widened after prepass, which can emit invalid ops like:
+          #   sdiv i64 %rX(i32), 4
+          # when %rX was actually emitted as i32.
+          left_runtime_type = @emitted_value_types[left]? || operand_type_str
+          right_runtime_type = @emitted_value_types[right]? || right_type_str
+
           result_bits = result_type[1..].to_i? || 32
-          operand_bits = operand_type_str.starts_with?('i') ? (operand_type_str[1..].to_i? || 32) : 0
-          right_bits_val = right_type_str.starts_with?('i') ? (right_type_str[1..].to_i? || 32) : 0
+          operand_bits = left_runtime_type.starts_with?('i') ? (left_runtime_type[1..].to_i? || 32) : 0
+          right_bits_val = right_runtime_type.starts_with?('i') ? (right_runtime_type[1..].to_i? || 32) : 0
 
           # If operands are larger than result, use the larger operand type
           max_operand_bits = {operand_bits, right_bits_val}.max
@@ -9853,20 +9892,34 @@ module Crystal::MIR
 
           # Extend smaller operands to result_type
           result_bits = result_type[1..].to_i? || 32
-          if operand_type_str.starts_with?('i') && operand_type_str != result_type
-            operand_bits = operand_type_str[1..].to_i? || 32
+          if left_runtime_type.starts_with?('i') && left_runtime_type != result_type
+            operand_bits = left_runtime_type[1..].to_i? || 32
             if operand_bits < result_bits
-              emit "%binop#{inst.id}.left_to_result = sext #{operand_type_str} #{left} to #{result_type}"
+              left_type = @value_types[inst.left]?
+              ext_op = (left_type && unsigned_type_ref?(left_type)) ? "zext" : "sext"
+              emit "%binop#{inst.id}.left_to_result = #{ext_op} #{left_runtime_type} #{left} to #{result_type}"
+              left = "%binop#{inst.id}.left_to_result"
+            elsif operand_bits > result_bits
+              emit "%binop#{inst.id}.left_to_result = trunc #{left_runtime_type} #{left} to #{result_type}"
               left = "%binop#{inst.id}.left_to_result"
             end
+            left_runtime_type = result_type
           end
-          if right_type_str.starts_with?('i') && right_type_str != result_type
-            right_bits_check = right_type_str[1..].to_i? || 32
+          if right_runtime_type.starts_with?('i') && right_runtime_type != result_type
+            right_bits_check = right_runtime_type[1..].to_i? || 32
             if right_bits_check < result_bits
-              emit "%binop#{inst.id}.right_to_result = sext #{right_type_str} #{right} to #{result_type}"
+              right_type_ref = @value_types[inst.right]?
+              ext_op = (right_type_ref && unsigned_type_ref?(right_type_ref)) ? "zext" : "sext"
+              emit "%binop#{inst.id}.right_to_result = #{ext_op} #{right_runtime_type} #{right} to #{result_type}"
+              right = "%binop#{inst.id}.right_to_result"
+            elsif right_bits_check > result_bits
+              emit "%binop#{inst.id}.right_to_result = trunc #{right_runtime_type} #{right} to #{result_type}"
               right = "%binop#{inst.id}.right_to_result"
             end
+            right_runtime_type = result_type
           end
+          operand_type_str = left_runtime_type
+          right_type_str = right_runtime_type
         end
         # If MIR expects ptr but we did arithmetic as int, convert back to ptr
         if convert_result_to_ptr && result_type.starts_with?('i')
@@ -11548,7 +11601,6 @@ module Crystal::MIR
         end
         end  # end else for prepass_type check
       end
-
       # Format arguments with proper types, handling type coercion where needed
       # Use callee function params only if param count matches arg count.
       # For class methods (self.foo), MIR call includes self as first arg but the
@@ -13865,6 +13917,7 @@ module Crystal::MIR
           if def_inst.type == TypeRef::BOOL || @type_mapper.llvm_type(def_inst.type) == "i1"
             const_val = inst.variant_type_id == 0 ? "0" : "1"
             emit "#{name} = add i1 0, #{const_val}"
+            record_emitted_type(name, "i1")
             return
           end
         end
@@ -13878,6 +13931,7 @@ module Crystal::MIR
            union_type_ref == TypeRef::CHAR || union_type_ref == TypeRef::SYMBOL
           const_val = inst.variant_type_id == 0 ? "0" : "1"
           emit "#{name} = add i1 0, #{const_val}"
+          record_emitted_type(name, "i1")
           return
         end
         ptr_val = union_val
@@ -13899,6 +13953,7 @@ module Crystal::MIR
           emit "#{name} = icmp ne ptr #{ptr_val}, null"
         end
       end
+      record_emitted_type(name, "i1")
     end
 
     # ─────────────────────────────────────────────────────────────────────────

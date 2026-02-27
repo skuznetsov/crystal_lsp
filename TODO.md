@@ -1,6 +1,29 @@
 # Crystal v2 — Active Work (codegen branch)
 
 ## Known Bugs (codegen)
+- **2026-02-27 (latest): fixed root-cause LLVM `i32/i64` mismatch in union-wrapped integer binary ops (`opt` reject)**
+  - Root cause (`src/compiler/mir/llvm_backend.cr`):
+    - in `MIR::LLVMIRGenerator#emit_binary_op`, the `wrap_union_result` arithmetic path emitted raw integer ops before operand-width normalization;
+    - this produced invalid IR like:
+      - `%r76 = call i32 ...`
+      - `%binop78.raw = sdiv i64 %r76, 4`
+      - `opt: '%r76' defined with type 'i32' but expected 'i64'`.
+  - Fixes applied (`src/compiler/mir/llvm_backend.cr`):
+    - added emitted-SSA-type-aware integer width normalization in `wrap_union_result` path before raw op emission (`zext`/`sext`/`trunc` as needed);
+    - hardened non-wrap arithmetic normalization to also prefer actual emitted SSA types over stale prepass types.
+  - Evidence:
+    - stage1 release (original compiler):
+      - `/usr/bin/time -p crystal build --release src/crystal_v2.cr -o /tmp/stage1_rel_binop_fix2 --error-trace`
+      - result: **real 429.57s**
+    - stage2 release (self-hosted, watchdog 180s):
+      - `scripts/timeout_sample_lldb.sh -t 180 -s 8 -n 12 -o /tmp/stage2_rel_binop_fix2_probe -- /usr/bin/time -p /tmp/stage1_rel_binop_fix2 src/crystal_v2.cr --release -o /tmp/stage2_rel_binop_fix2`
+      - result: timeout wrapper `124`, but stage2 artifact produced (`/tmp/stage2_rel_binop_fix2`), command log shows **real 187.81s**;
+      - old `opt` signature is gone (no `sdiv i64 %r76` type-mismatch failure).
+  - Remaining blocker:
+    - stage2 bootstrap repro still traps on second-stage compile:
+      - `scripts/stage2_bootstrap_repro.sh /tmp/stage2_rel_binop_fix2 regression_tests/basic_sanity.cr` -> `exit 133`;
+      - lldb: `EXC_BREAKPOINT` in `Parser#parse_statement` immediately after `parse_hash_or_tuple` call.
+
 - **2026-02-27 (latest): fixed root-cause alias-resolution cache pollution that miscompiled `IO::FileDescriptor#fd` and crashed startup (`EXC_BAD_ACCESS 0x3`)**
   - Root cause (`src/compiler/hir/ast_to_hir.cr`):
     - `resolve_type_alias_chain` cached by bare alias name only (`"Handle"`), but `Handle` is context-sensitive;
