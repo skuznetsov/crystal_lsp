@@ -877,10 +877,46 @@ module Crystal::MIR
       emit_missing_crystal_function_stubs
 
       if @emit_type_metadata
-        STDERR.puts "  [LLVM] emit_type_metadata_globals..." if @progress
-        emit_type_metadata_globals
-        STDERR.puts "  [LLVM] emit_union_metadata_globals..." if @progress
-        emit_union_metadata_globals
+        # Metadata is debug DX only. For large stage2 builds IR can approach the
+        # IO::Memory ceiling (~2GB), so emit metadata into a temporary buffer and
+        # append only if safe/successful.
+        current_pos = @output.pos.to_i64
+        estimated_type_metadata_bytes =
+          1024_i64 +
+          (@type_info_entries.size.to_i64 * 160_i64) +
+          (@field_info_entries.size.to_i64 * 128_i64) +
+          (@string_table.pos.to_i64 * 8_i64)
+        estimated_union_metadata_bytes =
+          512_i64 +
+          (@union_info_entries.size.to_i64 * 128_i64) +
+          (@union_variant_entries.size.to_i64 * 128_i64)
+        io_memory_safety_limit = 2_000_000_000_i64
+        estimated_total_metadata_bytes = estimated_type_metadata_bytes + estimated_union_metadata_bytes
+
+        if current_pos + estimated_total_metadata_bytes >= io_memory_safety_limit
+          if @progress || ENV["CRYSTAL2_STAGE2_DEBUG"]?
+            STDERR.puts "  [LLVM] skip metadata: output=#{current_pos} est_meta=#{estimated_total_metadata_bytes} limit=#{io_memory_safety_limit}"
+          end
+        else
+          saved_output = @output
+          metadata_output = IO::Memory.new
+          metadata_ok = true
+          @output = metadata_output
+          begin
+            STDERR.puts "  [LLVM] emit_type_metadata_globals..." if @progress
+            emit_type_metadata_globals
+            STDERR.puts "  [LLVM] emit_union_metadata_globals..." if @progress
+            emit_union_metadata_globals
+          rescue ex : IO::EOFError
+            metadata_ok = false
+            if @progress || ENV["CRYSTAL2_STAGE2_DEBUG"]?
+              STDERR.puts "  [LLVM] metadata emission skipped after EOF: #{ex.message}"
+            end
+          ensure
+            @output = saved_output
+          end
+          emit_raw metadata_output.to_s if metadata_ok
+        end
       end
 
       # Always emit type name table (needed for self.class at runtime)
@@ -16271,6 +16307,25 @@ module Crystal::MIR
 
     private def emit_union_metadata_globals
       return if @union_info_entries.empty?
+
+      # IO::Memory-backed IR buffer has a practical upper bound around 2GB.
+      # On large stage2 builds IR text can already approach this size before
+      # metadata emission; appending full union metadata then raises EOFError.
+      #
+      # Metadata is debug DX only, so when close to the buffer ceiling we
+      # skip union metadata emission to keep codegen stable.
+      current_pos = @output.pos.to_i64
+      estimated_union_metadata_bytes =
+        512_i64 +
+        (@union_info_entries.size.to_i64 * 128_i64) +
+        (@union_variant_entries.size.to_i64 * 128_i64)
+      io_memory_safety_limit = 2_000_000_000_i64
+      if current_pos + estimated_union_metadata_bytes >= io_memory_safety_limit
+        if @progress || ENV["CRYSTAL2_STAGE2_DEBUG"]?
+          STDERR.puts "  [LLVM] skip union metadata: output=#{current_pos} est_union_meta=#{estimated_union_metadata_bytes} limit=#{io_memory_safety_limit}"
+        end
+        return
+      end
 
       emit_raw "; Union metadata for enhanced debug DX\n"
 
