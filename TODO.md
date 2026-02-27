@@ -1,6 +1,25 @@
 # Crystal v2 — Active Work (codegen branch)
 
 ## Known Bugs (codegen)
+- **2026-02-27 (latest): removed hardcoded `ExprId` `Hash#key_hash` override; kept generic ABI wrapper-path**
+  - Context:
+    - previous local WIP contained a symbol-string hardcode for `Frontend::ExprId` in `llvm_backend` `key_hash` override path;
+    - this was symptom-level and too brittle (mangled-name coupling).
+  - Change:
+    - removed the `ExprId`-specific `mangled.ends_with?("$Hkey_hash$$...ExprId")` special case;
+    - retained generic scalar->ptr ABI coercion for transparent one-field wrapper structs in call lowering:
+      - materialize stack slot and pass pointer instead of invalid `inttoptr` for wrapper values.
+  - Evidence:
+    - build:
+      - `/usr/bin/time -p crystal build src/crystal_v2.cr -o /tmp/stage1_dbg_hashcheck --error-trace` -> `exit 0`, **real 6.83s**
+    - targeted hash regressions:
+      - `regression_tests/stage1_hash_find_entry_union_idx_repro.sh /tmp/stage1_dbg_hashcheck` -> `not reproduced`
+      - `regression_tests/stage1_hash_literal_index_repro.sh /tmp/stage1_dbg_hashcheck` -> `not reproduced`
+      - `regression_tests/stage1_const_hash_or_chain_repro.sh /tmp/stage1_dbg_hashcheck` -> `not reproduced`
+    - mini-oracles baseline unchanged:
+      - `bash regression_tests/run_mini_oracles.sh /tmp/stage1_dbg_hashcheck` -> **2/5 PASS** (`test_nested_macro_record`, `test_select_map_stress`)
+      - remaining: `file_join_splat`, `forall_nil_union_return`, `test_byteformat_decode_u32`.
+
 - **2026-02-27 (latest): fixed root-cause `Array#select/#reject` dynamic intrinsic PHI predecessor mismatch**
   - Root cause (`src/compiler/hir/ast_to_hir.cr`):
     - in `lower_array_select_dynamic` / `lower_array_reject_dynamic`, `count_incr_phi` used `body_block` as predecessor for the "keep current count" path;

@@ -11942,31 +11942,61 @@ module Crystal::MIR
                    emit "%bool_to_str.#{c} = call ptr @__crystal_v2_bool_to_string(i1 #{val})"
                    "ptr %bool_to_str.#{c}"
                 elsif expected_llvm_type == "ptr" && (actual_llvm_type.starts_with?('i') || actual_llvm_type == "ptr")
-                   # Int to ptr conversion needed (inttoptr)
+                   # Scalar-to-ptr call coercion.
+                   # IMPORTANT: for transparent wrapper structs (e.g. ExprId wrapping i32),
+                   # inttoptr is invalid because the scalar is a value, not an address.
+                   # Materialize a temporary stack slot and pass its pointer instead.
                    val = value_ref(a)
-                   if val == "0"
+                   if actual_llvm_type == "ptr"
+                     "ptr #{val}"  # Already a ptr
+                   elsif wrapper_field_llvm = transparent_wrapper_struct_scalar_llvm_type(param_type)
+                     c = @cond_counter
+                     @cond_counter += 1
+                     slot_name = "%struct_wrap.#{c}.slot"
+                     store_name = "%struct_wrap.#{c}.store"
+                     store_val = val
+                     if wrapper_field_llvm != actual_llvm_type
+                       src_bits = actual_llvm_type[1..].to_i?
+                       dst_bits = wrapper_field_llvm[1..].to_i?
+                       if src_bits && dst_bits
+                         if dst_bits > src_bits
+                           ext_op = (actual_type == TypeRef::BOOL || unsigned_type_ref?(actual_type)) ? "zext" : "sext"
+                           emit "#{store_name} = #{ext_op} #{actual_llvm_type} #{val} to #{wrapper_field_llvm}"
+                           store_val = store_name
+                         elsif dst_bits < src_bits
+                           emit "#{store_name} = trunc #{actual_llvm_type} #{val} to #{wrapper_field_llvm}"
+                           store_val = store_name
+                         end
+                       end
+                     end
+                     align = case wrapper_field_llvm
+                             when "i1", "i8" then 1
+                             when "i16" then 2
+                             when "i32" then 4
+                             else 8
+                             end
+                     emit "#{slot_name} = alloca #{wrapper_field_llvm}, align #{align}"
+                     emit "store #{wrapper_field_llvm} #{store_val}, ptr #{slot_name}"
+                     "ptr #{slot_name}"
+                   elsif val == "0"
                      "ptr null"
                    else
-                     if actual_llvm_type == "ptr"
-                       "ptr #{val}"  # Already a ptr
-                     else
-                       c = @cond_counter
-                       @cond_counter += 1
-                       temp_ptr = "%inttoptr.#{c}"
-                       if src_bits = actual_llvm_type[1..].to_i?
-                         if src_bits < 64
-                           ext_name = "#{temp_ptr}.ext"
-                           ext_op = (actual_type == TypeRef::BOOL || unsigned_type_ref?(actual_type)) ? "zext" : "sext"
-                           emit "#{ext_name} = #{ext_op} #{actual_llvm_type} #{val} to i64"
-                           emit "#{temp_ptr} = inttoptr i64 #{ext_name} to ptr"
-                         else
-                           emit "#{temp_ptr} = inttoptr #{actual_llvm_type} #{val} to ptr"
-                         end
+                     c = @cond_counter
+                     @cond_counter += 1
+                     temp_ptr = "%inttoptr.#{c}"
+                     if src_bits = actual_llvm_type[1..].to_i?
+                       if src_bits < 64
+                         ext_name = "#{temp_ptr}.ext"
+                         ext_op = (actual_type == TypeRef::BOOL || unsigned_type_ref?(actual_type)) ? "zext" : "sext"
+                         emit "#{ext_name} = #{ext_op} #{actual_llvm_type} #{val} to i64"
+                         emit "#{temp_ptr} = inttoptr i64 #{ext_name} to ptr"
                        else
                          emit "#{temp_ptr} = inttoptr #{actual_llvm_type} #{val} to ptr"
                        end
-                       "ptr #{temp_ptr}"
+                     else
+                       emit "#{temp_ptr} = inttoptr #{actual_llvm_type} #{val} to ptr"
                      end
+                     "ptr #{temp_ptr}"
                    end
                  elsif expected_llvm_type == "ptr" && (actual_llvm_type == "double" || actual_llvm_type == "float")
                    # Float to ptr conversion: bitcast float bits to int, then inttoptr
@@ -15967,6 +15997,21 @@ module Crystal::MIR
     private def is_union_llvm_type?(llvm_type : String) : Bool
       # Union types end with ".union" or ".union}" for struct fields
       llvm_type.ends_with?(".union") || llvm_type.ends_with?(".union}")
+    end
+
+    # Transparent wrapper struct = one field at offset 0 backed by an integer scalar.
+    # Example: Frontend::ExprId { @index : Int32 }.
+    # For call coercion into ptr ABI params we must materialize storage, not inttoptr.
+    private def transparent_wrapper_struct_scalar_llvm_type(type_ref : TypeRef) : String?
+      type = @module.type_registry.get(type_ref)
+      return nil unless type && type.kind.struct?
+      fields = type.fields
+      return nil unless fields && fields.size == 1
+      field = fields[0]
+      return nil unless field.offset == 0_u32
+      field_llvm = @type_mapper.llvm_type(field.type_ref)
+      return nil unless field_llvm.starts_with?('i')
+      field_llvm
     end
 
     private def tuple_struct_llvm_type(type : Type) : String
