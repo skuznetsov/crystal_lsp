@@ -141,15 +141,58 @@ if [[ "$SAMPLE_PID" == "$PID" && -n "${DESC_PIDS[*]:-}" ]]; then
   done < <(ps -o pid=,%cpu=,comm= -p "${DESC_PIDS[@]}" 2>/dev/null | sort -k2,2nr)
 fi
 
+SAMPLE_TARGETS=()
+add_sample_target() {
+  local target="$1"
+  local existing=""
+  [[ -z "${target:-}" ]] && return
+  for existing in "${SAMPLE_TARGETS[@]:-}"; do
+    [[ "$existing" == "$target" ]] && return
+  done
+  SAMPLE_TARGETS+=("$target")
+}
+
+add_sample_target "$SAMPLE_PID"
+add_sample_target "$PID"
+if [[ -n "${DESC_PIDS[*]:-}" ]]; then
+  while read -r cpid _cpu _comm; do
+    [[ -z "${cpid:-}" ]] && continue
+    add_sample_target "$cpid"
+  done < <(ps -o pid=,%cpu=,comm= -p "${DESC_PIDS[@]}" 2>/dev/null | sort -k2,2nr)
+fi
+
 ps -o pid,ppid,pgid,stat,etime,%cpu,%mem,command -p "$PID" > "$PROC_LOG" 2>/dev/null || true
 if [[ -n "${DESC_PIDS[*]:-}" ]]; then
   ps -o pid,ppid,pgid,stat,etime,%cpu,%mem,command -p "${DESC_PIDS[@]}" >> "$PROC_LOG" 2>/dev/null || true
 fi
 
 if command -v sample >/dev/null 2>&1; then
-  sample "$PID" "$SAMPLE_SECS" -file "$SAMPLE_LOG" >/dev/null 2>&1 || true
-  if [[ "$SAMPLE_PID" != "$PID" ]]; then
-    sample "$SAMPLE_PID" "$SAMPLE_SECS" -file "$SAMPLE_CHILD_LOG" >/dev/null 2>&1 || true
+  rm -f "$SAMPLE_LOG" "$SAMPLE_CHILD_LOG"
+  SAMPLED_PID=""
+  for target in "${SAMPLE_TARGETS[@]:-}"; do
+    [[ -z "${target:-}" ]] && continue
+    if ! kill -0 "$target" 2>/dev/null; then
+      continue
+    fi
+    if [[ "$target" == "$PID" ]]; then
+      sample "$target" "$SAMPLE_SECS" -file "$SAMPLE_LOG" >/dev/null 2>&1 || true
+      if [[ -s "$SAMPLE_LOG" ]]; then
+        SAMPLED_PID="$target"
+        SAMPLE_PID="$target"
+        break
+      fi
+    else
+      sample "$target" "$SAMPLE_SECS" -file "$SAMPLE_CHILD_LOG" >/dev/null 2>&1 || true
+      if [[ -s "$SAMPLE_CHILD_LOG" ]]; then
+        SAMPLED_PID="$target"
+        SAMPLE_PID="$target"
+        break
+      fi
+    fi
+  done
+  if [[ -z "$SAMPLED_PID" ]]; then
+    SAMPLE_PID="$PID"
+    echo "sample failed for candidate pids: ${SAMPLE_TARGETS[*]:-none}" > "$SAMPLE_LOG"
   fi
 else
   echo "sample tool not found" > "$SAMPLE_LOG"
