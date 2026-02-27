@@ -48326,7 +48326,11 @@ module Crystal::HIR
               entry_name = entry[0]
               if def_node = @function_defs[entry_name]?
                 def_arena = @function_def_arenas[entry_name]? || @arena
-                if def_contains_yield?(def_node, def_arena) && def_node.body && contains_return?(def_node.body.not_nil!)
+                callee_has_return = false
+                if body = def_node.body
+                  callee_has_return = with_arena(def_arena) { contains_return?(body) }
+                end
+                if def_contains_yield?(def_node, def_arena) && callee_has_return
                   skip_inline = true
                   debug_hook("call.inline.skip", "callee=#{mangled_method_name} reason=callee_yield_with_return")
                 end

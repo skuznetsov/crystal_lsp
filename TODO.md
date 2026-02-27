@@ -1,6 +1,25 @@
 # Crystal v2 — Active Work (codegen branch)
 
 ## Known Bugs (codegen)
+- **2026-02-27 (latest): replaced fragile `any?` inline-name hardcode with structural callee guard (`yield` + `return`) and fixed arena mismatch regression**
+  - Root cause (`src/compiler/hir/ast_to_hir.cr`):
+    - previous skip-inline rule relied on method-name string matching for `any?`, which is brittle and symptom-level;
+    - structural replacement initially called `contains_return?` on a def body from `def_arena` while evaluator used current `@arena`, causing `IndexError` (`Index out of bounds`) on `file_join_splat`.
+  - Fix:
+    - removed `any?`/mangled-name hardcoded checks;
+    - added structural skip-inline rule based on resolved callee properties:
+      - skip only when callee contains both `yield` and explicit `return`;
+    - made return-scan arena-safe by evaluating `contains_return?` under `with_arena(def_arena)`.
+  - Evidence:
+    - build:
+      - `/usr/bin/time -p crystal build src/crystal_v2.cr -o /tmp/stage1_dbg_inline_guard` -> `exit 0`, **real 8.93s**
+    - targeted oracle:
+      - `bash regression_tests/run_mini_oracles.sh /tmp/stage1_dbg_inline_guard regression_tests/file_join_splat.cr` -> **PASS**
+    - full mini-oracles:
+      - `bash regression_tests/run_mini_oracles.sh /tmp/stage1_dbg_inline_guard` -> **4/5 PASS**
+      - passed: `file_join_splat`, `forall_nil_union_return`, `test_nested_macro_record`, `test_select_map_stress`
+      - remaining: `test_byteformat_decode_u32` (segfault)
+
 - **2026-02-27 (latest): fixed root-cause `Void`↔`Nil` union type-id remap mismatch in LLVM backend (unblocks `forall_nil_union_return`)**
   - Root cause (`src/compiler/mir/llvm_backend.cr`):
     - union-to-union conversion path (`emit_union_type_id_remap`) treated variant names literally and did not map null variants across naming forms (`Void` vs `Nil`);
