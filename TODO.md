@@ -1,6 +1,33 @@
 # Crystal v2 — Active Work (codegen branch)
 
 ## Known Bugs (codegen)
+- **2026-02-27 (latest): stabilized stage2 `--release --no-llvm-metadata` path; full metadata path still fails with EOF in union metadata emission**
+  - Root fixes applied (`src/compiler/mir/llvm_backend.cr`):
+    - removed O(N) per-call extern resolution scan in `emit_extern_call` / prepass path by adding indexed lookup (`name/mangled/suffix`) with constrained fuzzy fallback;
+    - normalized `ptr_to_int` cast emission when MIR cast kind is stale but LLVM source is non-`ptr` (prevents invalid `ptrtoint i32 ...`);
+    - fixed union-phi normalization:
+      - removed heuristic ptr fallback for union phis (keep union-typed phi unless prepass explicitly resolves ptr);
+      - treat any non-union incoming (including `ptr`) as requiring union normalization path;
+    - hardened `emit_global_store` cast reconciliation:
+      - final pre-store emitted-type safety check;
+      - update/register emitted SSA type after synthesized global casts to avoid stale-type double-cast chains.
+  - Evidence:
+    - stage1 (original compiler, release):
+      - `crystal build --release src/crystal_v2.cr -o /tmp/stage1_rel_globalcast_fix2 --error-trace`
+      - result: **real 420.76s**
+    - stage2 (self-hosted, release, no metadata):
+      - watchdog probe:
+        - `scripts/timeout_sample_lldb.sh -t 180 ... -- /tmp/stage1_rel_globalcast_fix2 src/crystal_v2.cr --release --no-llvm-metadata -o /tmp/stage2_rel_globalcast_fix2_nometa`
+        - result: **exit 0** (no early IR/opt crash)
+      - direct timing:
+        - `/usr/bin/time -p /tmp/stage1_rel_globalcast_fix2 src/crystal_v2.cr --release --no-llvm-metadata -o /tmp/stage2_rel_globalcast_fix2_nometa_direct`
+        - result: **real 105.05s**
+    - stage2 (self-hosted, release, full metadata):
+      - `scripts/timeout_sample_lldb.sh -t 300 ... -- /usr/bin/time -p /tmp/stage1_rel_globalcast_fix2 src/crystal_v2.cr --release -o /tmp/stage2_rel_globalcast_fix2_full`
+      - result: **exit 1**, `error: End of file reached`, **real 102.44s**
+  - Current blocker:
+    - default metadata-enabled stage2 still fails in union metadata emission path (`emit_union_metadata_globals` / large `IO::Memory` write); no-metadata bootstrap path is now stable and fast.
+
 - **2026-02-26 (latest): fixed root bottleneck in block-fallback owner filtering and stabilized exposed type-name recursion loop**
   - Root causes:
     - `lookup_block_function_def_for_call` fallback path filtered candidates via `receiver_allows_yield_owner?` for each candidate name; for hot methods (`each`/`initialize`/etc.) candidate lists grew to hundreds/thousands, causing repeated class-info hash lookups and heavy compile-time churn;
