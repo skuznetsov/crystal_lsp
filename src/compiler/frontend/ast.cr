@@ -1824,10 +1824,18 @@ module CrystalV2
           NodeKind::MacroDef
         end
 
+        record MacroParamDecl, name : String, external_name : String? = nil, prefix : String = ""
+
         getter name : Slice(UInt8)
         getter body : ExprId
+        getter params : Array(MacroParamDecl)
 
-        def initialize(@span : Span, @name : Slice(UInt8), @body : ExprId)
+        def initialize(
+          @span : Span,
+          @name : Slice(UInt8),
+          @body : ExprId,
+          @params : Array(MacroParamDecl) = [] of MacroParamDecl
+        )
         end
 
         # Legacy alias (ExpressionNode#left)

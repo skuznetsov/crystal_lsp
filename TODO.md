@@ -1,6 +1,30 @@
 # Crystal v2 — Active Work (codegen branch)
 
 ## Known Bugs (codegen)
+- **2026-02-27 (latest): fixed root-cause macro parameter loss and added nested generic substitution inference (partial stage2 stabilization)**
+  - Root causes:
+    - parser discarded macro parameter declarations after validation, forcing brittle source-slice fallback in HIR macro expansion;
+    - generic type-parameter inference at callsites handled only trivial forms and missed nested annotations (`Array(T)` etc.), so substitutions like `T => Int32` were not propagated reliably.
+  - Fixes applied:
+    - `src/compiler/frontend/ast.cr`:
+      - added `MacroDefNode::MacroParamDecl`;
+      - extended `MacroDefNode` with persisted `params`.
+    - `src/compiler/frontend/parser.cr`:
+      - `skip_macro_parameters` now returns parsed params;
+      - `parse_macro_definition` stores params in `MacroDefNode`;
+      - added `parse_macro_param_decl` helper.
+    - `src/compiler/hir/ast_to_hir.cr`:
+      - `extract_macro_params` now prefers AST-persisted params (source parsing kept only as fallback);
+      - added recursive annotation-vs-calltype substitution merge (`merge_type_param_substitutions_from_callsite`) for nested generic shapes.
+  - Evidence:
+    - `/usr/bin/time -p crystal build src/crystal_v2.cr -o /tmp/stage1_dbg_tmapfix --error-trace` -> `exit 0` (**real 8.91s**)
+    - targeted repro `clone_generic(arr : Array(T)) : Array(T)`:
+      - before: crash/corruption; after: prints expected `size=5` and payload.
+    - mini-oracle smoke before return-`T` fix:
+      - `./regression_tests/run_mini_oracles.sh /tmp/stage1_dbg_macroparams` -> **1/5 PASS** (`test_nested_macro_record` fixed).
+  - Remaining blocker:
+    - declared generic return annotations (`: T`) can still degrade to `Nil` in some specialized call paths (`first_generic` / `select` family); next root-cause branch is return-type substitution/finalization in `lower_call`.
+
 - **2026-02-27 (latest): fixed root-cause union global-store mismatch from `fromslot.cast` values (`opt` reject in stage2)**
   - Root cause (`src/compiler/mir/llvm_backend.cr`):
     - `emit_global_store` reconciled only ptr/int mismatches in the final emitted-SSA safety net;

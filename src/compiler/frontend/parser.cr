@@ -1827,7 +1827,7 @@ module CrystalV2
             end
           end
 
-          skip_macro_parameters(macro_token, macro_name_slice)
+          macro_params = skip_macro_parameters(macro_token, macro_name_slice)
           # Allow immediate separators after header (e.g., `struct X; end`)
           skip_statement_end
 
@@ -1871,7 +1871,8 @@ module CrystalV2
             MacroDefNode.new(
               macro_span,
               macro_name_slice,
-              body_id
+              body_id,
+              macro_params
             )
           )
         end
@@ -7161,10 +7162,12 @@ module CrystalV2
           )
         end
 
-        private def skip_macro_parameters(macro_token : Token, macro_name_slice : Slice(UInt8))
+        private def skip_macro_parameters(macro_token : Token, macro_name_slice : Slice(UInt8)) : Array(MacroDefNode::MacroParamDecl)
           skip_trivia
-          return unless current_token.kind == Token::Kind::LParen
+          return [] of MacroDefNode::MacroParamDecl unless current_token.kind == Token::Kind::LParen
 
+          params = [] of MacroDefNode::MacroParamDecl
+          current_param_tokens = [] of Token
           advance
           depth = 1
           seen_bare_splat = false
@@ -7174,14 +7177,25 @@ module CrystalV2
           named_after_bare_splat = false
           just_saw_double_splat = false
           while depth > 0 && current_token.kind != Token::Kind::EOF
-            case current_token.kind
+            token = current_token
+            case token.kind
             when Token::Kind::LParen
+              current_param_tokens << token if depth >= 1
               depth += 1
               just_saw_double_splat = false
             when Token::Kind::RParen
+              if depth == 1
+                if param = parse_macro_param_decl(current_param_tokens)
+                  params << param
+                end
+                current_param_tokens.clear
+              else
+                current_param_tokens << token
+              end
               depth -= 1
               just_saw_double_splat = false
             when Token::Kind::Star
+              current_param_tokens << token if depth >= 1
               # bare * marks end of positional args; named must follow
               if seen_double_splat
                 @diagnostics << Diagnostic.new("only block parameter is allowed after double splat", current_token.span)
@@ -7189,12 +7203,14 @@ module CrystalV2
               seen_bare_splat = true
               just_saw_double_splat = false
             when Token::Kind::StarStar
+              current_param_tokens << token if depth >= 1
               if seen_double_splat
                 @diagnostics << Diagnostic.new("only block parameter is allowed after double splat", current_token.span)
               end
               seen_double_splat = true
               just_saw_double_splat = true
             when Token::Kind::String
+              current_param_tokens << token if depth >= 1
               # external name cannot be empty
               if current_token.slice.empty?
                 @diagnostics << Diagnostic.new("external parameter name cannot be empty", current_token.span)
@@ -7204,6 +7220,7 @@ module CrystalV2
               end
               just_saw_double_splat = false
             when Token::Kind::Identifier
+              current_param_tokens << token if depth >= 1
               if just_saw_double_splat
                 # This identifier is the parameter name for **, which is valid (e.g., **opts)
                 seen_double_splat_param_name = true
@@ -7215,7 +7232,18 @@ module CrystalV2
                 named_after_bare_splat = true
               end
               just_saw_double_splat = false
+            when Token::Kind::Comma
+              if depth == 1
+                if param = parse_macro_param_decl(current_param_tokens)
+                  params << param
+                end
+                current_param_tokens.clear
+              else
+                current_param_tokens << token
+              end
+              just_saw_double_splat = false
             else
+              current_param_tokens << token if depth >= 1
               just_saw_double_splat = false
             end
             advance
@@ -7227,6 +7255,47 @@ module CrystalV2
           if seen_bare_splat && !named_after_bare_splat
             @diagnostics << Diagnostic.new("named parameters must follow bare *", macro_token.span)
           end
+
+          params
+        end
+
+        private def parse_macro_param_decl(tokens : Array(Token)) : MacroDefNode::MacroParamDecl?
+          return nil if tokens.empty?
+
+          prefix = ""
+          idx = 0
+          if first = tokens.first?
+            case first.kind
+            when Token::Kind::StarStar
+              prefix = "**"
+              idx = 1
+            when Token::Kind::Star
+              prefix = "*"
+              idx = 1
+            end
+          end
+
+          external_name : String? = nil
+          names = [] of String
+
+          while idx < tokens.size
+            tok = tokens[idx]
+            case tok.kind
+            when Token::Kind::String
+              external_name ||= String.new(tok.slice)
+            when Token::Kind::Identifier
+              names << String.new(tok.slice)
+            end
+            idx += 1
+          end
+
+          return nil if names.empty?
+          names.shift if names.first? == "__name"
+          return nil if names.empty?
+
+          internal = names.last
+          external = names.size > 1 ? names.first : external_name
+          MacroDefNode::MacroParamDecl.new(internal, external, prefix)
         end
 
         private def parse_macro_body(stop_on_branch : Bool = false)
