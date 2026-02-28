@@ -1,6 +1,25 @@
 # Crystal v2 — Active Work (codegen branch)
 
 ## Known Bugs (codegen)
+- **2026-02-28 (latest): reduced stage2 recursion pressure by making pending generic monomorphization drain truly iterative**
+  - Root cause (`src/compiler/hir/ast_to_hir.cr`):
+    - `monomorphize_generic_class` claimed breadth-first draining of `@pending_monomorphizations`, but called itself recursively while draining;
+    - on stage2 release this created deep recursive stacks around `monomorphize_generic_class` + type resolution.
+  - Fix:
+    - added `drain_pending` flag to `monomorphize_generic_class`;
+    - only outer call drains pending queue;
+    - pending batch and union-split specialization calls execute with `drain_pending: false` to keep the drain loop iterative.
+  - Evidence:
+    - stage1 release:
+      - `/usr/bin/time -p crystal build --release src/crystal_v2.cr -o /tmp/stage1_rel_mono_drain_fix --error-trace` -> `exit 0`, **real 478.12s**
+    - stage2 release probe (watchdog 180s):
+      - `scripts/timeout_sample_lldb.sh -t 180 -s 8 -n 12 -o /tmp/stage2_rel_mono_drain_fix_t180 -- /usr/bin/time -p /tmp/stage1_rel_mono_drain_fix src/crystal_v2.cr --release -o /tmp/stage2_rel_mono_drain_fix`
+      - result: timeout `124` (artifact not produced), but call stack profile changed:
+        - before: long repeated `monomorphize_generic_class` recursion frames;
+        - after: only shallow `monomorphize_generic_class` frames remain; hotspot moved to `resolve_type_name_in_context`/`type_ref_for_name`.
+  - Status:
+    - **partial stabilization**; next root-cause branch is type-name resolution churn/recursion in `resolve_type_name_in_context`.
+
 - **2026-02-28 (latest): fixed root-cause non-local `return` misrouting in inlined yield blocks (`Hash#find_entry_with_index_linear_scan`)**
   - Root cause (`src/compiler/hir/ast_to_hir.cr`):
     - ownership check for `return` inside inlined block body required both:

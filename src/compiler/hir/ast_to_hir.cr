@@ -16047,7 +16047,12 @@ module Crystal::HIR
     end
 
     # Monomorphize a generic class: create specialized version with concrete types
-    private def monomorphize_generic_class(base_name : String, type_args : Array(String), specialized_name : String)
+    private def monomorphize_generic_class(
+      base_name : String,
+      type_args : Array(String),
+      specialized_name : String,
+      drain_pending : Bool = true,
+    )
       template = @generic_templates[base_name]?
       return unless template
 
@@ -16061,7 +16066,7 @@ module Crystal::HIR
             if @defer_monomorphization
               enqueue_pending_monomorphization(base_name, [part], specialized_part)
             else
-              monomorphize_generic_class(base_name, [part], specialized_part)
+              monomorphize_generic_class(base_name, [part], specialized_part, drain_pending: false)
             end
           end
         end
@@ -16174,7 +16179,7 @@ module Crystal::HIR
 
       # Process deferred monomorphizations iteratively (breadth-first).
       # Only process if we're the outermost monomorphize call (not nested).
-      unless old_defer_mono
+      if drain_pending && !old_defer_mono
         while !@pending_monomorphizations.empty?
           batch = @pending_monomorphizations.dup
           @pending_monomorphizations.clear
@@ -16182,7 +16187,7 @@ module Crystal::HIR
           batch.each do |(pending_base, pending_args, pending_name)|
             next if @monomorphized.includes?(pending_name)
             next unless concrete_type_args?(pending_args)
-            monomorphize_generic_class(pending_base, pending_args, pending_name)
+            monomorphize_generic_class(pending_base, pending_args, pending_name, drain_pending: false)
           end
         end
       end
