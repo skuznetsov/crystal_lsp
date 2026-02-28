@@ -27915,12 +27915,15 @@ module Crystal::HIR
           end
           end
           type_param_map = @type_param_map
-          fallback_map : Hash(String, String)? = nil
-          if current = @current_class
-            if info = generic_owner_info(current)
-              fallback_map = info[:map]
-            end
-          end
+          fallback_map = if current = @current_class
+                           if info = generic_owner_info(current)
+                             info[:map]
+                           else
+                             nil
+                           end
+                         else
+                           nil
+                         end
           substitution : String? = nil
 
           if simple_identifier_token?(name)
@@ -64052,6 +64055,11 @@ module Crystal::HIR
       @resolved_type_name_cache_epoch &+= 1
       @resolved_type_name_invalidations[name] = @resolved_type_name_cache_epoch
       @resolved_type_name_invalidations[short] = @resolved_type_name_cache_epoch if short
+      # Module-alias caches include resolved-type epoch in the key. Without
+      # clearing on epoch bump, entries accumulate across invalidations and
+      # trigger heavy hash-resize churn during stage2 bootstrap.
+      @module_include_alias_cache.clear
+      @module_alias_prefix_cache.clear
     end
 
       private def resolved_type_name_cache_entry_valid?(name : String, entry : ResolvedTypeNameCacheEntry) : Bool

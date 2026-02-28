@@ -1,6 +1,32 @@
 # Crystal v2 — Active Work (codegen branch)
 
 ## Known Bugs (codegen)
+- **2026-02-28 (latest): fixed module-alias cache epoch invalidation leak (root-cause), reverted failed owner-fallback cache branch**
+  - Scope (`src/compiler/hir/ast_to_hir.cr`):
+    - reverted uncommitted experimental `current_generic_owner_fallback_map` cache path in `substitute_type_params_in_type_name`;
+    - in `invalidate_resolved_type_name_cache_for`, now clears:
+      - `@module_include_alias_cache`
+      - `@module_alias_prefix_cache`
+  - Why:
+    - module alias caches are keyed by `@resolved_type_name_cache_epoch`; epoch bumps without cache clear caused stale-key accumulation and hash resize churn during stage2.
+  - Evidence:
+    - debug DoD:
+      - `/usr/bin/time -p crystal build src/crystal_v2.cr -o /tmp/stage1_dbg_alias_epoch_clear_fix --error-trace` -> **real 9.11s**
+      - `bash regression_tests/run_mini_oracles.sh /tmp/stage1_dbg_alias_epoch_clear_fix` -> **5/5 PASS**
+      - `bash regression_tests/stage2_env_optional_repro.sh /tmp/stage1_dbg_alias_epoch_clear_fix` -> `not reproduced`
+    - release stage1:
+      - `/usr/bin/time -p crystal build --release src/crystal_v2.cr -o /tmp/stage1_rel_alias_epoch_clear_fix --error-trace` -> **real 423.53s**
+    - stage2 watchdog (`t300`, timeline enabled):
+      - `scripts/timeout_sample_lldb.sh -t 300 -s 8 -n 15 -o /tmp/stage2_rel_alias_epoch_clear_fix_t300 -- /usr/bin/time -p /tmp/stage1_rel_alias_epoch_clear_fix src/crystal_v2.cr --release -o /tmp/stage2_rel_alias_epoch_clear_fix` -> timeout `124`
+      - final stack/hotspots no longer dominated by `resolve_module_alias_prefix -> Hash#resize`; current top is:
+        - `type_ref_for_name`, `resolve_type_name_in_context`, `register_concrete_class`, `String#hash/find_entry`
+      - LLDB stop stack:
+        - `resolve_type_name_in_signature_context_impl`
+        - `collect_defined_instance_method_full_names`
+        - `register_concrete_class`
+  - Status:
+    - **partial**: alias-epoch map-growth root cause addressed; next root-cause branch is signature-type resolution churn in class method-signature collection.
+
 - **2026-02-28 (latest): sped up `capture_initialize_params` by indexing ivars (partial, stage2 still >300s)**
   - Scope (`src/compiler/hir/ast_to_hir.cr`):
     - `capture_initialize_params` now builds local `ivar_index_by_name` once and uses O(1) lookup
