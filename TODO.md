@@ -1,6 +1,37 @@
 # Crystal v2 — Active Work (codegen branch)
 
 ## Known Bugs (codegen)
+- **2026-02-28 (latest): root-cause performance/churn reductions in `AstToHir` type-resolution hot path (stage2 still unstable)**
+  - Scope (`src/compiler/hir/ast_to_hir.cr`):
+    - added versioned negative cache for `type_name_exists?` (cache `false` with universe stamp);
+    - skip `@module.is_lib?` for namespaced lookups in `type_name_exists?`;
+    - added lightweight `resolve_type_name_in_signature_context_impl` and routed `resolve_type_name_in_context` through it when `@signature_scan_mode`;
+    - removed `nil`-negative cache writes in `split_generic_base_and_args` and added fast non-generic early return;
+    - bypassed global `store_type_cache` side effects in signature scan mode;
+    - deferred `type_cache` reverse-index registration for placeholder `TypeRef::VOID` until transition to concrete type;
+    - removed unnecessary builtin contextual resolve in `type_ref_for_name` and kept explicit nested-shadow handling;
+    - skipped pre-builtin `resolve_type_name_in_context` for builtin simple names in `type_ref_for_name`.
+  - Why:
+    - repeated stage2 watchdog samples showed dominant churn in:
+      - `resolve_type_name_in_context`
+      - `type_ref_for_name`
+      - `split_generic_base_and_args`
+      - `String#hash` / hash/set upserts
+    - fix series targets contracts/invariants (cache invalidation discipline + hot-path specialization), no symbol/method hardcode.
+  - Evidence:
+    - stage1 debug smoke:
+      - `/usr/bin/time -p crystal build src/crystal_v2.cr -o /tmp/stage1_dbg_builtin_resolve_skip --error-trace` -> `exit 0`, **real 8.66s**
+      - `bash regression_tests/run_mini_oracles.sh /tmp/stage1_dbg_builtin_resolve_skip` -> **5/5 PASS**
+    - stage1 release (latest branch):
+      - `/usr/bin/time -p crystal build --release src/crystal_v2.cr -o /tmp/stage1_rel_builtin_resolve_skip --error-trace` -> `exit 0`, **real 436.53s**
+    - stage2 probes (latest branch):
+      - `scripts/timeout_sample_lldb.sh -t 180 ... /tmp/stage1_rel_builtin_resolve_skip ...` -> timeout `124`
+      - `scripts/timeout_sample_lldb.sh -t 300 ... /tmp/stage1_rel_builtin_resolve_skip ...` -> timeout `124`
+      - top hotspots remain type-resolution/hash heavy (`resolve_type_name_in_context`, `type_ref_for_name`, `split_generic_base_and_args`, `String#hash`), but earlier overload/placeholder-index churn signatures reduced in several samples.
+  - Status:
+    - **partial**: measurable hotspot shift and reduced churn signatures, but full stage2 release bootstrap still not completing within 300s.
+    - next root-cause branch: cut namespace-qualification recursion in `resolve_class_name_in_context` / `resolve_type_name_in_context` for generic monomorphization path.
+
 - **2026-02-28 (latest): fixed root-cause lost captured-local updates in nested yield/loop inlining (`count/sum` stayed unchanged)**
   - Root cause (`src/compiler/hir/ast_to_hir.cr`):
     - `inline_block_body` saves updated captured locals to `@inline_loop_var_backedge_values` and restores PHI-bound locals during loop lowering;

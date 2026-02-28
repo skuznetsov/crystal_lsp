@@ -2102,6 +2102,14 @@ module Crystal::HIR
       end
     end
 
+    private struct TypeNameExistsCacheEntry
+      getter exists : Bool
+      getter negative_stamp : UInt64
+
+      def initialize(@exists : Bool, @negative_stamp : UInt64 = 0_u64)
+      end
+    end
+
     # Cache resolved type names per namespace to avoid repeated context scans.
     @resolved_type_name_cache_global : Hash(String, ResolvedTypeNameCacheEntry)
     @resolved_type_name_cache_by_ctx : Hash(TypeNameContextKey, Hash(String, ResolvedTypeNameCacheEntry))
@@ -2110,7 +2118,7 @@ module Crystal::HIR
     # Cache resolved class names for .class/.metaclass type literals.
     @type_literal_class_cache : Hash(String, String?)
     # Temporary cache for type_name_exists? lookups (used during signature collection).
-    @type_name_exists_cache : Hash(String, Bool)?
+    @type_name_exists_cache : Hash(String, TypeNameExistsCacheEntry)?
     # Signature scan mode: avoid deep namespace walks while collecting method names.
     @signature_scan_mode : Bool
     # Optional debug histogram for type name resolution hot paths.
@@ -7082,7 +7090,7 @@ module Crystal::HIR
       old_signature_scan = @signature_scan_mode
       @current_class = class_name
       @current_namespace_override = nil
-      @type_name_exists_cache = {} of String => Bool
+      @type_name_exists_cache = {} of String => TypeNameExistsCacheEntry
       @current_typeof_local_names = nil
       @signature_scan_mode = true
       begin
@@ -7202,7 +7210,7 @@ module Crystal::HIR
       old_signature_scan = @signature_scan_mode
       @current_class = class_name
       @current_namespace_override = nil
-      @type_name_exists_cache = {} of String => Bool
+      @type_name_exists_cache = {} of String => TypeNameExistsCacheEntry
       @current_typeof_local_names = nil
       @signature_scan_mode = true
       begin
@@ -25780,26 +25788,49 @@ module Crystal::HIR
       nil
     end
 
+    @[AlwaysInline]
+    private def type_name_exists_universe_stamp : UInt64
+      # Stamp tracks negative-cache validity. It changes when the known type universe grows.
+      stamp = 1469598103934665603_u64
+      prime = 1099511628211_u64
+
+      stamp = (stamp ^ @class_info.size.to_u64) &* prime
+      stamp = (stamp ^ @generic_templates.size.to_u64) &* prime
+      stamp = (stamp ^ @type_aliases.size.to_u64) &* prime
+      enum_size = if enum_info = @enum_info
+                    enum_info.size.to_u64
+                  else
+                    0_u64
+                  end
+      stamp = (stamp ^ enum_size) &* prime
+      stamp = (stamp ^ @module_defs.size.to_u64) &* prime
+      stamp = (stamp ^ @top_level_type_names.size.to_u64) &* prime
+      stamp = (stamp ^ @top_level_class_kinds.size.to_u64) &* prime
+      stamp
+    end
+
     private def type_name_exists?(name : String) : Bool
       # Hot path: type resolution calls this millions of times when lowering stdlib.
-      # Cache positive results aggressively (monotonic as the type set only grows).
-      cache = (@type_name_exists_cache ||= {} of String => Bool)
+      # Cache positives directly and negatives with a universe stamp (invalidates on growth).
+      cache = (@type_name_exists_cache ||= {} of String => TypeNameExistsCacheEntry)
       if cached = cache[name]?
-        return cached
+        return true if cached.exists
+        return false if cached.negative_stamp == type_name_exists_universe_stamp
       end
+
       result = @class_info.has_key?(name) ||
                @generic_templates.has_key?(name) ||
                @type_aliases.has_key?(name) ||
                (@enum_info && @enum_info.not_nil!.has_key?(name)) ||
                @module_defs.has_key?(name) ||
-               @module.is_lib?(name) ||
+               (!name.includes?("::") && @module.is_lib?(name)) ||
                @top_level_type_names.includes?(name) ||
                @top_level_class_kinds.has_key?(name)
-      # Only cache false results during signature scans (where the type universe is stable).
-      if @signature_scan_mode
-        cache[name] = result
-      elsif result
-        cache[name] = true
+
+      if result
+        cache[name] = TypeNameExistsCacheEntry.new(true)
+      else
+        cache[name] = TypeNameExistsCacheEntry.new(false, type_name_exists_universe_stamp)
       end
       result
     end
@@ -26092,10 +26123,110 @@ module Crystal::HIR
       end
       @resolve_type_name_stack << name
       begin
-        resolve_type_name_in_context_impl(name)
+        if @signature_scan_mode
+          resolve_type_name_in_signature_context_impl(name)
+        else
+          resolve_type_name_in_context_impl(name)
+        end
       ensure
         @resolve_type_name_stack.delete(name)
       end
+    end
+
+    private def resolve_type_name_in_signature_context_impl(name : String) : String
+      return name if name.empty?
+      name = normalize_missing_generic_parens(name)
+      if mapped = @type_param_map[name]?
+        return resolve_type_name_in_context(mapped) if mapped != name
+      end
+      if name.starts_with?(':')
+        stripped = name.size > 1 ? name[1..] : ""
+        return stripped.empty? ? "" : resolve_type_name_in_context(stripped)
+      end
+      if local_name = @current_typeof_local_names.try(&.[name]?)
+        return local_name unless local_name.empty?
+      end
+      return name if value_literal_name?(name)
+
+      if name.includes?('|')
+        parts = split_union_type_name(name)
+        if parts.size > 1
+          return parts.map { |part| resolve_type_name_in_context(part) }.join(" | ")
+        end
+      end
+      if name.ends_with?('?')
+        base = name[0, name.size - 1]
+        return "#{resolve_type_name_in_context(base)}?"
+      end
+      if name.ends_with?('*')
+        base = name
+        star_count = 0
+        while base.ends_with?('*')
+          base = base[0...-1]
+          star_count += 1
+        end
+        base = base.strip
+        resolved_base = base.empty? ? base : resolve_type_name_in_context(base)
+        return "#{resolved_base}#{("*" * star_count)}"
+      end
+      if name.starts_with?("::")
+        stripped = name.size > 2 ? name[2..] : ""
+        return "" if stripped.empty?
+        if info = split_generic_base_and_args(stripped)
+          resolved_args = split_generic_type_args(info[:args]).map do |arg|
+            arg = arg.strip
+            if arg.starts_with?(':')
+              arg = arg.size > 1 ? arg[1..] : ""
+            end
+            if arg == "self"
+              @current_class || arg
+            else
+              resolve_type_name_in_context(arg)
+            end
+          end.join(", ")
+          return "#{info[:base]}(#{resolved_args})"
+        end
+        return @current_class || stripped if stripped == "self"
+        return stripped
+      end
+
+      if name == "self"
+        return @current_class || name
+      end
+      if type_param_like?(name) && short_type_param_name?(name) && !@type_param_map.has_key?(name)
+        return name
+      end
+      if name.starts_with?('{') && name.ends_with?('}')
+        inner = name[1, name.size - 2].strip
+        if inner.empty?
+          return "Tuple()"
+        end
+        tuple_args = split_generic_type_args(inner).map do |arg|
+          resolve_type_name_in_context(arg.strip)
+        end
+        return "Tuple(#{tuple_args.join(", ")})"
+      end
+
+      if info = split_generic_base_and_args(name)
+        resolved_base = resolve_class_name_in_signature_context(info[:base]) || info[:base]
+        resolved_args = split_generic_type_args(info[:args]).map do |arg|
+          arg = arg.strip
+          if arg.starts_with?(':')
+            arg = arg.size > 1 ? arg[1..] : ""
+          end
+          if type_param_like?(arg) && short_type_param_name?(arg) && !@type_param_map.has_key?(arg)
+            normalize_tuple_literal_type_name(arg)
+          else
+            normalize_tuple_literal_type_name(resolve_type_name_in_context(arg))
+          end
+        end.join(", ")
+        return resolved_base == info[:base] && resolved_args == info[:args] ? name : "#{resolved_base}(#{resolved_args})"
+      end
+
+      if resolved = resolve_class_name_in_signature_context(name)
+        return resolved
+      end
+      name
     end
 
     private def resolve_type_name_in_context_impl(name : String) : String
@@ -27446,6 +27577,14 @@ module Crystal::HIR
         end
       end
 
+      # Fast negative path for plain type names: avoid cache churn on ubiquitous
+      # non-generic lookups (e.g., String, Int32, Foo::Bar).
+      unless name.ends_with?(')') || name.includes?('(') || name.includes?(',')
+        @generic_split_last_input = name
+        @generic_split_last_output = nil
+        return nil
+      end
+
       if cached = @generic_split_cache[name]?
         @generic_split_last_input = name
         @generic_split_last_output = cached
@@ -27468,8 +27607,6 @@ module Crystal::HIR
       end
 
       unless parse_name.ends_with?(')')
-        @generic_split_cache[name] = nil
-        @generic_split_cache[parse_name] = nil unless parse_name == name
         @generic_split_last_input = name
         @generic_split_last_output = nil
         return nil
@@ -27498,8 +27635,6 @@ module Crystal::HIR
         i -= 1
       end
 
-      @generic_split_cache[parse_name] = nil
-      @generic_split_cache[name] = nil unless parse_name == name
       @generic_split_last_input = name
       @generic_split_last_output = nil
       nil
@@ -63433,8 +63568,33 @@ module Crystal::HIR
     end
 
     private def store_type_cache(cache_key : String, type_ref : TypeRef) : TypeRef
+      if @signature_scan_mode
+        # Signature scans are transient and already use local caches; avoid
+        # global type-cache/index churn here (especially reverse-index Set upserts).
+        return type_ref
+      end
+
+      existing = @type_cache[cache_key]?
+      if existing
+        # Hot path: avoid re-indexing component/generic-prefix sets when the
+        # cache key is already registered. Repeated same-key updates happen
+        # frequently in type resolution and otherwise create heavy Hash/Set churn.
+        if existing == type_ref
+          return existing
+        end
+        @type_cache[cache_key] = type_ref
+        # Placeholder VOID entries are used for cycle breaking. Index only when
+        # transitioning from placeholder to a concrete type.
+        if existing == TypeRef::VOID && type_ref != TypeRef::VOID
+          register_type_cache_key(cache_key)
+        end
+        return type_ref
+      end
+
       @type_cache[cache_key] = type_ref
-      register_type_cache_key(cache_key)
+      # Do not index placeholder VOID entries; many are transient and indexing
+      # them creates substantial Set/Hash churn in type lowering hot paths.
+      register_type_cache_key(cache_key) unless type_ref == TypeRef::VOID
       type_ref
     end
 
@@ -64190,7 +64350,9 @@ module Crystal::HIR
       absolute_name = lookup_name.starts_with?("::")
       lookup_ns_idx0 = namespace_separator_index(lookup_name)
       if pre_resolved_lookup_name.nil? && !absolute_name && !has_complex_shape
-        should_resolve_in_context = true
+        # Builtins are handled below (with explicit nested-shadow checks);
+        # skipping contextual resolution here avoids a very hot recursive path.
+        should_resolve_in_context = !BUILTIN_TYPE_NAMES.includes?(lookup_name)
         if idx = lookup_ns_idx0
           head = lookup_name[0, idx]
           anchored_namespace = head == "Crystal" ||
@@ -64210,12 +64372,6 @@ module Crystal::HIR
 
       if BUILTIN_TYPE_NAMES.includes?(lookup_name)
         has_builtin_shadow_context = !!@current_class || !!@current_namespace_override
-        if has_builtin_shadow_context && !lookup_name.includes?("::")
-          resolved = resolve_class_name_in_context(lookup_name)
-          if resolved != lookup_name
-            return type_ref_for_name(resolved)
-          end
-        end
         # Before returning builtin type, check if there's a nested type
         # that shadows this name in the current context or namespace override
         # (e.g., WUInt::UInt128 should resolve to the record, not global UInt128).
