@@ -1,6 +1,41 @@
 # Crystal v2 — Active Work (codegen branch)
 
 ## Known Bugs (codegen)
+- **2026-02-28 (latest): cached defined-method signature scans by class/body context (partial, stage2 still >300s)**
+  - Scope (`src/compiler/hir/ast_to_hir.cr`):
+    - added caches:
+      - `@defined_instance_method_full_names_cache`
+      - `@defined_class_method_full_names_cache`
+    - both `collect_defined_instance_method_full_names` and `collect_defined_class_method_full_names` now use cache key:
+      - `{class_name, body.object_id, @module_defs_cache_version, @resolved_type_name_cache_epoch}`
+      - return `dup` to avoid mutation leaks into cache.
+    - invalidation wired into:
+      - `bump_module_defs_cache_version`
+      - `invalidate_resolved_type_name_cache_for`
+  - Why:
+    - timeout LLDB pointed to `collect_defined_instance_method_full_names -> resolve_type_name_in_signature_context_impl` churn inside `register_concrete_class`.
+    - repeated class-body signature scans are deterministic for a fixed class/body+type-resolution epoch.
+  - Evidence:
+    - debug DoD:
+      - `/usr/bin/time -p crystal build src/crystal_v2.cr -o /tmp/stage1_dbg_defined_method_cache_fix --error-trace` -> **real 8.54s**
+      - `bash regression_tests/run_mini_oracles.sh /tmp/stage1_dbg_defined_method_cache_fix` -> **5/5 PASS**
+      - `bash regression_tests/stage2_env_optional_repro.sh /tmp/stage1_dbg_defined_method_cache_fix` -> `not reproduced`
+    - release stage1:
+      - `/usr/bin/time -p crystal build --release src/crystal_v2.cr -o /tmp/stage1_rel_defined_method_cache_fix --error-trace` -> **real 414.03s** (improved from `423.53s`)
+    - stage2 watchdog (`t300`):
+      - `scripts/timeout_sample_lldb.sh -t 300 -s 8 -n 15 -o /tmp/stage2_rel_defined_method_cache_fix_t300 -- /usr/bin/time -p /tmp/stage1_rel_defined_method_cache_fix src/crystal_v2.cr --release -o /tmp/stage2_rel_defined_method_cache_fix` -> timeout `124`
+      - current top symbols:
+        - `type_ref_for_name` 674
+        - `lower_call` 455
+        - `resolve_type_name_in_context` 308
+        - `register_concrete_class` 303
+      - LLDB stop stack in this run:
+        - GC mark/alloc path
+        - `type_ref_for_name`
+        - `register_concrete_class` / `monomorphize_generic_class`
+  - Status:
+    - **partial**: stage1 release improved; stage2 still unstable/slow, next root-cause branch remains `type_ref_for_name`/allocation pressure under generic-class registration/lowering.
+
 - **2026-02-28 (latest): fixed module-alias cache epoch invalidation leak (root-cause), reverted failed owner-fallback cache branch**
   - Scope (`src/compiler/hir/ast_to_hir.cr`):
     - reverted uncommitted experimental `current_generic_owner_fallback_map` cache path in `substitute_type_params_in_type_name`;

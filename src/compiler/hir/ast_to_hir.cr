@@ -2106,6 +2106,8 @@ module Crystal::HIR
     @module_class_def_lookup_cache : Hash(String, Tuple(CrystalV2::Compiler::Frontend::DefNode, CrystalV2::Compiler::Frontend::ArenaLike)?)
     @instance_method_names_cache : Hash(String, Array(String))
     @instance_method_names_cache_version : Int32
+    @defined_instance_method_full_names_cache : Hash({String, UInt64, Int32, Int32}, Set(String))
+    @defined_class_method_full_names_cache : Hash({String, UInt64, Int32, Int32}, Set(String))
 
     # Type aliases (alias_name -> target_type_name)
     @type_aliases : Hash(String, String)
@@ -2475,6 +2477,8 @@ module Crystal::HIR
       @module_class_def_lookup_cache = {} of String => Tuple(CrystalV2::Compiler::Frontend::DefNode, CrystalV2::Compiler::Frontend::ArenaLike)?
       @instance_method_names_cache = {} of String => Array(String)
       @instance_method_names_cache_version = 0
+      @defined_instance_method_full_names_cache = {} of {String, UInt64, Int32, Int32} => Set(String)
+      @defined_class_method_full_names_cache = {} of {String, UInt64, Int32, Int32} => Set(String)
         @type_aliases = {} of String => String
         @resolved_type_alias_cache = Hash(String, String).new(initial_capacity: 4096)
         @type_alias_keys_by_suffix = {} of String => Array(String)
@@ -7216,6 +7220,11 @@ module Crystal::HIR
     end
 
     private def collect_defined_instance_method_full_names(class_name : String, body : Array(ExprId)) : Set(String)
+      cache_key = {class_name, body.object_id, @module_defs_cache_version, @resolved_type_name_cache_epoch}
+      if cached = @defined_instance_method_full_names_cache[cache_key]?
+        return cached.dup
+      end
+
       defined = Set(String).new
       type_cache = {} of String => TypeRef
       resolved_type_cache = {} of String => String
@@ -7332,10 +7341,16 @@ module Crystal::HIR
         @current_typeof_local_names = old_typeof_locals
         @signature_scan_mode = old_signature_scan
       end
+      @defined_instance_method_full_names_cache[cache_key] = defined.dup
       defined
     end
 
     private def collect_defined_class_method_full_names(class_name : String, body : Array(ExprId)) : Set(String)
+      cache_key = {class_name, body.object_id, @module_defs_cache_version, @resolved_type_name_cache_epoch}
+      if cached = @defined_class_method_full_names_cache[cache_key]?
+        return cached.dup
+      end
+
       defined = Set(String).new
       type_cache = {} of String => TypeRef
       resolved_type_cache = {} of String => String
@@ -7439,6 +7454,7 @@ module Crystal::HIR
         @current_typeof_local_names = old_typeof_locals
         @signature_scan_mode = old_signature_scan
       end
+      @defined_class_method_full_names_cache[cache_key] = defined.dup
       defined
     end
 
@@ -11029,6 +11045,12 @@ module Crystal::HIR
     end
 
     @[AlwaysInline]
+    private def clear_defined_method_scan_caches : Nil
+      @defined_instance_method_full_names_cache.clear
+      @defined_class_method_full_names_cache.clear
+    end
+
+    @[AlwaysInline]
     private def bump_class_info_version : Nil
       @class_info_version += 1
       clear_receiver_specialization_caches
@@ -11039,6 +11061,7 @@ module Crystal::HIR
       @module_defs_cache_version += 1
       @module_include_alias_cache.clear
       @module_alias_prefix_cache.clear
+      clear_defined_method_scan_caches
       clear_receiver_specialization_caches
     end
 
@@ -64060,6 +64083,7 @@ module Crystal::HIR
       # trigger heavy hash-resize churn during stage2 bootstrap.
       @module_include_alias_cache.clear
       @module_alias_prefix_cache.clear
+      clear_defined_method_scan_caches
     end
 
       private def resolved_type_name_cache_entry_valid?(name : String, entry : ResolvedTypeNameCacheEntry) : Bool
