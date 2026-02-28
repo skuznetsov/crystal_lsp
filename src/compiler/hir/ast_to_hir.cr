@@ -2098,6 +2098,7 @@ module Crystal::HIR
     @lazy_module_methods : Bool
     @module_defs_cache_version : Int32
     @module_include_alias_cache : Hash({String, String?, Int32, Int32}, String)
+    @module_alias_prefix_cache : Hash({String, Int32, Int32}, String)
     @module_def_lookup_cache_version : Int32
     @module_def_lookup_cache : Hash(String, Tuple(CrystalV2::Compiler::Frontend::DefNode, CrystalV2::Compiler::Frontend::ArenaLike)?)
     @module_class_def_lookup_cache : Hash(String, Tuple(CrystalV2::Compiler::Frontend::DefNode, CrystalV2::Compiler::Frontend::ArenaLike)?)
@@ -2116,6 +2117,8 @@ module Crystal::HIR
     @type_cache : Hash(String, TypeRef)
     @type_cache_keys_by_component : Hash(String, Set(String))
     @type_cache_keys_by_generic_prefix : Hash(String, Set(String))
+    @receiver_type_param_map_cache : Hash(Int32, Hash(String, String))
+    @specialized_type_with_receiver_cache : Hash({Int32, Int32}, TypeRef)
     @array_type_for_element_cache : Hash(TypeRef, TypeRef)
     @array_type_for_element_nil_cache : Set(TypeRef)
     @hash_type_for_entry_cache : Hash({TypeRef, TypeRef}, NamedTuple(type: TypeRef, name: String))
@@ -2462,6 +2465,7 @@ module Crystal::HIR
       @lazy_module_methods = false
       @module_defs_cache_version = 0
       @module_include_alias_cache = {} of {String, String?, Int32, Int32} => String
+      @module_alias_prefix_cache = {} of {String, Int32, Int32} => String
       @module_def_lookup_cache_version = 0
       @module_def_lookup_cache = {} of String => Tuple(CrystalV2::Compiler::Frontend::DefNode, CrystalV2::Compiler::Frontend::ArenaLike)?
       @module_class_def_lookup_cache = {} of String => Tuple(CrystalV2::Compiler::Frontend::DefNode, CrystalV2::Compiler::Frontend::ArenaLike)?
@@ -2474,6 +2478,8 @@ module Crystal::HIR
       @type_cache = {} of String => TypeRef
       @type_cache_keys_by_component = {} of String => Set(String)
       @type_cache_keys_by_generic_prefix = {} of String => Set(String)
+      @receiver_type_param_map_cache = {} of Int32 => Hash(String, String)
+      @specialized_type_with_receiver_cache = {} of {Int32, Int32} => TypeRef
       @resolved_enum_name_cache = {} of String => String
       @resolved_enum_name_negative_cache = Set(String).new
       @method_name_parts_cache = Hash(UInt64, MethodNameParts).new(initial_capacity: 32768)
@@ -2884,7 +2890,16 @@ module Crystal::HIR
     end
 
     private def resolve_module_alias_prefix(module_name : String) : String
-      return resolve_type_alias_chain(module_name) unless module_name.includes?("::")
+      cache_key = {module_name, @module_defs_cache_version, @resolved_type_name_cache_epoch}
+      if cached = @module_alias_prefix_cache[cache_key]?
+        return cached
+      end
+
+      unless module_name.includes?("::")
+        resolved = resolve_type_alias_chain(module_name)
+        @module_alias_prefix_cache[cache_key] = resolved
+        return resolved
+      end
 
       probe = module_name
       while sep = probe.rindex("::")
@@ -2906,12 +2921,15 @@ module Crystal::HIR
               end
             end
           end
+          @module_alias_prefix_cache[cache_key] = result
           return result
         end
         probe = prefix
       end
 
-      resolve_type_alias_chain(module_name)
+      resolved = resolve_type_alias_chain(module_name)
+      @module_alias_prefix_cache[cache_key] = resolved
+      resolved
     end
 
     private def named_only_separator?(param : CrystalV2::Compiler::Frontend::Parameter) : Bool
@@ -4350,6 +4368,8 @@ module Crystal::HIR
       @type_aliases[alias_name] = target_name
       @resolved_type_alias_cache.clear
       @module_include_alias_cache.clear
+      @module_alias_prefix_cache.clear
+      clear_receiver_specialization_caches
       @type_cache.delete(alias_name)
       invalidate_type_cache_for_namespace(alias_name)
     end
@@ -10975,9 +10995,23 @@ module Crystal::HIR
     end
 
     @[AlwaysInline]
+    private def clear_receiver_specialization_caches : Nil
+      @receiver_type_param_map_cache.clear
+      @specialized_type_with_receiver_cache.clear
+    end
+
+    @[AlwaysInline]
+    private def bump_class_info_version : Nil
+      @class_info_version += 1
+      clear_receiver_specialization_caches
+    end
+
+    @[AlwaysInline]
     private def bump_module_defs_cache_version : Nil
       @module_defs_cache_version += 1
       @module_include_alias_cache.clear
+      @module_alias_prefix_cache.clear
+      clear_receiver_specialization_caches
     end
 
     private def register_module_with_name(node : CrystalV2::Compiler::Frontend::ModuleNode, module_name : String)
@@ -15003,7 +15037,7 @@ module Crystal::HIR
         )
         @class_info[class_name] = provisional_info
         @class_info_by_type_id[type_ref.id] = provisional_info
-        @class_info_version += 1
+        bump_class_info_version
 
         defined_start = Time.instant if mono_debug
         if env_has?("DEBUG_TYPE_RESOLVE") && class_name == "IO"
@@ -15707,7 +15741,7 @@ module Crystal::HIR
       final_info = ClassInfo.new(class_name, type_ref, ivars, class_vars, offset, is_struct, parent_name)
       @class_info[class_name] = final_info
       @class_info_by_type_id[type_ref.id] = final_info
-      @class_info_version += 1
+      bump_class_info_version
       record_class_parent(class_name, parent_name)
       if env_has?("DEBUG_CLASS_PARENTS") && (class_name == "Base" || class_name == "Child" || class_name == "IO::Memory")
         STDERR.puts "[CLASS_PARENT] class=#{class_name} parent=#{parent_name || "nil"}"
@@ -23684,7 +23718,7 @@ module Crystal::HIR
               new_info = ClassInfo.new(info.name, info.type_ref, new_ivars, info.class_vars, offset, info.is_struct, info.parent_name)
               @class_info[struct_name] = new_info
               @class_info_by_type_id[info.type_ref.id] = new_info
-              @class_info_version += 1
+              bump_class_info_version
               changed = true
             end
           rescue ex
@@ -28351,6 +28385,11 @@ module Crystal::HIR
     end
 
     private def type_param_map_for_receiver_type(receiver_type : TypeRef) : Hash(String, String)
+      receiver_type_id = receiver_type.id.to_i32
+      if cached = @receiver_type_param_map_cache[receiver_type_id]?
+        return cached
+      end
+
       desc = @module.get_type_descriptor(receiver_type)
       return {} of String => String unless desc
 
@@ -28361,10 +28400,12 @@ module Crystal::HIR
           name = get_type_name_from_ref(ref)
           (name == "Void" || name == "Unknown") ? "Unknown" : name
         end
-        return {
+        mapping = {
           "T"        => names.join(" | "),
           "T__tuple" => names.join(", "),
         }
+        @receiver_type_param_map_cache[receiver_type_id] = mapping
+        return mapping
       end
 
       info = split_generic_base_and_args(desc.name)
@@ -28385,6 +28426,17 @@ module Crystal::HIR
         mapping[param] = args.unsafe_fetch(i).strip
         i += 1
       end
+      if first_arg = args[0]?
+        mapping["K"] ||= first_arg
+        mapping["T"] ||= first_arg
+        mapping["K2"] ||= first_arg
+      end
+      if second_arg = args[1]?
+        mapping["V"] ||= second_arg
+        mapping["U"] ||= second_arg
+        mapping["V2"] ||= second_arg
+      end
+      @receiver_type_param_map_cache[receiver_type_id] = mapping
       mapping
     end
 
@@ -28412,17 +28464,23 @@ module Crystal::HIR
     end
 
     private def specialize_type_with_receiver_map(type_ref : TypeRef, receiver_type : TypeRef) : TypeRef
+      cache_key = {type_ref.id.to_i32, receiver_type.id.to_i32}
+      if cached = @specialized_type_with_receiver_cache[cache_key]?
+        return cached
+      end
+
       receiver_map = type_param_map_for_receiver_type(receiver_type)
       return type_ref if receiver_map.empty?
 
-      extend_receiver_type_param_aliases!(receiver_map, receiver_type)
       type_name = get_type_name_from_ref(type_ref)
       substituted = substitute_type_params(type_name, receiver_map)
       substituted = qualify_receiver_nested_entry_type(substituted, receiver_type)
       return type_ref if substituted == type_name
 
       specialized = type_ref_for_name(substituted)
-      specialized == TypeRef::VOID ? type_ref : specialized
+      result = specialized == TypeRef::VOID ? type_ref : specialized
+      @specialized_type_with_receiver_cache[cache_key] = result
+      result
     end
 
     private def qualify_receiver_nested_entry_type(type_name : String, receiver_type : TypeRef) : String
@@ -60993,7 +61051,7 @@ module Crystal::HIR
                 class_info.parent_name
               )
               @class_info_by_type_id[class_info.type_ref.id] = @class_info[class_name]
-              @class_info_version += 1
+              bump_class_info_version
               ivar_type = value_type
               ivar_offset = new_offset
             end
@@ -61593,7 +61651,7 @@ module Crystal::HIR
                 class_info.parent_name
               )
               @class_info_by_type_id[class_info.type_ref.id] = @class_info[class_name]
-              @class_info_version += 1
+              bump_class_info_version
               ivar_type = value_type
               ivar_offset = new_offset
             end

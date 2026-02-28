@@ -1,6 +1,76 @@
 # Crystal v2 — Active Work (codegen branch)
 
 ## Known Bugs (codegen)
+- **2026-02-28 (latest): stage2 watchdog now supports periodic sample timeline (start 30s, then every 60s)**
+  - Scope:
+    - `scripts/timeout_sample_lldb.sh`:
+      - default timeout remains `300s`;
+      - added periodic pre-timeout sampling (enabled by default):
+        - `--series-start SEC` (default `30`)
+        - `--series-interval SEC` (default `60`)
+        - `--series-duration SEC` (default `--sample`)
+        - `--no-series` (disable periodic snapshots)
+      - emits per-snapshot artifacts:
+        - `sample_series/sample.N.txt`
+        - `sample_series/hotspots.N.txt`
+        - timeline records in `summary.txt`.
+      - added CLI compatibility alias `--out-dir` for `--out`.
+    - `regression_tests/stage2_env_optional_hang_probe.sh`:
+      - default timeout updated to `300`.
+    - `regression_tests/stage2_no_codegen_puts_repro.sh`:
+      - switched to `--out` (kept backward compatibility in watchdog via `--out-dir` alias).
+  - Why:
+    - single timeout snapshot often misses hotspot evolution; timeline snapshots expose phase shifts/root-cause transitions.
+  - Evidence:
+    - syntax/help:
+      - `bash -n scripts/timeout_sample_lldb.sh` -> `exit 0`
+      - `scripts/timeout_sample_lldb.sh --help` shows new series flags.
+    - smoke:
+      - `scripts/timeout_sample_lldb.sh -t 5 -s 1 --series-start 1 --series-interval 2 --series-duration 1 --no-lldb -o /tmp/timeout_sample_series_smoke -- /bin/sleep 10` -> timeout `124`
+      - `summary.txt` contains timeline:
+        - `idx=0 t=1s`
+        - `idx=1 t=3s`
+        - `idx=2 t=5s`
+      - created files:
+        - `/tmp/timeout_sample_series_smoke/sample_series/sample.{0,1,2}.txt`
+        - `/tmp/timeout_sample_series_smoke/sample_series/hotspots.{0,1,2}.txt`
+  - Status:
+    - **done** (debug tooling; no codegen semantics changed).
+
+- **2026-02-28 (latest): receiver specialization + alias-prefix caching reduced stage1 churn, stage2 hotspot moved again**
+  - Scope (`src/compiler/hir/ast_to_hir.cr`):
+    - include/module alias path:
+      - added versioned `@module_alias_prefix_cache` in `resolve_module_alias_prefix`;
+      - invalidated together with alias/module graph updates.
+    - receiver specialization path:
+      - added `@receiver_type_param_map_cache` (by receiver `TypeRef` id);
+      - added `@specialized_type_with_receiver_cache` (by `{return_type_ref, receiver_type_ref}`);
+      - `type_param_map_for_receiver_type` now memoizes tuple/generic maps and pre-populates receiver aliases (`K/T/K2`, `V/U/V2`);
+      - `specialize_type_with_receiver_map` now uses memoized maps + memoized specialization result.
+    - invalidation discipline:
+      - introduced `clear_receiver_specialization_caches`;
+      - wired cache clears into `register_type_alias`, `bump_module_defs_cache_version`, and class-info version bumps via `bump_class_info_version`.
+  - Why:
+    - stage2 timeout samples repeatedly showed heavy `lower_call -> type_ref_for_name -> substitute_type_params` churn with hash-heavy cache/index traffic.
+  - Evidence:
+    - debug:
+      - `/usr/bin/time -p crystal build src/crystal_v2.cr -o /tmp/stage1_dbg_receiver_specialization_cache_fix --error-trace` -> `exit 0`, **real 9.85s**
+      - `bash regression_tests/stage2_env_optional_repro.sh /tmp/stage1_dbg_receiver_specialization_cache_fix` -> `not reproduced`
+      - `bash regression_tests/run_mini_oracles.sh /tmp/stage1_dbg_receiver_specialization_cache_fix` -> **5/5 PASS**
+    - release stage1:
+      - `/usr/bin/time -p crystal build --release src/crystal_v2.cr -o /tmp/stage1_rel_receiver_specialization_cache_fix --error-trace` -> `exit 0`, **real 423.43s**
+      - previous probe in this cycle (before receiver-specialization cache): **real 458.13s**
+    - stage2 watchdog (`t300`):
+      - `scripts/timeout_sample_lldb.sh -t 300 -s 8 -n 15 -o /tmp/stage2_rel_receiver_specialization_cache_fix_t300 -- /usr/bin/time -p /tmp/stage1_rel_receiver_specialization_cache_fix src/crystal_v2.cr --release -o /tmp/stage2_rel_receiver_specialization_cache_fix` -> timeout `124`
+      - top symbols shifted to:
+        - `type_ref_for_name` 524
+        - `lower_call` 413
+        - `resolve_type_name_in_context` 242
+        - `register_concrete_class` 265
+        - `Hash(String, Nil)#upsert` 141
+  - Status:
+    - **partial**: stage2 still exceeds 300s, but stage1 release recovered to ~423s and hotspots moved away from earlier alias-prefix dominance toward call/type specialization path.
+
 - **2026-02-28 (latest): arena-resolution and allocator-init lookup hot-path hardening (stage2 still unstable)**
   - Scope (`src/compiler/hir/ast_to_hir.cr`):
     - `resolve_arena_for_def`:
