@@ -1,5 +1,38 @@
 # Crystal v2 — Active Work (codegen branch)
 
+## Historical pattern ledger (root-cause oriented, 2026-02-28)
+
+### Confirmed patterns (worked repeatedly)
+- Move from single hotspot fixes to workload-shape analysis:
+  - sample hotspots migrate between phases after each local fix;
+  - stable progress comes from reducing total work volume (counts), not just one function cost.
+- Small repro first, full bootstrap second:
+  - `stage2_yield_scan_hang_probe` + mini-oracles gives faster and cleaner signal than full bootstrap-only iteration.
+- Release stage1 is the only relevant performance baseline for stage2 bootstrap timing.
+- Cache/index fixes in hot paths can produce real gains when tied to invariant keys and explicit invalidation.
+- Existing timeout+sample+lLDB pipeline is useful only with timeline series (30s start, then periodic snapshots).
+
+### Refuted patterns (do not repeat)
+- Symptom masking/hardcoded special-cases in codegen/runtime path:
+  - may unblock one trace, but usually shifts failure and increases fragility.
+- “Hot function in one sample == root cause”:
+  - repeatedly falsified by hotspot migration across HIR/MIR/LLVM after each micro-fix.
+- Stage1 compile-time improvements (original compiler) as success metric:
+  - not accepted as stage2 bootstrap success proxy.
+
+### Current root-cause hypotheses (ordered)
+1) Superlinear growth in HIR type-resolution/lowering work volume (not just per-call cost).
+2) Superlinear growth in LLVM emission volume/coercion paths for the same structural patterns.
+3) Measurement drift between runs (flags/cache/state mismatch) can hide/regress real improvements.
+
+### Operational invariants (must hold for every branch)
+- For performance branches, collect both:
+  - wall-time (`Timing (ms): ... total=...`)
+  - work-volume counters (`DebugProfile: ...`) on the same repro.
+- Compare at least two `N` points (default `1200,4000`) before judging branch direction.
+- If two consecutive branches only move hotspot location without slope improvement, pivot to workload-invariant analysis.
+- If stage2 run exceeds 3 minutes, treat as hang candidate: capture sample series + lldb, then stop branch.
+
 ## 2026-02-28: debug-profile oracle for root-cause velocity analysis
 - Added compiler flag `--debug-profile` in `src/compiler/cli.cr`.
 - `--debug-profile` implies `--stats` and emits a second machine-readable line:
