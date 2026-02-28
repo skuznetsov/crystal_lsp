@@ -21,6 +21,14 @@
       - `scripts/run_safe.sh /tmp/yield_nested_each_with_index_loop_backedge_fix_clean.bin 10 512` -> `count=3 sum=3`, `yield_nested_each_with_index_ok`
     - mini-oracles:
       - `bash regression_tests/run_mini_oracles.sh /tmp/stage1_dbg_loop_backedge_fix_clean` -> **5/5 PASS**
+    - stage1 release:
+      - `/usr/bin/time -p crystal build --release src/crystal_v2.cr -o /tmp/stage1_rel_loop_backedge_fix --error-trace` -> `exit 0`, **real 462.32s**
+    - stage2 release probe (watchdog 180s):
+      - `scripts/timeout_sample_lldb.sh -t 180 -s 8 -n 12 -o /tmp/stage2_rel_loop_backedge_fix_t180 -- /usr/bin/time -p /tmp/stage1_rel_loop_backedge_fix src/crystal_v2.cr --release -o /tmp/stage2_rel_loop_backedge_fix`
+      - result: timeout `124`, artifact not produced; hotspots moved to type-resolution/hash churn:
+        - `AstToHir#type_ref_for_name`
+        - `AstToHir#resolve_type_name_in_context`
+        - `Hash(String, Nil)#upsert` / `String#hash`
 
 - **2026-02-28 (latest): reduced stage2 recursion pressure by making pending generic monomorphization drain truly iterative**
   - Root cause (`src/compiler/hir/ast_to_hir.cr`):
