@@ -190,6 +190,9 @@ module CrystalV2
             options.verbose = true
           elsif arg == "-s" || arg == "--stats"
             options.stats = true
+          elsif arg == "--debug-profile"
+            options.debug_profile = true
+            options.stats = true
           elsif arg == "-p" || arg == "--progress"
             options.progress = true
           elsif arg == "--dump-symbols"
@@ -419,6 +422,10 @@ module CrystalV2
             # Verbose / progress (Crystal-compatible)
             p.on("--verbose", "Display executed commands") { options.verbose = true }
             p.on("-s", "--stats", "Enable statistics output") { options.stats = true }
+            p.on("--debug-profile", "Enable extended phase/counter profile output (implies --stats)") do
+              options.debug_profile = true
+              options.stats = true
+            end
             p.on("-p", "--progress", "Enable progress output") { options.progress = true }
 
             # Additional
@@ -559,6 +566,7 @@ module CrystalV2
         property debug : Bool = false
         property verbose : Bool = false
         property stats : Bool = false
+        property debug_profile : Bool = false
         property progress : Bool = false
         property check_only : Bool = false
         property dump_symbols : Bool = false
@@ -644,6 +652,7 @@ module CrystalV2
       # Full compilation (driver.cr functionality)
       private def compile(input_file : String, options : Options, out_io : IO, err_io : IO) : Int32
         timings = {} of String => Float64
+        debug_profile = options.debug_profile
         stage2_debug("[STAGE2_DEBUG] compile start", err_io)
         total_start = Time.instant
         @ast_cache_hits = 0
@@ -705,6 +714,10 @@ module CrystalV2
           err_io.puts "error: no valid source files found"
           emit_timings(options, out_io, timings, total_start)
           return 1
+        end
+        if debug_profile
+          timings["dbg_count_parse_arenas"] = all_arenas.size.to_f
+          timings["dbg_count_parse_loaded_files"] = loaded_files.size.to_f
         end
 
         # NOTE: Keep this as a constant-time summary.
@@ -797,6 +810,7 @@ module CrystalV2
         acyclic_types = Set(String).new
 
         flags = Runtime.target_flags
+        hir_collect_start = Time.instant if debug_profile
         stage2_debug("[STAGE2_DEBUG] top-level collection walk start", err_io)
         arena_i = 0
         while arena_i < all_arenas.size
@@ -839,6 +853,19 @@ module CrystalV2
           arena_i += 1
         end
         stage2_debug("[STAGE2_DEBUG] top-level collection done defs=#{def_nodes.size} classes=#{class_nodes.size} modules=#{module_nodes.size} constants=#{constant_exprs.size} main=#{main_exprs.size}", err_io)
+        if debug_profile
+          timings["dbg_ms_hir_collect"] = (Time.instant - hir_collect_start.not_nil!).total_milliseconds
+          timings["dbg_count_hir_defs"] = def_nodes.size.to_f
+          timings["dbg_count_hir_classes"] = class_nodes.size.to_f
+          timings["dbg_count_hir_modules"] = module_nodes.size.to_f
+          timings["dbg_count_hir_enums"] = enum_nodes.size.to_f
+          timings["dbg_count_hir_macros"] = macro_nodes.size.to_f
+          timings["dbg_count_hir_aliases"] = alias_nodes.size.to_f
+          timings["dbg_count_hir_libs"] = lib_nodes.size.to_f
+          timings["dbg_count_hir_constants"] = constant_exprs.size.to_f
+          timings["dbg_count_hir_main_exprs"] = main_exprs.size.to_f
+          timings["dbg_count_hir_acyclic_types"] = acyclic_types.size.to_f
+        end
 
         stage2_debug("[STAGE2_DEBUG] seed top-level names start", err_io)
         top_level_type_names = Set(String).new
@@ -1184,6 +1211,7 @@ module CrystalV2
         STDERR.puts "  Getting HIR module..." if options.progress
         hir_module = hir_converter.module
         STDERR.puts "  Got HIR module with #{hir_module.functions.size} functions" if options.progress
+        timings["dbg_count_hir_funcs_before_rta"] = hir_module.functions.size.to_f if debug_profile
         options.link_libraries = hir_module.link_libraries.dup
         log(options, out_io, "  Functions: #{hir_module.functions.size}")
         timings["hir"] = (Time.instant - hir_start).total_milliseconds if options.stats
@@ -1200,6 +1228,10 @@ module CrystalV2
           STDERR.puts "[PHASE_STATS] RTA: #{rta_msg.strip}" if ENV.has_key?("CRYSTAL_V2_PHASE_STATS")
         end
         timings["hir_reachable_funcs"] = hir_module.functions.size.to_f if options.stats
+        if debug_profile
+          timings["dbg_count_hir_reachable_names"] = reachable.size.to_f
+          timings["dbg_count_hir_funcs_after_rta"] = hir_module.functions.size.to_f
+        end
 
         if options.emit_hir
           hir_file = options.output + ".hir"
@@ -1217,6 +1249,7 @@ module CrystalV2
         log(options, out_io, "\n[3/6] Escape analysis...")
         escape_start = Time.instant
         total_funcs = hir_module.functions.size
+        timings["dbg_count_escape_total_funcs"] = total_funcs.to_f if debug_profile
         # Inlined memory_config_for (workaround: private methods defined
         # after call site are not resolved as methods by the compiler)
         memory_config = begin
@@ -1274,6 +1307,10 @@ module CrystalV2
         end
         timings["escape"] = (Time.instant - escape_start).total_milliseconds if options.stats
         timings["ea_skipped"] = ea_skipped.to_f if options.stats
+        if debug_profile
+          timings["dbg_count_escape_skipped_funcs"] = ea_skipped.to_f
+          timings["dbg_count_escape_analyzed_funcs"] = (total_funcs - ea_skipped).to_f
+        end
         if options.stats
           timings["mm_stack"] = total_ms_stats.stack_count.to_f
           timings["mm_slab"] = total_ms_stats.slab_count.to_f
@@ -1341,6 +1378,7 @@ module CrystalV2
 
         STDERR.puts "  Lowering #{hir_module.functions.size} functions to MIR..." if options.progress
         mir_module = mir_lowering.lower(options.progress)
+        timings["dbg_count_mir_funcs"] = mir_module.functions.size.to_f if debug_profile
         log(options, out_io, "  Functions: #{mir_module.functions.size}")
         timings["mir"] = (Time.instant - mir_start).total_milliseconds if options.stats
         timings["mir_funcs"] = mir_module.functions.size.to_f if options.stats
@@ -1372,6 +1410,7 @@ module CrystalV2
             end
           end
           timings["mir_opt"] = (Time.instant - mir_opt_start).total_milliseconds if options.stats
+          timings["dbg_count_mir_opt_funcs"] = mir_module.functions.size.to_f if debug_profile
         else
           log(options, out_io, "  Skipping MIR optimizations (--no-mir-opt)")
           timings["mir_opt"] = 0.0 if options.stats
@@ -1419,17 +1458,21 @@ module CrystalV2
         ll_file = options.output + ".ll"
 
         llvm_ir = ""
+        llvm_ir_bytes = 0_i64
         if options.emit_llvm
           llvm_ir = llvm_gen.generate
-          log(options, out_io, "  LLVM IR size: #{llvm_ir.size} bytes")
+          llvm_ir_bytes = llvm_ir.size.to_i64
+          log(options, out_io, "  LLVM IR size: #{llvm_ir_bytes} bytes")
           File.write(ll_file, llvm_ir)
         else
           File.open(ll_file, "w") do |io|
             llvm_gen.generate(io)
           end
-          log(options, out_io, "  LLVM IR size: #{File.size(ll_file)} bytes")
+          llvm_ir_bytes = File.size(ll_file)
+          log(options, out_io, "  LLVM IR size: #{llvm_ir_bytes} bytes")
         end
         timings["llvm"] = (Time.instant - llvm_start).total_milliseconds if options.stats
+        timings["dbg_count_llvm_ir_bytes"] = llvm_ir_bytes.to_f if debug_profile
 
         log(options, out_io, "  Wrote: #{ll_file}")
 
@@ -3576,6 +3619,30 @@ module CrystalV2
         parts << "llvm_cache=#{@llvm_cache_hits} hit/#{@llvm_cache_misses} miss" if options.llvm_cache
         parts << "pipeline_cache=#{@pipeline_cache_hits} hit/#{@pipeline_cache_misses} miss" if options.pipeline_cache
         out_io.puts "Timing (ms): #{parts.join(" ")}"
+        if options.debug_profile
+          debug_ms_keys = [] of String
+          debug_count_keys = [] of String
+          timings.each_key do |key|
+            if key.starts_with?("dbg_ms_")
+              debug_ms_keys << key
+            elsif key.starts_with?("dbg_count_")
+              debug_count_keys << key
+            end
+          end
+          debug_ms_keys.sort!
+          debug_count_keys.sort!
+
+          debug_parts = [] of String
+          debug_ms_keys.each do |key|
+            value = timings[key]? || 0.0
+            debug_parts << "#{key[7..-1]}=#{value.round(1)}ms"
+          end
+          debug_count_keys.each do |key|
+            value = timings[key]? || 0.0
+            debug_parts << "#{key[10..-1]}=#{value.to_i64}"
+          end
+          out_io.puts "DebugProfile: #{debug_parts.join(" ")}" unless debug_parts.empty?
+        end
 
         if MIR::OptimizationPipeline.pass_timing_enabled?
           pass_details = MIR::OptimizationPipeline.pass_timing_snapshot

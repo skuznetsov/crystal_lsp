@@ -1,5 +1,17 @@
 # Crystal v2 — Active Work (codegen branch)
 
+## 2026-02-28: debug-profile oracle for root-cause velocity analysis
+- Added compiler flag `--debug-profile` in `src/compiler/cli.cr`.
+- `--debug-profile` implies `--stats` and emits a second machine-readable line:
+  - `DebugProfile: ...`
+  - includes phase-adjacent counters (parse/HIR topology, RTA counts, escape analyzed/skipped, MIR function counts, LLVM IR bytes).
+- Added matrix mini-oracle:
+  - `regression_tests/stage2_debug_profile_oracle.sh`
+  - runs yield-scan stress at multiple `N` values, uses timeout+sample/lldb series (`30s + every 60s`), captures `Timing (ms)` + `DebugProfile` per case and writes `summary.tsv`.
+- Intended usage:
+  - `bash regression_tests/stage2_debug_profile_oracle.sh <stage2_compiler> 240 release 1200,4000`
+  - compare counter growth slope between `N=1200` and `N=4000` to identify superlinear root-cause branches before full bootstrap runs.
+
 ## Fast small repro loop (2026-02-28)
 - Use this loop for rapid rollback/iteration before full stage2 bootstrap checks.
 - Build debug stage1 with original compiler:
