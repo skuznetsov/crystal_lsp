@@ -1,6 +1,26 @@
 # Crystal v2 — Active Work (codegen branch)
 
 ## Known Bugs (codegen)
+- **2026-02-28 (latest): fixed root-cause non-local `return` misrouting in inlined yield blocks (`Hash#find_entry_with_index_linear_scan`)**
+  - Root cause (`src/compiler/hir/ast_to_hir.cr`):
+    - ownership check for `return` inside inlined block body required both:
+      - `@block_owner_function_ids[block.object_id] == ctx.function.id`, and
+      - lexical owner match against mutable `@current_class/@current_method`;
+    - nested inline contexts temporarily rebind lexical owner, so same-function block returns were misclassified and routed to inline-exit PHI instead of real function return.
+  - Fix:
+    - prioritize `function_id` ownership as authoritative for non-local return routing;
+    - keep lexical owner match only as fallback when function-id ownership is unavailable.
+  - Evidence:
+    - build:
+      - `/usr/bin/time -p crystal build src/crystal_v2.cr -o /tmp/stage1_dbg_nonlocal_return_fix --error-trace` -> `exit 0`, **real 10.55s**
+    - minimal repro:
+      - source:
+        - `h = {} of String => Int32; h["x"] = 1; puts h.has_key?("x")`
+      - before fix (stage1 baseline): `false`
+      - after fix (`/tmp/stage1_dbg_nonlocal_return_fix`): `true`
+    - regression script:
+      - `regression_tests/stage1_hash_has_key_nonlocal_return_repro.sh /tmp/stage1_dbg_nonlocal_return_fix` -> `not reproduced`
+
 - **2026-02-27 (latest): replaced fragile `any?` inline-name hardcode with structural callee guard (`yield` + `return`) and fixed arena mismatch regression**
   - Root cause (`src/compiler/hir/ast_to_hir.cr`):
     - previous skip-inline rule relied on method-name string matching for `any?`, which is brittle and symptom-level;

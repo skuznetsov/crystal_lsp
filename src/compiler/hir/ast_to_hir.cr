@@ -57137,16 +57137,22 @@ module Crystal::HIR
         # an intermediate inline-yield exit block. We detect this by comparing the block's
         # registered function_id against ctx.function.id.
         owner = @block_owner[block.object_id]?
-        owner_matches_current = if owner
-                                  owner_method = owner[:method_name]
-                                  owner_class = owner[:class_name]
-                                  owner_is_class = owner[:is_class]
-                                  method_matches = owner_method.nil? || owner_method.empty? || owner_method == @current_method
-                                  owner_class == @current_class && method_matches && owner_is_class == (@current_method_is_class || false)
-                                else
-                                  true
-                                end
-        block_owned_by_current_fn = (@block_owner_function_ids[block.object_id]? == ctx.function.id) && owner_matches_current
+        owner_fn_id = @block_owner_function_ids[block.object_id]?
+        # Function id is the strongest ownership signal for non-local return routing.
+        # Lexical owner checks can mismatch after temporary @current_class/method
+        # rebinding in nested inline contexts and then incorrectly route `return`
+        # to an inline-exit phi instead of a real function return.
+        block_owned_by_current_fn = (owner_fn_id == ctx.function.id)
+        # Keep lexical fallback only when function id ownership is unavailable.
+        if !block_owned_by_current_fn && owner_fn_id.nil? && owner
+          owner_method = owner[:method_name]
+          owner_class = owner[:class_name]
+          owner_is_class = owner[:is_class]
+          method_matches = owner_method.nil? || owner_method.empty? || owner_method == @current_method
+          block_owned_by_current_fn = owner_class == @current_class &&
+                                      method_matches &&
+                                      owner_is_class == (@current_method_is_class || false)
+        end
         base_override = nil
         if block_owned_by_current_fn
           # Block is from the same logical method — `return` inside it should exit
