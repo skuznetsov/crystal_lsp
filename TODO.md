@@ -33,6 +33,23 @@
 - If two consecutive branches only move hotspot location without slope improvement, pivot to workload-invariant analysis.
 - If stage2 run exceeds 3 minutes, treat as hang candidate: capture sample series + lldb, then stop branch.
 
+## 2026-02-28: full-history synthesis pass (cross-`TODO.md` pattern extraction)
+- Machine scan across whole `TODO.md` (not only latest entries) confirms recurring hotspot families:
+  - `type_ref_for_name` (97 mentions),
+  - `resolve_type_name_in_context` (49),
+  - `register_concrete_class` (31),
+  - `substitute_type_params_in_type_name` (15),
+  - `resolve_module_alias_prefix` (11).
+- Cross-era breakthrough pattern (where stage2 really crossed finish line):
+  - correctness-first ABI/IR fixes (union coercion/type-width/call-return typing) + large-IR streaming hardening in LLVM backend
+    repeatedly moved runs from `124` timeouts/`opt` rejects to successful stage2 outputs (`~110s` class runs in logged historical commits).
+- Cross-era anti-pattern:
+  - hotspot-local micro-edits without invariant checks often produced `partial` with hotspot migration only.
+- Updated guardrail for ongoing work:
+  - evaluate branches by slope (`N=1200 -> N=4000`) and phase counters, not by one sample snapshot;
+  - preserve compatibility constraints (no stdlib hacks, no method-name hardcoding);
+  - prioritize invariant classes that historically unlocked stage2: ABI typing, cache-key context correctness, emission memory model.
+
 ## 2026-02-28: `substitute_type_params_in_type_name` cache scope + lazy fallback (partial, signal still noisy)
 - Scope (`src/compiler/hir/ast_to_hir.cr`):
   - `@subst_cache` changed to per-class scoped map:
@@ -55,6 +72,13 @@
       - `AstToHir#substitute_type_params_in_type_name`
       - `Hash(String, String)#find_entry`
       - `Hash(String, Hash(String, String))#find_entry`
+  - commit anchor + latest rerun:
+    - commit: `899074d0` (`hir: reduce type substitution cache churn`)
+    - stage1 release rebuild on this commit:
+      - `/usr/bin/time -p crystal build --release src/crystal_v2.cr -o /tmp/stage1_rel_subst_guard --error-trace` -> `real 433.94s`
+    - stage2 watchdog (`t180`):
+      - `scripts/timeout_sample_lldb.sh -t 180 ... /tmp/stage1_rel_subst_guard src/crystal_v2.cr --release ...` -> `status 124`
+      - top symbols: `String#hash`, `Hash(String, String)#find_entry`, `substitute_type_params_in_type_name`, `resolve_module_alias_prefix`, `resolve_type_alias_chain_no_context`.
   - discarded experiment (rolled back in working tree before next step):
     - identity-cache + last-scope fast-path for substitution cache caused regression (`N=4000` timeout at `180s`), so it was removed.
   - current branch reruns remain noisy around `N=4000` (sometimes DCE/RC-elision hotspots dominate near the same timeout wall), so this step is marked partial.
