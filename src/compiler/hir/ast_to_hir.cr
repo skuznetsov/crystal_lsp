@@ -1266,6 +1266,8 @@ module Crystal::HIR
     @function_lowering_states : Hash(String, FunctionLoweringState) = Hash(String, FunctionLoweringState).new(initial_capacity: 32768)
     # Queue for pending lower requests to avoid O(n^2) scans of the state hash.
     @pending_function_queue : Array(String) = [] of String
+    # Reused removal set for pending queue compaction (avoid per-iteration pending.to_set allocations).
+    @pending_queue_remove_set : Set(String) = Set(String).new
     # Pending queue source counts (debug only): stripped base name → enqueue count.
     @pending_source_counts : Hash(String, Int32) = {} of String => Int32
     # Pending queue sample names (debug only): stripped base name → sample full names.
@@ -32314,14 +32316,18 @@ module Crystal::HIR
         # Remove from queue so we don't reprocess endlessly
         # Also remove deferred functions from the queue (they're tracked separately)
         if lazy_rta
-          remove_set = pending.to_set
+          remove_set = @pending_queue_remove_set
+          remove_set.clear
+          pending.each { |name| remove_set << name }
           @rta_deferred_set.each { |name| remove_set << name }
           @pending_function_queue.reject! { |name| remove_set.includes?(name) }
         elsif pending.size == @pending_function_queue.size
           @pending_function_queue.clear
         else
-          pending_set = pending.to_set
-          @pending_function_queue.reject! { |name| pending_set.includes?(name) }
+          remove_set = @pending_queue_remove_set
+          remove_set.clear
+          pending.each { |name| remove_set << name }
+          @pending_function_queue.reject! { |name| remove_set.includes?(name) }
         end
 
         # Reset lowering depth to allow these functions to be processed

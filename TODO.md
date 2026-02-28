@@ -1,6 +1,31 @@
 # Crystal v2 — Active Work (codegen branch)
 
 ## Known Bugs (codegen)
+- **2026-02-28 (latest): removed `pending.to_set` allocation hotspot in pending-lowering loop; bottleneck moved to type-param checks in return inference**
+  - Scope (`src/compiler/hir/ast_to_hir.cr`):
+    - added reusable `@pending_queue_remove_set` for queue compaction;
+    - replaced per-iteration `pending.to_set` allocations in `process_pending_lower_functions` with reusable set clear/refill;
+    - keeps behavior identical for both lazy-RTA and non-lazy branches (`reject!` membership still set-based).
+  - Why:
+    - LLDB stop in stage2 timeout previously landed in `Set#to_set` allocation path inside `process_pending_lower_functions` (`ast_to_hir.cr:32317`);
+    - this is pure churn (allocation/GC), not semantic work.
+  - Evidence:
+    - debug validation:
+      - `/usr/bin/time -p crystal build src/crystal_v2.cr -o /tmp/stage1_dbg_pending_remove_set_fix --error-trace` -> `exit 0`, **real 8.78s**
+      - `bash regression_tests/run_mini_oracles.sh /tmp/stage1_dbg_pending_remove_set_fix` -> **5/5 PASS**
+      - `bash regression_tests/stage2_env_optional_repro.sh /tmp/stage1_dbg_pending_remove_set_fix` -> `not reproduced`
+    - release stage1:
+      - `/usr/bin/time -p crystal build --release src/crystal_v2.cr -o /tmp/stage1_rel_pending_remove_set_fix --error-trace` -> `exit 0`, **real 430.75s**
+    - stage2 watchdog with timeline (`t300`):
+      - `scripts/timeout_sample_lldb.sh -t 300 -s 8 -n 15 -o /tmp/stage2_rel_pending_remove_set_fix_t300 -- /usr/bin/time -p /tmp/stage1_rel_pending_remove_set_fix src/crystal_v2.cr --release -o /tmp/stage2_rel_pending_remove_set_fix` -> timeout `124`
+      - timeline samples at `30/90/150/210/270s` recorded (`sample_series` count `5`);
+      - final LLDB stack no longer points to `pending.to_set`; now lands in:
+        - `builtin_alias_target?` -> `type_param_like?` -> `type_ref_for_name`
+        - `infer_return_type_from_includers`
+        - nested `inline_yield_function` / `lower_call` path
+  - Status:
+    - **partial**: allocation hotspot removed, but stage2 still exceeds 300s; next root-cause branch is type-param classification / return-inference churn (not queue-set churn).
+
 - **2026-02-28 (latest): stage2 watchdog now supports periodic sample timeline (start 30s, then every 60s)**
   - Scope:
     - `scripts/timeout_sample_lldb.sh`:
