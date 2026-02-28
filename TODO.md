@@ -16,6 +16,27 @@
   - run full release stage2 bootstrap only after small repro signal improves.
 
 ## Known Bugs (codegen)
+- **2026-02-28 (latest): indexed call target lookup by `FunctionId` in LLVM backend hot path**
+  - Scope (`src/compiler/mir/llvm_backend.cr`):
+    - added `@func_by_id : Hash(FunctionId, Function)` and populated it in `build_function_lookup_indexes`;
+    - replaced linear scans `@module.functions.find { |f| f.id == inst.callee }` in 3 hot sites:
+      - `prepass_collect_constants`
+      - void-usage inference pass (`collect_usage_contexts` consumer block)
+      - `emit_call`.
+  - Why:
+    - after DCE array-count fix, timeout profile moved into LLVM backend and still showed hash/string churn around call emission/prepass.
+    - these sites were still doing O(function_count) lookup per call instruction.
+  - Evidence (small repro loop):
+    - build:
+      - `/usr/bin/time -p crystal build src/crystal_v2.cr -o /tmp/stage1_dbg_funcid_index --error-trace` -> **real 7.56s**
+    - small full-codegen stress:
+      - `bash regression_tests/stage2_yield_scan_hang_probe.sh /tmp/stage1_dbg_funcid_index 180 debug 1200 full` -> **real 43.38s**, completed
+      - `bash regression_tests/stage2_yield_scan_hang_probe.sh /tmp/stage1_dbg_funcid_index 180 debug 4000 full` -> **real 177.85s**, completed (previously timed out `124`)
+    - sanity:
+      - `bash regression_tests/run_mini_oracles.sh /tmp/stage1_dbg_funcid_index` -> **5/5 PASS**
+  - Status:
+    - **partial, root-cause-positive**: heavy small repro now completes under 180s; next step is reduce remaining string/hash churn in early HIR lowering (`type_ref_for_name` / `lower_call`) and LLVM type-name hashing in later phase.
+
 - **2026-02-28 (latest): root-cause fix in MIR DCE use-count structure (Hash -> dense Array), bottleneck moved later**
   - Scope (`src/compiler/mir/optimizations.cr`):
     - `DeadCodeEliminationPass#run` no longer uses `Hash(ValueId, Int32).new(0)` for `use_counts`;

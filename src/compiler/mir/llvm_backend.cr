@@ -373,6 +373,7 @@ module Crystal::MIR
     @global_declared_types : Hash(String, String) = {} of String => String  # Global name -> declared LLVM type
     @func_by_name : Hash(String, Function)  # Fast lookup for exact/mangled function names
     @func_by_suffix : Hash(String, Function)  # Fast lookup for namespace suffix matches
+    @func_by_id : Hash(FunctionId, Function)  # Fast lookup by function id for Call lowering/prepass
     @alloc_element_types : Hash(ValueId, TypeRef)  # For GEP element type lookup
     @array_info : Hash(ValueId, {String, Int32})  # Array element_type and size
     @string_constants : Hash(String, String)  # String value -> global name
@@ -411,8 +412,10 @@ module Crystal::MIR
     private def build_function_lookup_indexes
       @func_by_name.clear
       @func_by_suffix.clear
+      @func_by_id.clear
 
       @module.functions.each do |f|
+        @func_by_id[f.id] = f unless @func_by_id.has_key?(f.id)
         mangled = @type_mapper.mangle_name(f.name)
         @func_by_name[mangled] = f unless @func_by_name.has_key?(mangled)
         @func_by_name[f.name] = f unless @func_by_name.has_key?(f.name)
@@ -549,6 +552,7 @@ module Crystal::MIR
       @emitted_value_types = {} of String => String
       @func_by_name = {} of String => Function
       @func_by_suffix = {} of String => Function
+      @func_by_id = {} of FunctionId => Function
       build_function_lookup_indexes
 
       # Type metadata
@@ -1325,6 +1329,43 @@ module Crystal::MIR
                "  %result = call float @llvm.pow.f32(float %self, float %other)\n" \
                "  ret float %result\n" \
                "}\n"
+      end
+
+      # Nil | IntN arithmetic fallback used by hash index bookkeeping paths.
+      # Semantics: nil is treated as 0 for these helpers.
+      if m = name.match(/\ANil\$_\$OR\$_(Int8|Int16|Int32|Int64|UInt8|UInt16|UInt32|UInt64)\$H\$(ADD|SUB)\$\$(Int8|Int16|Int32|Int64|UInt8|UInt16|UInt32|UInt64)\z/)
+        lhs = m[1]
+        op = m[2]
+        rhs = m[3]
+        if lhs == rhs
+          llvm_type = case lhs
+                      when "Int8", "UInt8"   then "i8"
+                      when "Int16", "UInt16" then "i16"
+                      when "Int32", "UInt32" then "i32"
+                      when "Int64", "UInt64" then "i64"
+                      else "i32"
+                      end
+          ir_op = op == "SUB" ? "sub" : "add"
+          union_llvm = arg_types[0]? || "%Nil$_$OR$_#{lhs}.union"
+          return "; Nil | #{lhs}##{op}(#{rhs}) dead-code primitive\n" \
+                 "define #{llvm_type} @#{name}(#{union_llvm} %self, #{llvm_type} %other) {\n" \
+                 "entry:\n" \
+                 "  %self.ptr = alloca #{union_llvm}, align 8\n" \
+                 "  store #{union_llvm} %self, ptr %self.ptr\n" \
+                 "  %self.tid_ptr = getelementptr #{union_llvm}, ptr %self.ptr, i32 0, i32 0\n" \
+                 "  %self.tid = load i32, ptr %self.tid_ptr\n" \
+                 "  %self.is_nil = icmp eq i32 %self.tid, 0\n" \
+                 "  br i1 %self.is_nil, label %nil_case, label %value_case\n" \
+                 "nil_case:\n" \
+                 "  %nil.res = #{ir_op} #{llvm_type} 0, %other\n" \
+                 "  ret #{llvm_type} %nil.res\n" \
+                 "value_case:\n" \
+                 "  %self.payload_ptr = getelementptr #{union_llvm}, ptr %self.ptr, i32 0, i32 1\n" \
+                 "  %self.val = load #{llvm_type}, ptr %self.payload_ptr, align 4\n" \
+                 "  %val.res = #{ir_op} #{llvm_type} %self.val, %other\n" \
+                 "  ret #{llvm_type} %val.res\n" \
+                 "}\n"
+        end
       end
 
       # Primitive integer comparison/arithmetic methods: Int32#>(Int32) etc.
@@ -7266,7 +7307,7 @@ module Crystal::MIR
           elsif inst.is_a?(Call)
             # For Call instructions, check the callee's actual return type
             # If callee returns void, mark as void even if inst.type says otherwise
-            callee_func = @module.functions.find { |f| f.id == inst.callee }
+            callee_func = @func_by_id[inst.callee]?
             if callee_func
               if ENV["DEBUG_SLOT_TYPES"]? && func.name.includes?("Path#basename")
                 inst_type_name = @module.type_registry.get(inst.type).try(&.name) || "unknown"
@@ -7467,7 +7508,7 @@ module Crystal::MIR
           # Skip Call/ExternCall instructions that are truly void
           # These are genuinely void and any usage is a MIR issue we handle with defaults
           if inst.is_a?(Call)
-            callee_func = @module.functions.find { |f| f.id == inst.callee }
+            callee_func = @func_by_id[inst.callee]?
             if callee_func && @type_mapper.llvm_type(callee_func.return_type) == "void"
               next  # Genuinely void, don't infer type
             end
@@ -9654,7 +9695,6 @@ module Crystal::MIR
             emit "%binop#{inst.id}.left_ext = #{ext_op} #{operand_type_str} #{left} to #{right_type_str}"
             left = "%binop#{inst.id}.left_ext"
             operand_type_str = right_type_str
-            result_type = right_type_str if is_arithmetic
           elsif right_bits < left_bits
             # Extend right to match left
             right_type = @value_types[inst.right]?
@@ -9662,7 +9702,6 @@ module Crystal::MIR
             emit "%binop#{inst.id}.right_ext = #{ext_op} #{right_type_str} #{right} to #{operand_type_str}"
             right = "%binop#{inst.id}.right_ext"
             right_type_str = operand_type_str
-            result_type = operand_type_str if is_arithmetic
           end
         end
 
@@ -9932,13 +9971,8 @@ module Crystal::MIR
           operand_bits = left_runtime_type.starts_with?('i') ? (left_runtime_type[1..].to_i? || 32) : 0
           right_bits_val = right_runtime_type.starts_with?('i') ? (right_runtime_type[1..].to_i? || 32) : 0
 
-          # If operands are larger than result, use the larger operand type
-          max_operand_bits = {operand_bits, right_bits_val}.max
-          if max_operand_bits > result_bits
-            result_type = "i#{max_operand_bits}"
-          end
-
-          # Extend smaller operands to result_type
+          # Normalize operands to MIR result type.
+          # MIR type is authoritative for arithmetic result width (for example UInt8 += 1).
           result_bits = result_type[1..].to_i? || 32
           if left_runtime_type.starts_with?('i') && left_runtime_type != result_type
             operand_bits = left_runtime_type[1..].to_i? || 32
@@ -11353,7 +11387,7 @@ module Crystal::MIR
 
     private def emit_call(inst : Call, name : String, func : Function)
       # Look up callee function for name and param types
-      callee_func = @module.functions.find { |f| f.id == inst.callee }
+      callee_func = @func_by_id[inst.callee]?
       callee_name = if callee_func
                       mangle_function_name(callee_func.name)
                     else
@@ -11516,6 +11550,8 @@ module Crystal::MIR
       emitted_ret = @emitted_function_return_types[callee_name]?
       needs_ptr_to_union_wrap = false
       ptr_to_union_target_type = ""
+      needs_scalar_to_union_wrap = false
+      scalar_to_union_target_type = ""
       needs_union_to_union_wrap = false
       union_to_union_target_type = ""
       return_type = if emitted_ret && emitted_ret != "void"
@@ -11536,8 +11572,10 @@ module Crystal::MIR
                         ptr_to_union_target_type = inst_return_type
                         callee_ret
                       elsif inst_return_type.includes?(".union") && !callee_ret.includes?(".union")
-                        # Keep callee ABI return type. Emitting a call with union return against
-                        # a non-union function declaration produces invalid LLVM IR.
+                        # Keep callee ABI return type, then wrap scalar/pointer result
+                        # into expected union layout after the call.
+                        needs_scalar_to_union_wrap = true
+                        scalar_to_union_target_type = inst_return_type
                         callee_ret
                       elsif inst_return_type.includes?(".union") && callee_ret.includes?(".union") &&
                             inst_return_type != callee_ret
@@ -11655,10 +11693,12 @@ module Crystal::MIR
       # callee definition doesn't. Strip the leading self arg when count is off by 1.
       call_args = inst.args
       if callee_func && callee_func.params.size == inst.args.size - 1 && inst.args.size > 0
-        # Off-by-1 arg count is the hallmark of class method self arg mismatch.
-        # The MIR call includes self (void/ptr/union) but the callee definition doesn't.
-        # Strip the leading self arg regardless of its LLVM type.
-        call_args = inst.args[1..]
+        # Off-by-1 can indicate a class/module method call where MIR still carries
+        # receiver `self` but callee signature doesn't. Restrict this only to `.`
+        # methods; applying it to instance methods (`#`) drops real first args.
+        if callee_func.name.includes?('.') && !callee_func.name.includes?('#')
+          call_args = inst.args[1..]
+        end
       end
       # Struct argument expansion: when the callee has more params than the call has args,
       # a struct-typed argument may need to be expanded into its individual fields.
@@ -12390,6 +12430,21 @@ module Crystal::MIR
         emit "#{name} = load #{ptr_to_union_target_type}, ptr %ptr2union.#{c}.alloca"
         record_emitted_type(name, ptr_to_union_target_type)
         @value_types[inst.id] = inst.type
+      elsif needs_scalar_to_union_wrap
+        # ABI fix: callee returns scalar/pointer but caller expects a union.
+        # Emit call with callee ABI type, then wrap into expected union.
+        @value_names[inst.id] ||= "r#{inst.id}"
+        c = @cond_counter
+        @cond_counter += 1
+        call_reg = "%s2u_call.#{c}.raw"
+        emit "#{call_reg} = call #{return_type} @#{callee_name}(#{args})"
+        record_emitted_type(call_reg, return_type)
+        wrapped_val = coerce_union_value_for_type("s2u_call.#{c}", call_reg, scalar_to_union_target_type)
+        emit "%s2u_call.#{c}.final = alloca #{scalar_to_union_target_type}, align 8"
+        emit "store #{scalar_to_union_target_type} #{wrapped_val}, ptr %s2u_call.#{c}.final"
+        emit "#{name} = load #{scalar_to_union_target_type}, ptr %s2u_call.#{c}.final"
+        record_emitted_type(name, scalar_to_union_target_type)
+        @value_types[inst.id] = inst.type
       elsif needs_union_to_union_wrap
         # ABI fix: callee returns one union layout, caller/prepass expects another.
         # Preserve payload and remap type_id across variant orderings.
@@ -12500,7 +12555,10 @@ module Crystal::MIR
     end
 
     private def emit_indirect_call(inst : IndirectCall, name : String)
-      return_type = @type_mapper.llvm_type(inst.type)
+      inst_return_type = @type_mapper.llvm_type(inst.type)
+      return_type = inst_return_type
+      needs_scalar_to_union_wrap = false
+      scalar_to_union_target_type = ""
       callee = value_ref(inst.callee_ptr)
       # Handle args: union types need special handling - pass ptr to slot/alloca, not loaded value.
       # Non-union values should be passed by value with their LLVM type.
@@ -12614,7 +12672,10 @@ module Crystal::MIR
           STDERR.puts "[EXTERN_CALL] extern_name=#{inst.extern_name} args=#{inst.args.size}"
         end
       end
-      return_type = @type_mapper.llvm_type(inst.type)
+      inst_return_type = @type_mapper.llvm_type(inst.type)
+      return_type = inst_return_type
+      needs_scalar_to_union_wrap = false
+      scalar_to_union_target_type = ""
 
       # IMPORTANT: Check if prepass determined a different type (e.g., from phi usage)
       # Prepass type takes precedence over inst.type when phi expects a specific type
@@ -12622,7 +12683,11 @@ module Crystal::MIR
       if prepass_type
         prepass_llvm_type = @type_mapper.llvm_type(prepass_type)
         if prepass_llvm_type != "void" && prepass_llvm_type != return_type
-          return_type = prepass_llvm_type
+          # Keep union ABI contract from MIR instruction type; do not downgrade
+          # to a scalar prepass hint.
+          unless inst_return_type.includes?(".union") && !prepass_llvm_type.includes?(".union")
+            return_type = prepass_llvm_type
+          end
         end
       end
 
@@ -13197,6 +13262,11 @@ module Crystal::MIR
         end  # end else for prepass_type check
       end
 
+      if inst_return_type.includes?(".union") && !return_type.includes?(".union")
+        needs_scalar_to_union_wrap = true
+        scalar_to_union_target_type = inst_return_type
+      end
+
       # Known varargs functions need explicit signatures because we currently declare unknown
       # varargs as `declare <ret> @name(...)` (no fixed params). For correct ABI lowering,
       # the number and types of *fixed* parameters must match the real C prototype.
@@ -13251,6 +13321,22 @@ module Crystal::MIR
         emit "call void @#{mangled_extern_name}(#{args})"
         # Mark as void so value_ref returns a safe default for downstream uses
         @void_values << inst.id
+      elsif needs_scalar_to_union_wrap
+        if fixed_sig
+          sig_prefix = fixed_sig.join(", ")
+          raw_name = "%ext_s2u.#{inst.id}.raw"
+          emit "#{raw_name} = call #{return_type} (#{sig_prefix}, ...) @#{mangled_extern_name}(#{args})"
+        else
+          raw_name = "%ext_s2u.#{inst.id}.raw"
+          emit "#{raw_name} = call #{return_type} @#{mangled_extern_name}(#{args})"
+        end
+        record_emitted_type(raw_name, return_type)
+        wrapped_val = coerce_union_value_for_type("ext_s2u.#{inst.id}", raw_name, scalar_to_union_target_type)
+        emit "%ext_s2u.#{inst.id}.final = alloca #{scalar_to_union_target_type}, align 8"
+        emit "store #{scalar_to_union_target_type} #{wrapped_val}, ptr %ext_s2u.#{inst.id}.final"
+        emit "#{name} = load #{scalar_to_union_target_type}, ptr %ext_s2u.#{inst.id}.final"
+        record_emitted_type(name, scalar_to_union_target_type)
+        @value_types[inst.id] = inst.type
       elsif fixed_sig
         sig_prefix = fixed_sig.join(", ")
         emit "#{name} = call #{return_type} (#{sig_prefix}, ...) @#{mangled_extern_name}(#{args})"
@@ -13725,18 +13811,9 @@ module Crystal::MIR
       if union_type.includes?(".union")
         # Store union value to stack to get pointer for GEP
         emit "%#{base_name}.union_ptr = alloca #{union_type}, align 8"
-        # Prefer the actual emitted union type for the value. If it differs from the
-        # expected union_type, reinterpret through memory before storing.
-        actual_union_val_type = @emitted_value_types[union_val]? || union_type
-        store_val = if actual_union_val_type.includes?(".union") && actual_union_val_type != union_type
-                      emit "%#{base_name}.union_conv_ptr = alloca #{actual_union_val_type}, align 8"
-                      emit "store #{actual_union_val_type} #{normalize_union_value(union_val, actual_union_val_type)}, ptr %#{base_name}.union_conv_ptr"
-                      emit "%#{base_name}.union_conv = load #{union_type}, ptr %#{base_name}.union_conv_ptr"
-                      "%#{base_name}.union_conv"
-                    else
-                      # Use zeroinitializer for integer literal 0 with struct types
-                      (union_val == "0" || union_val == "null") ? "zeroinitializer" : union_val
-                    end
+        # Coerce source value to the expected union layout before storing.
+        # Handles scalar/pointer values as well as cross-union layout remaps.
+        store_val = coerce_union_value_for_type("#{base_name}.unwrap", union_val, union_type)
         emit "store #{union_type} #{store_val}, ptr %#{base_name}.union_ptr"
 
         # Check if variant is a tuple type (stack-allocated value type) that needs memcpy from payload
