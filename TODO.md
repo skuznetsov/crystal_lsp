@@ -1,6 +1,36 @@
 # Crystal v2 — Active Work (codegen branch)
 
 ## Known Bugs (codegen)
+- **2026-02-28 (latest): removed regex-heavy unresolved generic token path and reduced short-token allocation churn (stage2 still unstable)**
+  - Scope (`src/compiler/hir/ast_to_hir.cr`):
+    - removed double-scan precheck in `has_top_level_union_separator?` (`includes?('|') || includes?("___")`) and kept single-pass depth-aware scanner;
+    - optimized include alias resolution hot path:
+      - avoid unconditional suffix slicing in `resolve_module_alias_prefix` (construct suffix only on real alias-hit);
+      - simplified scope-walk loops and removed redundant `includes?("::")` checks;
+    - replaced regex tokenization in `unresolved_short_type_param_token?` with ASCII tokenizer (no `scan(/[A-Za-z_][A-Za-z0-9_]*/)` in hot path);
+    - in `unresolved_generic_type_arg?`, added fast known-base check before `resolve_type_alias_chain`;
+    - reduced short-token allocation churn:
+      - only materialize token strings for `T` / `T1`-shaped candidates;
+      - added `single_upper_token` helper and used it in both `unresolved_short_type_param_token?` and `has_unresolved_short_type_param_token?` to avoid `byte_slice(i, 1)` allocations.
+  - Why:
+    - stage2 `t300` profile shifted to `unresolved_generic_type_arg?` + `Regex#match_at_byte_index` + `pcre2_*`, indicating regex/tokenization as dominant root cause;
+    - after regex removal, PCRE2 dropped from top symbols and hotspot moved back to core type-resolution/hash paths (expected next bottleneck).
+  - Evidence:
+    - debug validation:
+      - `/usr/bin/time -p crystal build src/crystal_v2.cr -o /tmp/stage1_dbg_single_upper_token_opt --error-trace` -> `exit 0`, **real 8.27s**
+      - `bash regression_tests/run_mini_oracles.sh /tmp/stage1_dbg_single_upper_token_opt` -> **5/5 PASS**
+    - release stage1 timings (recent steps):
+      - `/tmp/stage1_rel_union_sep_scan_opt` -> **real 427.70s**
+      - `/tmp/stage1_rel_short_token_alloc_opt` -> **real 428.72s**
+      - `/tmp/stage1_rel_single_upper_token_opt` -> **real 429.60s**
+    - stage2 watchdog probes (`scripts/timeout_sample_lldb.sh -t 300`):
+      - all recent variants still timeout with `124`, but top symbols changed significantly across branches:
+        - before regex-removal: `unresolved_generic_type_arg?`, `unresolved_short_type_param_token?`, `Regex#match_at_byte_index`, `pcre2_match_8`;
+        - after regex-removal/token churn cuts: PCRE2 is no longer consistently top-level; hotspots move toward `type_ref_for_name`, `resolve_type_name_in_context`, `lower_call`, `String#hash/index`, hash upserts/find-entry.
+  - Regression status:
+    - full run: `bash regression_tests/run_all.sh /tmp/stage1_dbg_single_upper_token_opt` -> **56 passed, 3 failed** (`hash_compaction`, `hash_stress`, `yield_suffix_unless`);
+    - baseline check with earlier binary (`/tmp/stage1_dbg_union_sep_scan_opt`) reproduces the same 3 failures, so these are **pre-existing** in current line, not introduced by this patchset.
+
 - **2026-02-28 (latest): root-cause performance/churn reductions in `AstToHir` type-resolution hot path (stage2 still unstable)**
   - Scope (`src/compiler/hir/ast_to_hir.cr`):
     - added versioned negative cache for `type_name_exists?` (cache `false` with universe stamp);

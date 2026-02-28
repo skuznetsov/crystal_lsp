@@ -2824,9 +2824,9 @@ module Crystal::HIR
 
       # If the alias resolved to a short name (e.g. "PCRE2" from "Regex::Engine"),
       # re-qualify under the original module's namespace (e.g. "Regex::PCRE2").
-      if resolved != module_name && !resolved.includes?("::") && module_name.includes?("::")
+      if resolved != module_name && !resolved.includes?("::")
         if ns_sep = module_name.rindex("::")
-          ns = module_name[0, ns_sep]
+          ns = module_name.byte_slice(0, ns_sep)
           requalified = "#{ns}::#{resolved}"
           if @module_defs.has_key?(requalified)
             @module_include_alias_cache[cache_key] = requalified
@@ -2837,9 +2837,8 @@ module Crystal::HIR
 
       if current = @current_class
         scope = current
-        while scope.includes?("::")
-          break unless sep = scope.rindex("::")
-          scope = scope[0, sep]
+        while sep = scope.rindex("::")
+          scope = scope.byte_slice(0, sep)
           candidate = "#{scope}::#{module_name}"
           resolved_candidate = resolve_module_alias_prefix(candidate)
           if @module_defs.has_key?(resolved_candidate)
@@ -2858,17 +2857,19 @@ module Crystal::HIR
 
       probe = module_name
       while sep = probe.rindex("::")
-        prefix = module_name[0, sep]
-        suffix = module_name[(sep + 2)..]
+        prefix = module_name.byte_slice(0, sep)
         resolved_prefix = resolve_type_alias_chain(prefix)
         if resolved_prefix != prefix
+          suffix_start = sep + 2
+          suffix_len = module_name.bytesize - suffix_start
+          suffix = suffix_len > 0 ? module_name.byte_slice(suffix_start, suffix_len) : ""
           result = "#{resolved_prefix}::#{suffix}"
           # If the resolved prefix lost its namespace (e.g. Regex::Engine → PCRE2),
           # re-qualify under the original prefix's namespace so we get Regex::PCRE2::MatchData.
-          unless result.includes?("::") && @module_defs.has_key?(result)
+          unless @module_defs.has_key?(result)
             unless resolved_prefix.includes?("::")
               if parent_sep = prefix.rindex("::")
-                ns = prefix[0, parent_sep]
+                ns = prefix.byte_slice(0, parent_sep)
                 requalified = "#{ns}::#{result}"
                 result = requalified if @module_defs.has_key?(requalified)
               end
@@ -20595,8 +20596,6 @@ module Crystal::HIR
 
     @[AlwaysInline]
     private def has_top_level_union_separator?(type_name : String) : Bool
-      return false unless type_name.includes?('|') || type_name.includes?("___")
-
       depth = 0
       i = 0
       size = type_name.bytesize
@@ -20861,8 +20860,12 @@ module Crystal::HIR
           return unresolved_generic_type_arg?(arg[0...-1])
         end
         if info = split_generic_base_and_args(arg)
-          base = resolve_type_alias_chain(info[:base])
-          base_known = known_type_name?(base) || @generic_templates.has_key?(base)
+          base_name = info[:base]
+          base_known = known_type_name?(base_name) || @generic_templates.has_key?(base_name)
+          unless base_known
+            base = resolve_type_alias_chain(base_name)
+            base_known = known_type_name?(base) || @generic_templates.has_key?(base)
+          end
           return true unless base_known
           inner_args = split_generic_type_args(info[:args]).map(&.strip)
           return inner_args.any? { |inner| unresolved_generic_type_arg?(inner) }
@@ -20883,9 +20886,40 @@ module Crystal::HIR
 
     private def unresolved_short_type_param_token?(type_name : String) : Bool
       return false if type_name.empty?
-      type_name.scan(/[A-Za-z_][A-Za-z0-9_]*/) do |match|
-        token = match[0]
-        next unless short_type_param_name?(token)
+
+      ptr = type_name.to_unsafe
+      size = type_name.bytesize
+      i = 0
+      while i < size
+        byte = ptr[i]
+        starts_token = (byte >= 'A'.ord && byte <= 'Z'.ord) ||
+                       (byte >= 'a'.ord && byte <= 'z'.ord) ||
+                       byte == '_'.ord
+        unless starts_token
+          i += 1
+          next
+        end
+
+        start = i
+        i += 1
+        while i < size && ascii_alnum_or_underscore?(ptr[i])
+          i += 1
+        end
+
+        token_size = i - start
+        next unless token_size == 1 || token_size == 2
+        first = ptr[start]
+        next unless ascii_upper_alpha?(first)
+        if token_size == 2
+          second = ptr[start + 1]
+          next unless second >= '0'.ord && second <= '9'.ord
+        end
+
+        token = if token_size == 1
+                  single_upper_token(first).not_nil!
+                else
+                  type_name.byte_slice(start, token_size)
+                end
         next if @type_param_map.has_key?(token)
         next if known_type_name?(token)
         return true
@@ -26705,6 +26739,16 @@ module Crystal::HIR
         if fast = resolve_class_name_in_signature_context(name)
           return fast
         end
+        if !name.empty? && name.to_unsafe[0].unsafe_chr.ascii_uppercase? &&
+           !@short_type_index.has_key?(name) &&
+           !@top_level_type_names.includes?(name) &&
+           !@top_level_class_kinds.has_key?(name) &&
+           !@generic_templates.has_key?(name) &&
+           !@module_defs.has_key?(name) &&
+           !@type_aliases.has_key?(name) &&
+           !BUILTIN_TYPE_NAMES.includes?(name)
+          return name
+        end
       end
 
       # If this is a generic type name, resolve the base in context and
@@ -27978,6 +28022,40 @@ module Crystal::HIR
         (byte >= 'a'.ord && byte <= 'z'.ord) ||
         (byte >= '0'.ord && byte <= '9'.ord) ||
         byte == '_'.ord
+    end
+
+    @[AlwaysInline]
+    private def single_upper_token(byte : UInt8) : String?
+      case byte
+      when 'A'.ord then "A"
+      when 'B'.ord then "B"
+      when 'C'.ord then "C"
+      when 'D'.ord then "D"
+      when 'E'.ord then "E"
+      when 'F'.ord then "F"
+      when 'G'.ord then "G"
+      when 'H'.ord then "H"
+      when 'I'.ord then "I"
+      when 'J'.ord then "J"
+      when 'K'.ord then "K"
+      when 'L'.ord then "L"
+      when 'M'.ord then "M"
+      when 'N'.ord then "N"
+      when 'O'.ord then "O"
+      when 'P'.ord then "P"
+      when 'Q'.ord then "Q"
+      when 'R'.ord then "R"
+      when 'S'.ord then "S"
+      when 'T'.ord then "T"
+      when 'U'.ord then "U"
+      when 'V'.ord then "V"
+      when 'W'.ord then "W"
+      when 'X'.ord then "X"
+      when 'Y'.ord then "Y"
+      when 'Z'.ord then "Z"
+      else
+        nil
+      end
     end
 
     private def type_param_map_debug_string : String
@@ -63169,9 +63247,10 @@ module Crystal::HIR
           left_ok = i == 0 || !type_param_token_char?(name.byte_at(i - 1))
           right_ok = i + 1 >= name.bytesize || !type_param_token_char?(name.byte_at(i + 1))
           if left_ok && right_ok
-            token = name.byte_slice(i, 1)
-            unless @type_param_map.has_key?(token) || known_type_name?(token) || type_name_exists?(token)
-              return true
+            if token = single_upper_token(byte)
+              unless @type_param_map.has_key?(token) || known_type_name?(token) || type_name_exists?(token)
+                return true
+              end
             end
           end
         end
