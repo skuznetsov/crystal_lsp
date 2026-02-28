@@ -1155,8 +1155,7 @@ module Crystal::HIR
     @substitute_type_params_stack : Set(String) = Set(String).new
     @substitute_type_params_depth : Int32 = 0
     # Cache for substitute_type_params_in_type_name — invalidated on type_param_map/current_class change.
-    @subst_cache : Hash(String, String) = {} of String => String
-    @subst_cache_class : String? = nil
+    @subst_cache : Hash(String, Hash(String, String)) = {} of String => Hash(String, String)
     @subst_cache_gen : UInt64 = 0
     @subst_cache_last_gen : UInt64 = 0
     # Cache generic owner parsing/substitution for the current substitution generation.
@@ -27966,13 +27965,18 @@ module Crystal::HIR
 
       private def substitute_type_params_in_type_name(name : String) : String
       # --- Cache check (invalidate on type_param_map or current_class change) ---
-      cc = @current_class
-      if cc != @subst_cache_class || @subst_cache_gen != @subst_cache_last_gen
+      if @subst_cache_gen != @subst_cache_last_gen
         @subst_cache.clear
-        @subst_cache_class = cc
         @subst_cache_last_gen = @subst_cache_gen
       end
-      if cached = @subst_cache[name]?
+      cache_scope = @current_class || ""
+      scope_cache = @subst_cache[cache_scope]?
+      unless scope_cache
+        scope_cache = {} of String => String
+        @subst_cache[cache_scope] = scope_cache
+      end
+
+      if cached = scope_cache[name]?
         return cached
       end
 
@@ -27992,31 +27996,38 @@ module Crystal::HIR
         # e.g., "(self, K -> V)?" becomes "(Hash(String, Int32), String -> Int32)?"
         if name == "self"
           if current = @current_class
-            return @subst_cache[name] = current
+            return scope_cache[name] = current
           end
           end
           type_param_map = @type_param_map
-          fallback_map = if current = @current_class
-                           if info = generic_owner_info(current)
-                             info[:map]
-                           else
-                             nil
-                           end
-                         else
-                           nil
-                         end
+          current_class_name = @current_class
+          allow_param_subst = !type_param_map.empty?
+          if !allow_param_subst && current_class_name
+            allow_param_subst = !!ascii_byte_index(current_class_name, '('.ord.to_u8)
+          end
+          fallback_map : Hash(String, String)? = nil
+          fallback_map_loaded = false
           substitution : String? = nil
 
-          if simple_identifier_token?(name)
-            substitution = resolve_type_param_substitution(name, type_param_map, fallback_map)
+          if allow_param_subst && simple_identifier_token?(name)
+            substitution = type_param_map[name]?
+            if substitution.nil?
+              unless fallback_map_loaded
+                fallback_map = current_class_type_param_map
+                fallback_map_loaded = true
+              end
+              if fmap = fallback_map
+                substitution = fmap[name]?
+              end
+            end
           end
 
           if substitution
-            return @subst_cache[name] = substitution
+            return scope_cache[name] = substitution
           end
         if local_name = @current_typeof_local_names.try(&.[name]?)
           unless local_name.empty?
-            return @subst_cache[name] = local_name
+            return scope_cache[name] = local_name
           end
         end
 
@@ -28027,12 +28038,21 @@ module Crystal::HIR
             suffix_len = name.bytesize - suffix_start
             suffix = suffix_len > 0 ? name.byte_slice(suffix_start, suffix_len) : ""
             substitution = nil
-            if simple_identifier_token?(prefix)
-              substitution = resolve_type_param_substitution(prefix, type_param_map, fallback_map)
+            if allow_param_subst && simple_identifier_token?(prefix)
+              substitution = type_param_map[prefix]?
+              if substitution.nil?
+                unless fallback_map_loaded
+                  fallback_map = current_class_type_param_map
+                  fallback_map_loaded = true
+                end
+                if fmap = fallback_map
+                  substitution = fmap[prefix]?
+                end
+              end
             end
             if substitution
               # Recursively substitute the suffix in case it also contains type params
-              return @subst_cache[name] = "#{substitution}::#{substitute_type_params_in_type_name(suffix)}"
+              return scope_cache[name] = "#{substitution}::#{substitute_type_params_in_type_name(suffix)}"
             end
             # Also check if the suffix after the last :: is a type param
             if last_ns_idx = name.rindex("::")
@@ -28040,11 +28060,20 @@ module Crystal::HIR
               suffix_len = name.bytesize - suffix_start
               suffix = suffix_len > 0 ? name.byte_slice(suffix_start, suffix_len) : ""
               substitution = nil
-              if simple_identifier_token?(suffix)
-                substitution = resolve_type_param_substitution(suffix, type_param_map, fallback_map)
+              if allow_param_subst && simple_identifier_token?(suffix)
+                substitution = type_param_map[suffix]?
+                if substitution.nil?
+                  unless fallback_map_loaded
+                    fallback_map = current_class_type_param_map
+                    fallback_map_loaded = true
+                  end
+                  if fmap = fallback_map
+                    substitution = fmap[suffix]?
+                  end
+                end
               end
               if substitution
-                return @subst_cache[name] = substitution
+                return scope_cache[name] = substitution
               end
             end
           end
@@ -28052,13 +28081,13 @@ module Crystal::HIR
           if ascii_byte_index(name, '|'.ord.to_u8)
             parts = split_union_type_name(name).map(&.strip)
             if parts.size > 1
-              return @subst_cache[name] = parts.map { |part| substitute_type_params_in_type_name(part) }.join(" | ")
+              return scope_cache[name] = parts.map { |part| substitute_type_params_in_type_name(part) }.join(" | ")
             end
           end
 
           if !name.empty? && name.byte_at(name.bytesize - 1) == '?'.ord.to_u8
             base = name[0, name.size - 1]
-            return @subst_cache[name] = "#{substitute_type_params_in_type_name(base)}?"
+            return scope_cache[name] = "#{substitute_type_params_in_type_name(base)}?"
           end
 
         # Handle Proc shorthand syntax: (A, B -> C) or (A -> B)
@@ -28072,7 +28101,7 @@ module Crystal::HIR
             inputs = split_proc_type_inputs(inputs_str)
             new_inputs = inputs.map { |inp| substitute_type_params_in_type_name(inp.strip) }
             new_output = substitute_type_params_in_type_name(output_str)
-            return @subst_cache[name] = "(#{new_inputs.join(", ")} -> #{new_output})"
+            return scope_cache[name] = "(#{new_inputs.join(", ")} -> #{new_output})"
           end
         end
 
@@ -28081,10 +28110,10 @@ module Crystal::HIR
           new_args = args.map do |arg|
             normalize_tuple_literal_type_name(substitute_type_params_in_type_name(arg.strip))
           end
-          return @subst_cache[name] = "#{info[:base]}(#{new_args.join(", ")})"
+          return scope_cache[name] = "#{info[:base]}(#{new_args.join(", ")})"
         end
 
-        @subst_cache[name] = normalize_missing_generic_parens(name)
+        scope_cache[name] = normalize_missing_generic_parens(name)
       ensure
         @substitute_type_params_depth -= 1
         @substitute_type_params_stack.delete(name)
@@ -28104,16 +28133,11 @@ module Crystal::HIR
       end
 
       @[AlwaysInline]
-      private def resolve_type_param_substitution(
-        name : String,
-        type_param_map : Hash(String, String),
-        fallback_map : Hash(String, String)?,
-      ) : String?
-        if substitution = type_param_map[name]?
-          return substitution
-        end
-        if fmap = fallback_map
-          return fmap[name]?
+      private def current_class_type_param_map : Hash(String, String)?
+        if current = @current_class
+          if info = generic_owner_info(current)
+            return info[:map]
+          end
         end
         nil
       end

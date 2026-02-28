@@ -33,6 +33,34 @@
 - If two consecutive branches only move hotspot location without slope improvement, pivot to workload-invariant analysis.
 - If stage2 run exceeds 3 minutes, treat as hang candidate: capture sample series + lldb, then stop branch.
 
+## 2026-02-28: `substitute_type_params_in_type_name` cache scope + lazy fallback (partial, signal still noisy)
+- Scope (`src/compiler/hir/ast_to_hir.cr`):
+  - `@subst_cache` changed to per-class scoped map:
+    - from `Hash(String, String)` with clear-on-class-switch
+    - to `Hash(String, Hash(String, String))` keyed by `@current_class || ""`.
+  - cache invalidation now tied only to `@subst_cache_gen` (type-param generation), not to every class switch.
+  - fallback map resolution for generic owners is now lazy (`current_class_type_param_map`) and only queried when a type-param substitution path is actually possible.
+  - additional guard: skip type-param lookups entirely when substitution cannot apply (`@type_param_map.empty?` and current class is non-generic).
+- Validation/evidence:
+  - build + sanity:
+    - `/usr/bin/time -p crystal build src/crystal_v2.cr -o /tmp/stage1_dbg_subst_scope_cache --error-trace` -> `real 9.47s`
+    - `bash regression_tests/run_mini_oracles.sh /tmp/stage1_dbg_subst_scope_cache` -> **5/5 PASS**
+  - small repro (same harness, `t180`, debug):
+    - `N=1200` -> `real 37.29s`, status `0`
+    - `N=4000` -> `real 168.85s`, status `0` (near threshold)
+  - release stage1 / stage2 watchdog:
+    - `/usr/bin/time -p crystal build --release src/crystal_v2.cr -o /tmp/stage1_rel_subst_scope_cache --error-trace` -> `real 444.88s`
+    - `scripts/timeout_sample_lldb.sh -t 180 ... /tmp/stage1_rel_subst_scope_cache src/crystal_v2.cr --release ...` -> `status 124`
+    - top samples still include:
+      - `AstToHir#substitute_type_params_in_type_name`
+      - `Hash(String, String)#find_entry`
+      - `Hash(String, Hash(String, String))#find_entry`
+  - discarded experiment (rolled back in working tree before next step):
+    - identity-cache + last-scope fast-path for substitution cache caused regression (`N=4000` timeout at `180s`), so it was removed.
+  - current branch reruns remain noisy around `N=4000` (sometimes DCE/RC-elision hotspots dominate near the same timeout wall), so this step is marked partial.
+- Status:
+  - **IN_PROGRESS**: no semantic regressions found (`mini-oracles 5/5`), but stage2 stability/speed not yet reliably improved at release bootstrap scale.
+
 ## 2026-02-28: debug-profile oracle for root-cause velocity analysis
 - Added compiler flag `--debug-profile` in `src/compiler/cli.cr`.
 - `--debug-profile` implies `--stats` and emits a second machine-readable line:
