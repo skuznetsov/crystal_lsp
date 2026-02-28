@@ -827,15 +827,15 @@ module Crystal::HIR
     end
 
     @[AlwaysInline]
-    private def index_type_cache_key(index : Hash(String, Set(String)), key : String, cache_key : String) : Nil
-      return if key.empty?
-      set = index[key]? || begin
-        created = Set(String).new
-        index[key] = created
-        created
+      private def index_type_cache_key(index : Hash(String, Array(String)), key : String, cache_key : String) : Nil
+        return if key.empty?
+        set = index[key]? || begin
+          created = [] of String
+          index[key] = created
+          created
+        end
+        set << cache_key
       end
-      set << cache_key
-    end
 
     @[AlwaysInline]
     private def strip_generic_receiver_from_base_name(base_name : String) : String
@@ -2110,6 +2110,7 @@ module Crystal::HIR
     # Type aliases (alias_name -> target_type_name)
     @type_aliases : Hash(String, String)
     @resolved_type_alias_cache : Hash(String, String)
+    @type_alias_keys_by_suffix : Hash(String, Array(String))
 
     # Track which allocators have been generated (to avoid duplicates for reopened classes)
     @generated_allocators : Set(String)
@@ -2117,8 +2118,8 @@ module Crystal::HIR
 
     # Type cache to prevent infinite recursion in type_ref_for_name/create_union_type
     @type_cache : Hash(String, TypeRef)
-    @type_cache_keys_by_component : Hash(String, Set(String))
-    @type_cache_keys_by_generic_prefix : Hash(String, Set(String))
+    @type_cache_keys_by_component : Hash(String, Array(String))
+    @type_cache_keys_by_generic_prefix : Hash(String, Array(String))
     @type_param_like_cache : Hash(String, Bool)
     @receiver_type_param_map_cache : Hash(Int32, Hash(String, String))
     @specialized_type_with_receiver_cache : Hash({Int32, Int32}, TypeRef)
@@ -2474,13 +2475,14 @@ module Crystal::HIR
       @module_class_def_lookup_cache = {} of String => Tuple(CrystalV2::Compiler::Frontend::DefNode, CrystalV2::Compiler::Frontend::ArenaLike)?
       @instance_method_names_cache = {} of String => Array(String)
       @instance_method_names_cache_version = 0
-      @type_aliases = {} of String => String
-      @resolved_type_alias_cache = Hash(String, String).new(initial_capacity: 4096)
-      @generated_allocators = Set(String).new
-      @deferred_allocators = Set(String).new
+        @type_aliases = {} of String => String
+        @resolved_type_alias_cache = Hash(String, String).new(initial_capacity: 4096)
+        @type_alias_keys_by_suffix = {} of String => Array(String)
+        @generated_allocators = Set(String).new
+        @deferred_allocators = Set(String).new
       @type_cache = {} of String => TypeRef
-      @type_cache_keys_by_component = {} of String => Set(String)
-      @type_cache_keys_by_generic_prefix = {} of String => Set(String)
+        @type_cache_keys_by_component = {} of String => Array(String)
+        @type_cache_keys_by_generic_prefix = {} of String => Array(String)
       @type_param_like_cache = {} of String => Bool
       @receiver_type_param_map_cache = {} of Int32 => Hash(String, String)
       @specialized_type_with_receiver_cache = {} of {Int32, Int32} => TypeRef
@@ -4345,9 +4347,9 @@ module Crystal::HIR
       end
     end
 
-    private def alias_full_name_from_span(node : CrystalV2::Compiler::Frontend::AliasNode) : String?
-      source = @sources_by_arena[@arena]?
-      return nil unless source
+      private def alias_full_name_from_span(node : CrystalV2::Compiler::Frontend::AliasNode) : String?
+        source = @sources_by_arena[@arena]?
+        return nil unless source
 
       span = node.span
       start = span.start_offset
@@ -4359,22 +4361,34 @@ module Crystal::HIR
         return match[1]
       end
 
-      nil
-    end
-
-    private def register_type_alias(alias_name : String, target_name : String)
-      if existing = @type_aliases[alias_name]?
-        if existing != target_name
-          if env_has?("DEBUG_ALIAS")
-            STDERR.puts "[ALIAS] Skipping redefinition: #{alias_name} already #{existing}, new #{target_name}"
-          end
-          return
-        end
+        nil
       end
-      @type_aliases[alias_name] = target_name
-      @resolved_type_alias_cache.clear
-      @module_include_alias_cache.clear
-      @module_alias_prefix_cache.clear
+
+      @[AlwaysInline]
+      private def index_type_alias_suffix(alias_name : String) : Nil
+        return unless sep = alias_name.rindex("::")
+        suffix_start = sep + 2
+        suffix_len = alias_name.bytesize - suffix_start
+        return if suffix_len <= 0
+        suffix = alias_name.byte_slice(suffix_start, suffix_len)
+        suffix_entries = (@type_alias_keys_by_suffix[suffix] ||= [] of String)
+        suffix_entries << alias_name unless suffix_entries.includes?(alias_name)
+      end
+
+      private def register_type_alias(alias_name : String, target_name : String)
+        if existing = @type_aliases[alias_name]?
+          if existing != target_name
+            if env_has?("DEBUG_ALIAS")
+              STDERR.puts "[ALIAS] Skipping redefinition: #{alias_name} already #{existing}, new #{target_name}"
+          end
+            return
+          end
+        end
+        @type_aliases[alias_name] = target_name
+        index_type_alias_suffix(alias_name)
+        @resolved_type_alias_cache.clear
+        @module_include_alias_cache.clear
+        @module_alias_prefix_cache.clear
       clear_receiver_specialization_caches
       @type_cache.delete(alias_name)
       invalidate_type_cache_for_namespace(alias_name)
@@ -27469,8 +27483,8 @@ module Crystal::HIR
       resolved
     end
 
-    private def resolve_contextual_type_alias_name(name : String) : String?
-      return nil if name.empty? || name.includes?("::")
+      private def resolve_contextual_type_alias_name(name : String) : String?
+        return nil if name.empty? || name.includes?("::")
       # Never shadow built-in/top-level type names via contextual alias fallback.
       # Otherwise a single alias like `LibC::Char = UInt8` can leak globally and
       # corrupt overload resolution for core APIs expecting `Char`.
@@ -27478,12 +27492,8 @@ module Crystal::HIR
         return nil
       end
 
-      suffix = "::#{name}"
-      matches = [] of String
-      @type_aliases.each_key do |key|
-        matches << key if key.ends_with?(suffix)
-      end
-      return nil if matches.empty?
+        matches = @type_alias_keys_by_suffix[name]?
+        return nil unless matches
 
       if key = resolve_contextual_alias_key(matches, name)
         target = @type_aliases[key]?
@@ -27497,16 +27507,11 @@ module Crystal::HIR
       target
     end
 
-    private def resolve_type_alias_by_suffix(name : String) : String?
-      return nil if name.empty? || name.includes?("::")
-      suffix = "::#{name}"
-      matches = [] of String
-      @type_aliases.each_key do |key|
-        next unless key.ends_with?(suffix)
-        matches << key
-      end
-      return nil if matches.empty?
-      return @type_aliases[matches[0]]? if matches.size == 1
+      private def resolve_type_alias_by_suffix(name : String) : String?
+        return nil if name.empty? || name.includes?("::")
+        matches = @type_alias_keys_by_suffix[name]?
+        return nil unless matches
+        return @type_aliases[matches[0]]? if matches.size == 1
 
       if contextual = resolve_type_alias_by_suffix_context(matches, name)
         return @type_aliases[contextual]?
@@ -27871,7 +27876,7 @@ module Crystal::HIR
       nil
     end
 
-    private def substitute_type_params_in_type_name(name : String) : String
+      private def substitute_type_params_in_type_name(name : String) : String
       # --- Cache check (invalidate on type_param_map or current_class change) ---
       cc = @current_class
       if cc != @subst_cache_class || @subst_cache_gen != @subst_cache_last_gen
@@ -27901,102 +27906,69 @@ module Crystal::HIR
           if current = @current_class
             return @subst_cache[name] = current
           end
-        end
-        type_param_map = @type_param_map
-        fallback_map : Hash(String, String)? = nil
-        fallback_map_loaded = false
-        substitution : String? = nil
-
-        if simple_identifier_token?(name)
-          substitution = type_param_map[name]?
-          if substitution.nil?
-            unless fallback_map_loaded
-              fallback_map_loaded = true
-              if current = @current_class
-                if info = generic_owner_info(current)
-                  fallback_map = info[:map]
-                end
-              end
-            end
-            if fmap = fallback_map
-              substitution = fmap[name]?
+          end
+          type_param_map = @type_param_map
+          fallback_map : Hash(String, String)? = nil
+          if current = @current_class
+            if info = generic_owner_info(current)
+              fallback_map = info[:map]
             end
           end
-        end
+          substitution : String? = nil
 
-        if substitution
-          return @subst_cache[name] = substitution
-        end
+          if simple_identifier_token?(name)
+            substitution = resolve_type_param_substitution(name, type_param_map, fallback_map)
+          end
+
+          if substitution
+            return @subst_cache[name] = substitution
+          end
         if local_name = @current_typeof_local_names.try(&.[name]?)
           unless local_name.empty?
             return @subst_cache[name] = local_name
           end
         end
 
-        if name.includes?("::")
-          # Check if the prefix before :: is a type param (e.g., ImplInfo::CarrierUInt)
-          if idx = name.index("::")
-            prefix = name[0, idx]
-            suffix = name[(idx + 2)..]
+          if first_ns_idx = namespace_separator_index(name)
+            # Check if the prefix before :: is a type param (e.g., ImplInfo::CarrierUInt)
+            prefix = first_ns_idx > 0 ? name.byte_slice(0, first_ns_idx) : ""
+            suffix_start = first_ns_idx + 2
+            suffix_len = name.bytesize - suffix_start
+            suffix = suffix_len > 0 ? name.byte_slice(suffix_start, suffix_len) : ""
             substitution = nil
             if simple_identifier_token?(prefix)
-              substitution = type_param_map[prefix]?
-              if substitution.nil?
-                unless fallback_map_loaded
-                  fallback_map_loaded = true
-                  if current = @current_class
-                    if info = generic_owner_info(current)
-                      fallback_map = info[:map]
-                    end
-                  end
-                end
-                if fmap = fallback_map
-                  substitution = fmap[prefix]?
-                end
-              end
+              substitution = resolve_type_param_substitution(prefix, type_param_map, fallback_map)
             end
             if substitution
               # Recursively substitute the suffix in case it also contains type params
               return @subst_cache[name] = "#{substitution}::#{substitute_type_params_in_type_name(suffix)}"
             end
-          end
-          # Also check if the suffix after the last :: is a type param
-          if idx = name.rindex("::")
-            suffix = name[(idx + 2)..]
-            substitution = nil
-            if simple_identifier_token?(suffix)
-              substitution = type_param_map[suffix]?
-              if substitution.nil?
-                unless fallback_map_loaded
-                  fallback_map_loaded = true
-                  if current = @current_class
-                    if info = generic_owner_info(current)
-                      fallback_map = info[:map]
-                    end
-                  end
-                end
-                if fmap = fallback_map
-                  substitution = fmap[suffix]?
-                end
+            # Also check if the suffix after the last :: is a type param
+            if last_ns_idx = name.rindex("::")
+              suffix_start = last_ns_idx + 2
+              suffix_len = name.bytesize - suffix_start
+              suffix = suffix_len > 0 ? name.byte_slice(suffix_start, suffix_len) : ""
+              substitution = nil
+              if simple_identifier_token?(suffix)
+                substitution = resolve_type_param_substitution(suffix, type_param_map, fallback_map)
+              end
+              if substitution
+                return @subst_cache[name] = substitution
               end
             end
-            if substitution
-              return @subst_cache[name] = substitution
+          end
+
+          if ascii_byte_index(name, '|'.ord.to_u8)
+            parts = split_union_type_name(name).map(&.strip)
+            if parts.size > 1
+              return @subst_cache[name] = parts.map { |part| substitute_type_params_in_type_name(part) }.join(" | ")
             end
           end
-        end
 
-        if name.includes?('|')
-          parts = split_union_type_name(name).map(&.strip)
-          if parts.size > 1
-            return @subst_cache[name] = parts.map { |part| substitute_type_params_in_type_name(part) }.join(" | ")
+          if !name.empty? && name.byte_at(name.bytesize - 1) == '?'.ord.to_u8
+            base = name[0, name.size - 1]
+            return @subst_cache[name] = "#{substitute_type_params_in_type_name(base)}?"
           end
-        end
-
-        if name.ends_with?('?')
-          base = name[0, name.size - 1]
-          return @subst_cache[name] = "#{substitute_type_params_in_type_name(base)}?"
-        end
 
         # Handle Proc shorthand syntax: (A, B -> C) or (A -> B)
         # This must be checked before split_generic_base_and_args
@@ -28028,17 +28000,32 @@ module Crystal::HIR
       end
     end
 
-    @[AlwaysInline]
-    private def simple_identifier_token?(name : String) : Bool
-      return false if name.empty?
-      bytes = name.to_unsafe
-      i = 0
-      while i < name.bytesize
-        return false unless ascii_alnum_or_underscore?(bytes[i])
-        i += 1
+      @[AlwaysInline]
+      private def simple_identifier_token?(name : String) : Bool
+        return false if name.empty?
+        bytes = name.to_unsafe
+        i = 0
+        while i < name.bytesize
+          return false unless ascii_alnum_or_underscore?(bytes[i])
+          i += 1
+        end
+        true
       end
-      true
-    end
+
+      @[AlwaysInline]
+      private def resolve_type_param_substitution(
+        name : String,
+        type_param_map : Hash(String, String),
+        fallback_map : Hash(String, String)?,
+      ) : String?
+        if substitution = type_param_map[name]?
+          return substitution
+        end
+        if fmap = fallback_map
+          return fmap[name]?
+        end
+        nil
+      end
 
     private def find_top_level_arrow(name : String) : Int32?
       depth = 0
@@ -30357,13 +30344,13 @@ module Crystal::HIR
       end
     end
 
-    private def infer_type_from_class_ivar_assign(value_node) : TypeRef
-      if inferred_name = infer_type_from_expr(value_node)
-        inferred_ref = type_ref_for_name(inferred_name)
-        return inferred_ref unless inferred_ref == TypeRef::VOID
-      end
+      private def infer_type_from_class_ivar_assign(value_node) : TypeRef
+        if inferred_name = infer_type_from_expr(value_node)
+          inferred_ref = type_ref_for_name(inferred_name)
+          return inferred_ref unless inferred_ref == TypeRef::VOID
+        end
 
-      case value_node
+        case value_node
       when CrystalV2::Compiler::Frontend::MemberAccessNode
         # Direct member access: SomeType.new (without call parens)
         obj_node = @arena[value_node.object]
@@ -30381,9 +30368,9 @@ module Crystal::HIR
             if env_has?("DEBUG_TYPE_INFER")
               STDERR.puts "[TYPE_INFER] resolved type_name=#{resolved}"
             end
-            return type_ref_for_name(resolved)
+              return type_ref_for_name(resolved)
+            end
           end
-        end
       when CrystalV2::Compiler::Frontend::CallNode
         # For calls like SomeClass.new() or GenericClass(T).new()
         callee = value_node.callee
@@ -63853,7 +63840,7 @@ module Crystal::HIR
       end
     end
 
-    private def store_type_cache(cache_key : String, type_ref : TypeRef) : TypeRef
+      private def store_type_cache(cache_key : String, type_ref : TypeRef) : TypeRef
       if @signature_scan_mode
         # Signature scans are transient and already use local caches; avoid
         # global type-cache/index churn here (especially reverse-index Set upserts).
@@ -63877,23 +63864,23 @@ module Crystal::HIR
         return type_ref
       end
 
-      @type_cache[cache_key] = type_ref
-      # Do not index placeholder VOID entries; many are transient and indexing
-      # them creates substantial Set/Hash churn in type lowering hot paths.
-      register_type_cache_key(cache_key) unless type_ref == TypeRef::VOID
-      type_ref
-    end
-
-    # Fast helper to get last component of a namespace path (e.g., "Foo::Bar::Baz" -> "Baz")
-    # Avoids allocating an array like split("::").last would
-    @[AlwaysInline]
-    private def last_namespace_component(name : String) : String
-      if idx = name.rindex("::")
-        name[(idx + 2)..]
-      else
-        name
+        @type_cache[cache_key] = type_ref
+        # Do not index placeholder VOID entries; many are transient and indexing
+        # them creates substantial Set/Hash churn in type lowering hot paths.
+        register_type_cache_key(cache_key) unless type_ref == TypeRef::VOID
+        type_ref
       end
-    end
+
+      # Fast helper to get last component of a namespace path (e.g., "Foo::Bar::Baz" -> "Baz")
+      # Avoids allocating an array like split("::").last would
+      @[AlwaysInline]
+      private def last_namespace_component(name : String) : String
+        if idx = name.rindex("::")
+          name[(idx + 2)..]
+        else
+          name
+        end
+      end
 
     # Returns last component only if name contains "::", otherwise nil
     @[AlwaysInline]
@@ -64060,13 +64047,13 @@ module Crystal::HIR
       @resolved_type_name_invalidations[short] = @resolved_type_name_cache_epoch if short
     end
 
-    private def resolved_type_name_cache_entry_valid?(name : String, entry : ResolvedTypeNameCacheEntry) : Bool
-      if invalid = @resolved_type_name_invalidations[name]?
-        entry.epoch >= invalid
-      else
-        true
+      private def resolved_type_name_cache_entry_valid?(name : String, entry : ResolvedTypeNameCacheEntry) : Bool
+        if invalid = @resolved_type_name_invalidations[name]?
+          entry.epoch >= invalid
+        else
+          true
+        end
       end
-    end
 
     private def invalidate_type_literal_cache_for(name : String) : Nil
       return if @type_literal_class_cache.empty?

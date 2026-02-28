@@ -1,6 +1,45 @@
 # Crystal v2 — Active Work (codegen branch)
 
 ## Known Bugs (codegen)
+- **2026-02-28 (latest): root-cause alias/type-substitution/index churn reductions (stage2 still unstable, stage1 faster)**
+  - Scope (`src/compiler/hir/ast_to_hir.cr`):
+    - `resolve_contextual_type_alias_name` / `resolve_type_alias_by_suffix` now use indexed alias suffix lookup (`@type_alias_keys_by_suffix`) instead of scanning all `@type_aliases`.
+    - `substitute_type_params_in_type_name` hot path reduced repeated scans:
+      - single `namespace_separator_index` gate for `::` path;
+      - shared `resolve_type_param_substitution` helper for map/fallback lookup;
+      - byte-level checks for union (`'|'`) and nullable suffix (`'?'`).
+    - reverse type-cache indexes switched from `Set(String)` to append-only `Array(String)` in:
+      - `@type_cache_keys_by_component`
+      - `@type_cache_keys_by_generic_prefix`
+      - `index_type_cache_key`.
+  - Why:
+    - stage2 timeline repeatedly showed heavy churn in alias-resolution + type-param substitution + reverse-index hash upserts.
+  - Evidence:
+    - debug DoD:
+      - `/usr/bin/time -p crystal build src/crystal_v2.cr -o /tmp/stage1_dbg_alias_suffix_index_fix --error-trace` -> `real 8.59s`
+      - `/usr/bin/time -p crystal build src/crystal_v2.cr -o /tmp/stage1_dbg_subst_fastpath_fix --error-trace` -> `real 8.66s`
+      - `/usr/bin/time -p crystal build src/crystal_v2.cr -o /tmp/stage1_dbg_type_cache_index_array_fix --error-trace` -> `real 8.79s`
+      - `bash regression_tests/run_mini_oracles.sh /tmp/stage1_dbg_sanity_after_revert` -> **5/5 PASS**
+      - `bash regression_tests/stage2_env_optional_repro.sh /tmp/stage1_dbg_sanity_after_revert` -> `not reproduced`
+    - release stage1:
+      - `/usr/bin/time -p crystal build --release src/crystal_v2.cr -o /tmp/stage1_rel_alias_suffix_index_fix --error-trace` -> `real 428.58s`
+      - `/usr/bin/time -p crystal build --release src/crystal_v2.cr -o /tmp/stage1_rel_subst_fastpath_fix --error-trace` -> `real 411.62s`
+      - `/usr/bin/time -p crystal build --release src/crystal_v2.cr -o /tmp/stage1_rel_type_cache_index_array_fix --error-trace` -> `real 409.22s`
+    - stage2 watchdog (`t300`):
+      - `scripts/timeout_sample_lldb.sh -t 300 -s 8 -n 15 -o /tmp/stage2_rel_type_cache_index_array_fix_t300 -- /usr/bin/time -p /tmp/stage1_rel_type_cache_index_array_fix src/crystal_v2.cr --release -o /tmp/stage2_rel_type_cache_index_array_fix` -> timeout `124`
+      - timeline still reaches deep HIR lowering; current top remains hash/type-ref churn (`String#hash`, `lower_call`, `type_ref_for_name`, `substitute_type_params_in_type_name`).
+  - Status:
+    - **partial**: measurable stage1 gain (~`428.58s -> 409.22s`), stage2 still exceeds `300s`.
+
+- **2026-02-28 (latest): falsified experiment — extra cache shortcut in `infer_type_from_class_ivar_assign` reverted**
+  - Attempt:
+    - added `cached_type_ref_for_name` shortcut before `type_ref_for_name` in class-ivar inference path.
+  - Result:
+    - no reliable speedup; release stage1 regressed/noise (`real 412.53s` vs `409.22s` prior run).
+    - timeout sample captured heavy hash churn during invalidation path; signal not improving.
+  - Decision:
+    - reverted this shortcut branch; keep only alias/substitution/type-cache-index changes above.
+
 - **2026-02-28 (latest): falsified experiment — dropping epoch from `resolve_module_alias_prefix` cache key breaks IR typing**
   - Attempt:
     - changed `@module_alias_prefix_cache` key from `{name, module_defs_version, resolved_epoch}` to `{name, module_defs_version}` only.
