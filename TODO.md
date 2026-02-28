@@ -1,6 +1,45 @@
 # Crystal v2 — Active Work (codegen branch)
 
+## Fast small repro loop (2026-02-28)
+- Use this loop for rapid rollback/iteration before full stage2 bootstrap checks.
+- Build debug stage1 with original compiler:
+  - `/usr/bin/time -p crystal build src/crystal_v2.cr -o /tmp/stage1_dbg_small_repro_loop --error-trace`
+  - observed: `real 6.74s`
+- Small full-codegen stress repro (watchdog + sample/lldb):
+  - `bash regression_tests/stage2_yield_scan_hang_probe.sh /tmp/stage1_dbg_small_repro_loop 180 debug 1200 full`
+    - completes, observed: `real 50.82s` (`command.log`)
+  - `bash regression_tests/stage2_yield_scan_hang_probe.sh /tmp/stage1_dbg_small_repro_loop 180 debug 4000 full`
+    - reproduces timeout (`status 124`) with timeline samples (`sample_series count=3`)
+    - final LLDB stack lands in `optimizations.cr` hash lookup path (`DeadCodeEliminationPass#run` -> `Hash#find_entry_with_index`)
+- Immediate workflow change:
+  - evaluate candidate fixes first on this small repro pair (`N=1200` must stay correct, `N=4000` should improve/shift hotspots),
+  - run full release stage2 bootstrap only after small repro signal improves.
+
 ## Known Bugs (codegen)
+- **2026-02-28 (latest): root-cause fix in MIR DCE use-count structure (Hash -> dense Array), bottleneck moved later**
+  - Scope (`src/compiler/mir/optimizations.cr`):
+    - `DeadCodeEliminationPass#run` no longer uses `Hash(ValueId, Int32).new(0)` for `use_counts`;
+    - switched to dense `Array(Int32)` indexed by `ValueId` (`ensure_use_capacity` helper);
+    - semantics unchanged: same fixpoint elimination and operand use decrements.
+  - Why:
+    - small repro timeout (`N=4000`) showed DCE/hash hotspot and LLDB stop in `Hash#find_entry_with_index` under `DeadCodeEliminationPass#run`.
+    - this was algorithmic overhead (hash churn on dense numeric IDs), not a semantic issue.
+  - Evidence:
+    - build:
+      - `/usr/bin/time -p crystal build src/crystal_v2.cr -o /tmp/stage1_dbg_dce_array_counts --error-trace` -> **real 6.77s**
+    - mini repro pair:
+      - `bash regression_tests/stage2_yield_scan_hang_probe.sh /tmp/stage1_dbg_dce_array_counts 180 debug 1200 full` -> completes, **real 36.71s** (was ~`50.82s` baseline)
+      - `bash regression_tests/stage2_yield_scan_hang_probe.sh /tmp/stage1_dbg_dce_array_counts 180 debug 4000 full` -> timeout `124` (still reproduced)
+    - timeout-profile shift (`N=4000`):
+      - DCE/hash hotspot disappeared from top;
+      - new top symbols move to LLVM IR emission path:
+        - `String#index`, `LLVMIRGenerator#emit_call`, `LLVMIRGenerator#emit_function`, `Hash(TypeRef, String)#find_entry_with_index`
+      - LLDB final stack now lands in `llvm_backend.cr` (`prepass_collect_constants` / `emit_function`) rather than `DeadCodeEliminationPass#run`.
+    - sanity:
+      - `bash regression_tests/run_mini_oracles.sh /tmp/stage1_dbg_dce_array_counts` -> **5/5 PASS**
+  - Status:
+    - **partial but root-cause-positive**: removed DCE hash-churn bottleneck; next root-cause branch is LLVM backend type-name/index lookup churn during IR emission.
+
 - **2026-02-28 (latest): cached defined-method signature scans by class/body context (partial, stage2 still >300s)**
   - Scope (`src/compiler/hir/ast_to_hir.cr`):
     - added caches:

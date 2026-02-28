@@ -281,22 +281,33 @@ module Crystal::MIR
       @eliminated = 0
 
       # Build use counts for all values
-      use_counts = Hash(ValueId, Int32).new(0)
+      use_counts = [] of Int32
 
       @function.blocks.each do |block|
         block.instructions.each do |inst|
-          inst.operands.each { |op| use_counts[op] += 1 }
+          ensure_use_capacity(use_counts, inst.id)
+          inst.operands.each do |op|
+            op_index = op.to_i
+            ensure_use_capacity(use_counts, op)
+            use_counts[op_index] += 1
+          end
         end
 
         # Count uses in terminator
         case term = block.terminator
         when Branch
-          use_counts[term.condition] += 1
+          cond_index = term.condition.to_i
+          ensure_use_capacity(use_counts, term.condition)
+          use_counts[cond_index] += 1
         when Switch
-          use_counts[term.value] += 1
+          value_index = term.value.to_i
+          ensure_use_capacity(use_counts, term.value)
+          use_counts[value_index] += 1
         when Return
           if v = term.value
-            use_counts[v] += 1
+            value_index = v.to_i
+            ensure_use_capacity(use_counts, v)
+            use_counts[value_index] += 1
           end
         end
       end
@@ -308,10 +319,16 @@ module Crystal::MIR
 
         @function.blocks.each do |block|
           block.instructions.reject! do |inst|
-            if !has_side_effects?(inst) && use_counts[inst.id] == 0
+            inst_index = inst.id.to_i
+            inst_uses = inst_index < use_counts.size ? use_counts[inst_index] : 0
+            if !has_side_effects?(inst) && inst_uses == 0
               # This instruction is dead - remove it
               # Also decrement use counts for its operands
-              inst.operands.each { |op| use_counts[op] -= 1 }
+              inst.operands.each do |op|
+                op_index = op.to_i
+                next if op_index >= use_counts.size
+                use_counts[op_index] -= 1
+              end
               @eliminated += 1
               changed = true
               true  # remove
@@ -323,6 +340,13 @@ module Crystal::MIR
       end
 
       @eliminated
+    end
+
+    private def ensure_use_capacity(use_counts : Array(Int32), id : ValueId) : Nil
+      required = id.to_i + 1
+      while use_counts.size < required
+        use_counts << 0
+      end
     end
 
     private def has_side_effects?(inst : Value) : Bool
