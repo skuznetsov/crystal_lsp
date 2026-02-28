@@ -2895,17 +2895,21 @@ module Crystal::HIR
       end
 
       if current = @current_class
-        sep = current.rindex("::")
-        while sep
-          scope = current.byte_slice(0, sep)
-          candidate = "#{scope}::#{module_name}"
-          resolved_candidate = resolve_module_alias_prefix(candidate)
-          if @module_defs.has_key?(resolved_candidate)
-            @module_include_alias_cache[cache_key] = resolved_candidate
-            return resolved_candidate
+        i = current.bytesize - 1
+        while i > 0
+          if current.byte_at(i - 1) == 58_u8 && current.byte_at(i) == 58_u8
+            sep = i - 1
+            scope = current.byte_slice(0, sep)
+            candidate = "#{scope}::#{module_name}"
+            resolved_candidate = resolve_module_alias_prefix(candidate)
+            if @module_defs.has_key?(resolved_candidate)
+              @module_include_alias_cache[cache_key] = resolved_candidate
+              return resolved_candidate
+            end
+            i = sep - 1
+          else
+            i -= 1
           end
-          break if sep <= 0
-          sep = current.rindex("::", sep - 1)
         end
       end
 
@@ -2925,34 +2929,38 @@ module Crystal::HIR
         return resolved
       end
 
-      sep = module_name.rindex("::")
-      while sep
-        prefix = module_name.byte_slice(0, sep)
-        resolved_prefix = resolve_type_alias_chain(prefix)
-        if resolved_prefix != prefix
-          suffix_start = sep + 2
-          suffix_len = module_name.bytesize - suffix_start
-          suffix = suffix_len > 0 ? module_name.byte_slice(suffix_start, suffix_len) : ""
-          result = "#{resolved_prefix}::#{suffix}"
-          # If the resolved prefix lost its namespace (e.g. Regex::Engine → PCRE2),
-          # re-qualify under the original prefix's namespace so we get Regex::PCRE2::MatchData.
-          unless @module_defs.has_key?(result)
-            unless resolved_prefix.includes?("::")
-              if parent_sep = prefix.rindex("::")
-                ns = prefix.byte_slice(0, parent_sep)
-                requalified = "#{ns}::#{result}"
-                result = requalified if @module_defs.has_key?(requalified)
+      i = module_name.bytesize - 1
+      while i > 0
+        if module_name.byte_at(i - 1) == 58_u8 && module_name.byte_at(i) == 58_u8
+          sep = i - 1
+          prefix = module_name.byte_slice(0, sep)
+          resolved_prefix = resolve_type_alias_chain_no_context(prefix)
+          if resolved_prefix != prefix
+            suffix_start = sep + 2
+            suffix_len = module_name.bytesize - suffix_start
+            suffix = suffix_len > 0 ? module_name.byte_slice(suffix_start, suffix_len) : ""
+            result = "#{resolved_prefix}::#{suffix}"
+            # If the resolved prefix lost its namespace (e.g. Regex::Engine → PCRE2),
+            # re-qualify under the original prefix's namespace so we get Regex::PCRE2::MatchData.
+            unless @module_defs.has_key?(result)
+              unless resolved_prefix.includes?("::")
+                if parent_sep = prefix.rindex("::")
+                  ns = prefix.byte_slice(0, parent_sep)
+                  requalified = "#{ns}::#{result}"
+                  result = requalified if @module_defs.has_key?(requalified)
+                end
               end
             end
+            @module_alias_prefix_cache[cache_key] = result
+            return result
           end
-          @module_alias_prefix_cache[cache_key] = result
-          return result
+          i = sep - 1
+        else
+          i -= 1
         end
-        break if sep <= 0
-        sep = module_name.rindex("::", sep - 1)
       end
 
-      resolved = resolve_type_alias_chain(module_name)
+      resolved = resolve_type_alias_chain_no_context(module_name)
       @module_alias_prefix_cache[cache_key] = resolved
       resolved
     end
@@ -27525,6 +27533,16 @@ module Crystal::HIR
       nil
     end
 
+    private def resolve_type_alias_chain_no_context(name : String) : String
+      resolved = @type_aliases[name]? || LIBC_TYPE_ALIASES[name]? || name
+      depth = 0
+      while (next_resolved = @type_aliases[resolved]? || LIBC_TYPE_ALIASES[resolved]?) && next_resolved != resolved && depth < 10
+        resolved = next_resolved
+        depth += 1
+      end
+      resolved
+    end
+
     private def resolve_type_alias_chain(name : String) : String
       contextual = !name.includes?("::")
       cache_key = if contextual
@@ -27547,12 +27565,7 @@ module Crystal::HIR
         end
       end
 
-      resolved = @type_aliases[seed]? || LIBC_TYPE_ALIASES[seed]? || seed
-      depth = 0
-      while (next_resolved = @type_aliases[resolved]? || LIBC_TYPE_ALIASES[resolved]?) && next_resolved != resolved && depth < 10
-        resolved = next_resolved
-        depth += 1
-      end
+      resolved = resolve_type_alias_chain_no_context(seed)
 
       @resolved_type_alias_cache[cache_key] = resolved
       resolved

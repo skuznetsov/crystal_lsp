@@ -109,6 +109,31 @@
 - Status:
   - **partial**: loop overhead reduced but root cause not eliminated; next step is semantic-level memoization/canonicalization for alias-chain resolution in include/monomorphization paths, not further micro-edits around symptoms.
 
+## 2026-02-28: non-context alias-chain helper + byte-scan loops (partial, stage2 still timeout)
+- Scope (`src/compiler/hir/ast_to_hir.cr`):
+  - introduced `resolve_type_alias_chain_no_context(name)` and reused it in:
+    - `resolve_type_alias_chain` (as terminal alias-chain resolver for `seed`);
+    - `resolve_module_alias_prefix` (prefix path and terminal fallback).
+  - switched include/prefix namespace traversal to byte-level `::` scan loops (no repeated `String#rindex(..., from)` calls in those loops).
+- Validation:
+  - debug build:
+    - `/usr/bin/time -p crystal build src/crystal_v2.cr -o /tmp/stage1_dbg_alias_chain_opt --error-trace` -> `real 9.54s`
+    - `bash regression_tests/run_mini_oracles.sh /tmp/stage1_dbg_alias_chain_opt` -> **5/5 PASS**
+  - release build:
+    - `/usr/bin/time -p crystal build --release src/crystal_v2.cr -o /tmp/stage1_rel_alias_chain_opt --error-trace` -> `real 449.65s` (near best observed 448s line)
+  - stage2 watchdog (`180s`):
+    - `scripts/timeout_sample_lldb.sh ... /tmp/stage1_rel_alias_chain_opt src/crystal_v2.cr --release --debug-profile -o /tmp/stage2_rel_alias_chain_opt` -> `124`
+    - LLDB stop stack still reaches include/alias path:
+      - `resolve_module_alias_prefix` (`ast_to_hir.cr:2936`)
+      - `resolve_module_alias_for_include` (`ast_to_hir.cr:2904`)
+      - `record_module_inclusion` + `register_concrete_class` chain
+    - timeline snapshots:
+      - `t31/t91`: alias/hash/GC churn (`Hash(String,String)#find_entry`, `String#hash`, `resolve_type_alias_chain_no_context`, `resolve_module_alias_prefix`, `GC_*`)
+      - `t151`: broader HIR lowering dominates (`lower_node`, `register_concrete_class`, `type_ref_for_name`, `lower_call`, `resolve_type_name_in_context`) while alias/hash still present.
+- Status:
+  - **partial**: this reduced some early alias-loop overhead but does not stabilize stage2 by itself.
+  - Next root-cause branch should target high-volume string/hash churn in `substitute_type_params_in_type_name` + `generic_owner_info` + alias-chain lookups under `register_module_instance_methods_for` / `register_concrete_class`.
+
 ## Fast small repro loop (2026-02-28)
 - Use this loop for rapid rollback/iteration before full stage2 bootstrap checks.
 - Build debug stage1 with original compiler:
