@@ -1,6 +1,21 @@
 # Crystal v2 — Active Work (codegen branch)
 
 ## Known Bugs (codegen)
+- **2026-02-28 (latest): falsified experiment — dropping epoch from `resolve_module_alias_prefix` cache key breaks IR typing**
+  - Attempt:
+    - changed `@module_alias_prefix_cache` key from `{name, module_defs_version, resolved_epoch}` to `{name, module_defs_version}` only.
+  - Result:
+    - stage2 advanced further in one probe, but `t420` run failed with LLVM `opt` type mismatch (not timeout):
+      - `/tmp/stage2_rel_alias_prefix_key_stable_fix_t420/command.log`
+      - error:
+        - `defined with type ... union ... but expected 'ptr'`
+        - in `Tuple#[]` call site.
+      - wall-time before failure: **real 312.37s**.
+  - Decision:
+    - reverted this experiment immediately; keep epoch in prefix-cache key.
+  - Insight:
+    - alias-prefix cache lifetime must remain synchronized with broader type-name invalidation epoch; relaxing key invalidation reintroduces stale-type aliasing and ABI/type mismatches.
+
 - **2026-02-28 (latest): added cached `type_param_like?` classification with structural invalidation (stage2 still unstable)**
   - Scope (`src/compiler/hir/ast_to_hir.cr`):
     - added `@type_param_like_cache : Hash(String, Bool)` to memoize repeated token classification;
