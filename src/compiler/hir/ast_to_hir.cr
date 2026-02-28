@@ -1151,6 +1151,11 @@ module Crystal::HIR
     # Recursion guard for unresolved_generic_type_arg? to avoid cyclic alias/union loops.
     @unresolved_generic_arg_stack : Set(String) = Set(String).new
     @unresolved_generic_arg_depth : Int32 = 0
+    # Cache for unresolved_generic_type_arg? — invalidated on type-param map generation
+    # changes and current class context changes.
+    @unresolved_generic_arg_cache : Hash(String, Bool) = {} of String => Bool
+    @unresolved_generic_arg_cache_gen : UInt64 = 0_u64
+    @unresolved_generic_arg_cache_class : String? = nil
     # Recursion guard for resolve_type_name_in_context to prevent alias/context loops.
     @resolve_type_name_stack : Set(String) = Set(String).new
     # Cache for split_union_type_name (pure function of input string).
@@ -20840,6 +20845,23 @@ module Crystal::HIR
     end
 
     private def unresolved_generic_type_arg?(arg : String) : Bool
+      cc = @current_class
+      if cc != @unresolved_generic_arg_cache_class || @unresolved_generic_arg_cache_gen != @subst_cache_gen
+        @unresolved_generic_arg_cache.clear
+        @unresolved_generic_arg_cache_class = cc
+        @unresolved_generic_arg_cache_gen = @subst_cache_gen
+      end
+
+      if cached = @unresolved_generic_arg_cache[arg]?
+        return cached
+      end
+
+      result = unresolved_generic_type_arg_uncached?(arg)
+      @unresolved_generic_arg_cache[arg] = result
+      result
+    end
+
+    private def unresolved_generic_type_arg_uncached?(arg : String) : Bool
       arg = normalize_tuple_literal_type_name(arg.strip)
       return true if arg.empty?
       return true if unresolved_short_type_param_token?(arg)

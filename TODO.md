@@ -30,6 +30,19 @@
   - Regression status:
     - full run: `bash regression_tests/run_all.sh /tmp/stage1_dbg_single_upper_token_opt` -> **56 passed, 3 failed** (`hash_compaction`, `hash_stress`, `yield_suffix_unless`);
     - baseline check with earlier binary (`/tmp/stage1_dbg_union_sep_scan_opt`) reproduces the same 3 failures, so these are **pre-existing** in current line, not introduced by this patchset.
+  - Follow-up branch (unresolved generic cache):
+    - added `unresolved_generic_type_arg?` memo-cache with invalidation by `@subst_cache_gen` + `@current_class`;
+    - debug check:
+      - `/usr/bin/time -p crystal build src/crystal_v2.cr -o /tmp/stage1_dbg_unresolved_cache_opt --error-trace` -> `exit 0`, **real 8.50s**
+      - `bash regression_tests/run_mini_oracles.sh /tmp/stage1_dbg_unresolved_cache_opt` -> **5/5 PASS**
+    - known failing repros remain unchanged (baseline parity):
+      - `hash_compaction`: `missing=6`
+      - `hash_stress`: `missing=14`
+      - `yield_suffix_unless`: `count=3`
+    - release + stage2 probe:
+      - `/usr/bin/time -p crystal build --release src/crystal_v2.cr -o /tmp/stage1_rel_unresolved_cache_opt --error-trace` -> `exit 0`, **real 431.76s**
+      - `scripts/timeout_sample_lldb.sh -t 300 ... /tmp/stage1_rel_unresolved_cache_opt ...` -> timeout `124`
+      - top symbols shifted to type-resolution/hash core (`type_ref_for_name`, `resolve_type_name_in_context`, `substitute_type_params_in_type_name`, `String#hash/index`), with unresolved-generic checks no longer dominating top.
 
 - **2026-02-28 (latest): root-cause performance/churn reductions in `AstToHir` type-resolution hot path (stage2 still unstable)**
   - Scope (`src/compiler/hir/ast_to_hir.cr`):
