@@ -1622,8 +1622,12 @@ module Crystal::HIR
     end
 
     # Centralized write path so type-key indexes can process only newly-added keys.
-    private def set_function_type_entry(name : String, return_type : TypeRef) : Nil
+    # Returns true if the entry was inserted or updated.
+    private def set_function_type_entry(name : String, return_type : TypeRef) : Bool
       old_type = @function_types[name]?
+      if old_type == return_type
+        return false
+      end
       # Do not downgrade a known concrete return type to VOID.
       # VOID writes are often provisional/failed inference states; allowing
       # them to overwrite concrete types causes unstable codegen (different
@@ -1635,7 +1639,7 @@ module Crystal::HIR
             STDERR.puts "[SET_FTYPE_SKIP_VOID] name=#{name} old=#{old_name} current=#{@current_class || ""}##{@current_method || ""}"
           end
         end
-        return
+        return false
       end
       is_new = old_type.nil?
       if filter = env_get("DEBUG_SET_FTYPE")
@@ -1654,6 +1658,7 @@ module Crystal::HIR
         @function_types_processed_for_keys = @function_types.size
         @function_type_keys_by_base_size = @function_types.size
       end
+      true
     end
 
     # Register a function def and update the method index for fast parent lookups.
@@ -2356,12 +2361,17 @@ module Crystal::HIR
       sources_by_arena : Hash(CrystalV2::Compiler::Frontend::ArenaLike, String)? = nil,
       paths_by_arena : Hash(CrystalV2::Compiler::Frontend::ArenaLike, String)? = nil,
     )
+      function_type_capacity = ENV["CRYSTAL_V2_FUNCTION_TYPE_CAPACITY"]?.try(&.to_i?) || 131072
+      function_type_capacity = 8192 if function_type_capacity < 8192
+      function_type_aux_capacity = function_type_capacity // 2
+      function_type_aux_capacity = 4096 if function_type_aux_capacity < 4096
+      function_type_processed_capacity = function_type_capacity * 2
       @module = Crystal::HIR::Module.new(module_name)
-      @function_types = Hash(String, TypeRef).new(initial_capacity: 8192)
-      @function_base_names = Set(String).new(initial_capacity: 8192)
+      @function_types = Hash(String, TypeRef).new(initial_capacity: function_type_capacity)
+      @function_base_names = Set(String).new(initial_capacity: function_type_capacity)
       @method_bases_by_name = Hash(String, Set(String)).new(initial_capacity: 4096)
       @instance_method_names_by_owner = Hash(String, Set(String)).new(initial_capacity: 2048)
-      @function_base_return_types = Hash(String, TypeRef).new(initial_capacity: 8192)
+      @function_base_return_types = Hash(String, TypeRef).new(initial_capacity: function_type_aux_capacity)
       @function_enum_return_names = {} of String => String
       @function_return_type_literals = Set(String).new
       @class_info = Hash(String, ClassInfo).new(initial_capacity: 2048)
@@ -2402,10 +2412,10 @@ module Crystal::HIR
       @pending_function_def_keys = [] of String
       @function_def_keys_processed = Set(String).new(initial_capacity: 32768)
       @function_param_stats = {} of String => DefParamStats
-      @function_type_keys_by_base = Hash(String, Array(String)).new(initial_capacity: 8192)
+      @function_type_keys_by_base = Hash(String, Array(String)).new(initial_capacity: function_type_aux_capacity)
       @function_type_keys_by_base_size = 0
       @pending_function_type_keys = [] of String
-      @function_type_keys_processed = Set(String).new(initial_capacity: 16384)
+      @function_type_keys_processed = Set(String).new(initial_capacity: function_type_processed_capacity)
       @function_def_overloads_cache = {} of String => Array(String)
       @function_def_overloads_cache_size = 0
       @yield_functions = Set(String).new
@@ -2425,7 +2435,7 @@ module Crystal::HIR
       @recorded_arg_types_by_signature = {} of CallSignature => Array(CallsiteArgs)
       @recorded_arg_types_seen_by_signature = {} of CallSignature => Set(String)
       @pending_type_param_maps = Hash(String, Hash(String, String)).new(initial_capacity: 4096)
-      @function_type_param_maps = Hash(String, Hash(String, String)).new(initial_capacity: 8192)
+      @function_type_param_maps = Hash(String, Hash(String, String)).new(initial_capacity: function_type_aux_capacity)
       @function_namespace_overrides = Hash(String, String).new(initial_capacity: 4096)
       @generic_templates = {} of String => GenericClassTemplate
       @generic_reopenings = {} of String => Array(GenericClassTemplate)
@@ -2992,7 +3002,9 @@ module Crystal::HIR
           end
         end
       end
-      set_function_type_entry(full_name, return_type)
+      updated = set_function_type_entry(full_name, return_type)
+      base_already_registered = @function_base_names.includes?(base_name)
+      return unless updated || !base_already_registered
       @function_base_names.add(base_name)
       if hash_idx = base_name.rindex('#')
         owner = base_name[0, hash_idx]

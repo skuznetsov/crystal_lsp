@@ -45,6 +45,46 @@
   - `bash regression_tests/stage2_debug_profile_oracle.sh <stage2_compiler> 240 release 1200,4000`
   - compare counter growth slope between `N=1200` and `N=4000` to identify superlinear root-cause branches before full bootstrap runs.
 
+## 2026-02-28: function-type churn reduction + capacity scaling (partial root-cause progress)
+- Scope (`src/compiler/hir/ast_to_hir.cr`):
+  - `set_function_type_entry`:
+    - now returns `Bool` (updated vs skipped);
+    - skips duplicate writes (`old_type == return_type`);
+    - keeps existing VOID-downgrade guard and returns `false` on skip.
+  - `register_function_type`:
+    - uses `updated = set_function_type_entry(...)`;
+    - skips repeated downstream index/set updates when type entry unchanged and base already registered.
+  - initializer:
+    - introduced `CRYSTAL_V2_FUNCTION_TYPE_CAPACITY` (default `131072`, floor `8192`);
+    - scaled capacities for:
+      - `@function_types`
+      - `@function_base_names`
+      - `@function_base_return_types`
+      - `@function_type_keys_by_base`
+      - `@function_type_keys_processed`
+      - `@function_type_param_maps`
+- Validation:
+  - debug build:
+    - `/usr/bin/time -p crystal build src/crystal_v2.cr -o /tmp/stage1_dbg_ftype_capacity --error-trace` -> `real 10.24s`
+    - `bash regression_tests/run_mini_oracles.sh /tmp/stage1_dbg_ftype_capacity` -> **5/5 PASS**
+  - debug oracle:
+    - `N=1200` completed (`total=41968.7ms`)
+    - `N=4000` timed out at `180s`; timeout stack/hotspots in MIR DCE (`DeadCodeEliminationPass#run`)
+  - release build:
+    - `/usr/bin/time -p crystal build --release src/crystal_v2.cr -o /tmp/stage1_rel_ftype_capacity --error-trace` -> `real 654.59s`
+  - release oracle:
+    - `bash regression_tests/stage2_debug_profile_oracle.sh /tmp/stage1_rel_ftype_capacity 240 release 1200,4000`
+    - `N=1200` -> `total=9055.3ms`
+    - `N=4000` -> `total=44023.5ms`
+    - both cases reported `llvm_cache=2 hit/0 miss` (cache-assisted measurements).
+  - stage2 bootstrap watchdog (`180s`):
+    - `scripts/timeout_sample_lldb.sh ... /tmp/stage1_rel_ftype_capacity src/crystal_v2.cr --release --debug-profile -o /tmp/stage2_rel_ftype_capacity`
+    - status `124` (still timeout), but hotspot/LLDB focus shifted:
+      - away from previous `set_function_type_entry` stack;
+      - now centered on `resolve_module_alias_prefix`, `substitute_type_params_in_type_name`, `register_module_instance_methods_for`, and GC pressure (`GC_*`, `String#byte_slice?`, `String#hash`).
+- Status:
+  - **partial**: removed one function-type table churn source; next root-cause branch is alias-prefix/type-substitution string-allocation pressure in HIR include/monomorphization paths.
+
 ## Fast small repro loop (2026-02-28)
 - Use this loop for rapid rollback/iteration before full stage2 bootstrap checks.
 - Build debug stage1 with original compiler:
