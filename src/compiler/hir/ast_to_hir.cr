@@ -7272,8 +7272,8 @@ module Crystal::HIR
               end
             end
 
-            full_name = function_full_name_for_def(base_name, param_types, member.params, has_block)
-            defined << full_name
+              full_name = function_full_name_for_def(base_name, param_types, member.params, has_block)
+              defined << full_name
             if env_get("DEBUG_DEFINED_METHODS") && class_name.starts_with?("Tuple") && method_name == "hash"
               STDERR.puts "[DEFINED_METHOD] class=#{class_name} full=#{full_name}"
             end
@@ -7524,12 +7524,12 @@ module Crystal::HIR
       when CrystalV2::Compiler::Frontend::VisibilityModifierNode
         add_defined_instance_methods_from_expr(class_name, defined_full_names, member.expression)
       end
-    end
+      end
 
-    private def accessor_method_name(spec : CrystalV2::Compiler::Frontend::AccessorSpec) : String
-      name = String.new(spec.name)
-      spec.predicate ? "#{name}?" : name
-    end
+      private def accessor_method_name(spec : CrystalV2::Compiler::Frontend::AccessorSpec) : String
+        name = String.new(spec.name)
+        spec.predicate ? "#{name}?" : name
+      end
 
     private def accessor_storage_name(spec : CrystalV2::Compiler::Frontend::AccessorSpec) : String
       String.new(spec.name)
@@ -7601,9 +7601,15 @@ module Crystal::HIR
       ivars : Array(IVarInfo),
       offset_ptr : Pointer(Int32),
       owner_name : String? = nil,
-    ) : Array({String, TypeRef})
-      init_params = [] of {String, TypeRef}
-      params.each do |param|
+      ) : Array({String, TypeRef})
+        init_params = [] of {String, TypeRef}
+        ivar_index_by_name = {} of String => Int32
+        ivar_idx = 0
+        while ivar_idx < ivars.size
+          ivar_index_by_name[ivars[ivar_idx].name] = ivar_idx
+          ivar_idx += 1
+        end
+        params.each do |param|
         next if named_only_separator?(param)
         param_name = param.name.nil? ? "_" : String.new(param.name.not_nil!)
         is_ivar_param = param.is_instance_var || param_name.starts_with?('@')
@@ -7626,20 +7632,21 @@ module Crystal::HIR
               param_type = inferred if inferred && inferred != TypeRef::VOID
             end
           end
-          if idx = ivars.index { |iv| iv.name == ivar_name }
-            existing = ivars[idx]
-            if existing.type == TypeRef::VOID && param_type != TypeRef::VOID
-              ivars[idx] = IVarInfo.new(ivar_name, param_type, existing.offset)
-            elsif param_type == TypeRef::VOID && existing.type != TypeRef::VOID
-              param_type = existing.type
+            if idx = ivar_index_by_name[ivar_name]?
+              existing = ivars[idx]
+              if existing.type == TypeRef::VOID && param_type != TypeRef::VOID
+                ivars[idx] = IVarInfo.new(ivar_name, param_type, existing.offset)
+              elsif param_type == TypeRef::VOID && existing.type != TypeRef::VOID
+                param_type = existing.type
             elsif param_type == TypeRef::NIL && existing.type != TypeRef::VOID && existing.type != TypeRef::NIL
               # `@ivar = nil` default: use the declared ivar type (e.g., Foo?) not Nil
               param_type = existing.type
             end
-          else
-            ivars << IVarInfo.new(ivar_name, param_type, offset_ptr.value)
-            offset_ptr.value += field_storage_size(param_type)
-          end
+            else
+              ivars << IVarInfo.new(ivar_name, param_type, offset_ptr.value)
+              ivar_index_by_name[ivar_name] = ivars.size - 1
+              offset_ptr.value += field_storage_size(param_type)
+            end
           if owner_name && (ta = param.type_annotation)
             type_name = String.new(ta)
             resolved = resolve_type_alias_chain(resolve_type_name_in_context(type_name))

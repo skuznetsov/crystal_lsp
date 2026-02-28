@@ -1,6 +1,44 @@
 # Crystal v2 — Active Work (codegen branch)
 
 ## Known Bugs (codegen)
+- **2026-02-28 (latest): sped up `capture_initialize_params` by indexing ivars (partial, stage2 still >300s)**
+  - Scope (`src/compiler/hir/ast_to_hir.cr`):
+    - `capture_initialize_params` now builds local `ivar_index_by_name` once and uses O(1) lookup
+      instead of repeated `ivars.index { |iv| iv.name == ivar_name }`.
+    - Keeps existing semantics for `VOID/NIL` reconciliation and offset updates.
+  - Why:
+    - timeout LLDB stack repeatedly sampled `register_concrete_class -> capture_initialize_params`.
+    - prior path performed repeated linear scans over growing ivar arrays.
+  - Evidence:
+    - debug DoD:
+      - `/usr/bin/time -p crystal build src/crystal_v2.cr -o /tmp/stage1_dbg_capture_init_index_fix --error-trace` -> **real 8.30s**
+      - `bash regression_tests/run_mini_oracles.sh /tmp/stage1_dbg_capture_init_index_fix` -> **5/5 PASS**
+      - `bash regression_tests/stage2_env_optional_repro.sh /tmp/stage1_dbg_capture_init_index_fix` -> `not reproduced`
+    - release stage1:
+      - `/usr/bin/time -p crystal build --release src/crystal_v2.cr -o /tmp/stage1_rel_capture_init_index_fix --error-trace` -> **real 408.07s** (best in current line)
+    - stage2 watchdog (`t300`):
+      - `scripts/timeout_sample_lldb.sh -t 300 -s 8 -n 15 -o /tmp/stage2_rel_capture_init_index_fix_t300 -- /usr/bin/time -p /tmp/stage1_rel_capture_init_index_fix src/crystal_v2.cr --release -o /tmp/stage2_rel_capture_init_index_fix` -> timeout `124`
+      - top symbols shifted to a tighter type-resolution/core churn set:
+        - `type_ref_for_name` 473
+        - `resolve_type_name_in_context` 283
+        - `register_concrete_class` 247
+        - `lower_call` dropped out of top dominance in this run.
+  - Status:
+    - **partial**: stable and faster stage1; stage2 still exceeds 300s.
+
+- **2026-02-28 (latest): falsified experiment — lightweight signature-scan full-name helper regressed bootstrap**
+  - Attempt:
+    - replaced `collect_defined_instance_method_full_names` call to `function_full_name_for_def`
+      with a lightweight `function_full_name_for_signature_scan` helper.
+  - Result:
+    - stage1 release regressed:
+      - `/usr/bin/time -p crystal build --release src/crystal_v2.cr -o /tmp/stage1_rel_signature_scan_name_fix --error-trace` -> **real 420.58s**
+    - stage2 remained timeout `t300` with heavier lowering mix:
+      - `/tmp/stage2_rel_signature_scan_name_fix_t300/hotspots.txt` dominated by
+        `lower_node/type_ref_for_name/register_concrete_class/lower_call`.
+  - Decision:
+    - reverted this helper branch completely.
+
 - **2026-02-28 (latest): invalidate type-cache buckets on namespace invalidation (partial, stage2 still >300s)**
   - Scope (`src/compiler/hir/ast_to_hir.cr`):
     - `invalidate_type_cache_for_namespace` now:
