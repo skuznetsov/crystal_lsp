@@ -16,6 +16,40 @@
   - run full release stage2 bootstrap only after small repro signal improves.
 
 ## Known Bugs (codegen)
+- **2026-02-28 (latest): HIR annotation/union gate hot-path reductions (small repro improved, full stage2 still >420s)**
+  - Scope (`src/compiler/hir/ast_to_hir.cr`):
+    - `annotation_type_ref`:
+      - added cache `@annotation_type_ref_cache` keyed by `{type_name, owner_name, module_defs_version, resolved_epoch}`;
+      - replaced `resolved_name.includes?("::")` with `namespace_separator_index(resolved_name).nil?`;
+      - wired cache clear into:
+        - `bump_module_defs_cache_version`
+        - `invalidate_resolved_type_name_cache_for`
+        - full type-cache reset branch.
+    - `type_ref_for_name`:
+      - added local `lookup_is_union` memoization and reused it across union checks in the same call;
+      - removed repeated union-separator rescans for the same `lookup_name`.
+  - Evidence (stage2-focused):
+    - small full-codegen repro:
+      - `/tmp/stage1_dbg_annotation_cache`:
+        - `N=1200` -> **real 34.09s**
+        - `N=4000` -> **real 170.18s**
+      - `/tmp/stage1_dbg_union_gate_cache`:
+        - `N=1200` -> **real 33.41s**
+        - `N=4000` -> **real 165.04s**
+      - both complete under `t180` (no timeout).
+    - full stage2 bootstrap:
+      - `t300`: `/tmp/stage2_rel_union_gate_cache_t300` -> timeout `124`, but hotspot intensity in HIR reduced vs prior runs.
+      - `t420`: `/tmp/stage2_rel_union_gate_cache_t420` -> timeout `124` (stage2 still **>420s**), hotspot now shifts to LLVM emission:
+        - `LLVMIRGenerator#emit_function`
+        - `emit_instruction`
+        - `coerce_union_value_for_type` (`String#index` path).
+      - LLDB (`t420`) stop stack:
+        - `llvm_backend.cr:16320` (`coerce_union_value_for_type`) via `emit_union_is`/`emit_instruction`.
+    - sanity:
+      - `bash regression_tests/run_mini_oracles.sh /tmp/stage1_dbg_union_gate_cache` -> **5/5 PASS**
+  - Status:
+    - **partial, root-cause-positive**: stage2 progressed beyond prior HIR bottleneck, but full bootstrap still not within 420s; next root-cause branch is LLVM union coercion/string-operation churn.
+
 - **2026-02-28 (latest): indexed call target lookup by `FunctionId` in LLVM backend hot path**
   - Scope (`src/compiler/mir/llvm_backend.cr`):
     - added `@func_by_id : Hash(FunctionId, Function)` and populated it in `build_function_lookup_indexes`;

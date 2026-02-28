@@ -2138,6 +2138,7 @@ module Crystal::HIR
     @generic_param_resolution_log_count : Int32
     # Cache for normalize_declared_type_name keyed on (type_name, context, subst_cache_gen).
     @normalize_decl_cache : Hash({String, String?, UInt64}, String)
+    @annotation_type_ref_cache : Hash({String, String?, Int32, Int32}, TypeRef)
     # Guard against recursive union construction (A | B where A aliases back to union).
     @union_in_progress : Set(String)
 
@@ -2510,6 +2511,7 @@ module Crystal::HIR
       @generic_param_resolution_in_progress = Set(String).new
       @generic_param_resolution_log_count = 0
       @normalize_decl_cache = Hash({String, String?, UInt64}, String).new(initial_capacity: 4096)
+      @annotation_type_ref_cache = Hash({String, String?, Int32, Int32}, TypeRef).new(initial_capacity: 4096)
       @union_in_progress = Set(String).new
       @resolved_type_name_cache_global = Hash(String, ResolvedTypeNameCacheEntry).new(initial_capacity: 8192)
       @resolved_type_name_cache_by_ctx = {} of TypeNameContextKey => Hash(String, ResolvedTypeNameCacheEntry)
@@ -6434,6 +6436,18 @@ module Crystal::HIR
       arena[expr_id]
     end
 
+    private def node_for_expr(
+      expr_id : ExprId,
+      preferred_arena : CrystalV2::Compiler::Frontend::ArenaLike?,
+    ) : CrystalV2::Compiler::Frontend::Node?
+      if arena = preferred_arena
+        if expr_id.index >= 0 && expr_id.index < arena.size
+          return arena[expr_id]
+        end
+      end
+      node_for_expr(expr_id)
+    end
+
     private def node_for_call_expr(
       call_arena : CrystalV2::Compiler::Frontend::ArenaLike,
       expr_id : ExprId,
@@ -7692,6 +7706,10 @@ module Crystal::HIR
     end
 
     private def annotation_type_ref(type_name : String, owner_name : String? = nil) : TypeRef
+      cache_key = {type_name, owner_name, @module_defs_cache_version, @resolved_type_name_cache_epoch}
+      if cached = @annotation_type_ref_cache[cache_key]?
+        return cached
+      end
       resolved_name = normalize_declared_type_name(type_name, owner_name)
       if resolved_name.ends_with?('*')
         pointer_depth = 0
@@ -7717,7 +7735,7 @@ module Crystal::HIR
         @current_namespace_override = nil
       end
       begin
-        if !resolved_name.includes?("::")
+        if namespace_separator_index(resolved_name).nil?
           if contextual_alias = resolve_contextual_type_alias_name(resolved_name)
             resolved_name = contextual_alias
             STDERR.puts "[HANDLE_ANNOT] contextual=#{resolved_name}" if debug_handle
@@ -7744,7 +7762,9 @@ module Crystal::HIR
         end
       end
       STDERR.puts "[HANDLE_ANNOT] final=#{resolved_name}" if debug_handle
-      type_ref_for_name(resolved_name)
+      resolved = type_ref_for_name(resolved_name)
+      @annotation_type_ref_cache[cache_key] = resolved
+      resolved
     end
 
     private def register_module_instance_methods_for(
@@ -11061,6 +11081,7 @@ module Crystal::HIR
       @module_defs_cache_version += 1
       @module_include_alias_cache.clear
       @module_alias_prefix_cache.clear
+      @annotation_type_ref_cache.clear
       clear_defined_method_scan_caches
       clear_receiver_specialization_caches
     end
@@ -23872,8 +23893,11 @@ module Crystal::HIR
     end
 
     # Check if expression list contains yield
-    private def contains_yield?(body : Array(ExprId)) : Bool
-      body.any? { |expr_id| contains_yield_in_expr?(expr_id) }
+    private def contains_yield?(
+      body : Array(ExprId),
+      preferred_arena : CrystalV2::Compiler::Frontend::ArenaLike? = nil,
+    ) : Bool
+      body.any? { |expr_id| contains_yield_in_expr?(expr_id, preferred_arena) }
     end
 
     private def contains_block_call?(body : Array(ExprId), block_name : String) : Bool
@@ -23904,7 +23928,10 @@ module Crystal::HIR
         byte == '_'.ord
     end
 
-    private def macro_literal_contains_yield?(node : CrystalV2::Compiler::Frontend::MacroLiteralNode) : Bool
+    private def macro_literal_contains_yield?(
+      node : CrystalV2::Compiler::Frontend::MacroLiteralNode,
+      preferred_arena : CrystalV2::Compiler::Frontend::ArenaLike? = nil,
+    ) : Bool
       if raw_text = macro_literal_raw_text(node)
         return true if macro_text_contains_yield?(raw_text)
       end
@@ -23912,7 +23939,7 @@ module Crystal::HIR
         case piece.kind
         when CrystalV2::Compiler::Frontend::MacroPiece::Kind::Expression
           if expr_id = piece.expr
-            return true if contains_yield_in_expr?(expr_id)
+            return true if contains_yield_in_expr?(expr_id, preferred_arena)
           end
         when CrystalV2::Compiler::Frontend::MacroPiece::Kind::Text
           if text = piece.text
@@ -24664,120 +24691,123 @@ module Crystal::HIR
       end
     end
 
-    private def contains_yield_in_expr?(expr_id : ExprId) : Bool
+    private def contains_yield_in_expr?(
+      expr_id : ExprId,
+      preferred_arena : CrystalV2::Compiler::Frontend::ArenaLike? = nil,
+    ) : Bool
       return false if expr_id.invalid?
-      node = node_for_expr(expr_id)
+      node = node_for_expr(expr_id, preferred_arena)
       return false unless node
       case node
       when CrystalV2::Compiler::Frontend::YieldNode
         true
       when CrystalV2::Compiler::Frontend::AssignNode
-        contains_yield_in_expr?(node.target) || contains_yield_in_expr?(node.value)
+        contains_yield_in_expr?(node.target, preferred_arena) || contains_yield_in_expr?(node.value, preferred_arena)
       when CrystalV2::Compiler::Frontend::MultipleAssignNode
-        return true if contains_yield_in_expr?(node.value)
-        node.targets.any? { |target| contains_yield_in_expr?(target) }
+        return true if contains_yield_in_expr?(node.value, preferred_arena)
+        node.targets.any? { |target| contains_yield_in_expr?(target, preferred_arena) }
       when CrystalV2::Compiler::Frontend::ReturnNode
-        node.value ? contains_yield_in_expr?(node.value.not_nil!) : false
+        node.value ? contains_yield_in_expr?(node.value.not_nil!, preferred_arena) : false
       when CrystalV2::Compiler::Frontend::MemberAccessNode
-        contains_yield_in_expr?(node.object)
+        contains_yield_in_expr?(node.object, preferred_arena)
       when CrystalV2::Compiler::Frontend::CallNode
         if callee_id = node.callee
-          callee_node = node_for_expr(callee_id)
+          callee_node = node_for_expr(callee_id, preferred_arena)
           if callee_node.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode)
             return true if String.new(callee_node.name) == "yield"
           end
-          return true if contains_yield_in_expr?(callee_id)
+          return true if contains_yield_in_expr?(callee_id, preferred_arena)
         end
         node.args.each do |arg|
-          return true if contains_yield_in_expr?(arg)
+          return true if contains_yield_in_expr?(arg, preferred_arena)
         end
         if block_id = node.block
-          return true if contains_yield_in_expr?(block_id)
+          return true if contains_yield_in_expr?(block_id, preferred_arena)
         end
         if named = node.named_args
           named.each do |na|
-            return true if contains_yield_in_expr?(na.value)
+            return true if contains_yield_in_expr?(na.value, preferred_arena)
           end
         end
         false
       when CrystalV2::Compiler::Frontend::UnaryNode
-        contains_yield_in_expr?(node.operand)
+        contains_yield_in_expr?(node.operand, preferred_arena)
       when CrystalV2::Compiler::Frontend::BinaryNode
-        contains_yield_in_expr?(node.left) || contains_yield_in_expr?(node.right)
+        contains_yield_in_expr?(node.left, preferred_arena) || contains_yield_in_expr?(node.right, preferred_arena)
       when CrystalV2::Compiler::Frontend::TernaryNode
-        contains_yield_in_expr?(node.condition) ||
-          contains_yield_in_expr?(node.true_branch) ||
-          contains_yield_in_expr?(node.false_branch)
+        contains_yield_in_expr?(node.condition, preferred_arena) ||
+          contains_yield_in_expr?(node.true_branch, preferred_arena) ||
+          contains_yield_in_expr?(node.false_branch, preferred_arena)
       when CrystalV2::Compiler::Frontend::GroupingNode
-        contains_yield_in_expr?(node.expression)
+        contains_yield_in_expr?(node.expression, preferred_arena)
       when CrystalV2::Compiler::Frontend::MacroExpressionNode
-        contains_yield_in_expr?(node.expression)
+        contains_yield_in_expr?(node.expression, preferred_arena)
       when CrystalV2::Compiler::Frontend::MacroIfNode
-        return true if contains_yield_in_expr?(node.condition)
-        return true if contains_yield_in_expr?(node.then_body)
+        return true if contains_yield_in_expr?(node.condition, preferred_arena)
+        return true if contains_yield_in_expr?(node.then_body, preferred_arena)
         if node.else_body
-          return true if contains_yield_in_expr?(node.else_body.not_nil!)
+          return true if contains_yield_in_expr?(node.else_body.not_nil!, preferred_arena)
         end
         false
       when CrystalV2::Compiler::Frontend::MacroForNode
-        return true if contains_yield_in_expr?(node.iterable)
-        contains_yield_in_expr?(node.body)
+        return true if contains_yield_in_expr?(node.iterable, preferred_arena)
+        contains_yield_in_expr?(node.body, preferred_arena)
       when CrystalV2::Compiler::Frontend::MacroLiteralNode
-        macro_literal_contains_yield?(node)
+        macro_literal_contains_yield?(node, preferred_arena)
       when CrystalV2::Compiler::Frontend::ConstantNode
-        contains_yield_in_expr?(node.value)
+        contains_yield_in_expr?(node.value, preferred_arena)
       when CrystalV2::Compiler::Frontend::IfNode
-        contains_yield_in_expr?(node.condition) ||
-          contains_yield?(node.then_body) ||
+        contains_yield_in_expr?(node.condition, preferred_arena) ||
+          contains_yield?(node.then_body, preferred_arena) ||
           (node.elsifs && node.elsifs.not_nil!.any? do |branch|
-            contains_yield_in_expr?(branch.condition) || contains_yield?(branch.body)
+            contains_yield_in_expr?(branch.condition, preferred_arena) || contains_yield?(branch.body, preferred_arena)
           end) ||
-          (node.else_body ? contains_yield?(node.else_body.not_nil!) : false)
+          (node.else_body ? contains_yield?(node.else_body.not_nil!, preferred_arena) : false)
       when CrystalV2::Compiler::Frontend::UnlessNode
-        contains_yield_in_expr?(node.condition) ||
-          contains_yield?(node.then_branch) ||
-          (node.else_branch ? contains_yield?(node.else_branch.not_nil!) : false)
+        contains_yield_in_expr?(node.condition, preferred_arena) ||
+          contains_yield?(node.then_branch, preferred_arena) ||
+          (node.else_branch ? contains_yield?(node.else_branch.not_nil!, preferred_arena) : false)
       when CrystalV2::Compiler::Frontend::WhileNode
-        contains_yield_in_expr?(node.condition) || contains_yield?(node.body)
+        contains_yield_in_expr?(node.condition, preferred_arena) || contains_yield?(node.body, preferred_arena)
       when CrystalV2::Compiler::Frontend::UntilNode
-        contains_yield_in_expr?(node.condition) || contains_yield?(node.body)
+        contains_yield_in_expr?(node.condition, preferred_arena) || contains_yield?(node.body, preferred_arena)
       when CrystalV2::Compiler::Frontend::LoopNode
-        contains_yield?(node.body)
+        contains_yield?(node.body, preferred_arena)
       when CrystalV2::Compiler::Frontend::BlockNode
-        contains_yield?(node.body)
+        contains_yield?(node.body, preferred_arena)
       when CrystalV2::Compiler::Frontend::ProcLiteralNode
-        contains_yield?(node.body)
+        contains_yield?(node.body, preferred_arena)
       when CrystalV2::Compiler::Frontend::CaseNode
-        node.when_branches.any? { |w| contains_yield?(w.body) } ||
-          (node.else_branch ? contains_yield?(node.else_branch.not_nil!) : false)
+        node.when_branches.any? { |w| contains_yield?(w.body, preferred_arena) } ||
+          (node.else_branch ? contains_yield?(node.else_branch.not_nil!, preferred_arena) : false)
       when CrystalV2::Compiler::Frontend::ArrayLiteralNode
-        return true if node.elements.any? { |el| contains_yield_in_expr?(el) }
-        node.of_type ? contains_yield_in_expr?(node.of_type.not_nil!) : false
+        return true if node.elements.any? { |el| contains_yield_in_expr?(el, preferred_arena) }
+        node.of_type ? contains_yield_in_expr?(node.of_type.not_nil!, preferred_arena) : false
       when CrystalV2::Compiler::Frontend::TupleLiteralNode
-        node.elements.any? { |el| contains_yield_in_expr?(el) }
+        node.elements.any? { |el| contains_yield_in_expr?(el, preferred_arena) }
       when CrystalV2::Compiler::Frontend::HashLiteralNode
         node.entries.any? do |entry|
-          contains_yield_in_expr?(entry.key) || contains_yield_in_expr?(entry.value)
+          contains_yield_in_expr?(entry.key, preferred_arena) || contains_yield_in_expr?(entry.value, preferred_arena)
         end
       when CrystalV2::Compiler::Frontend::NamedTupleLiteralNode
-        node.entries.any? { |entry| contains_yield_in_expr?(entry.value) }
+        node.entries.any? { |entry| contains_yield_in_expr?(entry.value, preferred_arena) }
       when CrystalV2::Compiler::Frontend::StringInterpolationNode
         node.pieces.any? do |piece|
           piece.kind == CrystalV2::Compiler::Frontend::StringPiece::Kind::Expression &&
-            piece.expr && contains_yield_in_expr?(piece.expr.not_nil!)
+            piece.expr && contains_yield_in_expr?(piece.expr.not_nil!, preferred_arena)
         end
       when CrystalV2::Compiler::Frontend::IndexNode
-        return true if contains_yield_in_expr?(node.object)
-        node.indexes.any? { |idx| contains_yield_in_expr?(idx) }
+        return true if contains_yield_in_expr?(node.object, preferred_arena)
+        node.indexes.any? { |idx| contains_yield_in_expr?(idx, preferred_arena) }
       when CrystalV2::Compiler::Frontend::RangeNode
-        contains_yield_in_expr?(node.begin_expr) || contains_yield_in_expr?(node.end_expr)
+        contains_yield_in_expr?(node.begin_expr, preferred_arena) || contains_yield_in_expr?(node.end_expr, preferred_arena)
       when CrystalV2::Compiler::Frontend::BeginNode
-        return true if contains_yield?(node.body)
+        return true if contains_yield?(node.body, preferred_arena)
         if clauses = node.rescue_clauses
-          return true if clauses.any? { |cl| contains_yield?(cl.body) }
+          return true if clauses.any? { |cl| contains_yield?(cl.body, preferred_arena) }
         end
-        return true if node.else_body && contains_yield?(node.else_body.not_nil!)
-        return true if node.ensure_body && contains_yield?(node.ensure_body.not_nil!)
+        return true if node.else_body && contains_yield?(node.else_body.not_nil!, preferred_arena)
+        return true if node.ensure_body && contains_yield?(node.ensure_body.not_nil!, preferred_arena)
         false
       else
         false
@@ -64083,6 +64113,7 @@ module Crystal::HIR
       # trigger heavy hash-resize churn during stage2 bootstrap.
       @module_include_alias_cache.clear
       @module_alias_prefix_cache.clear
+      @annotation_type_ref_cache.clear
       clear_defined_method_scan_caches
     end
 
@@ -64156,6 +64187,7 @@ module Crystal::HIR
         @resolved_type_name_last_entry_epoch = 0
         @type_literal_class_cache.clear
         @type_name_normalize_cache.clear
+        @annotation_type_ref_cache.clear
       end
     end
 
@@ -64757,7 +64789,8 @@ module Crystal::HIR
       resolved_alias = resolve_type_alias_chain(lookup_name)
       lookup_name = resolved_alias if resolved_alias != lookup_name
       lookup_name = normalize_missing_generic_parens(lookup_name || "")
-      if union_type_name?(lookup_name)
+      lookup_is_union = union_type_name?(lookup_name)
+      if lookup_is_union
         lookup_name = normalize_union_type_name(lookup_name)
       end
       lookup_has_generic = lookup_name.includes?('(')
@@ -64795,7 +64828,7 @@ module Crystal::HIR
       # If a composite type expression still contains unresolved short type params
       # (for example `... | U`), don't recurse into union/generic materialization.
       # This prevents runaway sanitize/type_ref/create_union cycles.
-      if (lookup_name.includes?('|') || lookup_name.includes?('(') || lookup_name.includes?(',') || lookup_name.ends_with?('?')) &&
+      if (lookup_is_union || lookup_name.includes?('(') || lookup_name.includes?(',') || lookup_name.ends_with?('?')) &&
          has_unresolved_short_type_param_token?(lookup_name)
         @type_cache.delete(cache_key)
         return TypeRef::VOID
@@ -64816,7 +64849,7 @@ module Crystal::HIR
       if cached = @type_cache[cache_key]?
         # If a union-like name was previously cached as a non-union descriptor,
         # invalidate and recompute so we don't treat unions as classes.
-        if union_type_name?(lookup_name)
+        if lookup_is_union
           if cached && (desc = @module.get_type_descriptor(cached))
             if desc.kind == TypeKind::Union
               return cached
@@ -64885,7 +64918,7 @@ module Crystal::HIR
       # Check for union type syntax (top-level only): "Type1 | Type2"
       # NOTE: Don't treat nested unions inside generics as unions here.
       # create_union_type handles its own caching.
-      if union_type_name?(lookup_name)
+      if lookup_is_union
         result = create_union_type(absolute_name ? "::#{lookup_name}" : lookup_name)
         store_type_cache(cache_key, result)
         return result
@@ -65040,6 +65073,14 @@ module Crystal::HIR
         if unresolved_param
           @type_cache.delete(cache_key)
           return TypeRef::VOID
+        end
+
+        if @generic_templates.has_key?(base_name)
+          if existing_info = @class_info[substituted_name]?
+            existing_ref = existing_info.type_ref
+            store_type_cache(cache_key, existing_ref)
+            return existing_ref
+          end
         end
 
         resolve_generic_param_type = ->(param : String) do
@@ -65273,7 +65314,7 @@ module Crystal::HIR
                  end
 
                  # Final guard: if this still looks like a union, prefer a union descriptor.
-                 if union_type_name?(lookup_name)
+                 if lookup_is_union
                    union_ref = create_union_type(normalize_union_type_name(lookup_name))
                    store_type_cache(cache_key, union_ref)
                    return union_ref if union_ref != TypeRef::VOID
