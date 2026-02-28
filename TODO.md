@@ -1,6 +1,31 @@
 # Crystal v2 — Active Work (codegen branch)
 
 ## Known Bugs (codegen)
+- **2026-02-28 (latest): invalidate type-cache buckets on namespace invalidation (partial, stage2 still >300s)**
+  - Scope (`src/compiler/hir/ast_to_hir.cr`):
+    - `invalidate_type_cache_for_namespace` now:
+      - deletes reverse-index buckets directly (`@type_cache_keys_by_component.delete(name|short)`, `@type_cache_keys_by_generic_prefix.delete(name|short)`);
+      - deletes indexed cache entries immediately without building temporary `keys` array.
+  - Why:
+    - reverse-index keys were accumulating stale entries across repeated invalidations; this inflated delete churn in hot bootstrap paths.
+  - Evidence:
+    - debug DoD:
+      - `/usr/bin/time -p crystal build src/crystal_v2.cr -o /tmp/stage1_dbg_invalidate_bucket_clear_fix --error-trace` -> **real 8.44s**
+      - `bash regression_tests/run_mini_oracles.sh /tmp/stage1_dbg_invalidate_bucket_clear_fix` -> **5/5 PASS**
+      - `bash regression_tests/stage2_env_optional_repro.sh /tmp/stage1_dbg_invalidate_bucket_clear_fix` -> `not reproduced`
+    - release stage1:
+      - `/usr/bin/time -p crystal build --release src/crystal_v2.cr -o /tmp/stage1_rel_invalidate_bucket_clear_fix --error-trace` -> **real 411.69s**
+    - stage2 watchdog (`t300`):
+      - `scripts/timeout_sample_lldb.sh -t 300 -s 8 -n 15 -o /tmp/stage2_rel_invalidate_bucket_clear_fix_t300 -- /usr/bin/time -p /tmp/stage1_rel_invalidate_bucket_clear_fix src/crystal_v2.cr --release -o /tmp/stage2_rel_invalidate_bucket_clear_fix` -> timeout `124`
+      - latest top sample shifts to:
+        - `type_ref_for_name` 709
+        - `register_concrete_class` 503
+        - `resolve_type_name_in_context` 377
+        - `lower_call` 276
+      - LLDB stop stack lands in `capture_initialize_params` / `register_concrete_class` path.
+  - Status:
+    - **partial**: working optimization with stable checks; next root-cause branch should target class/allocator registration churn during `register_concrete_class`.
+
 - **2026-02-28 (latest): root-cause alias/type-substitution/index churn reductions (stage2 still unstable, stage1 faster)**
   - Scope (`src/compiler/hir/ast_to_hir.cr`):
     - `resolve_contextual_type_alias_name` / `resolve_type_alias_by_suffix` now use indexed alias suffix lookup (`@type_alias_keys_by_suffix`) instead of scanning all `@type_aliases`.

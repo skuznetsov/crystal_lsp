@@ -64073,36 +64073,29 @@ module Crystal::HIR
       keys.each { |key| @type_literal_class_cache.delete(key) }
     end
 
-    private def invalidate_type_cache_for_namespace(name : String) : Nil
-      return if name.empty?
-      invalidate_resolved_type_name_cache_for(name)
-      invalidate_type_literal_cache_for(name)
-      keys = [] of String
-      if @type_cache.has_key?(name)
-        keys << name
-      end
-      if entries = @type_cache_keys_by_component[name]?
-        entries.each { |entry| keys << entry }
-      end
-      if entries = @type_cache_keys_by_generic_prefix[name]?
-        entries.each { |entry| keys << entry }
-      end
+      private def invalidate_type_cache_for_namespace(name : String) : Nil
+        return if name.empty?
+        invalidate_resolved_type_name_cache_for(name)
+        invalidate_type_literal_cache_for(name)
+        @type_cache.delete(name)
+          if entries = @type_cache_keys_by_component.delete(name)
+            entries.each { |entry| @type_cache.delete(entry) }
+          end
+          if entries = @type_cache_keys_by_generic_prefix.delete(name)
+            entries.each { |entry| @type_cache.delete(entry) }
+          end
 
-      # Only compute short name if the name contains "::"
-      if short = last_namespace_component_if_nested(name)
-        if @type_cache.has_key?(short)
-          keys << short
-        end
-        if entries = @type_cache_keys_by_component[short]?
-          entries.each { |entry| keys << entry }
-        end
-        if entries = @type_cache_keys_by_generic_prefix[short]?
-          entries.each { |entry| keys << entry }
+        # Only compute short name if the name contains "::"
+        if short = last_namespace_component_if_nested(name)
+          @type_cache.delete(short)
+            if entries = @type_cache_keys_by_component.delete(short)
+              entries.each { |entry| @type_cache.delete(entry) }
+            end
+            if entries = @type_cache_keys_by_generic_prefix.delete(short)
+              entries.each { |entry| @type_cache.delete(entry) }
+            end
         end
       end
-
-      keys.each { |key| @type_cache.delete(key) }
-    end
 
     private def invalidate_type_cache_for_macro_output(output : String) : Nil
       return if output.empty?
