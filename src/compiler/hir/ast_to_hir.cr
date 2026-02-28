@@ -26224,20 +26224,22 @@ module Crystal::HIR
         return "Tuple(#{tuple_args.join(", ")})"
       end
 
-      if info = split_generic_base_and_args(name)
-        resolved_base = resolve_class_name_in_signature_context(info[:base]) || info[:base]
-        resolved_args = split_generic_type_args(info[:args]).map do |arg|
-          arg = arg.strip
-          if arg.starts_with?(':')
-            arg = arg.size > 1 ? arg[1..] : ""
-          end
-          if type_param_like?(arg) && short_type_param_name?(arg) && !@type_param_map.has_key?(arg)
-            normalize_tuple_literal_type_name(arg)
-          else
-            normalize_tuple_literal_type_name(resolve_type_name_in_context(arg))
-          end
-        end.join(", ")
-        return resolved_base == info[:base] && resolved_args == info[:args] ? name : "#{resolved_base}(#{resolved_args})"
+      if name.ends_with?(')') || name.includes?('(') || name.includes?(',')
+        if info = split_generic_base_and_args(name)
+          resolved_base = resolve_class_name_in_signature_context(info[:base]) || info[:base]
+          resolved_args = split_generic_type_args(info[:args]).map do |arg|
+            arg = arg.strip
+            if arg.starts_with?(':')
+              arg = arg.size > 1 ? arg[1..] : ""
+            end
+            if type_param_like?(arg) && short_type_param_name?(arg) && !@type_param_map.has_key?(arg)
+              normalize_tuple_literal_type_name(arg)
+            else
+              normalize_tuple_literal_type_name(resolve_type_name_in_context(arg))
+            end
+          end.join(", ")
+          return resolved_base == info[:base] && resolved_args == info[:args] ? name : "#{resolved_base}(#{resolved_args})"
+        end
       end
 
       if resolved = resolve_class_name_in_signature_context(name)
@@ -26374,24 +26376,26 @@ module Crystal::HIR
         return tuple_name
       end
 
-      if info = split_generic_base_and_args(name)
-        resolved_base = resolve_type_name_in_context(info[:base])
-        resolved_args = split_generic_type_args(info[:args]).map do |arg|
-          arg = arg.strip
-          if arg.starts_with?(':')
-            arg = arg.size > 1 ? arg[1..] : ""
-          end
-          # Preserve short unbound type params in generic args (T/U/V) so they
-          # don't get namespace-qualified into fake nested classes.
-          if type_param_like?(arg) && short_type_param_name?(arg) && !@type_param_map.has_key?(arg)
-            normalize_tuple_literal_type_name(arg)
-          else
-            normalize_tuple_literal_type_name(resolve_type_name_in_context(arg))
-          end
-        end.join(", ")
-        resolved = resolved_base == info[:base] && resolved_args == info[:args] ? name : "#{resolved_base}(#{resolved_args})"
-        resolved_type_name_cache_set(name, resolved)
-        return resolved
+      if name.ends_with?(')') || name.includes?('(') || name.includes?(',')
+        if info = split_generic_base_and_args(name)
+          resolved_base = resolve_type_name_in_context(info[:base])
+          resolved_args = split_generic_type_args(info[:args]).map do |arg|
+            arg = arg.strip
+            if arg.starts_with?(':')
+              arg = arg.size > 1 ? arg[1..] : ""
+            end
+            # Preserve short unbound type params in generic args (T/U/V) so they
+            # don't get namespace-qualified into fake nested classes.
+            if type_param_like?(arg) && short_type_param_name?(arg) && !@type_param_map.has_key?(arg)
+              normalize_tuple_literal_type_name(arg)
+            else
+              normalize_tuple_literal_type_name(resolve_type_name_in_context(arg))
+            end
+          end.join(", ")
+          resolved = resolved_base == info[:base] && resolved_args == info[:args] ? name : "#{resolved_base}(#{resolved_args})"
+          resolved_type_name_cache_set(name, resolved)
+          return resolved
+        end
       end
 
       unless name.includes?("::")
@@ -27135,16 +27139,18 @@ module Crystal::HIR
         return name
       end
 
-      if info = split_generic_base_and_args(name)
-        resolved_base = resolve_class_name_in_signature_context(info[:base]) || info[:base]
-        resolved_args = split_generic_type_args(info[:args]).map do |arg|
-          arg = arg.strip
-          if arg.starts_with?(':')
-            arg = arg.size > 1 ? arg[1..] : ""
-          end
-          resolve_type_name_in_context(arg)
-        end.join(", ")
-        return resolved_base == info[:base] && resolved_args == info[:args] ? name : "#{resolved_base}(#{resolved_args})"
+      if name.ends_with?(')') || name.includes?('(') || name.includes?(',')
+        if info = split_generic_base_and_args(name)
+          resolved_base = resolve_class_name_in_signature_context(info[:base]) || info[:base]
+          resolved_args = split_generic_type_args(info[:args]).map do |arg|
+            arg = arg.strip
+            if arg.starts_with?(':')
+              arg = arg.size > 1 ? arg[1..] : ""
+            end
+            resolve_type_name_in_context(arg)
+          end.join(", ")
+          return resolved_base == info[:base] && resolved_args == info[:args] ? name : "#{resolved_base}(#{resolved_args})"
+        end
       end
 
       if override = @current_namespace_override

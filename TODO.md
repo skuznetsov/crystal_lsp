@@ -24,6 +24,7 @@
       - byte-scan for `$` in overload/type-key indexers;
       - suffix checks via `ends_with?` for `_splat`/`_double_splat`;
       - skip stripped-base bookkeeping when base has no generic receiver.
+    - guarded generic-split parser calls in hot resolvers (`resolve_type_name_in_context*`, `resolve_class_name_in_signature_context`) to avoid split attempts for obvious non-generic names.
   - Why:
     - repeated stage2 watchdog samples showed dominant churn in:
       - `resolve_type_name_in_context`
@@ -53,6 +54,12 @@
       - `/usr/bin/time -p crystal build --release src/crystal_v2.cr -o /tmp/stage1_rel_overload_index_opt2 --error-trace` -> `exit 0`, **real 428.96s**
       - `scripts/timeout_sample_lldb.sh -t 180 ... /tmp/stage1_rel_overload_index_opt2 ...` -> timeout `124`
       - profile shift: overload-index/rebuild symbols moved down; current top remains type-resolution/hash path (`resolve_type_name_in_context`, `type_ref_for_name`, `String#hash`).
+    - incremental generic-gate follow-up:
+      - `/usr/bin/time -p crystal build src/crystal_v2.cr -o /tmp/stage1_dbg_generic_gate_opt --error-trace` -> `exit 0`, **real 8.36s**
+      - `bash regression_tests/run_mini_oracles.sh /tmp/stage1_dbg_generic_gate_opt` -> **5/5 PASS**
+      - `/usr/bin/time -p crystal build --release src/crystal_v2.cr -o /tmp/stage1_rel_generic_gate_opt --error-trace` -> `exit 0`, **real 426.10s**
+      - `scripts/timeout_sample_lldb.sh -t 180 ... /tmp/stage1_rel_generic_gate_opt ...` -> timeout `124`
+      - `scripts/timeout_sample_lldb.sh -t 300 ... /tmp/stage1_rel_generic_gate_opt ...` -> timeout `124`
   - Status:
     - **partial**: measurable hotspot shift and reduced churn signatures, but full stage2 release bootstrap still not completing within 300s.
     - next root-cause branch: cut namespace-qualification recursion in `resolve_class_name_in_context` / `resolve_type_name_in_context` for generic monomorphization path.
