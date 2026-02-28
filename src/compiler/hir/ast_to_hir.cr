@@ -64381,7 +64381,11 @@ module Crystal::HIR
         end
         if should_resolve_in_context
           old_lookup = lookup_name
-          lookup_name = resolve_type_name_in_context(lookup_name)
+          if fast = resolve_class_name_in_signature_context(lookup_name)
+            lookup_name = fast
+          else
+            lookup_name = resolve_type_name_in_context(lookup_name)
+          end
           if env_get("DEBUG_WUINT128") && old_lookup == "UInt128"
             STDERR.puts "[DEBUG_WUINT128] type_ref_for_name: UInt128 resolved to #{lookup_name}, current=#{@current_class || "(nil)"}"
           end

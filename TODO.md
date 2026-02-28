@@ -15,6 +15,8 @@
     - reduced overload-name mangling churn:
       - ASCII byte-scan for `$` in `mangle_function_name` (instead of generic `String#index`);
       - removed duplicate `mangle_function_name` call in `function_full_name_for_def` for `params` case.
+    - in `type_ref_for_name` contextual resolution gate, prefer `resolve_class_name_in_signature_context` before full `resolve_type_name_in_context`.
+    - attempted additional short-name early-return gate in `resolve_class_name_in_context` was rejected (regressed `native` resolution in `file_join_splat`); patch reverted.
   - Why:
     - repeated stage2 watchdog samples showed dominant churn in:
       - `resolve_type_name_in_context`
@@ -32,6 +34,12 @@
       - `scripts/timeout_sample_lldb.sh -t 180 ... /tmp/stage1_rel_mangle_fastpath ...` -> timeout `124`
       - `scripts/timeout_sample_lldb.sh -t 300 ... /tmp/stage1_rel_mangle_fastpath ...` -> timeout `124`
       - top hotspots remain type-resolution/hash heavy (`resolve_type_name_in_context`, `type_ref_for_name`, `split_generic_base_and_args`, `String#hash`), but `String#index`/name-mangling pressure and part of overload/index churn shifted down versus earlier samples.
+    - incremental follow-up:
+      - `/usr/bin/time -p crystal build src/crystal_v2.cr -o /tmp/stage1_dbg_fast_resolve_gate --error-trace` -> `exit 0`, **real 8.59s**
+      - `bash regression_tests/run_mini_oracles.sh /tmp/stage1_dbg_fast_resolve_gate` -> **5/5 PASS**
+      - `/usr/bin/time -p crystal build --release src/crystal_v2.cr -o /tmp/stage1_rel_fast_resolve_gate --error-trace` -> `exit 0`, **real 428.11s**
+      - `scripts/timeout_sample_lldb.sh -t 180 ... /tmp/stage1_rel_fast_resolve_gate ...` -> timeout `124`
+      - `scripts/timeout_sample_lldb.sh -t 300 ... /tmp/stage1_rel_fast_resolve_gate ...` -> timeout `124`
   - Status:
     - **partial**: measurable hotspot shift and reduced churn signatures, but full stage2 release bootstrap still not completing within 300s.
     - next root-cause branch: cut namespace-qualification recursion in `resolve_class_name_in_context` / `resolve_type_name_in_context` for generic monomorphization path.
