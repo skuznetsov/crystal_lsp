@@ -20256,7 +20256,7 @@ module Crystal::HIR
       has_block : Bool = false,
       has_named_only : Bool = false,
     ) : String
-      if dollar = base_name.index('$')
+      if dollar = ascii_byte_index(base_name, '$'.ord.to_u8)
         base_name = base_name[0, dollar]
       end
       # Filter out VOID types (untyped parameters don't provide overload info)
@@ -20290,8 +20290,7 @@ module Crystal::HIR
         end
       end
       has_named_only = false
-      full_name = mangle_function_name(base_name, param_types, has_block, has_named_only)
-      return full_name unless params
+      return mangle_function_name(base_name, param_types, has_block, has_named_only) unless params
 
       param_count = 0
       has_splat = false
@@ -63634,6 +63633,18 @@ module Crystal::HIR
     end
 
     @[AlwaysInline]
+    private def ascii_byte_index(name : String, target : UInt8) : Int32?
+      i = 0
+      bytesize = name.bytesize
+      bytes = name.to_unsafe
+      while i < bytesize
+        return i if bytes[i] == target
+        i += 1
+      end
+      nil
+    end
+
+    @[AlwaysInline]
     private def namespace_bucket_for(name : String) : String
       if idx = namespace_separator_index(name)
         name[0, idx]
@@ -64353,6 +64364,13 @@ module Crystal::HIR
         # Builtins are handled below (with explicit nested-shadow checks);
         # skipping contextual resolution here avoids a very hot recursive path.
         should_resolve_in_context = !BUILTIN_TYPE_NAMES.includes?(lookup_name)
+        if should_resolve_in_context &&
+           !lookup_name.includes?("::") &&
+           (@top_level_type_names.includes?(lookup_name) || @top_level_class_kinds.has_key?(lookup_name))
+          # For known top-level short names, avoid contextual resolver unless
+          # they are actually shadowed by a nested type in current scope.
+          should_resolve_in_context = nested_shadowed_type_name?(lookup_name)
+        end
         if idx = lookup_ns_idx0
           head = lookup_name[0, idx]
           anchored_namespace = head == "Crystal" ||

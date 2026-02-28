@@ -11,6 +11,10 @@
     - deferred `type_cache` reverse-index registration for placeholder `TypeRef::VOID` until transition to concrete type;
     - removed unnecessary builtin contextual resolve in `type_ref_for_name` and kept explicit nested-shadow handling;
     - skipped pre-builtin `resolve_type_name_in_context` for builtin simple names in `type_ref_for_name`.
+    - skipped contextual resolution for known top-level short names unless actually nested-shadowed.
+    - reduced overload-name mangling churn:
+      - ASCII byte-scan for `$` in `mangle_function_name` (instead of generic `String#index`);
+      - removed duplicate `mangle_function_name` call in `function_full_name_for_def` for `params` case.
   - Why:
     - repeated stage2 watchdog samples showed dominant churn in:
       - `resolve_type_name_in_context`
@@ -23,11 +27,11 @@
       - `/usr/bin/time -p crystal build src/crystal_v2.cr -o /tmp/stage1_dbg_builtin_resolve_skip --error-trace` -> `exit 0`, **real 8.66s**
       - `bash regression_tests/run_mini_oracles.sh /tmp/stage1_dbg_builtin_resolve_skip` -> **5/5 PASS**
     - stage1 release (latest branch):
-      - `/usr/bin/time -p crystal build --release src/crystal_v2.cr -o /tmp/stage1_rel_builtin_resolve_skip --error-trace` -> `exit 0`, **real 436.53s**
+      - `/usr/bin/time -p crystal build --release src/crystal_v2.cr -o /tmp/stage1_rel_mangle_fastpath --error-trace` -> `exit 0`, **real 428.09s**
     - stage2 probes (latest branch):
-      - `scripts/timeout_sample_lldb.sh -t 180 ... /tmp/stage1_rel_builtin_resolve_skip ...` -> timeout `124`
-      - `scripts/timeout_sample_lldb.sh -t 300 ... /tmp/stage1_rel_builtin_resolve_skip ...` -> timeout `124`
-      - top hotspots remain type-resolution/hash heavy (`resolve_type_name_in_context`, `type_ref_for_name`, `split_generic_base_and_args`, `String#hash`), but earlier overload/placeholder-index churn signatures reduced in several samples.
+      - `scripts/timeout_sample_lldb.sh -t 180 ... /tmp/stage1_rel_mangle_fastpath ...` -> timeout `124`
+      - `scripts/timeout_sample_lldb.sh -t 300 ... /tmp/stage1_rel_mangle_fastpath ...` -> timeout `124`
+      - top hotspots remain type-resolution/hash heavy (`resolve_type_name_in_context`, `type_ref_for_name`, `split_generic_base_and_args`, `String#hash`), but `String#index`/name-mangling pressure and part of overload/index churn shifted down versus earlier samples.
   - Status:
     - **partial**: measurable hotspot shift and reduced churn signatures, but full stage2 release bootstrap still not completing within 300s.
     - next root-cause branch: cut namespace-qualification recursion in `resolve_class_name_in_context` / `resolve_type_name_in_context` for generic monomorphization path.
