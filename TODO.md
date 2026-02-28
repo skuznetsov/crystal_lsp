@@ -1,6 +1,29 @@
 # Crystal v2 — Active Work (codegen branch)
 
 ## Known Bugs (codegen)
+- **2026-02-28 (latest): reduced repeated string-scans in `resolve_type_name_in_context_impl` (stage2 still unstable)**
+  - Scope (`src/compiler/hir/ast_to_hir.cr`):
+    - precomputed namespace/generic-shape markers once per call:
+      - `ns_idx = namespace_separator_index(name)`
+      - `has_ns`, `has_union`, `has_open_paren`, `has_comma`, `has_generic_shape`
+    - reused precomputed markers instead of repeated `includes?`/`index` scans;
+    - reused `ns_idx` to derive namespace head with `byte_slice` in anchored/top-level checks.
+  - Why:
+    - stage2 watchdog hotspots remain centered in type-name resolution (`resolve_type_name_in_context`, `type_ref_for_name`), so this branch removes repeated per-call scans/alloc pressure in the hottest resolver.
+  - Evidence:
+    - debug validation:
+      - `/usr/bin/time -p crystal build src/crystal_v2.cr -o /tmp/stage1_dbg_resolve_flags_opt --error-trace` -> `exit 0`, **real 8.85s**
+      - `bash regression_tests/run_mini_oracles.sh /tmp/stage1_dbg_resolve_flags_opt` -> **5/5 PASS**
+    - release stage1:
+      - `/usr/bin/time -p crystal build --release src/crystal_v2.cr -o /tmp/stage1_rel_resolve_flags_opt --error-trace` -> `exit 0`, **real 426.14s**
+    - stage2 watchdog (`t300`):
+      - `scripts/timeout_sample_lldb.sh -t 300 -s 8 -n 12 -o /tmp/stage2_rel_resolve_flags_opt_t300 -- /usr/bin/time -p /tmp/stage1_rel_resolve_flags_opt src/crystal_v2.cr --release -o /tmp/stage2_rel_resolve_flags_opt` -> timeout `124`
+      - dominant sample remains type/cache churn:
+        - `type_ref_for_name`, `register_concrete_class`, `resolve_type_name_in_context`,
+          `substitute_type_params_in_type_name`, `String#hash`, `String#index`, `GC_malloc_kind`
+  - Status:
+    - **partial**: stage2 still does not complete within 300s; next root-cause branch is union/type-cache key normalization path (`strip_generic_args` / `register_type_cache_key`).
+
 - **2026-02-28 (latest): removed regex-heavy unresolved generic token path and reduced short-token allocation churn (stage2 still unstable)**
   - Scope (`src/compiler/hir/ast_to_hir.cr`):
     - removed double-scan precheck in `has_top_level_union_separator?` (`includes?('|') || includes?("___")`) and kept single-pass depth-aware scanner;

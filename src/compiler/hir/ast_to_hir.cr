@@ -26310,8 +26310,9 @@ module Crystal::HIR
       if mapped = @type_param_map[name]?
         return resolve_type_name_in_context(mapped) if mapped != name
       end
-      if (idx = name.index("::"))
-        prefix = name[0, idx]
+      ns_idx = namespace_separator_index(name)
+      if idx = ns_idx
+        prefix = name.byte_slice(0, idx)
         if mapped = @type_param_map[prefix]?
           mapped_name = "#{mapped}#{name[idx..]}"
           return resolve_type_name_in_context(mapped_name) if mapped_name != name
@@ -26324,6 +26325,11 @@ module Crystal::HIR
       if local_name = @current_typeof_local_names.try(&.[name]?)
         return local_name unless local_name.empty?
       end
+      has_ns = !ns_idx.nil?
+      has_union = !!ascii_byte_index(name, '|'.ord.to_u8)
+      has_open_paren = !!ascii_byte_index(name, '('.ord.to_u8)
+      has_comma = !!ascii_byte_index(name, ','.ord.to_u8)
+      has_generic_shape = name.ends_with?(')') || has_open_paren || has_comma
       if cached = resolved_type_name_cache_get(name)
         return cached unless nested_shadowed_type_name?(name)
       end
@@ -26331,8 +26337,8 @@ module Crystal::HIR
         resolved_type_name_cache_set(name, name)
         return name
       end
-      if name.includes?("::")
-        head = first_namespace_component(name)
+      if has_ns
+        head = ns_idx ? name.byte_slice(0, ns_idx.not_nil!) : name
         anchored_namespace = head == "Crystal" ||
                              @top_level_type_names.includes?(head) ||
                              @top_level_class_kinds.has_key?(head) ||
@@ -26342,7 +26348,7 @@ module Crystal::HIR
           return name
         end
       end
-      if name.includes?('|')
+      if has_union
         parts = split_union_type_name(name)
         if parts.size > 1
           resolved = parts.map { |part| resolve_type_name_in_context(part) }.join(" | ")
@@ -26432,7 +26438,7 @@ module Crystal::HIR
         return tuple_name
       end
 
-      if name.ends_with?(')') || name.includes?('(') || name.includes?(',')
+      if has_generic_shape
         if info = split_generic_base_and_args(name)
           resolved_base = resolve_type_name_in_context(info[:base])
           resolved_args = split_generic_type_args(info[:args]).map do |arg|
@@ -26454,7 +26460,7 @@ module Crystal::HIR
         end
       end
 
-      unless name.includes?("::")
+      unless has_ns
         # Nested types of the current class/namespace take priority over
         # top-level names, included module types, and type aliases.
         # E.g., bare "Entry" inside Hash must resolve to Hash::Entry,
@@ -26494,7 +26500,7 @@ module Crystal::HIR
         resolved_type_name_cache_set(name, resolved_path)
         return resolved_path
       end
-      head = first_namespace_component(name)
+      head = ns_idx ? name.byte_slice(0, ns_idx.not_nil!) : name
       if @top_level_type_names.includes?(head)
         resolved_type_name_cache_set(name, name)
         return name
