@@ -100,6 +100,34 @@
 - Status:
   - **IN_PROGRESS**: no semantic regressions found (`mini-oracles 5/5`), but stage2 stability/speed not yet reliably improved at release bootstrap scale.
 
+## 2026-02-28: alias-prefix cached alias-chain + small-map type-param lookup (partial)
+- Scope (`src/compiler/hir/ast_to_hir.cr`):
+  - `resolve_module_alias_prefix` now uses cached `resolve_type_alias_chain(...)` instead of repeated uncached `resolve_type_alias_chain_no_context(...)` in prefix/fallback paths.
+  - `substitute_type_params_in_type_name`:
+    - introduced small-map lookup mode for type-param maps (`size <= 4`) to avoid hash-based miss churn in hottest lookups;
+    - hot lookups (`name`, `prefix`, `suffix`) now route through `lookup_small_string_map(...)`.
+- Validation/evidence:
+  - debug build + sanity:
+    - `/usr/bin/time -p crystal build src/crystal_v2.cr -o /tmp/stage1_dbg_alias_prefix_cached --error-trace` -> `real 8.28s`
+    - `/usr/bin/time -p crystal build src/crystal_v2.cr -o /tmp/stage1_dbg_tpmap_smallscan --error-trace` -> `real 8.34s`
+    - `bash regression_tests/run_mini_oracles.sh /tmp/stage1_dbg_tpmap_smallscan` -> **5/5 PASS**
+  - small repro (`stage2_yield_scan_hang_probe`, `t180`, debug, `N=4000`):
+    - alias-prefix cached branch: `real 164.86s`, status `0`
+    - +small-map lookup branch: `real 164.41s`, status `0`
+    - hotspot remains shifted to MIR (`DeadCodeEliminationPass`, `RCElisionPass`), not early alias-resolution stall.
+  - release evidence currently available for alias-prefix cached step (before small-map lookup release retest):
+    - `/usr/bin/time -p crystal build --release src/crystal_v2.cr -o /tmp/stage1_rel_alias_prefix_cached --error-trace` -> `real 445.09s`
+    - stage2 watchdog:
+      - `t180`: timeout `124`, early timeline still alias/substitute/hash heavy
+      - `t300`: timeout `124`, late timeline shifts to broad HIR lowering (`type_ref_for_name`, `lower_node`, `register_concrete_class`, `resolve_type_name_in_context`)
+  - debug-profile matrix on release alias-prefix cached step:
+    - `bash regression_tests/stage2_debug_profile_oracle.sh /tmp/stage1_rel_alias_prefix_cached 240 release 1200,4000`
+    - `N=1200 total=6700.6ms`, `N=4000 total=29517.3ms` (vs previous branch `6749.9ms / 30283.7ms`)
+    - directional gain across phases (`hir`, `mir`, `llvm`) with same counter volumes.
+- Status:
+  - **IN_PROGRESS**: directional improvement is measurable on oracle slope and small repro; full stage2 bootstrap remains >300s.
+  - Next: run release-stage1 retest including small-map lookup patch and compare `t300` timeline against current alias-prefix cached baseline.
+
 ## 2026-02-28: debug-profile oracle for root-cause velocity analysis
 - Added compiler flag `--debug-profile` in `src/compiler/cli.cr`.
 - `--debug-profile` implies `--stats` and emits a second machine-readable line:
