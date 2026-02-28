@@ -818,6 +818,26 @@ module Crystal::HIR
     end
 
     @[AlwaysInline]
+    private def starts_with_generic_base?(name : String, base : String) : Bool
+      return false if base.empty?
+      base_size = base.bytesize
+      return false if name.bytesize <= base_size
+      return false unless name.starts_with?(base)
+      name.to_unsafe[base_size] == '('.ord
+    end
+
+    @[AlwaysInline]
+    private def index_type_cache_key(index : Hash(String, Set(String)), key : String, cache_key : String) : Nil
+      return if key.empty?
+      set = index[key]? || begin
+        created = Set(String).new
+        index[key] = created
+        created
+      end
+      set << cache_key
+    end
+
+    @[AlwaysInline]
     private def strip_generic_receiver_from_base_name(base_name : String) : String
       bytesize = base_name.bytesize
       ptr = base_name.to_unsafe
@@ -2450,6 +2470,8 @@ module Crystal::HIR
       @type_cache = {} of String => TypeRef
       @type_cache_keys_by_component = {} of String => Set(String)
       @type_cache_keys_by_generic_prefix = {} of String => Set(String)
+      @resolved_enum_name_cache = {} of String => String
+      @resolved_enum_name_negative_cache = Set(String).new
       @method_name_parts_cache = Hash(UInt64, MethodNameParts).new(initial_capacity: 32768)
       @method_name_parts_cache_size = 0
       @method_name_parts_last_id = 0_u64
@@ -3181,6 +3203,8 @@ module Crystal::HIR
     @enum_info : Hash(String, Hash(String, Int64))?
     # Enum base types: name -> underlying type
     @enum_base_types : Hash(String, TypeRef)?
+    @resolved_enum_name_cache : Hash(String, String)
+    @resolved_enum_name_negative_cache : Set(String)
     # Map enum value literals to their enum type names (for method resolution).
     @enum_value_types : Hash(ValueId, String)?
     # Map enum ivar/class var names to their enum type names.
@@ -3206,27 +3230,61 @@ module Crystal::HIR
       @enum_base_types.try(&.[enum_name]?) || TypeRef::INT32
     end
 
+    @[AlwaysInline]
+    private def invalidate_resolved_enum_name_cache : Nil
+      @resolved_enum_name_cache.clear
+      @resolved_enum_name_negative_cache.clear
+    end
+
     private def resolve_enum_name(name : String) : String?
-      return nil unless enum_info = @enum_info
-      return name if enum_info.has_key?(name)
+      if cached = @resolved_enum_name_cache[name]?
+        return cached
+      end
+      return nil if @resolved_enum_name_negative_cache.includes?(name)
+
+      unless enum_info = @enum_info
+        @resolved_enum_name_negative_cache << name
+        return nil
+      end
+      if enum_info.has_key?(name)
+        @resolved_enum_name_cache[name] = name
+        return name
+      end
       short_name = last_namespace_component(name)
-      return short_name if short_name != name && enum_info.has_key?(short_name)
+      if short_name != name && enum_info.has_key?(short_name)
+        @resolved_enum_name_cache[name] = short_name
+        return short_name
+      end
       if short_name != name
-        if match = unique_enum_match_by_suffix(enum_info, namespaced_suffix(short_name))
+        if match = unique_enum_match_by_suffix(enum_info, short_name)
+          @resolved_enum_name_cache[name] = match
           return match
         end
       end
-      if match = unique_enum_match_by_suffix(enum_info, namespaced_suffix(name))
+      if match = unique_enum_match_by_suffix(enum_info, name)
+        @resolved_enum_name_cache[name] = match
         return match
       end
+      @resolved_enum_name_negative_cache << name
       nil
     end
 
-    private def namespaced_suffix(name : String) : String
-      String.build(name.bytesize + 2) do |io|
-        io << "::"
-        io << name
+    @[AlwaysInline]
+    private def ends_with_namespaced_suffix?(name : String, suffix_name : String) : Bool
+      suffix_size = suffix_name.bytesize
+      return false if suffix_size == 0
+      name_size = name.bytesize
+      return false if name_size <= suffix_size + 1
+      start = name_size - suffix_size
+      return false if start < 2
+      name_ptr = name.to_unsafe
+      suffix_ptr = suffix_name.to_unsafe
+      i = 0
+      while i < suffix_size
+        return false if name_ptr[start + i] != suffix_ptr[i]
+        i += 1
       end
+      name_ptr[start - 2] == ':'.ord && name_ptr[start - 1] == ':'.ord
     end
 
     private def unique_enum_match_by_suffix(
@@ -3235,7 +3293,7 @@ module Crystal::HIR
     ) : String?
       match : String? = nil
       enum_info.each_key do |key|
-        next unless key.ends_with?(suffix)
+        next unless ends_with_namespaced_suffix?(key, suffix)
         return nil if match
         match = key
       end
@@ -3299,6 +3357,7 @@ module Crystal::HIR
       extract_enum_members_from_body(node, members, enum_name)
 
       @enum_info.not_nil![enum_name] = members
+      invalidate_resolved_enum_name_cache
       invalidate_type_cache_for_namespace(enum_name)
       register_enum_base_type(enum_name, enum_base_type_for_node(node))
       register_enum_methods(node, enum_name)
@@ -3403,6 +3462,7 @@ module Crystal::HIR
       extract_enum_members_from_body(node, members, full_enum_name)
 
       @enum_info.not_nil![full_enum_name] = members
+      invalidate_resolved_enum_name_cache
       invalidate_type_cache_for_namespace(full_enum_name)
       base_type = enum_base_type_for_node(node)
       register_enum_base_type(full_enum_name, base_type)
@@ -63633,67 +63693,44 @@ module Crystal::HIR
 
     private def register_type_cache_key(cache_key : String) : Nil
       return if cache_key.empty?
+      key_ptr = cache_key.to_unsafe
+      key_size = cache_key.bytesize
+
       # Track generic prefix keys like "Foo(" at the start.
-      if idx = cache_key.index("::")
-        first_segment = cache_key[0, idx]
-        base = strip_generic_args(first_segment)
-        if !base.empty? && cache_key.starts_with?("#{base}(")
-          set = @type_cache_keys_by_generic_prefix[base]? || begin
-            created = Set(String).new
-            @type_cache_keys_by_generic_prefix[base] = created
-            created
-          end
-          set << cache_key
-        end
-      else
-        base = strip_generic_args(cache_key)
-        if !base.empty? && cache_key.starts_with?("#{base}(")
-          set = @type_cache_keys_by_generic_prefix[base]? || begin
-            created = Set(String).new
-            @type_cache_keys_by_generic_prefix[base] = created
-            created
-          end
-          set << cache_key
-        end
+      first_segment_end = namespace_separator_index(cache_key) || key_size
+      first_segment = cache_key.byte_slice(0, first_segment_end)
+      generic_prefix_base = strip_generic_args(first_segment)
+      if starts_with_generic_base?(cache_key, generic_prefix_base)
+        index_type_cache_key(@type_cache_keys_by_generic_prefix, generic_prefix_base, cache_key)
       end
 
       # Avoid split allocations; walk namespace segments and index nested ones.
       seg_start = 0
       seg_index = 0
+      segment_has_generic = false
       i = 0
-      bytesize = cache_key.bytesize
-      while i < bytesize
-        if cache_key.to_unsafe[i] == ':'.ord && i + 1 < bytesize && cache_key.to_unsafe[i + 1] == ':'.ord
+      while i < key_size
+        byte = key_ptr[i]
+        if byte == '('.ord
+          segment_has_generic = true
+        elsif byte == ':'.ord && i + 1 < key_size && key_ptr[i + 1] == ':'.ord
           if seg_index > 0
             part = cache_key.byte_slice(seg_start, i - seg_start)
-            base = strip_generic_args(part)
-            unless base.empty?
-              set = @type_cache_keys_by_component[base]? || begin
-                created = Set(String).new
-                @type_cache_keys_by_component[base] = created
-                created
-              end
-              set << cache_key
-            end
+            base = segment_has_generic ? strip_generic_args(part) : part
+            index_type_cache_key(@type_cache_keys_by_component, base, cache_key)
           end
           seg_index += 1
           i += 2
           seg_start = i
+          segment_has_generic = false
           next
         end
         i += 1
       end
-      if seg_index > 0 && seg_start < bytesize
-        part = cache_key.byte_slice(seg_start, bytesize - seg_start)
-        base = strip_generic_args(part)
-        unless base.empty?
-          set = @type_cache_keys_by_component[base]? || begin
-            created = Set(String).new
-            @type_cache_keys_by_component[base] = created
-            created
-          end
-          set << cache_key
-        end
+      if seg_index > 0 && seg_start < key_size
+        part = cache_key.byte_slice(seg_start, key_size - seg_start)
+        base = segment_has_generic ? strip_generic_args(part) : part
+        index_type_cache_key(@type_cache_keys_by_component, base, cache_key)
       end
     end
 

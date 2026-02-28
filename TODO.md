@@ -1,6 +1,41 @@
 # Crystal v2 — Active Work (codegen branch)
 
 ## Known Bugs (codegen)
+- **2026-02-28 (latest): root-cause churn cuts in enum resolution + type-cache key indexing (stage2 still unstable)**
+  - Scope (`src/compiler/hir/ast_to_hir.cr`):
+    - enum resolution path:
+      - added `resolve_enum_name` positive/negative caches;
+      - added strict cache invalidation on new enum registration (`register_enum`, `register_enum_with_name`);
+      - removed `namespaced_suffix` string allocation and switched suffix checks to byte-level `ends_with_namespaced_suffix?`.
+    - type-cache index path:
+      - refactored `register_type_cache_key` to single-pass segment scan with cached pointer/size;
+      - removed repeated set-creation duplication via `index_type_cache_key`;
+      - removed interpolated `\"#{base}(\"` prefix check in favor of `starts_with_generic_base?`;
+      - only strip generic args per segment when segment actually contains `'('`.
+  - Why:
+    - stage2 timeout profile shifted from `strip_generic_args` stack into enum/type registration churn;
+    - this branch targets invariant hot paths (name-resolution/index maintenance), not symptom-level symbol hardcode.
+  - Evidence:
+    - debug build:
+      - `/usr/bin/time -p crystal build src/crystal_v2.cr -o /tmp/stage1_dbg_enum_resolve_cache_opt --error-trace` -> `exit 0`, **real 8.39s**
+    - mini-oracles:
+      - `bash regression_tests/run_mini_oracles.sh /tmp/stage1_dbg_enum_resolve_cache_opt` -> **5/5 PASS**
+    - full regression pack:
+      - `bash regression_tests/run_all.sh /tmp/stage1_dbg_enum_resolve_cache_opt` -> **56 passed, 3 failed** (`hash_compaction`, `hash_stress`, `yield_suffix_unless`) — baseline parity.
+    - release stage1:
+      - `/usr/bin/time -p crystal build --release src/crystal_v2.cr -o /tmp/stage1_rel_enum_resolve_cache_opt --error-trace` -> `exit 0`, **real 420.26s** (improved vs prior `430.06s`)
+    - stage2 watchdog (`t300`):
+      - `scripts/timeout_sample_lldb.sh -t 300 -s 8 -n 12 -o /tmp/stage2_rel_enum_resolve_cache_opt_t300 -- /usr/bin/time -p /tmp/stage1_rel_enum_resolve_cache_opt src/crystal_v2.cr --release -o /tmp/stage2_rel_enum_resolve_cache_opt` -> timeout `124`
+      - top symbols:
+        - `type_ref_for_name` 546
+        - `register_concrete_class` 367
+        - `resolve_type_name_in_context` 343
+        - `GC_malloc_kind` 332
+        - `lower_node` 325
+      - LLDB stop stack now centers in `resolve_arena_for_def_uncached` -> `infer_getter_return_type` -> `register_concrete_class`, i.e. shifted away from earlier `resolve_enum_name`/`strip_generic_args` hotspots.
+  - Status:
+    - **partial**: stage2 still exceeds 300s, but root-cause hotspot moved; next branch should target `resolve_arena_for_def_uncached` / def-arena lookup churn.
+
 - **2026-02-28 (latest): reduced repeated string-scans in `resolve_type_name_in_context_impl` (stage2 still unstable)**
   - Scope (`src/compiler/hir/ast_to_hir.cr`):
     - precomputed namespace/generic-shape markers once per call:
