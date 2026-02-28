@@ -17,6 +17,13 @@
       - removed duplicate `mangle_function_name` call in `function_full_name_for_def` for `params` case.
     - in `type_ref_for_name` contextual resolution gate, prefer `resolve_class_name_in_signature_context` before full `resolve_type_name_in_context`.
     - attempted additional short-name early-return gate in `resolve_class_name_in_context` was rejected (regressed `native` resolution in `file_join_splat`); patch reverted.
+    - converted function overload/type-key indexing to incremental-on-write path:
+      - index new `@function_defs`/`@function_types` entries immediately in helpers;
+      - fast early-return in `rebuild_function_def_overloads` when nothing changed.
+    - optimized overload indexer hot path:
+      - byte-scan for `$` in overload/type-key indexers;
+      - suffix checks via `ends_with?` for `_splat`/`_double_splat`;
+      - skip stripped-base bookkeeping when base has no generic receiver.
   - Why:
     - repeated stage2 watchdog samples showed dominant churn in:
       - `resolve_type_name_in_context`
@@ -40,6 +47,12 @@
       - `/usr/bin/time -p crystal build --release src/crystal_v2.cr -o /tmp/stage1_rel_fast_resolve_gate --error-trace` -> `exit 0`, **real 428.11s**
       - `scripts/timeout_sample_lldb.sh -t 180 ... /tmp/stage1_rel_fast_resolve_gate ...` -> timeout `124`
       - `scripts/timeout_sample_lldb.sh -t 300 ... /tmp/stage1_rel_fast_resolve_gate ...` -> timeout `124`
+    - incremental overload-index follow-up:
+      - `/usr/bin/time -p crystal build src/crystal_v2.cr -o /tmp/stage1_dbg_overload_index_opt2 --error-trace` -> `exit 0`, **real 9.23s**
+      - `bash regression_tests/run_mini_oracles.sh /tmp/stage1_dbg_overload_index_opt2` -> **5/5 PASS**
+      - `/usr/bin/time -p crystal build --release src/crystal_v2.cr -o /tmp/stage1_rel_overload_index_opt2 --error-trace` -> `exit 0`, **real 428.96s**
+      - `scripts/timeout_sample_lldb.sh -t 180 ... /tmp/stage1_rel_overload_index_opt2 ...` -> timeout `124`
+      - profile shift: overload-index/rebuild symbols moved down; current top remains type-resolution/hash path (`resolve_type_name_in_context`, `type_ref_for_name`, `String#hash`).
   - Status:
     - **partial**: measurable hotspot shift and reduced churn signatures, but full stage2 release bootstrap still not completing within 300s.
     - next root-cause branch: cut namespace-qualification recursion in `resolve_class_name_in_context` / `resolve_type_name_in_context` for generic monomorphization path.

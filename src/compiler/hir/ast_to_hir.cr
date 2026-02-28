@@ -1573,7 +1573,12 @@ module Crystal::HIR
         end
       end
       @function_defs[name] = def_node
-      @pending_function_def_keys << name if is_new
+      if is_new
+        index_function_def_overload_entry(name, def_node)
+        @function_defs_processed_for_overloads = @function_defs.size
+        @function_defs_cache_size = @function_defs.size
+        @function_def_overloads_cache_size = @function_defs_cache_size
+      end
       if !is_new && old_def != def_node
         # Def entry was replaced under the same key (happens in deferred/lazy paths).
         # Invalidate derived caches keyed by method name so arity/overload resolution
@@ -1613,7 +1618,11 @@ module Crystal::HIR
         end
       end
       @function_types[name] = return_type
-      @pending_function_type_keys << name if is_new
+      if is_new
+        index_function_type_key_entry(name)
+        @function_types_processed_for_keys = @function_types.size
+        @function_type_keys_by_base_size = @function_types.size
+      end
     end
 
     # Register a function def and update the method index for fast parent lookups.
@@ -21547,6 +21556,13 @@ module Crystal::HIR
     end
 
     private def rebuild_function_def_overloads
+      if @pending_function_def_keys.empty? &&
+         @pending_function_type_keys.empty? &&
+         @function_defs_cache_size == @function_defs.size &&
+         @function_type_keys_by_base_size == @function_types.size
+        return
+      end
+
       # Safety fallback for any direct map writes not routed through helpers.
       if @pending_function_def_keys.empty? && @function_defs_cache_size != @function_defs.size
         @function_defs.each_key do |key|
@@ -21589,7 +21605,7 @@ module Crystal::HIR
     private def index_function_def_overload_entry(key : String, def_node : CrystalV2::Compiler::Frontend::DefNode) : Nil
       return if @function_def_keys_processed.includes?(key)
 
-      base = if idx = key.index('$')
+      base = if idx = ascii_byte_index(key, '$'.ord.to_u8)
                key[0, idx]
              else
                key
@@ -21600,40 +21616,42 @@ module Crystal::HIR
       else
         @function_def_overloads[base] = [key]
       end
-      if key.includes?("_double_splat")
+      has_double_splat = key.ends_with?("_double_splat")
+      has_splat = !has_double_splat && key.ends_with?("_splat")
+      if has_double_splat
         @function_def_has_double_splat[base] = true
-      elsif key.includes?("_splat")
+      elsif has_splat
         @function_def_has_splat[base] = true
       end
       @function_def_overloads_cache[base] = @function_def_overloads[base]
 
-      stripped_base = overload_stripped_base_name(base)
-      if stripped_base != base && !@function_def_overloads_stripped_by_base.has_key?(base)
-        @function_def_overloads_stripped_by_base[base] = stripped_base
-      end
-      stripped_list = @function_def_overloads_stripped_index[stripped_base]?
-      if stripped_list
-        stripped_list << key
-      else
-        @function_def_overloads_stripped_index[stripped_base] = [key]
-      end
+      stripped_base = base.includes?('(') ? overload_stripped_base_name(base) : base
       if stripped_base != base
-        if key.includes?("_double_splat")
+        unless @function_def_overloads_stripped_by_base.has_key?(base)
+          @function_def_overloads_stripped_by_base[base] = stripped_base
+        end
+        stripped_list = @function_def_overloads_stripped_index[stripped_base]?
+        if stripped_list
+          stripped_list << key
+        else
+          @function_def_overloads_stripped_index[stripped_base] = [key]
+        end
+        if has_double_splat
           @function_def_has_double_splat[stripped_base] = true
-        elsif key.includes?("_splat")
+        elsif has_splat
           @function_def_has_splat[stripped_base] = true
         end
-      end
-      @function_def_overloads_cache[stripped_base] = @function_def_overloads_stripped_index[stripped_base]
-      if @function_def_overloads_stripped_cache.has_key?(stripped_base)
-        @function_def_overloads_stripped_cache[stripped_base] = @function_def_overloads_stripped_index[stripped_base]
+        @function_def_overloads_cache[stripped_base] = @function_def_overloads_stripped_index[stripped_base]
+        if @function_def_overloads_stripped_cache.has_key?(stripped_base)
+          @function_def_overloads_stripped_cache[stripped_base] = @function_def_overloads_stripped_index[stripped_base]
+        end
       end
       @function_param_stats[key] = build_param_stats(def_node) unless @function_param_stats.has_key?(key)
       @function_def_keys_processed << key
     end
 
     private def index_function_type_key_entry(key : String) : Nil
-      base = if idx = key.index('$')
+      base = if idx = ascii_byte_index(key, '$'.ord.to_u8)
                key[0, idx]
              else
                key
