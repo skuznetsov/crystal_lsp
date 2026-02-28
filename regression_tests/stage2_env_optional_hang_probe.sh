@@ -7,7 +7,7 @@ if [ $# -lt 1 ]; then
 fi
 
 COMPILER="$1"
-TIMEOUT_SEC="${2:-180}"
+TIMEOUT_SEC="${2:-300}"
 OUT_DIR="${TMPDIR:-/tmp}/stage2_env_optional_hang_probe"
 SRC="$OUT_DIR/env_optional.cr"
 BIN="$OUT_DIR/env_optional.bin"

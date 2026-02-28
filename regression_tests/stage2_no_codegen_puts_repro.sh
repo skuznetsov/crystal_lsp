@@ -20,7 +20,7 @@ puts 1
 CR
 
 set +e
-scripts/timeout_sample_lldb.sh --timeout "$TIMEOUT_SEC" --sample 2 --top 12 --out-dir "$PROBE_DIR" -- \
+scripts/timeout_sample_lldb.sh --timeout "$TIMEOUT_SEC" --sample 2 --top 12 --out "$PROBE_DIR" -- \
   "$COMPILER" --release --no-codegen --no-ast-cache "$SRC" -o "$BIN"
 status=$?
 set -e

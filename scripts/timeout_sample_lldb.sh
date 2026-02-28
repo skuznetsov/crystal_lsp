@@ -7,24 +7,33 @@ Usage:
   scripts/timeout_sample_lldb.sh [options] -- <command> [args...]
 
 Options:
-  -t, --timeout SEC       Timeout before sampling (default: 180)
+  -t, --timeout SEC       Timeout before sampling (default: 300)
   -s, --sample SEC        sample(1) duration in seconds (default: 10)
   -l, --lldb-timeout SEC  LLDB attach/backtrace timeout (default: 20)
   -n, --top N             Number of hotspot symbols (default: 5)
   -o, --out DIR           Output directory (default: /tmp/timeout_sample_<ts>_<pid>)
+      --out-dir DIR       Alias for --out
+      --series-start SEC  Periodic sample start offset (default: 30)
+      --series-interval SEC  Periodic sample interval (default: 60)
+      --series-duration SEC  Periodic sample duration (default: --sample)
+      --no-series         Disable periodic pre-timeout sampling
   -b, --breakpoints LIST  Comma-separated LLDB breakpoint symbols
       --no-lldb           Skip LLDB attach/backtrace
   -h, --help              Show this help
 USAGE
 }
 
-TIMEOUT_SECS=180
+TIMEOUT_SECS=300
 SAMPLE_SECS=10
 LLDB_TIMEOUT_SECS=20
 TOP_N=5
 OUT_DIR=""
 BREAKPOINTS=""
 USE_LLDB=1
+SERIES_ENABLED=1
+SERIES_START_SECS=30
+SERIES_INTERVAL_SECS=60
+SERIES_SAMPLE_SECS=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -36,8 +45,16 @@ while [[ $# -gt 0 ]]; do
       LLDB_TIMEOUT_SECS="${2:-}"; shift 2 ;;
     -n|--top)
       TOP_N="${2:-}"; shift 2 ;;
-    -o|--out)
+    -o|--out|--out-dir)
       OUT_DIR="${2:-}"; shift 2 ;;
+    --series-start)
+      SERIES_START_SECS="${2:-}"; shift 2 ;;
+    --series-interval)
+      SERIES_INTERVAL_SECS="${2:-}"; shift 2 ;;
+    --series-duration)
+      SERIES_SAMPLE_SECS="${2:-}"; shift 2 ;;
+    --no-series)
+      SERIES_ENABLED=0; shift ;;
     -b|--breakpoints)
       BREAKPOINTS="${2:-}"; shift 2 ;;
     --no-lldb)
@@ -63,6 +80,9 @@ if [[ -z "$OUT_DIR" ]]; then
   OUT_DIR="/tmp/timeout_sample_$(date +%Y%m%d_%H%M%S)_$$"
 fi
 mkdir -p "$OUT_DIR"
+if (( SERIES_SAMPLE_SECS <= 0 )); then
+  SERIES_SAMPLE_SECS="$SAMPLE_SECS"
+fi
 
 CMD=("$@")
 CMD_LOG="$OUT_DIR/command.log"
@@ -72,6 +92,8 @@ HOTSPOT_LOG="$OUT_DIR/hotspots.txt"
 LLDB_LOG="$OUT_DIR/lldb.txt"
 LLDB_CMDS="$OUT_DIR/lldb.commands"
 PROC_LOG="$OUT_DIR/processes.txt"
+SERIES_DIR="$OUT_DIR/sample_series"
+SERIES_INDEX=0
 
 echo "[run] ${CMD[*]}" | tee "$OUT_DIR/summary.txt"
 "${CMD[@]}" >"$CMD_LOG" 2>&1 &
@@ -79,10 +101,80 @@ PID=$!
 PGID="$(ps -o pgid= -p "$PID" 2>/dev/null | tr -d '[:space:]' || true)"
 SELF_PGID="$(ps -o pgid= -p "$$" 2>/dev/null | tr -d '[:space:]' || true)"
 START_TS=$(date +%s)
+if (( SERIES_ENABLED == 1 )); then
+  mkdir -p "$SERIES_DIR"
+  NEXT_SERIES_TS=$((START_TS + SERIES_START_SECS))
+else
+  NEXT_SERIES_TS=0
+fi
 TIMED_OUT=0
+
+collect_descendants_live() {
+  local parent="$1"
+  local child=""
+  while read -r child; do
+    [[ -z "${child:-}" ]] && continue
+    echo "$child"
+    collect_descendants_live "$child"
+  done < <(pgrep -P "$parent" || true)
+}
+
+run_periodic_sample() {
+  local now_ts="$1"
+  local sample_pid="$PID"
+  local desc=()
+
+  if command -v pgrep >/dev/null 2>&1; then
+    while read -r cpid; do
+      [[ -n "${cpid:-}" ]] && desc+=("$cpid")
+    done < <(collect_descendants_live "$PID")
+  fi
+
+  if [[ -n "${desc[*]:-}" ]]; then
+    while read -r cpid _cpu comm; do
+      [[ -z "${cpid:-}" ]] && continue
+      if [[ "$comm" != "bash" && "$comm" != "sh" ]] && kill -0 "$cpid" 2>/dev/null; then
+        sample_pid="$cpid"
+        break
+      fi
+    done < <(ps -o pid=,%cpu=,comm= -p "${desc[@]}" 2>/dev/null | sort -k2,2nr)
+  fi
+
+  if ! kill -0 "$sample_pid" 2>/dev/null; then
+    return
+  fi
+
+  local sample_file="$SERIES_DIR/sample.${SERIES_INDEX}.txt"
+  local hotspot_file="$SERIES_DIR/hotspots.${SERIES_INDEX}.txt"
+  sample "$sample_pid" "$SERIES_SAMPLE_SECS" -file "$sample_file" >/dev/null 2>&1 || true
+  if [[ -s "$sample_file" ]]; then
+    awk '
+      /\(in / {
+        line = $0
+        sub(/^[[:space:]]*[0-9]+[[:space:]]+/, "", line)
+        gsub(/^[+!|:[:space:]]+/, "", line)
+        while (sub(/^[0-9]+[[:space:]]+/, "", line)) {}
+        sub(/[[:space:]]+\(in .*/, "", line)
+        sub(/^[*~]+/, "", line)
+        while (sub(/^[0-9]+[[:space:]]+/, "", line)) {}
+        if (length(line) > 0) print line
+      }
+    ' "$sample_file" \
+      | rg -v '^(Thread_|DispatchQueue_|Call|start|main|kevent)$' \
+      | sort | uniq -c | sort -nr | head -n "$TOP_N" > "$hotspot_file" || true
+    echo "[series] idx=${SERIES_INDEX} t=$((now_ts - START_TS))s pid=${sample_pid} sample=${sample_file}" >> "$OUT_DIR/summary.txt"
+  else
+    echo "[series] idx=${SERIES_INDEX} t=$((now_ts - START_TS))s pid=${sample_pid} sample_failed" >> "$OUT_DIR/summary.txt"
+  fi
+  SERIES_INDEX=$((SERIES_INDEX + 1))
+}
 
 while kill -0 "$PID" 2>/dev/null; do
   NOW_TS=$(date +%s)
+  if (( SERIES_ENABLED == 1 )) && (( NOW_TS >= NEXT_SERIES_TS )); then
+    run_periodic_sample "$NOW_TS"
+    NEXT_SERIES_TS=$((NOW_TS + SERIES_INTERVAL_SECS))
+  fi
   if (( NOW_TS - START_TS >= TIMEOUT_SECS )); then
     TIMED_OUT=1
     break
@@ -98,6 +190,9 @@ if (( TIMED_OUT == 0 )); then
   {
     echo "[exit] status=$STATUS"
     echo "[log] $CMD_LOG"
+    if (( SERIES_ENABLED == 1 && SERIES_INDEX > 0 )); then
+      echo "[series] dir=$SERIES_DIR count=$SERIES_INDEX"
+    fi
   } | tee -a "$OUT_DIR/summary.txt"
   exit "$STATUS"
 fi
@@ -296,6 +391,9 @@ wait "$PID" 2>/dev/null || true
   fi
   if [[ -f "$LLDB_LOG" ]]; then
     echo "[lldb] $LLDB_LOG"
+  fi
+  if (( SERIES_ENABLED == 1 && SERIES_INDEX > 0 )); then
+    echo "[series] dir=$SERIES_DIR count=$SERIES_INDEX"
   fi
 } | tee -a "$OUT_DIR/summary.txt"
 
