@@ -85,6 +85,30 @@
 - Status:
   - **partial**: removed one function-type table churn source; next root-cause branch is alias-prefix/type-substitution string-allocation pressure in HIR include/monomorphization paths.
 
+## 2026-02-28: alias-prefix scanner loop tightening (partial, stage2 still timeout)
+- Scope (`src/compiler/hir/ast_to_hir.cr`):
+  - `resolve_module_alias_for_include`:
+    - replaced shrinking-string loop (`scope = scope.byte_slice(...)`) with index-walk over original `current` namespace (`rindex(..., from)`), reducing transient prefix churn.
+  - `resolve_module_alias_prefix`:
+    - replaced `probe = prefix` cascade with separator-index walk over original `module_name`, avoiding one extra intermediate string per loop step.
+- Validation:
+  - debug build:
+    - `/usr/bin/time -p crystal build src/crystal_v2.cr -o /tmp/stage1_dbg_alias_scan_opt --error-trace` -> `real 10.81s`
+    - `bash regression_tests/run_mini_oracles.sh /tmp/stage1_dbg_alias_scan_opt` -> **5/5 PASS**
+  - release build:
+    - `/usr/bin/time -p crystal build --release src/crystal_v2.cr -o /tmp/stage1_rel_alias_scan_opt --error-trace` -> `real 448.03s`
+  - stage2 watchdog:
+    - `scripts/timeout_sample_lldb.sh ... /tmp/stage1_rel_alias_scan_opt src/crystal_v2.cr --release --debug-profile -o /tmp/stage2_rel_alias_scan_opt` -> `124` (timeout at 180s)
+    - repeated run with `--progress` also `124`; `command.log` last visible progress still in HIR setup (`Creating main function...`).
+    - hotspots/LLDB remain centered on alias-resolution scan:
+      - `String#rindex`
+      - `resolve_module_alias_prefix`
+      - `resolve_type_alias_chain`
+      - `Hash(String, String)#find_entry`
+      - GC pressure (`GC_*`, `String#index`, `String#hash`, `String#byte_slice?`)
+- Status:
+  - **partial**: loop overhead reduced but root cause not eliminated; next step is semantic-level memoization/canonicalization for alias-chain resolution in include/monomorphization paths, not further micro-edits around symptoms.
+
 ## Fast small repro loop (2026-02-28)
 - Use this loop for rapid rollback/iteration before full stage2 bootstrap checks.
 - Build debug stage1 with original compiler:

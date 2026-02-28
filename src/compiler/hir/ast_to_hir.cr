@@ -2895,15 +2895,17 @@ module Crystal::HIR
       end
 
       if current = @current_class
-        scope = current
-        while sep = scope.rindex("::")
-          scope = scope.byte_slice(0, sep)
+        sep = current.rindex("::")
+        while sep
+          scope = current.byte_slice(0, sep)
           candidate = "#{scope}::#{module_name}"
           resolved_candidate = resolve_module_alias_prefix(candidate)
           if @module_defs.has_key?(resolved_candidate)
             @module_include_alias_cache[cache_key] = resolved_candidate
             return resolved_candidate
           end
+          break if sep <= 0
+          sep = current.rindex("::", sep - 1)
         end
       end
 
@@ -2923,8 +2925,8 @@ module Crystal::HIR
         return resolved
       end
 
-      probe = module_name
-      while sep = probe.rindex("::")
+      sep = module_name.rindex("::")
+      while sep
         prefix = module_name.byte_slice(0, sep)
         resolved_prefix = resolve_type_alias_chain(prefix)
         if resolved_prefix != prefix
@@ -2946,7 +2948,8 @@ module Crystal::HIR
           @module_alias_prefix_cache[cache_key] = result
           return result
         end
-        probe = prefix
+        break if sep <= 0
+        sep = module_name.rindex("::", sep - 1)
       end
 
       resolved = resolve_type_alias_chain(module_name)
