@@ -2119,6 +2119,7 @@ module Crystal::HIR
     @type_cache : Hash(String, TypeRef)
     @type_cache_keys_by_component : Hash(String, Set(String))
     @type_cache_keys_by_generic_prefix : Hash(String, Set(String))
+    @type_param_like_cache : Hash(String, Bool)
     @receiver_type_param_map_cache : Hash(Int32, Hash(String, String))
     @specialized_type_with_receiver_cache : Hash({Int32, Int32}, TypeRef)
     @array_type_for_element_cache : Hash(TypeRef, TypeRef)
@@ -2480,6 +2481,7 @@ module Crystal::HIR
       @type_cache = {} of String => TypeRef
       @type_cache_keys_by_component = {} of String => Set(String)
       @type_cache_keys_by_generic_prefix = {} of String => Set(String)
+      @type_param_like_cache = {} of String => Bool
       @receiver_type_param_map_cache = {} of Int32 => Hash(String, String)
       @specialized_type_with_receiver_cache = {} of {Int32, Int32} => TypeRef
       @resolved_enum_name_cache = {} of String => String
@@ -3381,6 +3383,7 @@ module Crystal::HIR
       extract_enum_members_from_body(node, members, enum_name)
 
       @enum_info.not_nil![enum_name] = members
+      clear_receiver_specialization_caches
       invalidate_resolved_enum_name_cache
       invalidate_type_cache_for_namespace(enum_name)
       register_enum_base_type(enum_name, enum_base_type_for_node(node))
@@ -3486,6 +3489,7 @@ module Crystal::HIR
       extract_enum_members_from_body(node, members, full_enum_name)
 
       @enum_info.not_nil![full_enum_name] = members
+      clear_receiver_specialization_caches
       invalidate_resolved_enum_name_cache
       invalidate_type_cache_for_namespace(full_enum_name)
       base_type = enum_base_type_for_node(node)
@@ -10998,6 +11002,7 @@ module Crystal::HIR
 
     @[AlwaysInline]
     private def clear_receiver_specialization_caches : Nil
+      @type_param_like_cache.clear
       @receiver_type_param_map_cache.clear
       @specialized_type_with_receiver_cache.clear
     end
@@ -28238,30 +28243,45 @@ module Crystal::HIR
     end
 
     private def type_param_like?(name : String) : Bool
-      return false if name.empty?
+      if cached = @type_param_like_cache[name]?
+        return cached
+      end
+      if name.empty?
+        @type_param_like_cache[name] = false
+        return false
+      end
       bytesize = name.bytesize
       bytes = name.to_unsafe
-      return false unless ascii_upper_alpha?(bytes[0])
+      unless ascii_upper_alpha?(bytes[0])
+        @type_param_like_cache[name] = false
+        return false
+      end
       i = 1
       while i < bytesize
         byte = bytes[i]
         if byte == ':'.ord
           # "Foo::Bar" is never a type parameter.
+          @type_param_like_cache[name] = false
           return false if i + 1 < bytesize && bytes[i + 1] == ':'.ord
           return false
         end
-        return false unless ascii_alnum_or_underscore?(byte)
+        unless ascii_alnum_or_underscore?(byte)
+          @type_param_like_cache[name] = false
+          return false
+        end
         i += 1
       end
-      return false if primitive_self_type(name)
-      return false if builtin_alias_target?(name)
-      return false if @class_info.has_key?(name)
-      return false if @enum_info && @enum_info.not_nil!.has_key?(name)
-      return false if @short_type_index.has_key?(name)
-      return false if @module_defs.has_key?(name)
-      return false if @type_aliases.has_key?(name)
-      return false if LIBC_TYPE_ALIASES.has_key?(name)
-      true
+
+      result = !primitive_self_type(name) &&
+               !builtin_alias_target?(name) &&
+               !@class_info.has_key?(name) &&
+               !(@enum_info && @enum_info.not_nil!.has_key?(name)) &&
+               !@short_type_index.has_key?(name) &&
+               !@module_defs.has_key?(name) &&
+               !@type_aliases.has_key?(name) &&
+               !LIBC_TYPE_ALIASES.has_key?(name)
+      @type_param_like_cache[name] = result
+      result
     end
 
     private def known_type_name?(name : String) : Bool

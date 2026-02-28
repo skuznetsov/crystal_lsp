@@ -1,6 +1,33 @@
 # Crystal v2 — Active Work (codegen branch)
 
 ## Known Bugs (codegen)
+- **2026-02-28 (latest): added cached `type_param_like?` classification with structural invalidation (stage2 still unstable)**
+  - Scope (`src/compiler/hir/ast_to_hir.cr`):
+    - added `@type_param_like_cache : Hash(String, Bool)` to memoize repeated token classification;
+    - `type_param_like?` now returns cached result for repeated names (`T`, `K`, `V`, `String`, etc.) and caches final decision;
+    - invalidation integrated through existing structural cache reset path:
+      - `register_type_alias`
+      - `bump_module_defs_cache_version`
+      - `bump_class_info_version`
+      - `register_enum` / `register_enum_with_name` on new enum registration.
+  - Why:
+    - LLDB hotspot after previous branch showed frequent `builtin_alias_target? -> type_param_like? -> type_ref_for_name` churn in return-inference/inline-yield paths.
+  - Evidence:
+    - debug:
+      - `/usr/bin/time -p crystal build src/crystal_v2.cr -o /tmp/stage1_dbg_type_param_like_cache_fix --error-trace` -> `exit 0`, **real 9.58s**
+      - `bash regression_tests/run_mini_oracles.sh /tmp/stage1_dbg_type_param_like_cache_fix` -> **5/5 PASS**
+      - `bash regression_tests/stage2_env_optional_repro.sh /tmp/stage1_dbg_type_param_like_cache_fix` -> `not reproduced`
+    - release stage1:
+      - `/usr/bin/time -p crystal build --release src/crystal_v2.cr -o /tmp/stage1_rel_type_param_like_cache_fix --error-trace` -> `exit 0`, **real 432.88s**
+    - stage2 watchdog with timeline (`t300`):
+      - `scripts/timeout_sample_lldb.sh -t 300 -s 8 -n 15 -o /tmp/stage2_rel_type_param_like_cache_fix_t300 -- /usr/bin/time -p /tmp/stage1_rel_type_param_like_cache_fix src/crystal_v2.cr --release -o /tmp/stage2_rel_type_param_like_cache_fix` -> timeout `124`
+      - timeline snapshots captured at `30/90/150/210/270s` (`sample_series` count `5`);
+      - final LLDB stack in this run:
+        - `resolve_module_alias_prefix` -> `resolve_module_alias_for_include` -> `record_module_inclusion` -> `register_concrete_class`
+      - i.e. hotspot moved away from previous `type_param_like?` frame in this sample.
+  - Status:
+    - **partial**: correctness preserved, but stage2 still exceeds `300s`; next branch should target include-alias resolution churn across `register_concrete_class` include chains.
+
 - **2026-02-28 (latest): removed `pending.to_set` allocation hotspot in pending-lowering loop; bottleneck moved to type-param checks in return inference**
   - Scope (`src/compiler/hir/ast_to_hir.cr`):
     - added reusable `@pending_queue_remove_set` for queue compaction;
