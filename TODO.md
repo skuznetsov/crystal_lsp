@@ -1,6 +1,27 @@
 # Crystal v2 — Active Work (codegen branch)
 
 ## Known Bugs (codegen)
+- **2026-02-28 (latest): fixed root-cause lost captured-local updates in nested yield/loop inlining (`count/sum` stayed unchanged)**
+  - Root cause (`src/compiler/hir/ast_to_hir.cr`):
+    - `inline_block_body` saves updated captured locals to `@inline_loop_var_backedge_values` and restores PHI-bound locals during loop lowering;
+    - several intrinsic loop lowerings (`times`, range/array/hash each variants) patched loop PHIs from `ctx.lookup_local(var_name)` directly and did not consume the saved backedge value for inline-captured vars;
+    - result: captured locals mutated inside nested yield blocks were reverted to pre-iteration PHI values (symptom: `count=0 sum=0` on nested `each`/`each_with_index` repros).
+  - Fix:
+    - introduced `resolve_loop_updated_value(ctx, var_name, inline_vars)` and used it in intrinsic loop PHI backedge patching paths;
+    - intrinsic loop bodies now clear stale `@inline_loop_var_backedge_values` entries for active `inline_vars` on loop entry (same discipline as `lower_while`);
+    - kept structural no-hardcode policy (no symbol/name special-casing for this fix).
+  - Evidence:
+    - build:
+      - `/usr/bin/time -p crystal build src/crystal_v2.cr -o /tmp/stage1_dbg_loop_backedge_fix_clean --error-trace` -> `exit 0`, **real 11.34s**
+    - nested-yield repro:
+      - `/tmp/stage1_dbg_loop_backedge_fix_clean /tmp/repro_nested_each_count.cr -o /tmp/repro_nested_each_count_loop_backedge_fix_clean.bin`
+      - `scripts/run_safe.sh /tmp/repro_nested_each_count_loop_backedge_fix_clean.bin 10 512` -> `count=3 sum=33`
+    - regression repro:
+      - `/tmp/stage1_dbg_loop_backedge_fix_clean regression_tests/yield_nested_each_with_index.cr -o /tmp/yield_nested_each_with_index_loop_backedge_fix_clean.bin`
+      - `scripts/run_safe.sh /tmp/yield_nested_each_with_index_loop_backedge_fix_clean.bin 10 512` -> `count=3 sum=3`, `yield_nested_each_with_index_ok`
+    - mini-oracles:
+      - `bash regression_tests/run_mini_oracles.sh /tmp/stage1_dbg_loop_backedge_fix_clean` -> **5/5 PASS**
+
 - **2026-02-28 (latest): reduced stage2 recursion pressure by making pending generic monomorphization drain truly iterative**
   - Root cause (`src/compiler/hir/ast_to_hir.cr`):
     - `monomorphize_generic_class` claimed breadth-first draining of `@pending_monomorphizations`, but called itself recursively while draining;
