@@ -1092,8 +1092,9 @@ module Crystal::HIR
     @yield_check_cache : Hash({UInt64, UInt64}, Bool) = {} of {UInt64, UInt64} => Bool
     # Cache for def_contains_block_call? keyed by {DefNode object_id, resolved arena object_id} → Bool.
     @block_call_check_cache : Hash({UInt64, UInt64}, Bool) = {} of {UInt64, UInt64} => Bool
-    # Cache for resolve_arena_for_def keyed by DefNode object_id → resolved arena.
-    @arena_for_def_cache : Hash(UInt64, CrystalV2::Compiler::Frontend::ArenaLike) = {} of UInt64 => CrystalV2::Compiler::Frontend::ArenaLike
+    # Cache for resolve_arena_for_def keyed by
+    # {DefNode object_id, fallback arena object_id, inline arenas object_id}.
+    @arena_for_def_cache : Hash({UInt64, UInt64, UInt64}, CrystalV2::Compiler::Frontend::ArenaLike) = {} of {UInt64, UInt64, UInt64} => CrystalV2::Compiler::Frontend::ArenaLike
     # Deduplicated set of unique arenas (by object_id) for resolve_arena_for_def candidates.
     @unique_def_arenas : Hash(UInt64, CrystalV2::Compiler::Frontend::ArenaLike) = {} of UInt64 => CrystalV2::Compiler::Frontend::ArenaLike
     # Cached list of unique arenas to avoid per-call allocations.
@@ -1231,6 +1232,9 @@ module Crystal::HIR
     @allocator_init_name_cache : Hash(String, String) = {} of String => String
     @allocator_init_mangled_prefix_cache : Hash(String, String) = {} of String => String
     @allocator_instance_new_name_cache : Hash(String, String) = {} of String => String
+    @allocator_init_def_key_cache : Hash(String, String) = {} of String => String
+    @allocator_init_def_key_negative_cache : Set(String) = Set(String).new
+    @allocator_init_def_key_cache_function_defs_size : Int32 = 0
     # Debug-only: lower node histogram (enabled via DEBUG_LOWER_HISTO)
     @lower_histo_counts : Hash(String, Int32) = {} of String => Int32
     @lower_histo_last : Time::Instant? = nil
@@ -6500,15 +6504,31 @@ module Crystal::HIR
       func_def : CrystalV2::Compiler::Frontend::DefNode,
       fallback : CrystalV2::Compiler::Frontend::ArenaLike,
     ) : CrystalV2::Compiler::Frontend::ArenaLike
-      resolve_arena_for_def_uncached(func_def, fallback)
+      if arena_fits_def?(fallback, func_def)
+        return fallback
+      end
+      inline_arenas_id = @inline_arenas ? @inline_arenas.not_nil!.object_id : 0_u64
+      cache_key = {func_def.object_id, fallback.object_id, inline_arenas_id}
+      if cached = @arena_for_def_cache[cache_key]?
+        return cached
+      end
+      resolved = resolve_arena_for_def_uncached(func_def, fallback)
+      @arena_for_def_cache[cache_key] = resolved
+      resolved
     end
 
     private def body_max_index_for_def(func_def : CrystalV2::Compiler::Frontend::DefNode) : Int32
-      if body = func_def.body
-        body.empty? ? -1 : body.max_of(&.index)
-      else
-        -1
+      def_id = func_def.object_id
+      if cached = @def_body_max_index_cache[def_id]?
+        return cached
       end
+      value = if body = func_def.body
+                body.empty? ? -1 : body.max_of(&.index)
+              else
+                -1
+              end
+      @def_body_max_index_cache[def_id] = value
+      value
     end
 
     @function_def_arenas_last_refresh_size : Int32 = 0
@@ -6527,6 +6547,7 @@ module Crystal::HIR
 
     private def set_function_def_arena(name : String, arena : CrystalV2::Compiler::Frontend::ArenaLike) : Nil
       @function_def_arenas[name] = arena
+      @arena_for_def_cache.clear
       add_unique_def_arena(arena)
       @function_def_arenas_last_refresh_size = @function_def_arenas.size
     end
@@ -16895,6 +16916,41 @@ module Crystal::HIR
       built
     end
 
+    private def allocator_init_def_key_for(class_name : String) : String?
+      if @allocator_init_def_key_cache_function_defs_size != @function_defs.size
+        @allocator_init_def_key_cache.clear
+        @allocator_init_def_key_negative_cache.clear
+        @allocator_init_def_key_cache_function_defs_size = @function_defs.size
+      end
+
+      if cached = @allocator_init_def_key_cache[class_name]?
+        return cached
+      end
+      return nil if @allocator_init_def_key_negative_cache.includes?(class_name)
+
+      init_key = allocator_init_name_for(class_name)
+      if @function_defs.has_key?(init_key)
+        @allocator_init_def_key_cache[class_name] = init_key
+        return init_key
+      end
+
+      init_mangled_prefix = allocator_init_mangled_prefix_for(class_name)
+      found : String? = nil
+      @function_defs.each_key do |k|
+        if k.starts_with?(init_mangled_prefix)
+          found = k
+          break
+        end
+      end
+
+      if found
+        @allocator_init_def_key_cache[class_name] = found.not_nil!
+      else
+        @allocator_init_def_key_negative_cache << class_name
+      end
+      found
+    end
+
     # Generate allocator: ClassName.new(...) -> allocates and returns instance
     private def generate_allocator(
       class_name : String,
@@ -17022,21 +17078,10 @@ module Crystal::HIR
 
       # Propagate default literal values from the initialize DefNode to allocator params.
       # Without this, the LLVM backend pads missing args with 0 instead of the actual default.
-      init_def_key = allocator_init_name_for(class_name)
-      init_def_for_defaults = @function_defs[init_def_key]?
-      unless init_def_for_defaults
-        # Try mangled key (e.g., Foo#initialize$String_String)
-        init_mangled_prefix = allocator_init_mangled_prefix_for(class_name)
-        @function_defs.each_key do |k|
-          if k.starts_with?(init_mangled_prefix)
-            init_def_for_defaults = @function_defs[k]
-            init_def_key = k
-            break
-          end
-        end
-      end
+      init_def_key = allocator_init_def_key_for(class_name)
+      init_def_for_defaults = init_def_key ? @function_defs[init_def_key]? : nil
       if init_def_for_defaults && (init_def_params = init_def_for_defaults.params)
-        init_arena_for_defaults = @function_def_arenas[init_def_key]? || @arena
+        init_arena_for_defaults = init_def_key ? (@function_def_arenas[init_def_key]? || @arena) : @arena
         with_arena(init_arena_for_defaults) do
           param_idx = 0
           init_def_params.each do |ast_param|
@@ -17364,20 +17409,10 @@ module Crystal::HIR
 
       # Propagate default literal values from the initialize DefNode to overload params.
       # Without this, the LLVM backend pads missing args with 0/null instead of the actual default.
-      init_def_key_ovr = allocator_init_name_for(class_name)
-      init_def_for_defaults = @function_defs[init_def_key_ovr]?
-      unless init_def_for_defaults
-        init_mangled_prefix = allocator_init_mangled_prefix_for(class_name)
-        @function_defs.each_key do |k|
-          if k.starts_with?(init_mangled_prefix)
-            init_def_for_defaults = @function_defs[k]
-            init_def_key_ovr = k
-            break
-          end
-        end
-      end
+      init_def_key_ovr = allocator_init_def_key_for(class_name)
+      init_def_for_defaults = init_def_key_ovr ? @function_defs[init_def_key_ovr]? : nil
       if init_def_for_defaults && (init_def_params = init_def_for_defaults.params)
-        init_arena_for_defaults = @function_def_arenas[init_def_key_ovr]? || @arena
+        init_arena_for_defaults = init_def_key_ovr ? (@function_def_arenas[init_def_key_ovr]? || @arena) : @arena
         with_arena(init_arena_for_defaults) do
           param_idx = 0
           init_def_params.each do |ast_param|

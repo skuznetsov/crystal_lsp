@@ -1,6 +1,37 @@
 # Crystal v2 — Active Work (codegen branch)
 
 ## Known Bugs (codegen)
+- **2026-02-28 (latest): arena-resolution and allocator-init lookup hot-path hardening (stage2 still unstable)**
+  - Scope (`src/compiler/hir/ast_to_hir.cr`):
+    - `resolve_arena_for_def`:
+      - enabled cache keyed by `{def_oid, fallback_arena_oid, inline_arenas_oid}`;
+      - cached `body_max_index_for_def` by `DefNode` object id;
+      - invalidated arena-resolution cache on `set_function_def_arena`;
+      - added fast-path `return fallback` when `arena_fits_def?(fallback, func_def)`.
+    - allocator default-param lookup:
+      - added `allocator_init_def_key_for(class_name)` cache (positive + negative) with invalidation by `@function_defs.size`;
+      - removed repeated full `@function_defs.each_key { starts_with?(init_prefix) }` scans from both `generate_allocator` and `generate_allocator_overload`.
+  - Why:
+    - watchdog/lldb stacks repeatedly showed heavy time in arena-resolution and allocator init-key scanning (`starts_with?`, hash lookups in span/source checks);
+    - this branch removes repeated global scans and prefers direct invariant checks/caches.
+  - Evidence:
+    - debug validation:
+      - `/usr/bin/time -p crystal build src/crystal_v2.cr -o /tmp/stage1_dbg_def_arena_fallback_fastpath_opt --error-trace` -> `exit 0`, **real 8.25s**
+      - `bash regression_tests/run_mini_oracles.sh /tmp/stage1_dbg_def_arena_fallback_fastpath_opt` -> **5/5 PASS**
+      - `bash regression_tests/run_all.sh /tmp/stage1_dbg_def_arena_fallback_fastpath_opt` -> **56 passed, 3 failed** (`hash_compaction`, `hash_stress`, `yield_suffix_unless`) — baseline parity.
+    - release stage1:
+      - `/usr/bin/time -p crystal build --release src/crystal_v2.cr -o /tmp/stage1_rel_def_arena_fallback_fastpath_opt --error-trace` -> `exit 0`, **real 422.27s** (close to prior best branch, not a decisive stage1 win).
+    - stage2 watchdog (`t300`):
+      - `scripts/timeout_sample_lldb.sh -t 300 -s 8 -n 12 -o /tmp/stage2_rel_def_arena_fallback_fastpath_opt_t300 -- /usr/bin/time -p /tmp/stage1_rel_def_arena_fallback_fastpath_opt src/crystal_v2.cr --release -o /tmp/stage2_rel_def_arena_fallback_fastpath_opt` -> timeout `124`
+      - hotspot mix shifted:
+        - `type_ref_for_name` 549
+        - `register_concrete_class` 315
+        - `resolve_type_name_in_context` 303
+        - `GC_malloc_kind` 309
+      - LLDB stack no longer centers on `resolve_arena_for_def` in the sampled stop; current stack lands in `resolve_type_name_in_context` hash/set path during `register_concrete_class`.
+  - Status:
+    - **partial**: stage2 still exceeds 300s; next root-cause branch is set/hash churn inside `resolve_type_name_in_context` (membership checks and contextual resolution recursion).
+
 - **2026-02-28 (latest): root-cause churn cuts in enum resolution + type-cache key indexing (stage2 still unstable)**
   - Scope (`src/compiler/hir/ast_to_hir.cr`):
     - enum resolution path:
