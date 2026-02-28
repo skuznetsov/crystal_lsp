@@ -79,6 +79,21 @@
     - stage2 watchdog (`t180`):
       - `scripts/timeout_sample_lldb.sh -t 180 ... /tmp/stage1_rel_subst_guard src/crystal_v2.cr --release ...` -> `status 124`
       - top symbols: `String#hash`, `Hash(String, String)#find_entry`, `substitute_type_params_in_type_name`, `resolve_module_alias_prefix`, `resolve_type_alias_chain_no_context`.
+  - debug-profile matrix (same commit, release stress oracle):
+    - `bash regression_tests/stage2_debug_profile_oracle.sh /tmp/stage1_rel_subst_guard 240 release 1200,4000`
+    - `N=1200`:
+      - `total=6749.9ms`, `hir=2781.5ms`, `mir=1411.1ms`, `llvm=1450.1ms`
+      - `hir_funcs_after_rta=19165`, `mir_funcs=20682`, `llvm_ir_bytes=18422232`
+    - `N=4000`:
+      - `total=30283.7ms`, `hir=13219.5ms`, `mir=8754.2ms`, `llvm=5332.7ms`
+      - `hir_funcs_after_rta=55565`, `mir_funcs=59882`, `llvm_ir_bytes=36388349`
+    - growth:
+      - total: `4.49x` (`6749.9 -> 30283.7`)
+      - HIR functions: `2.90x` (`19165 -> 55565`)
+      - MIR functions: `2.90x` (`20682 -> 59882`)
+      - LLVM IR bytes: `1.97x` (`18.4M -> 36.4M`)
+    - interpretation:
+      - wall-time still grows faster than work-volume counters, confirming residual superlinear overhead (not fully removed by current substitution-cache branch).
   - discarded experiment (rolled back in working tree before next step):
     - identity-cache + last-scope fast-path for substitution cache caused regression (`N=4000` timeout at `180s`), so it was removed.
   - current branch reruns remain noisy around `N=4000` (sometimes DCE/RC-elision hotspots dominate near the same timeout wall), so this step is marked partial.
