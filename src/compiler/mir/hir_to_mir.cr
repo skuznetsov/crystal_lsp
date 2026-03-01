@@ -464,6 +464,38 @@ module Crystal
       hir_func.params.each do |param|
         mir_func.add_param(param.name, convert_type(param.type), param.default_literal)
       end
+
+      # Fix: primitive binary operator methods (like Int32#+$Int32) may have their
+      # HIR created with only "self" as a param, missing the explicit "other" param.
+      # The LLVM backend's primitive override code hardcodes 2 params (self + other)
+      # in the function definition, so the MIR function must also have 2 params to
+      # avoid argument truncation in lower_call.
+      if mir_func.params.size == 1 && hir_func.params.size == 1 &&
+         hir_func.params[0].name == "self" && hir_func.name.includes?('#')
+        # Check if this is a binary operator (e.g., Int32#+$Int32, Int32#-$Int32)
+        hash_pos = hir_func.name.index('#')
+        if hash_pos
+          after_hash = hir_func.name[(hash_pos + 1)..]
+          dollar_pos = after_hash.index('$')
+          if dollar_pos
+            method_part = after_hash[0, dollar_pos]
+            suffix_part = after_hash[(dollar_pos + 1)..]
+            if {"+", "-", "*", "/", "//", "%", "**", "&", "|", "^", "<<", ">>",
+                "===", "<=>", "==", "!=", "<", "<=", ">", ">=",
+                "&+", "&-", "&*", "&**", "unsafe_shr", "unsafe_div",
+                "unsafe_mod"}.includes?(method_part)
+              # Infer the 'other' param type from the suffix
+              other_mir_type = @mir_module.type_registry.get_by_name(suffix_part)
+              if other_mir_type
+                mir_func.add_param("other", TypeRef.new(other_mir_type.id))
+              else
+                # Fallback: use same type as self
+                mir_func.add_param("other", mir_func.params[0].type)
+              end
+            end
+          end
+        end
+      end
     end
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -1573,7 +1605,16 @@ module Crystal
         end
 
         coerced_args = coerce_call_args(builder, effective_args, effective_hir_args, func)
-        return builder.call(callee_id, coerced_args, func.return_type)
+        call_return_type = func.return_type
+        hir_call_return_type = convert_type(call.type)
+        if is_union_type?(hir_call_return_type) && !is_union_type?(func.return_type)
+          # Keep HIR-level union contract when callee ABI is scalar/pointer.
+          # Backend will wrap ABI result into expected union shape.
+          call_return_type = hir_call_return_type
+        elsif call_return_type == TypeRef::VOID && hir_call_return_type != TypeRef::VOID
+          call_return_type = hir_call_return_type
+        end
+        return builder.call(callee_id, coerced_args, call_return_type)
       end
 
       # Built-in print functions (fallback only when no user-defined function exists).

@@ -2360,7 +2360,7 @@ module Crystal::HIR
       sources_by_arena : Hash(CrystalV2::Compiler::Frontend::ArenaLike, String)? = nil,
       paths_by_arena : Hash(CrystalV2::Compiler::Frontend::ArenaLike, String)? = nil,
     )
-      function_type_capacity = ENV["CRYSTAL_V2_FUNCTION_TYPE_CAPACITY"]?.try(&.to_i?) || 131072
+      function_type_capacity : Int32 = ENV["CRYSTAL_V2_FUNCTION_TYPE_CAPACITY"]?.try(&.to_i?) || 131072
       function_type_capacity = 8192 if function_type_capacity < 8192
       function_type_aux_capacity = function_type_capacity // 2
       function_type_aux_capacity = 4096 if function_type_aux_capacity < 4096
