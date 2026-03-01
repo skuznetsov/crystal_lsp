@@ -2164,8 +2164,8 @@ module Crystal::HIR
     @deferred_module_context_first_lookup : Hash(DeferredModuleLookupKey, DeferredModuleContext)
     @lazy_module_methods : Bool
     @module_defs_cache_version : Int32
-    @module_include_alias_cache : Hash({String, String?, Int32, Int32}, String)
-    @module_alias_prefix_cache : Hash({String, Int32, Int32}, String)
+    @module_include_alias_cache : Hash({String, String?, Int32}, String)
+    @module_alias_prefix_cache : Hash({String, Int32}, String)
     @module_def_lookup_cache_version : Int32
     @module_def_lookup_cache : Hash(String, Tuple(CrystalV2::Compiler::Frontend::DefNode, CrystalV2::Compiler::Frontend::ArenaLike)?)
     @module_class_def_lookup_cache : Hash(String, Tuple(CrystalV2::Compiler::Frontend::DefNode, CrystalV2::Compiler::Frontend::ArenaLike)?)
@@ -2541,8 +2541,8 @@ module Crystal::HIR
       @deferred_module_context_first_lookup = {} of DeferredModuleLookupKey => DeferredModuleContext
       @lazy_module_methods = false
       @module_defs_cache_version = 0
-      @module_include_alias_cache = {} of {String, String?, Int32, Int32} => String
-      @module_alias_prefix_cache = {} of {String, Int32, Int32} => String
+      @module_include_alias_cache = {} of {String, String?, Int32} => String
+      @module_alias_prefix_cache = {} of {String, Int32} => String
       @module_def_lookup_cache_version = 0
       @module_def_lookup_cache = {} of String => Tuple(CrystalV2::Compiler::Frontend::DefNode, CrystalV2::Compiler::Frontend::ArenaLike)?
       @module_class_def_lookup_cache = {} of String => Tuple(CrystalV2::Compiler::Frontend::DefNode, CrystalV2::Compiler::Frontend::ArenaLike)?
@@ -2930,7 +2930,7 @@ module Crystal::HIR
     private def resolve_module_alias_for_include(module_name : String) : String
       return module_name if module_name.empty?
 
-      cache_key = {module_name, @current_class, @module_defs_cache_version, @resolved_type_name_cache_epoch}
+      cache_key = {module_name, @current_class, @module_defs_cache_version}
       if cached = @module_include_alias_cache[cache_key]?
         return cached
       end
@@ -2978,7 +2978,7 @@ module Crystal::HIR
     end
 
     private def resolve_module_alias_prefix(module_name : String) : String
-      cache_key = {module_name, @module_defs_cache_version, @resolved_type_name_cache_epoch}
+      cache_key = {module_name, @module_defs_cache_version}
       if cached = @module_alias_prefix_cache[cache_key]?
         return cached
       end
@@ -55266,17 +55266,39 @@ module Crystal::HIR
       block : CrystalV2::Compiler::Frontend::BlockNode,
     ) : ValueId
       # Get block param names (element, index)
+      # Handles tuple destructuring: |(a, b), idx| is parsed as 3 flat params [a, b, idx]
+      # In that case, the last param is the index and the rest are tuple elements.
       elem_param_name = "__arr_elem"
       index_param_name = "__arr_idx"
+      tuple_destruct_names = nil  # nil means no destructuring
       if params = block.params
-        if first_param = params[0]?
-          if pname = first_param.name
-            elem_param_name = String.new(pname)
+        if params.size > 2
+          # Tuple destructuring: |(a, b, ...), idx| → params = [a, b, ..., idx]
+          # Last param is the index, the rest are destructured tuple element names
+          tuple_destruct_names = [] of String
+          params[0...-1].each do |p|
+            if pname = p.name
+              tuple_destruct_names << String.new(pname)
+            else
+              tuple_destruct_names << "__tuple_#{tuple_destruct_names.size}"
+            end
           end
-        end
-        if second_param = params[1]?
-          if pname = second_param.name
-            index_param_name = String.new(pname)
+          if last_param = params.last
+            if pname = last_param.name
+              index_param_name = String.new(pname)
+            end
+          end
+          elem_param_name = "__arr_tuple_elem"
+        else
+          if first_param = params[0]?
+            if pname = first_param.name
+              elem_param_name = String.new(pname)
+            end
+          end
+          if second_param = params[1]?
+            if pname = second_param.name
+              index_param_name = String.new(pname)
+            end
           end
         end
       end
@@ -55347,6 +55369,33 @@ module Crystal::HIR
       ctx.emit(index_get)
       ctx.register_type(index_get.id, element_type)
       ctx.register_local(elem_param_name, index_get.id)
+
+      # Tuple destructuring: extract fields from the element and register each as a local
+      if tuple_destruct_names
+        tuple_desc = @module.get_type_descriptor(element_type)
+        if tuple_desc && (tuple_desc.kind == Crystal::HIR::TypeKind::Tuple || tuple_desc.name.starts_with?("Tuple("))
+          tuple_element_types = tuple_desc.type_params.reject { |t| t == Crystal::HIR::TypeRef::VOID }
+          tuple_destruct_names.each_with_index do |name, idx|
+            field_type = if idx < tuple_element_types.size
+                           tuple_element_types[idx]
+                         else
+                           TypeRef::POINTER
+                         end
+            idx_lit = Literal.new(ctx.next_id, TypeRef::INT32, idx.to_i64)
+            ctx.emit(idx_lit)
+            ctx.register_type(idx_lit.id, TypeRef::INT32)
+            field_get = IndexGet.new(ctx.next_id, field_type, index_get.id, idx_lit.id)
+            ctx.emit(field_get)
+            ctx.register_type(field_get.id, field_type)
+            ctx.register_local(name, field_get.id)
+          end
+        else
+          # Not a recognized Tuple — just register the first name as the whole element
+          if first_name = tuple_destruct_names.first?
+            ctx.register_local(first_name, index_get.id)
+          end
+        end
+      end
 
       # Register index parameter with INT32 type
       ctx.register_local(index_param_name, index_phi.id)
@@ -58003,7 +58052,52 @@ module Crystal::HIR
                      end
         param_types = @inline_yield_block_param_types_stack.last?
         if block_params = block.params
-          if block_params.size > 1 && yield_args.size == 1
+          if block_params.size > yield_args.size && yield_args.size >= 1
+            # Tuple destructuring: |(a, b), c| with yield(tuple, c)
+            # Parser flattens |(a, b), c| into 3 params [a, b, c], but yield has 2 args.
+            # Expand the first yield arg (if it's a Tuple) to make arg count match.
+            expanded_param_types = param_types
+            tuple_source_type = if expanded_param_types && expanded_param_types.size >= 1
+                                  expanded_param_types.first
+                                else
+                                  ctx.type_of(yield_args.first)
+                                end
+            if tuple_source_type
+              if tuple_desc = @module.get_type_descriptor(tuple_source_type)
+                if tuple_desc.kind == TypeKind::Tuple || tuple_desc.name.starts_with?("Tuple(")
+                  tuple_params = tuple_desc.type_params.reject { |t| t == TypeRef::VOID }
+                  # Check if expanding the first arg makes counts match:
+                  # block_params.size == tuple_params.size + (yield_args.size - 1)
+                  expanded_count = tuple_params.size + (yield_args.size - 1)
+                  if expanded_count >= block_params.size
+                    tuple_val = yield_args.first
+                    expanded_args = [] of ValueId
+                    # Expand tuple elements for the destructured portion
+                    tuple_params.each_with_index do |elem_type_ref, idx|
+                      idx_lit = Literal.new(ctx.next_id, TypeRef::INT32, idx.to_i64)
+                      ctx.emit(idx_lit)
+                      ctx.register_type(idx_lit.id, TypeRef::INT32)
+                      elem_type = elem_type_ref
+                      idx_get = IndexGet.new(ctx.next_id, elem_type, tuple_val, idx_lit.id)
+                      ctx.emit(idx_get)
+                      ctx.register_type(idx_get.id, elem_type)
+                      expanded_args << idx_get.id
+                    end
+                    # Append remaining (non-tuple) yield args
+                    yield_args[1..].each { |a| expanded_args << a }
+                    yield_args = expanded_args
+                    # Build expanded param types: tuple element types + remaining yield arg types
+                    if expanded_param_types
+                      new_param_types = tuple_params.dup
+                      expanded_param_types[1..].each { |t| new_param_types << t }
+                      param_types = new_param_types
+                    end
+                  end
+                end
+              end
+            end
+          elsif block_params.size > 1 && yield_args.size == 1
+            # Original case: single yield arg is a Tuple, block has multiple params
             expanded_param_types = param_types
             tuple_source_type = if expanded_param_types && expanded_param_types.size == 1
                                   expanded_param_types.first
@@ -64316,11 +64410,12 @@ module Crystal::HIR
       @resolved_type_name_cache_epoch &+= 1
       @resolved_type_name_invalidations[name] = @resolved_type_name_cache_epoch
       @resolved_type_name_invalidations[short] = @resolved_type_name_cache_epoch if short
-      # Module-alias caches include resolved-type epoch in the key. Without
-      # clearing on epoch bump, entries accumulate across invalidations and
-      # trigger heavy hash-resize churn during stage2 bootstrap.
-      @module_include_alias_cache.clear
-      @module_alias_prefix_cache.clear
+      # Module-alias caches key on @module_defs_cache_version (not epoch) —
+      # they depend only on @type_aliases and @module_defs, both of which have
+      # their own invalidation paths (register_type_alias, bump_module_defs_cache_version).
+      # Clearing them here was the dominant bottleneck during monomorphization:
+      # every class registration cleared the caches, forcing re-allocation of
+      # prefix substrings via byte_slice → Boehm GC full-heap scans (66% of HIR time).
       @annotation_type_ref_cache.clear
       clear_defined_method_scan_caches
     end
