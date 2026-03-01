@@ -2483,8 +2483,15 @@ module Crystal
         base = recv_desc.name
         ([base] + subclasses_for(base)).each do |class_name|
           func_name = "#{class_name}##{method_suffix}"
-          func = @mir_module.get_function(func_name) ||
-                 resolve_virtual_method_for_class(class_name, method_suffix, arg_count)
+          func = @mir_module.get_function(func_name)
+          # Verify arity: an untyped alias (e.g. Foo#hash) may match a different
+          # overload than intended (e.g. hash(hasher) instead of hash()).
+          # If param count doesn't match, reject the exact-name match and fall
+          # through to arity-aware resolve_virtual_method_for_class.
+          if func && func.params.size != arg_count + 1
+            func = nil
+          end
+          func = func || resolve_virtual_method_for_class(class_name, method_suffix, arg_count)
           next unless func
           next unless mir_type = @mir_module.type_registry.get_by_name(class_name)
           candidates << {
@@ -2515,8 +2522,11 @@ module Crystal
             next if seen.includes?(class_name)
             seen.add(class_name)
             func_name = "#{class_name}##{method_suffix}"
-            func = @mir_module.get_function(func_name) ||
-                   resolve_virtual_method_for_class(class_name, method_suffix, arg_count, allow_module_method: true)
+            func = @mir_module.get_function(func_name)
+            if func && func.params.size != arg_count + 1
+              func = nil
+            end
+            func = func || resolve_virtual_method_for_class(class_name, method_suffix, arg_count, allow_module_method: true)
             next unless func
             mir_type = ensure_reference_type_for_name(class_name) ||
               @mir_module.type_registry.get_by_name(class_name)
@@ -2694,7 +2704,8 @@ module Crystal
           io << current; io << '#'; io << method_suffix
         end
 
-        if func = @mir_module.get_function(exact_name)
+        if (func = @mir_module.get_function(exact_name)) &&
+           (arg_count.nil? || func.params.size == arg_count + 1)
           # Check for naming collision using class index instead of full scan
           longer_match = nil.as(Crystal::MIR::Function?)
           if class_funcs = @functions_by_class[current]?

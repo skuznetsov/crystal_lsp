@@ -710,10 +710,14 @@ module Crystal::MIR
       end
 
       # Determine which functions to emit
+      STDERR.puts "  [LLVM] total MIR functions: #{@module.functions.size}"
       functions_to_emit = if @reachability
                             STDERR.puts "  [LLVM] computing reachable functions..." if @progress
                             reachable_ids = compute_reachable_functions
-                            @module.functions.select { |f| reachable_ids.includes?(f.id) }
+                            rta_count = reachable_ids.size
+                            result = @module.functions.select { |f| reachable_ids.includes?(f.id) }
+                            STDERR.puts "  [LLVM] RTA kept: #{rta_count} (pruned #{@module.functions.size - rta_count})"
+                            result
                           else
                             @module.functions
                           end
@@ -799,70 +803,6 @@ module Crystal::MIR
           emit_function(func)
         rescue ex : IndexError
           raise "Index error in emit_function for: #{func.name}\n#{ex.message}"
-        end
-      end
-
-      # Second pass: iteratively emit functions discovered by call sites during the first pass.
-      # After emitting reachable functions, @called_crystal_functions may contain functions
-      # that exist in the module but weren't reached by the RTA name-resolution.
-      # Common issue: call sites use short names (e.g. "HIR$CCAstToHir$Dnew$$...")
-      # while module functions use full names (e.g. "Crystal$CCHIR$CCAstToHir$Dnew$$...").
-      # Iterate until no new functions are discovered.
-      if @reachability
-        func_by_mangled = {} of String => Function
-        # Suffix index: for "Crystal$CCHIR$CCFoo" also index "$CCHIR$CCFoo", "HIR$CCFoo", "$CCFoo"
-        func_by_suffix = {} of String => Function
-        @module.functions.each do |f|
-          mangled = mangle_function_name(f.name)
-          func_by_mangled[mangled] = f
-          # Index all $CC-separated suffixes for namespace-prefix matching
-          search_from = 0
-          while cc_pos = mangled.index("$CC", search_from)
-            suffix = mangled[cc_pos + 3..]
-            func_by_suffix[suffix] = f unless func_by_suffix.has_key?(suffix)
-            search_from = cc_pos + 3
-          end
-        end
-
-        max_passes = 20
-        pass = 0
-        loop do
-          pass += 1
-          break if pass > max_passes
-
-          newly_found = [] of Function
-          @called_crystal_functions.each do |name, _|
-            next if @emitted_functions.includes?(name)
-            next if @undefined_externs.has_key?(name)
-            # Try to find this function in the module
-            # 1. Exact mangled match
-            func = func_by_mangled[name]?
-            # 2. Suffix match: call site "HIR$CCAstToHir$Dnew" matches module "Crystal$CCHIR$CCAstToHir$Dnew"
-            unless func
-              func = func_by_suffix[name]?
-            end
-            # 3. Strip arg suffix and try suffix match on base
-            unless func
-              if dd_idx = name.index("$$")
-                base = name[0, dd_idx]
-                func = func_by_suffix[base]?
-              end
-            end
-            if func
-              next if skip_ids.includes?(func.id)
-              newly_found << func
-            end
-          end
-
-          break if newly_found.empty?
-          STDERR.puts "  [LLVM] Pass #{pass + 1}: emitting #{newly_found.size} additional functions..." if @progress
-          newly_found.each do |func|
-            begin
-              emit_function(func)
-            rescue ex : IndexError
-              # Skip functions that fail during emission
-            end
-          end
         end
       end
 
@@ -1013,21 +953,11 @@ module Crystal::MIR
       # Build function lookup by ID and by name
       func_by_id = {} of FunctionId => Function
       func_by_name = {} of String => Function
-      # Suffix index: handles namespace prefix mismatches where call sites use short
-      # names (e.g. "HIR::AstToHir.new") but module has full names ("Crystal::HIR::AstToHir.new")
-      func_by_suffix = {} of String => Function
       @module.functions.each do |f|
         func_by_id[f.id] = f
         mangled = @type_mapper.mangle_name(f.name)
         func_by_name[mangled] = f
         func_by_name[f.name] = f
-        # Index all $CC-separated (::) suffixes for namespace-prefix matching
-        search_from = 0
-        while cc_pos = mangled.index("$CC", search_from)
-          suffix = mangled[cc_pos + 3..]
-          func_by_suffix[suffix] = f unless func_by_suffix.has_key?(suffix)
-          search_from = cc_pos + 3
-        end
       end
 
       # Traverse call graph
@@ -1052,12 +982,6 @@ module Crystal::MIR
 
               # Try to find matching function by exact name or mangled name
               matching_func = func_by_name[mangled_extern]? || func_by_name[extern_name]?
-
-              # Suffix match: handles namespace prefix mismatches
-              # e.g. call to "HIR$CCAstToHir$Dnew" matches "Crystal$CCHIR$CCAstToHir$Dnew"
-              unless matching_func
-                matching_func = func_by_suffix[mangled_extern]? || func_by_suffix[extern_name]?
-              end
 
               if matching_func
                 unless reachable.includes?(matching_func.id)

@@ -1,5 +1,44 @@
 # Crystal v2 — Active Work (codegen branch)
 
+## 2026-03-01: Bootstrap Stage2 Fixes (3 critical bugs found & fixed)
+
+### Fixes applied (all verified with regression tests):
+
+1. **forall type parameter resolution** (`ast_to_hir.cr`)
+   - `Slice#==(other : Slice(U)) forall U` was falling back to `Value#==` (always false)
+   - Root cause: parser discards `forall` type params; method registration couldn't resolve `U` → `UInt8`
+   - Fix: `resolve_forall_type_params()` + `split_top_level_type_args()` helpers
+   - Applied in `register_concrete_class`, `register_type_method_from_def`, `normalize_declared_type_name`
+   - Impact: Lexer keyword matching fixed (uses `id == "require".to_slice`)
+
+2. **Struct parent hierarchy** (`ast_to_hir.cr:19558`)
+   - User-defined structs got parent "Value" instead of "Struct"
+   - `Struct#==` (with macro-based ivar comparison) was never found in method chain
+   - Fix: `builtin_parent_for` returns `"Struct"` instead of `"Value"` for user structs
+   - Note: `Struct#==` still always returns `true` because `{% for ivar %}` macros not expanded
+
+3. **vdispatch arity mismatch** (`hir_to_mir.cr:2486`)
+   - `Foo#hash` (untyped alias for arity-1 `hash(hasher)`) shadowed `Object#hash()` (arity-0)
+   - vdispatch for `hash()` called `Foo#hash(ptr %recv, ptr null)` → null hasher → crash
+   - Fix: verify `func.params.size == arg_count + 1` before accepting exact-name match
+   - Applied in `virtual_dispatch_candidates` (Class + Module paths) and `_resolve_virtual_walk`
+   - Impact: Hash with Reference keys works (was segfaulting in Hasher#permute)
+
+### Current status:
+- Stage1 builds stage2 successfully (~482s, 73541 MIR functions)
+- Stage2 parses input correctly (trace verified: ARENAS=2, EXPRS=73, ROOT0_IDX=1)
+- Stage2 crashes during HIR lowering with ExprId out of bounds (investigating)
+- Known secondary bugs: `.class` returns wrong value, ENV access broken, `Struct#==` always true
+
+### TODO:
+- [ ] Fix ExprId OOB in stage2 HIR lowering (garbage values during node traversal)
+- [ ] Fix `.class` method (returns `#<Foo:0x0>` instead of class name)
+- [ ] Fix ENV access in stage2
+- [ ] Fix `Struct#==` (macro expansion for `@type.instance_vars`)
+- [ ] Fix Slice block constructor (garbage values from `Slice.new(n) { |i| ... }`)
+- [ ] Achieve stage2 → stage3 bootstrap
+- [ ] Benchmark: target ~75s for stage2 compilation
+
 ## Historical pattern ledger (root-cause oriented, 2026-02-28)
 
 ### Confirmed patterns (worked repeatedly)

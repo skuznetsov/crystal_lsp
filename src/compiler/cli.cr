@@ -654,6 +654,9 @@ module CrystalV2
         timings = {} of String => Float64
         debug_profile = options.debug_profile
         stage2_debug("[STAGE2_DEBUG] compile start", err_io)
+        # Bootstrap trace: write raw bytes to fd 2 (stderr) for debugging
+        trace_msg = "TRACE:COMPILE_START\n"
+        LibC.write(2, trace_msg.to_unsafe, trace_msg.bytesize)
         total_start = Time.instant
         @ast_cache_hits = 0
         @ast_cache_misses = 0
@@ -702,7 +705,34 @@ module CrystalV2
         # Parse user's input file
         user_parse_start = Time.instant
         stage2_debug("[STAGE2_DEBUG] parsing user file start", err_io)
+        trace2 = "TRACE:PARSE_USER_START\n"
+        LibC.write(2, trace2.to_unsafe, trace2.bytesize)
         parse_file_recursive(input_file, all_arenas, loaded_files, input_file, options, out_io)
+        trace3 = "TRACE:PARSE_USER_DONE\n"
+        LibC.write(2, trace3.to_unsafe, trace3.bytesize)
+        # Trace arena count and first entry details
+        arena_count_s = all_arenas.size.to_s
+        trace4 = "TRACE:ARENAS="
+        LibC.write(2, trace4.to_unsafe, trace4.bytesize)
+        LibC.write(2, arena_count_s.to_unsafe, arena_count_s.bytesize)
+        LibC.write(2, "\n".to_unsafe, 1)
+        if all_arenas.size > 0
+          first = all_arenas.unsafe_fetch(0)
+          exprs0 = first[1]
+          exprs_size_s = exprs0.size.to_s
+          trace5 = "TRACE:FIRST_EXPRS="
+          LibC.write(2, trace5.to_unsafe, trace5.bytesize)
+          LibC.write(2, exprs_size_s.to_unsafe, exprs_size_s.bytesize)
+          LibC.write(2, "\n".to_unsafe, 1)
+          if exprs0.size > 0
+            eid0 = exprs0.unsafe_fetch(0)
+            eid_s = eid0.index.to_s
+            trace6 = "TRACE:ROOT0_IDX="
+            LibC.write(2, trace6.to_unsafe, trace6.bytesize)
+            LibC.write(2, eid_s.to_unsafe, eid_s.bytesize)
+            LibC.write(2, "\n".to_unsafe, 1)
+          end
+        end
         stage2_debug("[STAGE2_DEBUG] user file parsed", err_io)
         stage2_debug("[STAGE2_DEBUG] arenas=#{all_arenas.size} loaded_files=#{loaded_files.size}", err_io)
         if options.stats
@@ -788,8 +818,18 @@ module CrystalV2
         first_arena = first_entry[0]
         sources_by_arena = {} of Frontend::ArenaLike => String
         paths_by_arena = {} of Frontend::ArenaLike => String
-        # Bootstrap stability: skip arena-keyed source/path caches.
-        # ArenaLike hash key operations are currently unstable in stage2 builds.
+        # Populate arena→path and arena→source maps from all_arenas.
+        # Required for __FILE__/__DIR__ resolution and diagnostics.
+        arena_map_i = 0
+        while arena_map_i < all_arenas.size
+          map_entry = all_arenas.unsafe_fetch(arena_map_i)
+          map_arena = map_entry[0]
+          map_path = map_entry[2]
+          map_source = map_entry[3]
+          paths_by_arena[map_arena] = map_path
+          sources_by_arena[map_arena] = map_source
+          arena_map_i += 1
+        end
         stage2_debug("[STAGE2_DEBUG] hir setup maps ready size=#{sources_by_arena.size}", err_io)
         hir_converter = HIR::AstToHir.new(first_arena, input_file, sources_by_arena, paths_by_arena)
         stage2_debug("[STAGE2_DEBUG] hir converter created", err_io)
@@ -812,6 +852,8 @@ module CrystalV2
         flags = Runtime.target_flags
         hir_collect_start = Time.instant if debug_profile
         stage2_debug("[STAGE2_DEBUG] top-level collection walk start", err_io)
+        t_collect = "TRACE:COLLECT_START\n"
+        LibC.write(2, t_collect.to_unsafe, t_collect.bytesize)
         arena_i = 0
         while arena_i < all_arenas.size
           entry = all_arenas.unsafe_fetch(arena_i)
@@ -819,6 +861,19 @@ module CrystalV2
           exprs = entry[1]
           file_path = entry[2]
           source = entry[3]
+          # Trace each arena
+          t_ai = "TRACE:ARENA_I="
+          ais = arena_i.to_s
+          es = exprs.size.to_s
+          LibC.write(2, t_ai.to_unsafe, t_ai.bytesize)
+          LibC.write(2, ais.to_unsafe, ais.bytesize)
+          t_es = " EXPRS="
+          LibC.write(2, t_es.to_unsafe, t_es.bytesize)
+          LibC.write(2, es.to_unsafe, es.bytesize)
+          t_p = " PATH="
+          LibC.write(2, t_p.to_unsafe, t_p.bytesize)
+          LibC.write(2, file_path.to_unsafe, file_path.bytesize)
+          LibC.write(2, "\n".to_unsafe, 1)
           safe_source = begin
             File.read(file_path)
           rescue
@@ -1843,6 +1898,11 @@ module CrystalV2
         arena = program.arena.as(Frontend::AstArena)
         exprs = program.roots
 
+        # Bootstrap debug: always log arena/expr stats for diagnosis
+        if options.verbose
+          log(options, out_io, "    arena.size=#{arena.size} exprs.size=#{exprs.size}")
+        end
+
         # Process requires first
         base_dir = File.dirname(abs_path)
         requires = [] of String
@@ -1880,6 +1940,17 @@ module CrystalV2
         requires_out : Array(String)? = nil
       )
         node = arena[expr_id]
+        # Bootstrap verbose: report which node type was seen
+        if options.verbose
+          is_require = node.is_a?(Frontend::RequireNode)
+          is_module = node.is_a?(Frontend::ModuleNode)
+          is_macroif = node.is_a?(Frontend::MacroIfNode)
+          is_node = node.is_a?(Frontend::Node)
+          is_string = node.is_a?(Frontend::StringNode)
+          # Read raw type_id from object header (first 4 bytes)
+          raw_type_id = Pointer(Int32).new(node.as(Frontend::Node).object_id).value
+          log(options, out_io, "    [req] expr=#{expr_id.index} type_id=#{raw_type_id} node?=#{is_node} req?=#{is_require} mod?=#{is_module} macif?=#{is_macroif} str?=#{is_string}")
+        end
         case node
         when Frontend::ModuleNode
           if body = node.body
@@ -1991,10 +2062,18 @@ module CrystalV2
         out_io : IO
       ) : Array(String)
         libraries = [] of String
-        all_arenas.each do |arena, exprs, _, _|
-          exprs.each do |expr_id|
+        idx = 0
+        while idx < all_arenas.size
+          entry = all_arenas.unsafe_fetch(idx)
+          arena = entry[0]
+          exprs = entry[1]
+          expr_i = 0
+          while expr_i < exprs.size
+            expr_id = exprs.unsafe_fetch(expr_i)
             collect_link_libraries_from_expr(arena, expr_id, libraries, options, out_io)
+            expr_i += 1
           end
+          idx += 1
         end
         libraries
       end

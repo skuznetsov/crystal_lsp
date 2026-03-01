@@ -817,6 +817,67 @@ module Crystal::HIR
       name
     end
 
+    # Split a generic type args string (e.g., "K, V" or "Tuple(A, B), C") into
+    # top-level components, respecting nested parentheses.
+    private def split_top_level_type_args(args : String) : Array(String)
+      result = [] of String
+      depth = 0
+      start = 0
+      i = 0
+      while i < args.bytesize
+        ch = args.to_unsafe[i]
+        case ch
+        when '('.ord then depth += 1
+        when ')'.ord then depth -= 1
+        when ','.ord
+          if depth == 0
+            result << args.byte_slice(start, i - start)
+            start = i + 1
+          end
+        else
+        end
+        i += 1
+      end
+      result << args.byte_slice(start, args.bytesize - start) if start <= args.bytesize
+      result
+    end
+
+    # Resolve forall-like type parameters in a type annotation by matching
+    # against the owner class's concrete generic arguments.
+    # Example: resolve_forall_type_params("Slice(U)", "Slice(UInt8)") => "Slice(UInt8)"
+    private def resolve_forall_type_params(annot_str : String, owner : String) : String
+      ann_split = split_generic_base_and_args(annot_str)
+      return annot_str unless ann_split
+      owner_split = split_generic_base_and_args(owner)
+      return annot_str unless owner_split
+
+      ann_base = strip_generic_args(ann_split[:base])
+      owner_base = strip_generic_args(owner_split[:base])
+      return annot_str unless ann_base == owner_base
+
+      ann_args = split_top_level_type_args(ann_split[:args])
+      owner_args = split_top_level_type_args(owner_split[:args])
+
+      changed = false
+      new_parts = [] of String
+      i = 0
+      while i < ann_args.size
+        trimmed = ann_args[i].strip
+        if type_param_like?(trimmed) && i < owner_args.size
+          new_parts << owner_args[i].strip
+          changed = true
+        else
+          new_parts << ann_args[i]
+        end
+        i += 1
+      end
+      if changed
+        "#{ann_split[:base]}(#{new_parts.join(", ")})"
+      else
+        annot_str
+      end
+    end
+
     @[AlwaysInline]
     private def starts_with_generic_base?(name : String, base : String) : Bool
       return false if base.empty?
@@ -6319,6 +6380,55 @@ module Crystal::HIR
       resolved = normalize_tuple_literal_type_name(resolved)
       @type_param_map.each do |param, actual|
         resolved = substitute_type_param(resolved, param, actual)
+      end
+
+      # Resolve forall-like type parameters in generic annotations.
+      # When a method has `def foo(x : Bar(U)) forall U` and the owner is `Bar(Concrete)`,
+      # the unresolved `U` should be mapped to `Concrete` positionally.
+      # The parser discards forall params, so we detect them here by checking for
+      # unresolved type-param-like names in generic arguments.
+      if resolved.includes?('(') && effective_context && effective_context.includes?('(')
+        if split = split_generic_base_and_args(resolved)
+          args_str = split[:args]
+          resolved_base = split[:base]
+          # Check if any top-level generic arg is an unresolved type-param-like name
+          has_unresolved = false
+          comma_parts = split_top_level_type_args(args_str)
+          comma_parts.each do |part|
+            trimmed = part.strip
+            if type_param_like?(trimmed)
+              has_unresolved = true
+              break
+            end
+          end
+          if has_unresolved
+            if ctx_split = split_generic_base_and_args(effective_context)
+              ctx_base = ctx_split[:base]
+              # Strip namespace prefixes for comparison
+              bare_resolved = strip_generic_args(resolved_base)
+              bare_ctx = strip_generic_args(ctx_base)
+              # Also resolve the annotation base to handle module/namespace differences
+              bare_resolved_full = resolve_type_name_in_context(bare_resolved) rescue bare_resolved
+              bare_ctx_full = resolve_type_name_in_context(bare_ctx) rescue bare_ctx
+              if bare_resolved == bare_ctx || bare_resolved_full == bare_ctx_full ||
+                 bare_resolved_full == bare_ctx || bare_resolved == bare_ctx_full
+                ctx_args = split_top_level_type_args(ctx_split[:args])
+                new_parts = [] of String
+                i = 0
+                while i < comma_parts.size
+                  trimmed = comma_parts[i].strip
+                  if type_param_like?(trimmed) && i < ctx_args.size
+                    new_parts << ctx_args[i].strip
+                  else
+                    new_parts << comma_parts[i]
+                  end
+                  i += 1
+                end
+                resolved = "#{resolved_base}(#{new_parts.join(", ")})"
+              end
+            end
+          end
+        end
       end
 
       old_class = @current_class
@@ -12749,12 +12859,24 @@ module Crystal::HIR
             next
           end
           param_type = if ta = param.type_annotation
-                         annotation_type_ref(String.new(ta), type_name)
+                         ta_str = String.new(ta)
+                         ref = annotation_type_ref(ta_str, type_name)
+                         # Forall resolution: if annotation wasn't resolved and
+                         # contains generic args with type-param-like names,
+                         # substitute from the owner's concrete type.
+                         if ref == TypeRef::VOID && ta_str.includes?('(') && type_name.includes?('(')
+                           resolved_ta = resolve_forall_type_params(ta_str, type_name)
+                           ref = annotation_type_ref(resolved_ta, type_name) if resolved_ta != ta_str
+                         end
+                         ref
                        elsif param.is_double_splat
                          type_ref_for_name("NamedTuple")
                        else
                          TypeRef::VOID
                        end
+          if env_has?("DEBUG_FORALL_REG") && type_name.starts_with?("Slice(") && method_name == "=="
+            STDERR.puts "[FORALL_REG] param_type.id=#{param_type.id} name=#{get_type_name_from_ref(param_type)}"
+          end
           param_types << param_type
         end
       end
@@ -12762,6 +12884,9 @@ module Crystal::HIR
         has_block = def_contains_yield?(member, member_arena)
       end
       full_name = function_full_name_for_def(base_name, param_types, member.params, has_block)
+      if env_has?("DEBUG_FORALL_REG") && type_name.starts_with?("Slice(") && method_name == "=="
+        STDERR.puts "[FORALL_REG] full_name=#{full_name} base=#{base_name}"
+      end
       if filter = env_get("DEBUG_METHOD_REGISTER_FILTER")
         if filter == "1" || type_name.includes?(filter) || method_name.includes?(filter)
           STDERR.puts "[DEBUG_METHOD_REGISTER] class=#{type_name} method=#{method_name} full=#{full_name} (macro_literal)"
@@ -15352,7 +15477,18 @@ module Crystal::HIR
                     next
                   end
                   param_type = if ta = param.type_annotation
-                                 type_ref_for_name(String.new(ta))
+                                 ta_str = String.new(ta)
+                                 ref = type_ref_for_name(ta_str)
+                                 # Forall type parameter resolution: when a method
+                                 # has a parameter like Slice(U) (from `forall U`),
+                                 # the raw annotation can't be resolved. Substitute
+                                 # unresolved type-param-like args positionally from
+                                 # the owner's concrete generic type.
+                                 if ref == TypeRef::VOID && ta_str.includes?('(') && class_name.includes?('(')
+                                   resolved_ta = resolve_forall_type_params(ta_str, class_name)
+                                   ref = type_ref_for_name(resolved_ta) if resolved_ta != ta_str
+                                 end
+                                 ref
                                elsif param.is_double_splat
                                  type_ref_for_name("NamedTuple")
                                else
@@ -19419,7 +19555,7 @@ module Crystal::HIR
       when "Object"
         nil
       else
-        is_struct ? "Value" : "Reference"
+        is_struct ? "Struct" : "Reference"
       end
     end
 
@@ -32582,6 +32718,28 @@ module Crystal::HIR
         end
       end
       if expr_id.index < 0 || expr_id.index >= arena.size
+        # Raw trace for bootstrap debugging
+        t_oob = "TRACE:EXPR_OOB idx="
+        eis = expr_id.index.to_s
+        as2 = arena.size.to_s
+        LibC.write(2, t_oob.to_unsafe, t_oob.bytesize)
+        LibC.write(2, eis.to_unsafe, eis.bytesize)
+        t_as = " arena_size="
+        LibC.write(2, t_as.to_unsafe, t_as.bytesize)
+        LibC.write(2, as2.to_unsafe, as2.bytesize)
+        t_fn = " func="
+        fn = ctx.function.name
+        LibC.write(2, t_fn.to_unsafe, t_fn.bytesize)
+        LibC.write(2, fn.to_unsafe, fn.bytesize)
+        t_cls = " class="
+        cls = @current_class || "(none)"
+        LibC.write(2, t_cls.to_unsafe, t_cls.bytesize)
+        LibC.write(2, cls.to_unsafe, cls.bytesize)
+        t_meth = " method="
+        meth = @current_method || "(none)"
+        LibC.write(2, t_meth.to_unsafe, t_meth.bytesize)
+        LibC.write(2, meth.to_unsafe, meth.bytesize)
+        LibC.write(2, "\n".to_unsafe, 1)
         if env_get("DEBUG_EXPR_OOB")
           stack = @inline_yield_name_stack.join(" -> ")
           block_debug = ""
