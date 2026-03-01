@@ -1371,6 +1371,7 @@ module CrystalV2
         mir_lowering.register_globals(globals)
         mir_lowering.register_extern_globals(hir_module.extern_globals)
         mir_lowering.register_union_types(hir_converter.union_descriptors)
+        mir_lowering.register_union_type_aliases(hir_module.types)
         mir_lowering.register_class_types(hir_converter.class_info)
         mir_lowering.register_enum_types(hir_converter.enum_names, hir_module.types)
         mir_lowering.register_module_types(hir_module.types)
