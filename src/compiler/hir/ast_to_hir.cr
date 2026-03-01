@@ -2176,7 +2176,7 @@ module Crystal::HIR
 
     # Type aliases (alias_name -> target_type_name)
     @type_aliases : Hash(String, String)
-    @resolved_type_alias_cache : Hash({String, String, String}, String)
+    @resolved_type_alias_cache : Hash(String, String)
     @type_alias_keys_by_suffix : Hash(String, Array(String))
 
     # Track which allocators have been generated (to avoid duplicates for reopened classes)
@@ -2551,7 +2551,7 @@ module Crystal::HIR
       @defined_instance_method_full_names_cache = {} of {String, UInt64, Int32, Int32} => Set(String)
       @defined_class_method_full_names_cache = {} of {String, UInt64, Int32, Int32} => Set(String)
         @type_aliases = {} of String => String
-        @resolved_type_alias_cache = Hash({String, String, String}, String).new(initial_capacity: 4096)
+        @resolved_type_alias_cache = Hash(String, String).new(initial_capacity: 4096)
         @type_alias_keys_by_suffix = {} of String => Array(String)
         @generated_allocators = Set(String).new
         @deferred_allocators = Set(String).new
@@ -27703,9 +27703,9 @@ module Crystal::HIR
       cache_key = if contextual
                     ns_override = @current_namespace_override || ""
                     current = @current_class || ""
-                    {name, ns_override, current}
+                    "#{name}\u0000#{ns_override}\u0000#{current}"
                   else
-                    {name, "", ""}
+                    name
                   end
       if cached = @resolved_type_alias_cache[cache_key]?
         return cached
