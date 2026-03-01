@@ -133,6 +133,10 @@
     - `def_contains_yield?` last-key fast-path:
       - LLDB hinted at hash-upsert churn in `def_contains_yield?`, but repro worsened:
       - `bash regression_tests/stage2_yield_scan_hang_probe.sh /tmp/stage1_dbg_yield_lastcache 180 debug 4000 full` -> `real 166.71s` (worse than `164.86s`), reverted.
+    - union variant name pre-dedup before `type_ref_for_name` (`merge_union_variant_names`):
+      - looked plausible from `t300` stack (`union_type_for_values -> merge_union_variant_names -> type_ref_for_name`),
+      - but repro regressed:
+      - `bash regression_tests/stage2_yield_scan_hang_probe.sh /tmp/stage1_dbg_union_name_dedup 180 debug 4000 full` -> `real 166.24s` (worse than `164.86s`), reverted.
   - current release anchor after rollback:
     - `/usr/bin/time -p crystal build --release src/crystal_v2.cr -o /tmp/stage1_rel_alias_prefix_cached_revert_small --error-trace` -> `real 436.00s`
 - Status:
