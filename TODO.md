@@ -137,6 +137,9 @@
       - looked plausible from `t300` stack (`union_type_for_values -> merge_union_variant_names -> type_ref_for_name`),
       - but repro regressed:
       - `bash regression_tests/stage2_yield_scan_hang_probe.sh /tmp/stage1_dbg_union_name_dedup 180 debug 4000 full` -> `real 166.24s` (worse than `164.86s`), reverted.
+    - reordering `type_param_like?` and `short_type_param_name?` checks to short-circuit long names:
+      - semantically equivalent, but repro regressed:
+      - `bash regression_tests/stage2_yield_scan_hang_probe.sh /tmp/stage1_dbg_typeparam_order 180 debug 4000 full` -> `real 166.46s` (worse than `164.86s`), reverted.
   - current release anchor after rollback:
     - `/usr/bin/time -p crystal build --release src/crystal_v2.cr -o /tmp/stage1_rel_alias_prefix_cached_revert_small --error-trace` -> `real 436.00s`
 - Status:
