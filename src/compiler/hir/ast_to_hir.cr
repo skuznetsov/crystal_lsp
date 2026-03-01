@@ -28005,26 +28005,19 @@ module Crystal::HIR
           if !allow_param_subst && current_class_name
             allow_param_subst = !!ascii_byte_index(current_class_name, '('.ord.to_u8)
           end
-          type_param_map_small = type_param_map.size <= 4
           fallback_map : Hash(String, String)? = nil
           fallback_map_loaded = false
-          fallback_map_small = false
           substitution : String? = nil
 
           if allow_param_subst && simple_identifier_token?(name)
-            substitution = lookup_small_string_map(type_param_map, name, type_param_map_small)
+            substitution = type_param_map[name]?
             if substitution.nil?
               unless fallback_map_loaded
                 fallback_map = current_class_type_param_map
                 fallback_map_loaded = true
-                fallback_map_small = if fmap = fallback_map
-                                       fmap.size <= 4
-                                     else
-                                       false
-                                     end
               end
               if fmap = fallback_map
-                substitution = lookup_small_string_map(fmap, name, fallback_map_small)
+                substitution = fmap[name]?
               end
             end
           end
@@ -28046,19 +28039,14 @@ module Crystal::HIR
             suffix = suffix_len > 0 ? name.byte_slice(suffix_start, suffix_len) : ""
             substitution = nil
             if allow_param_subst && simple_identifier_token?(prefix)
-              substitution = lookup_small_string_map(type_param_map, prefix, type_param_map_small)
+              substitution = type_param_map[prefix]?
               if substitution.nil?
                 unless fallback_map_loaded
                   fallback_map = current_class_type_param_map
                   fallback_map_loaded = true
-                  fallback_map_small = if fmap = fallback_map
-                                         fmap.size <= 4
-                                       else
-                                         false
-                                       end
                 end
                 if fmap = fallback_map
-                  substitution = lookup_small_string_map(fmap, prefix, fallback_map_small)
+                  substitution = fmap[prefix]?
                 end
               end
             end
@@ -28073,19 +28061,14 @@ module Crystal::HIR
               suffix = suffix_len > 0 ? name.byte_slice(suffix_start, suffix_len) : ""
               substitution = nil
               if allow_param_subst && simple_identifier_token?(suffix)
-                substitution = lookup_small_string_map(type_param_map, suffix, type_param_map_small)
+                substitution = type_param_map[suffix]?
                 if substitution.nil?
                   unless fallback_map_loaded
                     fallback_map = current_class_type_param_map
                     fallback_map_loaded = true
-                    fallback_map_small = if fmap = fallback_map
-                                           fmap.size <= 4
-                                         else
-                                           false
-                                         end
                   end
                   if fmap = fallback_map
-                    substitution = lookup_small_string_map(fmap, suffix, fallback_map_small)
+                    substitution = fmap[suffix]?
                   end
                 end
               end
@@ -28155,21 +28138,6 @@ module Crystal::HIR
           if info = generic_owner_info(current)
             return info[:map]
           end
-        end
-        nil
-      end
-
-      @[AlwaysInline]
-      private def lookup_small_string_map(
-        map : Hash(String, String),
-        key : String,
-        small : Bool,
-      ) : String?
-        unless small
-          return map[key]?
-        end
-        map.each do |candidate, value|
-          return value if candidate == key
         end
         nil
       end

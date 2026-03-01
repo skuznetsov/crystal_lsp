@@ -109,11 +109,10 @@
 - Validation/evidence:
   - debug build + sanity:
     - `/usr/bin/time -p crystal build src/crystal_v2.cr -o /tmp/stage1_dbg_alias_prefix_cached --error-trace` -> `real 8.28s`
-    - `/usr/bin/time -p crystal build src/crystal_v2.cr -o /tmp/stage1_dbg_tpmap_smallscan --error-trace` -> `real 8.34s`
-    - `bash regression_tests/run_mini_oracles.sh /tmp/stage1_dbg_tpmap_smallscan` -> **5/5 PASS**
+    - `bash regression_tests/run_mini_oracles.sh /tmp/stage1_dbg_alias_prefix_cached` -> **5/5 PASS**
   - small repro (`stage2_yield_scan_hang_probe`, `t180`, debug, `N=4000`):
     - alias-prefix cached branch: `real 164.86s`, status `0`
-    - +small-map lookup branch: `real 164.41s`, status `0`
+    - +small-map lookup branch (experiment): `real 164.41s`, status `0` (looked better on this probe only)
     - hotspot remains shifted to MIR (`DeadCodeEliminationPass`, `RCElisionPass`), not early alias-resolution stall.
   - release evidence currently available for alias-prefix cached step (before small-map lookup release retest):
     - `/usr/bin/time -p crystal build --release src/crystal_v2.cr -o /tmp/stage1_rel_alias_prefix_cached --error-trace` -> `real 445.09s`
@@ -124,9 +123,21 @@
     - `bash regression_tests/stage2_debug_profile_oracle.sh /tmp/stage1_rel_alias_prefix_cached 240 release 1200,4000`
     - `N=1200 total=6700.6ms`, `N=4000 total=29517.3ms` (vs previous branch `6749.9ms / 30283.7ms`)
     - directional gain across phases (`hir`, `mir`, `llvm`) with same counter volumes.
+  - rejected follow-up experiments (rolled back):
+    - `small-map lookup` in `substitute_type_params_in_type_name`:
+      - release oracle regressed despite one favorable debug repro:
+      - `/tmp/stage1_rel_tpmap_smallscan`:
+        - run1: `N=1200 total=7179.3ms`, `N=4000 total=32138.4ms`
+        - run2: `N=1200 total=7093.4ms`, `N=4000 total=32434.9ms`
+      - both worse than alias-prefix cached baseline (`6700.6 / 29517.3`), so reverted.
+    - `def_contains_yield?` last-key fast-path:
+      - LLDB hinted at hash-upsert churn in `def_contains_yield?`, but repro worsened:
+      - `bash regression_tests/stage2_yield_scan_hang_probe.sh /tmp/stage1_dbg_yield_lastcache 180 debug 4000 full` -> `real 166.71s` (worse than `164.86s`), reverted.
+  - current release anchor after rollback:
+    - `/usr/bin/time -p crystal build --release src/crystal_v2.cr -o /tmp/stage1_rel_alias_prefix_cached_revert_small --error-trace` -> `real 436.00s`
 - Status:
-  - **IN_PROGRESS**: directional improvement is measurable on oracle slope and small repro; full stage2 bootstrap remains >300s.
-  - Next: run release-stage1 retest including small-map lookup patch and compare `t300` timeline against current alias-prefix cached baseline.
+  - **IN_PROGRESS**: keep alias-prefix cached branch as the working point; rejected experiments were removed.
+  - full stage2 bootstrap still remains >300s (`t300` timeout), so next branch must target core `type_ref_for_name`/`resolve_type_name_in_context` superlinear path directly.
 
 ## 2026-02-28: debug-profile oracle for root-cause velocity analysis
 - Added compiler flag `--debug-profile` in `src/compiler/cli.cr`.
