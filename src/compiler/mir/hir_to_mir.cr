@@ -565,9 +565,7 @@ module Crystal
             TypeRef.new(union_mir_type.id),
             old_param.default_value
           )
-          STDERR.puts "[DEBUG_UNION_PARAM] FIXED p#{idx} '#{param.name}' → union TypeRef #{union_mir_type.id}"
         else
-          STDERR.puts "[DEBUG_UNION_PARAM] NOT FIXED p#{idx} '#{param.name}': by_name=#{union_mir_type ? "#{union_mir_type.kind}:#{union_mir_type.name}" : "nil"}"
         end
       end
     end

@@ -15344,6 +15344,16 @@ module Crystal::MIR
 
         part_ref = value_ref(part_id)
 
+        # Guard: "null" is only valid for ptr types in LLVM IR.  If part_ref is
+        # "null" but part_type is a non-pointer type (Bool, Int32, etc.), replace
+        # with "0" to avoid "null must be a pointer type" errors.
+        if part_ref == "null" && part_type && !{TypeRef::STRING, TypeRef::POINTER}.includes?(part_type)
+          llvm_check = @type_mapper.llvm_type(part_type)
+          if llvm_check != "ptr" && !llvm_check.includes?(".union")
+            part_ref = "0"
+          end
+        end
+
         # Check if part is an Array (stored as ptr but tracked in @array_info)
         if arr_info = @array_info[part_id]?
           elem_llvm_type = arr_info[0]  # LLVM type: "i32", "ptr", etc.
