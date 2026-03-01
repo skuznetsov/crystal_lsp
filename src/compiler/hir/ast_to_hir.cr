@@ -1150,7 +1150,7 @@ module Crystal::HIR
 
     # Cache for def_contains_yield? keyed by {DefNode object_id, resolved arena object_id} → Bool.
     # DefNode ids are arena-local and can collide across different arenas.
-    @yield_check_cache : Hash({UInt64, UInt64}, Bool) = {} of {UInt64, UInt64} => Bool
+    @yield_check_cache : Hash({Int32, Int32, UInt64}, Bool) = {} of {Int32, Int32, UInt64} => Bool
     # Cache for def_contains_block_call? keyed by {DefNode object_id, resolved arena object_id} → Bool.
     @block_call_check_cache : Hash({UInt64, UInt64}, Bool) = {} of {UInt64, UInt64} => Bool
     # Cache for resolve_arena_for_def keyed by
@@ -2176,7 +2176,7 @@ module Crystal::HIR
 
     # Type aliases (alias_name -> target_type_name)
     @type_aliases : Hash(String, String)
-    @resolved_type_alias_cache : Hash(String, String)
+    @resolved_type_alias_cache : Hash({String, String, String}, String)
     @type_alias_keys_by_suffix : Hash(String, Array(String))
 
     # Track which allocators have been generated (to avoid duplicates for reopened classes)
@@ -2551,7 +2551,7 @@ module Crystal::HIR
       @defined_instance_method_full_names_cache = {} of {String, UInt64, Int32, Int32} => Set(String)
       @defined_class_method_full_names_cache = {} of {String, UInt64, Int32, Int32} => Set(String)
         @type_aliases = {} of String => String
-        @resolved_type_alias_cache = Hash(String, String).new(initial_capacity: 4096)
+        @resolved_type_alias_cache = Hash({String, String, String}, String).new(initial_capacity: 4096)
         @type_alias_keys_by_suffix = {} of String => Array(String)
         @generated_allocators = Set(String).new
         @deferred_allocators = Set(String).new
@@ -17181,14 +17181,15 @@ module Crystal::HIR
     end
 
     private def allocator_init_def_key_for(class_name : String) : String?
-      if @allocator_init_def_key_cache_function_defs_size != @function_defs.size
-        @allocator_init_def_key_cache.clear
-        @allocator_init_def_key_negative_cache.clear
-        @allocator_init_def_key_cache_function_defs_size = @function_defs.size
-      end
-
+      # Positive cache entries are always valid — function defs are never removed.
       if cached = @allocator_init_def_key_cache[class_name]?
         return cached
+      end
+
+      # Negative cache only valid while no new functions have been added.
+      if @allocator_init_def_key_cache_function_defs_size != @function_defs.size
+        @allocator_init_def_key_negative_cache.clear
+        @allocator_init_def_key_cache_function_defs_size = @function_defs.size
       end
       return nil if @allocator_init_def_key_negative_cache.includes?(class_name)
 
@@ -23813,6 +23814,20 @@ module Crystal::HIR
         if descriptor = @union_descriptors[mir_type_ref]?
           return descriptor.total_size
         end
+        # Type aliases (e.g., ArenaLike = AstArena | VirtualArena | PageArena) have
+        # a different TypeRef than the underlying union. Resolve through aliases and
+        # check again so union-typed ivars get the correct storage size.
+        type_name_for_alias = get_type_name_from_ref(type)
+        if type_name_for_alias != "Unknown"
+          alias_target = resolve_type_alias_chain(type_name_for_alias)
+          if alias_target != type_name_for_alias
+            alias_ref = type_ref_for_name(alias_target)
+            mir_alias_ref = hir_to_mir_type_ref(alias_ref)
+            if descriptor = @union_descriptors[mir_alias_ref]?
+              return descriptor.total_size
+            end
+          end
+        end
         # Check if it's a struct (value type) with known layout
         if info = @class_info_by_type_id[type.id]?
           if info.is_struct && info.size > 0
@@ -24113,8 +24128,13 @@ module Crystal::HIR
     private def def_contains_yield_cache_key(
       node : CrystalV2::Compiler::Frontend::DefNode,
       arena : CrystalV2::Compiler::Frontend::ArenaLike,
-    ) : {UInt64, UInt64}
-      {node.object_id, arena.object_id}
+    ) : {Int32, Int32, UInt64}
+      # Use source span instead of object_id so generic instantiations of
+      # the same template method share a single cache entry.  Two DefNodes
+      # from Box(Int32) and Box(String) have different object_ids but
+      # identical spans — yield behaviour depends only on source text.
+      span = node.span
+      {span.start_offset, span.end_offset, arena.object_id}
     end
 
     private def def_contains_yield?(node : CrystalV2::Compiler::Frontend::DefNode, arena : CrystalV2::Compiler::Frontend::ArenaLike) : Bool
@@ -27683,9 +27703,9 @@ module Crystal::HIR
       cache_key = if contextual
                     ns_override = @current_namespace_override || ""
                     current = @current_class || ""
-                    "#{name}\u0000#{ns_override}\u0000#{current}"
+                    {name, ns_override, current}
                   else
-                    name
+                    {name, "", ""}
                   end
       if cached = @resolved_type_alias_cache[cache_key]?
         return cached
@@ -32718,28 +32738,6 @@ module Crystal::HIR
         end
       end
       if expr_id.index < 0 || expr_id.index >= arena.size
-        # Raw trace for bootstrap debugging
-        t_oob = "TRACE:EXPR_OOB idx="
-        eis = expr_id.index.to_s
-        as2 = arena.size.to_s
-        LibC.write(2, t_oob.to_unsafe, t_oob.bytesize)
-        LibC.write(2, eis.to_unsafe, eis.bytesize)
-        t_as = " arena_size="
-        LibC.write(2, t_as.to_unsafe, t_as.bytesize)
-        LibC.write(2, as2.to_unsafe, as2.bytesize)
-        t_fn = " func="
-        fn = ctx.function.name
-        LibC.write(2, t_fn.to_unsafe, t_fn.bytesize)
-        LibC.write(2, fn.to_unsafe, fn.bytesize)
-        t_cls = " class="
-        cls = @current_class || "(none)"
-        LibC.write(2, t_cls.to_unsafe, t_cls.bytesize)
-        LibC.write(2, cls.to_unsafe, cls.bytesize)
-        t_meth = " method="
-        meth = @current_method || "(none)"
-        LibC.write(2, t_meth.to_unsafe, t_meth.bytesize)
-        LibC.write(2, meth.to_unsafe, meth.bytesize)
-        LibC.write(2, "\n".to_unsafe, 1)
         if env_get("DEBUG_EXPR_OOB")
           stack = @inline_yield_name_stack.join(" -> ")
           block_debug = ""

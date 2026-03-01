@@ -64,6 +64,10 @@ module Crystal
     @module_includers_cache : Hash(String, Array(String)) = {} of String => Array(String)
     @resolve_virtual_cache : Hash({String, String, Int32?, Bool}, Crystal::MIR::Function?) = {} of {String, String, Int32?, Bool} => Crystal::MIR::Function?
 
+    # Reusable buffer for virtual dispatch candidates to avoid repeated array
+    # allocations that cause heavy GC pressure in the Boehm collector.
+    @vdispatch_candidates_buf = Array(NamedTuple(type_id: Int32, type_ref: TypeRef, variant_id: Int32, func: Crystal::MIR::Function?, dispatch_class: String?)).new(initial_capacity: 16)
+
     # Memory strategy (note: we use inline selection, not global assigner)
 
     # Track HIR values that point to inline struct data (from Pointer(Struct).value).
@@ -2442,7 +2446,8 @@ module Crystal
       method_suffix : String,
       arg_count : Int32
     ) : Array(NamedTuple(type_id: Int32, type_ref: TypeRef, variant_id: Int32, func: Crystal::MIR::Function?, dispatch_class: String?))
-      candidates = [] of NamedTuple(type_id: Int32, type_ref: TypeRef, variant_id: Int32, func: Crystal::MIR::Function?, dispatch_class: String?)
+      candidates = @vdispatch_candidates_buf
+      candidates.clear
 
       if recv_desc.kind == HIR::TypeKind::Union
         mir_union_ref = convert_type(recv_type)
