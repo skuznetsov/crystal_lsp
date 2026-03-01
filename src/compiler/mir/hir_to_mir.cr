@@ -241,6 +241,49 @@ module Crystal
       end
     end
 
+    # Register additional MIR union type aliases from all HIR type descriptors.
+    # The HIR can assign different TypeRef IDs to the same logical union type
+    # in different contexts (e.g., .new vs initialize).  Only one is registered
+    # via register_union_types; this method ensures ALL union TypeRefs in the
+    # HIR type descriptor table resolve correctly in the MIR type registry.
+    def register_union_type_aliases(type_descriptors : Array(Crystal::HIR::TypeDescriptor))
+      registered_count = 0
+      type_descriptors.each_with_index do |desc, idx|
+        next unless desc.kind == HIR::TypeKind::Union
+
+        hir_ref = Crystal::HIR::TypeRef.new(Crystal::HIR::TypeRef::FIRST_USER_TYPE + idx.to_u32)
+        mir_ref = convert_type(hir_ref)
+
+        # Skip if already registered
+        next if @mir_module.type_registry.get(mir_ref)
+
+        # Look up the canonical union type by name
+        canonical = @mir_module.type_registry.get_by_name(desc.name)
+        next unless canonical && canonical.kind.union?
+
+        # Register this MIR TypeRef as the same union type
+        alias_type = @mir_module.type_registry.create_type_with_id(
+          mir_ref.id,
+          TypeKind::Union,
+          desc.name,
+          canonical.size,
+          canonical.alignment
+        )
+
+        # Copy variants from the canonical union
+        if variants = canonical.variants
+          variants.each { |v| alias_type.add_variant(v) }
+        end
+
+        # Also register the union descriptor under this TypeRef
+        if canonical_descriptor = @mir_module.get_union_descriptor(TypeRef.new(canonical.id))
+          @mir_module.register_union(mir_ref, canonical_descriptor)
+        end
+        registered_count += 1
+      end
+      STDERR.puts "[UNION_ALIAS] Registered #{registered_count} union type aliases" if registered_count > 0
+    end
+
     # Register class/struct types with their fields
     # This allows LLVM backend to generate proper struct types
     def register_class_types(class_infos : Hash(String, Crystal::HIR::ClassInfo))
@@ -494,6 +537,37 @@ module Crystal
               end
             end
           end
+        end
+      end
+
+      # Fix: HIR union-typed parameters may get MIR TypeRefs that aren't
+      # registered as union types in the MIR type registry (because the HIR
+      # assigns different TypeRef IDs for the same logical union type in
+      # different method contexts, e.g., .new vs initialize).  Look up the
+      # correct union type by name and update the parameter so that the LLVM
+      # backend emits the proper union LLVM type instead of ptr.
+      hir_func.params.each_with_index do |param, idx|
+        next if idx >= mir_func.params.size
+        desc = @hir_module.get_type_descriptor(param.type)
+        # (debug output removed)
+        next unless desc && desc.kind == HIR::TypeKind::Union
+
+        mir_param_type = mir_func.params[idx].type
+        mir_type = @mir_module.type_registry.get(mir_param_type)
+        next if mir_type && mir_type.kind.union?
+
+        # MIR type is not a union — look up the registered union by name
+        union_mir_type = @mir_module.type_registry.get_by_name(desc.name)
+        if union_mir_type && union_mir_type.kind.union?
+          old_param = mir_func.params[idx]
+          mir_func.params[idx] = Parameter.new(
+            old_param.index, old_param.name,
+            TypeRef.new(union_mir_type.id),
+            old_param.default_value
+          )
+          STDERR.puts "[DEBUG_UNION_PARAM] FIXED p#{idx} '#{param.name}' → union TypeRef #{union_mir_type.id}"
+        else
+          STDERR.puts "[DEBUG_UNION_PARAM] NOT FIXED p#{idx} '#{param.name}': by_name=#{union_mir_type ? "#{union_mir_type.kind}:#{union_mir_type.name}" : "nil"}"
         end
       end
     end
