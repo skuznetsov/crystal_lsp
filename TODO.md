@@ -34,6 +34,11 @@
   - `t=240`: timeout (~245s wall incl. diagnostics), hotspots in LLVM codegen/asm (`SelectionDAGISel`, `MachObjectWriter`, symbol table, mem2reg/SROA)
   - This indicates current blocker is **performance (late LLVM pipeline)**, not the prior correctness traps.
 
+- Regression snapshot (`debug stage1`):
+  - `regression_tests/run_all.sh /tmp/stage1_dbg_20260302_guardfix`
+  - **2 passed, 57 failed (of 59)**.
+  - Broad failures across runtime/semantic/macro/control-flow tests (`basic_sanity`, `hash_*`, `module/class`, `yield/*`, `rescue/*`, etc.), many with immediate `SIGSEGV`.
+
 ### Current state
 
 - Immediate stage2→stage3 trap reproducer is addressed at IR generation level (null-substitution in constructors removed).
