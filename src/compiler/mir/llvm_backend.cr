@@ -438,6 +438,7 @@ module Crystal::MIR
     @string_constants : Hash(String, String)  # String value -> global name
     @module_singleton_globals : Hash(TypeRef, String)  # Module type -> singleton global name
     @emitted_value_types : Hash(String, String)  # SSA name -> LLVM type (per function)
+    @emitted_value_names : Set(String)  # SSA names materialized in current function
     @emitted_allocas : Set(ValueId) = Set(ValueId).new  # Track pre-emitted allocas
     @alloc_types : Hash(ValueId, TypeRef) = {} of ValueId => TypeRef  # Track original alloc_type for enum detection
     @inttoptr_value_ids : Set(ValueId) = Set(ValueId).new  # Track values created by inttoptr (packed scalars)
@@ -610,6 +611,7 @@ module Crystal::MIR
       @string_constants = {} of String => String
       @module_singleton_globals = {} of TypeRef => String
       @emitted_value_types = {} of String => String
+      @emitted_value_names = Set(String).new
       @func_by_name = {} of String => Function
       @func_by_suffix = {} of String => Function
       @func_by_id = {} of FunctionId => Function
@@ -2090,6 +2092,11 @@ module Crystal::MIR
     end
 
     private def emit(s : String)
+      if s.starts_with?('%')
+        if eq = s.index(" = ")
+          @emitted_value_names.add(s[0...eq])
+        end
+      end
       @output << ("  " * @indent) << s << "\n"
     end
 
@@ -6669,6 +6676,7 @@ module Crystal::MIR
       @phi_union_payload_extracts.clear
       @current_func_blocks.clear
       @emitted_value_types.clear
+      @emitted_value_names.clear
 
       # Populate block lookup for phi predecessor load emission
       func.blocks.each { |block| @current_func_blocks[block.id] = block }
@@ -8742,7 +8750,7 @@ module Crystal::MIR
         if @in_phi_block && produces_value && (slot_name = @cross_block_slots[inst.id]?)
           @deferred_phi_store_ops << {inst.id, name, slot_name}
         elsif produces_value && (slot_name = @cross_block_slots[inst.id]?)
-          if @constant_values.has_key?(inst.id) || @emitted_value_types.has_key?(name)
+          if @constant_values.has_key?(inst.id) || @emitted_value_names.includes?(name) || @emitted_value_types.has_key?(name)
             emit_cross_block_slot_store(inst.id, name, slot_name)
           else
             if ENV["CRYSTAL2_STAGE2_DEBUG"]? == "1" || ENV["STAGE2_BOOTSTRAP_TRACE"]?
@@ -9034,6 +9042,10 @@ module Crystal::MIR
       when MemoryStrategy::Stack
         # Skip if already emitted in hoisted entry block
         if @emitted_allocas.includes?(inst.id)
+          @emitted_value_names.add(name)
+          @value_types[inst.id] = TypeRef::POINTER
+          @alloc_types[inst.id] = inst.alloc_type
+          record_emitted_type(name, "ptr")
           return
         end
         # Use llvm_alloca_type to get actual struct type (not ptr)
@@ -9061,6 +9073,7 @@ module Crystal::MIR
       @value_types[inst.id] = TypeRef::POINTER
       # Track original alloc_type for enum/struct detection during argument conversion
       @alloc_types[inst.id] = inst.alloc_type
+      record_emitted_type(name, "ptr")
     end
 
     private def compute_size_class(size : UInt64) : Int32

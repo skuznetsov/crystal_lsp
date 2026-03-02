@@ -19,24 +19,34 @@
   - Non-union target path now explicitly materializes a value (ptr/int/float cases) and records type.
   - Passthrough path (`value already union`) now records emitted type + value type.
   - Normal union path now records emitted type + value type after final load.
-- Cross-block slot policy restored to guarded mode (no unconditional stores of potentially undefined SSA names).
+- Added SSA-definition tracking (`@emitted_value_names`) from `emit(...)` lines (`%name = ...`),
+  and cross-block slot stores now gate on real SSA materialization, not only type metadata.
+- `emit_alloc` now records emitted pointer type, including pre-hoisted allocas.
+- Cross-block slot policy stays guarded (no unconditional stores of potentially undefined SSA names).
+
+### Regression guards
+- Added `regression_tests/io_puts_single_line.cr` (`# EXPECT: ok`).
 
 ### Evidence
 - Debug stage1 rebuild:
-  - `/usr/bin/time -p crystal build src/crystal_v2.cr -o /tmp/stage1_dbg_rootfix3`
-  - `real 7.28`
-- Mini-oracle: `puts "ok"` with `/tmp/stage1_dbg_rootfix3`
+  - `/usr/bin/time -p crystal build src/crystal_v2.cr -o /tmp/stage1_dbg_rootfix6`
+  - `real 8.02`
+- Mini-oracle: `puts "ok"` with `/tmp/stage1_dbg_rootfix6`
   - exits cleanly, single `ok`, no loop.
-- Parser regression (`postfix_if_member_call_no_parens`) with `/tmp/stage1_dbg_rootfix3`
+- Parser regression (`postfix_if_member_call_no_parens`) with `/tmp/stage1_dbg_rootfix6`
   - exits cleanly, `done`.
+- `CRYSTAL2_STAGE2_DEBUG=1` compile of mini-oracle with `/tmp/stage1_dbg_rootfix6`:
+  - zero `[LLVM_MISSING_VALUE]` lines.
 - Release stage1 rebuild:
-  - `/usr/bin/time -p crystal build src/crystal_v2.cr --release -o /tmp/stage1_rel_rootfix3`
-  - `real 441.75`
-- Stage2 attempt with release stage1:
-  - `/usr/bin/time -p scripts/timeout_sample_lldb.sh -t 180 ... -- /tmp/stage1_rel_rootfix3 src/crystal_v2.cr --release -o /tmp/stage2_rel_rootfix3`
-  - no `%r174` opt error; process timed out at 180s in late LLVM optimization (`Twine`, `mem2reg` hotspots).
-- Regression suite snapshot (`regression_tests/run_all.sh /tmp/stage1_dbg_rootfix3`):
-  - `25 passed, 35 failed (60 total)` — substantial correctness remains, but root infinite-output failure fixed.
+  - `/usr/bin/time -p crystal build src/crystal_v2.cr --release -o /tmp/stage1_rel_rootfix6`
+  - `real 443.08`
+- Stage2 attempts with release stage1:
+  - `/usr/bin/time -p scripts/timeout_sample_lldb.sh -t 180 ... -- /tmp/stage1_rel_rootfix6 src/crystal_v2.cr --release -o /tmp/stage2_rel_rootfix6`
+  - `/usr/bin/time -p scripts/timeout_sample_lldb.sh -t 180 ... -- /tmp/stage1_rel_rootfix6 src/crystal_v2.cr --release -o /tmp/stage2_rel_rootfix6_try1`
+  - both hit watchdog timeout at 180s (no `%r174` opt error), hotspots in late LLVM optimization (`Twine`, `mem2reg`, `InstCombine`).
+  - `stage2_rel_rootfix6_try1` was not produced before timeout.
+- Regression suite snapshot (`regression_tests/run_all.sh /tmp/stage1_dbg_rootfix6`):
+  - `61 passed, 0 failed (61 total)`.
 
 ## 2026-03-02: Root cause localized — postfix `if` misparsed in member no-parens calls
 
