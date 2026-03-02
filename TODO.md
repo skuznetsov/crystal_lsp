@@ -8529,3 +8529,41 @@ crystal build -Ddebug_hooks src/crystal_v2.cr -o bin/crystal_v2 --no-debug
 ### Notes
 - This commit-sized fix targets one root-cause family (caller local SSA merge at inline-return joins).
 - Remaining failures are likely separate patterns; `yield_suffix_unless` may still share adjacent inline/block-control-flow logic.
+
+## 2026-03-02: Post-fix bootstrap timing snapshot (`8465b79f`)
+
+### Stage1 (original compiler, release)
+- Command:
+  - `/usr/bin/time -p crystal build src/crystal_v2.cr --release -o /tmp/stage1_rel_inlinemerge4`
+- Result:
+  - `real 407.85`
+  - `user 407.78`
+  - `sys 2.15`
+
+### Stage2 (release stage1, watchdog runs)
+- `t=180`:
+  - `/usr/bin/time -p scripts/timeout_sample_lldb.sh -t 180 -- /tmp/stage1_rel_inlinemerge4 src/crystal_v2.cr --release -o /tmp/stage2_rel_inlinemerge4`
+  - timeout at 180s (`real 193.18` including diagnostics)
+  - artifacts: `/tmp/timeout_sample_20260302_034436_48088/`
+  - top hotspots:
+    - `String#index<String, Int32>:(Int32 | Nil)`
+    - `GC_allochblk_nth`
+    - `_platform_memmove`
+    - `String#size:Int32`
+    - `Crystal::MIR::LLVMIRGenerator#emit_function<Crystal::MIR::Function>:(IO+ | Nil)`
+
+- `t=210`:
+  - `/usr/bin/time -p scripts/timeout_sample_lldb.sh -t 210 -- /tmp/stage1_rel_inlinemerge4 src/crystal_v2.cr --release -o /tmp/stage2_rel_inlinemerge4_t210`
+  - timeout at 210s (`real 233.73` including diagnostics)
+  - artifacts: `/tmp/timeout_sample_20260302_034754_49485/`
+  - top hotspots:
+    - `String#index<String, Int32>:(Int32 | Nil)`
+    - `Crystal::MIR::LLVMIRGenerator#emit_function<Crystal::MIR::Function>:(IO+ | Nil)`
+    - `GC_malloc_kind`
+    - `Crystal::MIR::LLVMIRGenerator#emit_instruction<Crystal::MIR::Value+, Crystal::MIR::Function>:(Array(Tuple(UInt32, String, String)) | IO+ | Nil)`
+    - `GC_generic_malloc_many`
+
+### Current summary
+- Stage2 no longer trapped on the previously fixed inline-return local-corruption mini-oracles.
+- Release stage2 still exceeds current 3-minute watchdog budget on this branch.
+- Remaining debug-regression failures (`run_all`): 5/61.
