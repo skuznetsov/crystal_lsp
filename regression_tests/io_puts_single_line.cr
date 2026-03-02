@@ -1,0 +1,2 @@
+# EXPECT: ok
+puts "ok"

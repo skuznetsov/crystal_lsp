@@ -1,5 +1,43 @@
 # Crystal v2 — Active Work (codegen branch)
 
+## 2026-03-02: Root-cause fix — `UnionWrap` cross-block slot corruption (infinite `puts`, `%r174` opt failure)
+
+### Symptom (mini-oracles)
+- `puts "ok"` binary built by stage1 looped forever printing `ok`.
+- Earlier branch failed stage2 at `opt` with:
+  - `error: use of undefined value '%r174'`
+
+### Localization
+- In generated LLVM for `Crystal::EventLoop::Kqueue#write`, cross-block slot stores for
+  `UnionWrap` values used default zero payloads when value-type metadata was missing.
+- For one path (`id=174`) the value itself was not materialized in non-union unionwrap mode,
+  so cross-block store referenced undefined `%r174`.
+
+### Root-cause fixes (`src/compiler/mir/llvm_backend.cr`)
+- `emit_load`: record emitted type for loaded SSA values (`record_emitted_type(name, type)`).
+- `emit_union_wrap`:
+  - Non-union target path now explicitly materializes a value (ptr/int/float cases) and records type.
+  - Passthrough path (`value already union`) now records emitted type + value type.
+  - Normal union path now records emitted type + value type after final load.
+- Cross-block slot policy restored to guarded mode (no unconditional stores of potentially undefined SSA names).
+
+### Evidence
+- Debug stage1 rebuild:
+  - `/usr/bin/time -p crystal build src/crystal_v2.cr -o /tmp/stage1_dbg_rootfix3`
+  - `real 7.28`
+- Mini-oracle: `puts "ok"` with `/tmp/stage1_dbg_rootfix3`
+  - exits cleanly, single `ok`, no loop.
+- Parser regression (`postfix_if_member_call_no_parens`) with `/tmp/stage1_dbg_rootfix3`
+  - exits cleanly, `done`.
+- Release stage1 rebuild:
+  - `/usr/bin/time -p crystal build src/crystal_v2.cr --release -o /tmp/stage1_rel_rootfix3`
+  - `real 441.75`
+- Stage2 attempt with release stage1:
+  - `/usr/bin/time -p scripts/timeout_sample_lldb.sh -t 180 ... -- /tmp/stage1_rel_rootfix3 src/crystal_v2.cr --release -o /tmp/stage2_rel_rootfix3`
+  - no `%r174` opt error; process timed out at 180s in late LLVM optimization (`Twine`, `mem2reg` hotspots).
+- Regression suite snapshot (`regression_tests/run_all.sh /tmp/stage1_dbg_rootfix3`):
+  - `25 passed, 35 failed (60 total)` — substantial correctness remains, but root infinite-output failure fixed.
+
 ## 2026-03-02: Root cause localized — postfix `if` misparsed in member no-parens calls
 
 ### Symptom reproduced with mini-oracle

@@ -9206,6 +9206,7 @@ module Crystal::MIR
       end
 
       emit "#{name} = load #{type}, ptr #{ptr}"
+      record_emitted_type(name, type)
       # Cross-block store is now handled centrally in emit_instruction
     end
 
@@ -13754,8 +13755,10 @@ module Crystal::MIR
         base_name = name.lstrip('%')
         emit "%#{base_name}.pay_ptr = getelementptr #{decl_type}, ptr @#{actual_global}, i32 0, i32 1"
         emit "#{name} = load ptr, ptr %#{base_name}.pay_ptr, align 4"
+        record_emitted_type(name, "ptr")
       else
         emit "#{name} = load #{llvm_type}, ptr @#{actual_global}"
+        record_emitted_type(name, llvm_type)
       end
     end
 
@@ -13971,7 +13974,32 @@ module Crystal::MIR
           src_type = @value_types[inst.value]? || TypeRef::POINTER
           STDERR.puts "[UNION_WRAP] non-union target=#{union_type} src=#{@type_mapper.llvm_type(src_type)}"
         end
-        emit_cast(Cast.new(inst.id, inst.union_type, CastKind::Bitcast, inst.value), name)
+        if union_type == "ptr"
+          val = value_ref(inst.value)
+          src_type = @emitted_value_types[val]? || @type_mapper.llvm_type(@value_types[inst.value]? || TypeRef::POINTER)
+          if val == "0"
+            val = "null"
+          end
+
+          if src_type == "ptr" || val == "null"
+            emit "#{name} = bitcast ptr #{val} to ptr"
+          elsif src_type.starts_with?('i') && !src_type.includes?(".union")
+            emit "#{name} = inttoptr #{src_type} #{val} to ptr"
+          elsif src_type == "double"
+            emit "%#{base_name}.bits = bitcast double #{val} to i64"
+            emit "#{name} = inttoptr i64 %#{base_name}.bits to ptr"
+          elsif src_type == "float"
+            emit "%#{base_name}.bits = bitcast float #{val} to i32"
+            emit "%#{base_name}.bits.ext = zext i32 %#{base_name}.bits to i64"
+            emit "#{name} = inttoptr i64 %#{base_name}.bits.ext to ptr"
+          else
+            emit "#{name} = inttoptr i64 0 to ptr"
+          end
+        else
+          emit_cast(Cast.new(inst.id, inst.union_type, CastKind::Bitcast, inst.value), name)
+        end
+        record_emitted_type(name, union_type == "void" ? "ptr" : union_type)
+        @value_types[inst.id] = inst.union_type
         return
       end
 
@@ -13985,6 +14013,8 @@ module Crystal::MIR
         emit "%#{base_name}.passthru = alloca #{union_type}, align 8"
         emit "store #{union_type} #{normalize_union_value(val, union_type)}, ptr %#{base_name}.passthru"
         emit "#{name} = load #{union_type}, ptr %#{base_name}.passthru"
+        record_emitted_type(name, union_type)
+        @value_types[inst.id] = inst.union_type
         return
       end
       emit "%#{base_name}.ptr = alloca #{union_type}, align 8"
@@ -14112,6 +14142,8 @@ module Crystal::MIR
 
       # 4. Load the completed union value from stack
       emit "#{name} = load #{union_type}, ptr %#{base_name}.ptr"
+      record_emitted_type(name, union_type)
+      @value_types[inst.id] = inst.union_type
     end
 
     private def emit_union_unwrap(inst : UnionUnwrap, name : String)
