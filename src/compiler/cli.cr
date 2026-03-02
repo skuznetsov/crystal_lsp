@@ -654,9 +654,6 @@ module CrystalV2
         timings = {} of String => Float64
         debug_profile = options.debug_profile
         stage2_debug("[STAGE2_DEBUG] compile start", err_io)
-        # Bootstrap trace: write raw bytes to fd 2 (stderr) for debugging
-        trace_msg = "TRACE:COMPILE_START\n"
-        LibC.write(2, trace_msg.to_unsafe, trace_msg.bytesize)
         total_start = Time.instant
         @ast_cache_hits = 0
         @ast_cache_misses = 0
@@ -705,34 +702,7 @@ module CrystalV2
         # Parse user's input file
         user_parse_start = Time.instant
         stage2_debug("[STAGE2_DEBUG] parsing user file start", err_io)
-        trace2 = "TRACE:PARSE_USER_START\n"
-        LibC.write(2, trace2.to_unsafe, trace2.bytesize)
         parse_file_recursive(input_file, all_arenas, loaded_files, input_file, options, out_io)
-        trace3 = "TRACE:PARSE_USER_DONE\n"
-        LibC.write(2, trace3.to_unsafe, trace3.bytesize)
-        # Trace arena count and first entry details
-        arena_count_s = all_arenas.size.to_s
-        trace4 = "TRACE:ARENAS="
-        LibC.write(2, trace4.to_unsafe, trace4.bytesize)
-        LibC.write(2, arena_count_s.to_unsafe, arena_count_s.bytesize)
-        LibC.write(2, "\n".to_unsafe, 1)
-        if all_arenas.size > 0
-          first = all_arenas.unsafe_fetch(0)
-          exprs0 = first[1]
-          exprs_size_s = exprs0.size.to_s
-          trace5 = "TRACE:FIRST_EXPRS="
-          LibC.write(2, trace5.to_unsafe, trace5.bytesize)
-          LibC.write(2, exprs_size_s.to_unsafe, exprs_size_s.bytesize)
-          LibC.write(2, "\n".to_unsafe, 1)
-          if exprs0.size > 0
-            eid0 = exprs0.unsafe_fetch(0)
-            eid_s = eid0.index.to_s
-            trace6 = "TRACE:ROOT0_IDX="
-            LibC.write(2, trace6.to_unsafe, trace6.bytesize)
-            LibC.write(2, eid_s.to_unsafe, eid_s.bytesize)
-            LibC.write(2, "\n".to_unsafe, 1)
-          end
-        end
         stage2_debug("[STAGE2_DEBUG] user file parsed", err_io)
         stage2_debug("[STAGE2_DEBUG] arenas=#{all_arenas.size} loaded_files=#{loaded_files.size}", err_io)
         if options.stats
@@ -852,8 +822,6 @@ module CrystalV2
         flags = Runtime.target_flags
         hir_collect_start = Time.instant if debug_profile
         stage2_debug("[STAGE2_DEBUG] top-level collection walk start", err_io)
-        t_collect = "TRACE:COLLECT_START\n"
-        LibC.write(2, t_collect.to_unsafe, t_collect.bytesize)
         arena_i = 0
         while arena_i < all_arenas.size
           entry = all_arenas.unsafe_fetch(arena_i)
@@ -861,19 +829,6 @@ module CrystalV2
           exprs = entry[1]
           file_path = entry[2]
           source = entry[3]
-          # Trace each arena
-          t_ai = "TRACE:ARENA_I="
-          ais = arena_i.to_s
-          es = exprs.size.to_s
-          LibC.write(2, t_ai.to_unsafe, t_ai.bytesize)
-          LibC.write(2, ais.to_unsafe, ais.bytesize)
-          t_es = " EXPRS="
-          LibC.write(2, t_es.to_unsafe, t_es.bytesize)
-          LibC.write(2, es.to_unsafe, es.bytesize)
-          t_p = " PATH="
-          LibC.write(2, t_p.to_unsafe, t_p.bytesize)
-          LibC.write(2, file_path.to_unsafe, file_path.bytesize)
-          LibC.write(2, "\n".to_unsafe, 1)
           safe_source = begin
             File.read(file_path)
           rescue
