@@ -8735,3 +8735,49 @@ crystal build -Ddebug_hooks src/crystal_v2.cr -o bin/crystal_v2 --no-debug
 
 ### Next
 - Target next perf root-cause in HIR type-resolution path (`type_ref_for_name` / concrete class registration), guided by mini-oracles and sample deltas.
+
+## 2026-03-02: Refuted perf branches (all reverted, tracked for contradiction ledger)
+
+### Branch A: `substitute_type_params_in_type_name` fast-path
+- Change: early return when no active substitution context (`type_param_map` empty, no typeof locals, non-generic current class, `name != "self"`).
+- Validation:
+  - `regression_tests/run_all.sh /tmp/stage1_dbg_subst_fastpath` → `61 passed, 0 failed`
+  - `/usr/bin/time -p scripts/timeout_sample_lldb.sh -t 180 ... /tmp/stage1_rel_subst_fastpath ...` → `real 192.96` (timeout)
+- Result: no measurable stage2 improvement vs current best (`192.78`).
+
+### Branch B: alloca post-pass span scan (no per-line `lstrip`)
+- Change: scan block IR via byte spans for alloca detection (replace `each_line` + string-based checks).
+- Validation:
+  - `regression_tests/run_all.sh /tmp/stage1_dbg_alloca_span` → `61 passed, 0 failed`
+  - `/usr/bin/time -p scripts/timeout_sample_lldb.sh -t 180 ... /tmp/stage1_rel_alloca_span ...` → `real 193.14` (timeout)
+- Result: no measurable stage2 improvement.
+
+### Branch C: `mangle_name_uncached` byte-level rewrite
+- Change: removed `name[i,2]` / `name[i,3]` substring allocations in mangling loop; switched to byte comparisons.
+- Validation:
+  - `regression_tests/run_all.sh /tmp/stage1_dbg_mangle_bytes` → `61 passed, 0 failed`
+  - `/usr/bin/time -p scripts/timeout_sample_lldb.sh -t 180 ... /tmp/stage1_rel_mangle_bytes ...` → `real 193.68` (timeout)
+- Result: no measurable stage2 improvement.
+
+### Branch D: block IR buffer copy removal (`IO::Memory#to_s` -> `to_slice/write`)
+- Change: avoid extra giant string materialization in `emit_function` block IR post-pass (`block_output.to_slice`, direct `@output.write`).
+- Validation:
+  - `regression_tests/run_all.sh /tmp/stage1_dbg_emit_slice` → `61 passed, 0 failed`
+  - `/usr/bin/time -p scripts/timeout_sample_lldb.sh -t 180 ... /tmp/stage1_rel_emit_slice ...` → `real 193.71` (timeout)
+- Result: no measurable stage2 improvement.
+
+### Additional diagnostics
+- `--emit llvm-ir` probe (baseline compiler):
+  - `/usr/bin/time -p scripts/timeout_sample_lldb.sh -t 180 ... -- /tmp/stage1_rel_subst_fastpath src/crystal_v2.cr --release --emit llvm-ir -o /tmp/stage2_rel_subst_emitll`
+  - exited before timeout at `real 173.64` with `error: End of file reached`
+  - indicates IR emission path remains a stress point, but this mode still differs from normal release bootstrap path.
+
+- Mini-oracle with `--debug-profile`:
+  - `regression_tests/stage2_debug_profile_oracle.sh /tmp/stage1_rel_subst_fastpath 180 release 600,1200`
+  - N=600: `total=16633.9ms`, `hir=1682.2ms`, `opt=3076.0ms`, `llc=9624.5ms`
+  - N=1200: `total=21101.0ms`, `hir=3062.6ms`, `opt=3834.6ms`, `llc=10469.5ms`
+  - comparative baseline (`/tmp/stage1_rel_alloca_no_lstrip`) was within noise (no clear win/loss).
+
+### Decision
+- Branches A-D are explicitly **reverted** from code to avoid performance-noise accumulation.
+- Active best-known snapshot remains commit `71dd9cd9` with stage2 watchdog `real 192.78`.
