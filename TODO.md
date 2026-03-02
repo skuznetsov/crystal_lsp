@@ -8481,3 +8481,51 @@ crystal build -Ddebug_hooks src/crystal_v2.cr -o bin/crystal_v2 --no-debug
   - Interpretation:
     - stage2 bootstrap now reaches and passes full codegen/linking path.
     - remaining instability is stage3 runtime crash in parser startup, likely still bad codegen/runtime ABI issue around Array(String) growth path.
+
+## 2026-03-02: Root-cause fix — inline return path now merges caller locals (not only return values)
+
+### Symptom (mini-oracles)
+- `yield+return` was corrupting caller locals on non-yield path:
+  - `/tmp/repro_yield_not_called.cr` (expected `42`) produced `0` with stage1-built compiler.
+  - `/tmp/repro_yield_exit_prelude.cr` (expected exit `42`) produced exit `0`.
+- Zero-iteration `downto` case also showed the same class of corruption:
+  - `/tmp/repro_downto_zero_iter.cr` (expected `42`) produced `0`.
+
+### Localization (HIR-level SSA)
+- In emitted HIR for repro, inline-return exit block used a value defined only on one branch:
+  - `%34846 = copy %34842`
+  - where `%34842` existed only in the non-return branch.
+- Existing inline-yield machinery merged **inline return values** (`InlineReturnContext.incoming`) but did **not** merge caller-local maps tracked in `@inline_caller_locals_stack` across return/fallthrough paths.
+- Result: caller local `x` collapsed to last-visited branch value (`0`) instead of SSA-merged value.
+
+### Root-cause fix (`src/compiler/hir/ast_to_hir.cr`)
+1. Added merge of caller locals for inline-return control-flow joins:
+   - New stack: `@inline_yield_return_caller_locals_stack` aligned with `@inline_yield_return_stack`.
+   - `lower_return` now records caller-locals snapshot per inline-return incoming edge.
+   - Normal fallthrough path in `inline_yield_function` also records caller-locals snapshot.
+   - New helper `merge_inline_caller_locals_for_inline_return(...)` performs phi-based merge (via existing `merge_if_branch_locals`) at inline exit block.
+2. Kept branch-local stack isolation logic and added safer inline-caller merges for `if/unless` paths (supporting existing and future branch-sensitive block mutations).
+3. Preserved non-hardcoded behavior: fix is structural (SSA/control-flow invariant), not method-name/symbol heuristics.
+
+### Evidence
+- Build debug stage1:
+  - `/usr/bin/time -p crystal build src/crystal_v2.cr -o /tmp/stage1_dbg_inlinemerge4`
+  - `real 7.99`
+- Mini-oracles with `/tmp/stage1_dbg_inlinemerge4`:
+  - `/tmp/repro_yield_exit_prelude.cr` => exit code `42` (fixed)
+  - `/tmp/repro_yield_not_called.cr` => stdout `42` (fixed)
+  - `/tmp/repro_downto_zero_iter.cr` => stdout `42` (fixed)
+- Full regression snapshot:
+  - `regression_tests/run_all.sh /tmp/stage1_dbg_inlinemerge4`
+  - `56 passed, 5 failed (61 total)`
+
+### Remaining failing regressions (current)
+- `hash_compaction` (output mismatch)
+- `hash_stress` (segfault)
+- `test_byteformat_decode_u32` (segfault)
+- `upto_block_var` (output mismatch: `total=10`)
+- `yield_suffix_unless` (output mismatch: `count=1`)
+
+### Notes
+- This commit-sized fix targets one root-cause family (caller local SSA merge at inline-return joins).
+- Remaining failures are likely separate patterns; `yield_suffix_unless` may still share adjacent inline/block-control-flow logic.

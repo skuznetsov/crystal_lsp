@@ -2311,6 +2311,9 @@ module Crystal::HIR
 
     @inline_yield_return_stack : Array(InlineReturnContext) = [] of InlineReturnContext
     @inline_yield_return_override_stack : Array(InlineReturnOverride) = [] of InlineReturnOverride
+    # Per-inline-return snapshots of caller locals by incoming block.
+    # Aligned with @inline_yield_return_stack.
+    @inline_yield_return_caller_locals_stack : Array(Array({BlockId, Hash(String, ValueId)})) = [] of Array({BlockId, Hash(String, ValueId)})
 
     # Block-local `next` handling context (e.g. iterator/predicate blocks).
     # `next value` should return from the block invocation, not from the enclosing function.
@@ -25765,15 +25768,59 @@ module Crystal::HIR
       @function_types.has_key?(base_name) || has_function_base?(base_name)
     end
 
+    private def lookup_return_def_from_overloads(base_name : String) : CrystalV2::Compiler::Frontend::DefNode?
+      overloads = function_def_overloads(base_name)
+      return nil if overloads.empty?
+
+      if overloads.size == 1
+        return @function_defs[overloads.first]?
+      end
+
+      selected_name = nil.as(String?)
+      selected_return = nil.as(String?)
+      overloads.each do |candidate|
+        def_node = @function_defs[candidate]?
+        next unless def_node
+        return_slice = def_node.return_type
+        next unless return_slice
+        return_name = String.new(return_slice)
+        next if return_name.empty?
+
+        if selected_return.nil?
+          selected_return = return_name
+          selected_name = candidate
+        elsif selected_return != return_name
+          # Ambiguous overload set: keep caller behavior conservative.
+          return nil
+        end
+      end
+
+      return nil unless selected_name
+      @function_defs[selected_name]?
+    end
+
     private def lookup_function_def_for_return(
       name : String,
       base_name : String,
     ) : CrystalV2::Compiler::Frontend::DefNode?
-      @function_defs[name]? || @function_defs[base_name]? || begin
-        stripped_name = strip_generic_receiver_from_base_name(name)
-        stripped_base = strip_generic_receiver_from_base_name(base_name)
-        @function_defs[stripped_name]? || @function_defs[stripped_base]?
+      direct = @function_defs[name]? || @function_defs[base_name]?
+      return direct if direct
+
+      stripped_name = strip_generic_receiver_from_base_name(name)
+      stripped_base = strip_generic_receiver_from_base_name(base_name)
+      direct = @function_defs[stripped_name]? || @function_defs[stripped_base]?
+      return direct if direct
+
+      if overload = lookup_return_def_from_overloads(base_name)
+        return overload
       end
+      if stripped_base != base_name
+        if overload = lookup_return_def_from_overloads(stripped_base)
+          return overload
+        end
+      end
+
+      nil
     end
 
     # Return type shortcuts for ultra-common methods that are always the same
@@ -29382,6 +29429,20 @@ module Crystal::HIR
       receiver_type : TypeRef?,
     ) : TypeRef?
       func_def = @function_defs[mangled_method_name]? || @function_defs[base_method_name]?
+      if func_def.nil?
+        stripped_mangled = strip_generic_receiver_from_base_name(mangled_method_name)
+        stripped_base = strip_generic_receiver_from_base_name(base_method_name)
+        func_def = @function_defs[stripped_mangled]? || @function_defs[stripped_base]?
+      end
+      if func_def.nil?
+        func_def = lookup_return_def_from_overloads(base_method_name)
+        if func_def.nil?
+          stripped_base = strip_generic_receiver_from_base_name(base_method_name)
+          if stripped_base != base_method_name
+            func_def = lookup_return_def_from_overloads(stripped_base)
+          end
+        end
+      end
       return nil unless func_def
 
       return_type_slice = func_def.return_type
@@ -38751,8 +38812,9 @@ module Crystal::HIR
 
       merge_block = ctx.create_block
 
-      # Collect all branches: (exit_block, value, locals, flows_to_merge)
-      branches = [] of {BlockId, ValueId, Hash(String, ValueId), Bool}
+      # Collect all branches:
+      # (exit_block, value, locals, flows_to_merge, inline_caller_locals_stack_snapshot)
+      branches = [] of {BlockId, ValueId, Hash(String, ValueId), Bool, Array(Hash(String, ValueId))}
 
       # Build the chain: if -> elsif1 -> elsif2 -> ... -> else
       # Each test that fails jumps to the next test block (or final else block)
@@ -38828,17 +38890,22 @@ module Crystal::HIR
       then_value = lower_body(ctx, node.then_body)
       then_exit_block = ctx.current_block
       then_locals = ctx.save_locals
+      then_inline_locals = @inline_caller_locals_stack.map(&.dup)
       ctx.pop_scope
 
       then_block_data = ctx.get_block(ctx.current_block)
       then_has_noreturn = then_block_data.instructions.any? { |inst| inst.is_a?(Raise) || inst.is_a?(Return) }
-      then_flows_to_merge = then_block_data.terminator.is_a?(Unreachable) &&
-                            !then_has_noreturn &&
-                            !control_flow_dead_block?(ctx, then_exit_block)
-      if then_flows_to_merge
+      then_term = then_block_data.terminator
+      then_jump_to_merge = then_term.is_a?(Jump) && then_term.target == merge_block
+      then_flows_to_merge = then_jump_to_merge || (
+        then_term.is_a?(Unreachable) &&
+        !then_has_noreturn &&
+        !control_flow_dead_block?(ctx, then_exit_block)
+      )
+      if then_flows_to_merge && !then_jump_to_merge
         ctx.terminate(Jump.new(merge_block))
       end
-      branches << {then_exit_block, then_value, then_locals, then_flows_to_merge}
+      branches << {then_exit_block, then_value, then_locals, then_flows_to_merge, then_inline_locals}
 
       # Process elsif branches
       if elsifs && !elsifs.empty?
@@ -38876,17 +38943,22 @@ module Crystal::HIR
           elsif_value = lower_body(ctx, elsif_branch.body)
           elsif_exit_block = ctx.current_block
           elsif_locals = ctx.save_locals
+          elsif_inline_locals = @inline_caller_locals_stack.map(&.dup)
           ctx.pop_scope
 
           elsif_block_data = ctx.get_block(ctx.current_block)
           elsif_has_noreturn = elsif_block_data.instructions.any? { |inst| inst.is_a?(Raise) || inst.is_a?(Return) }
-          elsif_flows_to_merge = elsif_block_data.terminator.is_a?(Unreachable) &&
-                                 !elsif_has_noreturn &&
-                                 !control_flow_dead_block?(ctx, elsif_exit_block)
-          if elsif_flows_to_merge
+          elsif_term = elsif_block_data.terminator
+          elsif_jump_to_merge = elsif_term.is_a?(Jump) && elsif_term.target == merge_block
+          elsif_flows_to_merge = elsif_jump_to_merge || (
+            elsif_term.is_a?(Unreachable) &&
+            !elsif_has_noreturn &&
+            !control_flow_dead_block?(ctx, elsif_exit_block)
+          )
+          if elsif_flows_to_merge && !elsif_jump_to_merge
             ctx.terminate(Jump.new(merge_block))
           end
-          branches << {elsif_exit_block, elsif_value, elsif_locals, elsif_flows_to_merge}
+          branches << {elsif_exit_block, elsif_value, elsif_locals, elsif_flows_to_merge, elsif_inline_locals}
         end
       end
 
@@ -38911,33 +38983,48 @@ module Crystal::HIR
                    end
       else_exit_block = ctx.current_block
       else_locals = ctx.save_locals
+      else_inline_locals = @inline_caller_locals_stack.map(&.dup)
       ctx.pop_scope
 
       else_block_data = ctx.get_block(ctx.current_block)
       else_has_noreturn = else_block_data.instructions.any? { |inst| inst.is_a?(Raise) || inst.is_a?(Return) }
-      else_flows_to_merge = else_block_data.terminator.is_a?(Unreachable) &&
-                            !else_has_noreturn &&
-                            !control_flow_dead_block?(ctx, else_exit_block)
-      if else_flows_to_merge
+      else_term = else_block_data.terminator
+      else_jump_to_merge = else_term.is_a?(Jump) && else_term.target == merge_block
+      else_flows_to_merge = else_jump_to_merge || (
+        else_term.is_a?(Unreachable) &&
+        !else_has_noreturn &&
+        !control_flow_dead_block?(ctx, else_exit_block)
+      )
+      if else_flows_to_merge && !else_jump_to_merge
         ctx.terminate(Jump.new(merge_block))
       end
-      branches << {else_exit_block, else_value, else_locals, else_flows_to_merge}
+      branches << {else_exit_block, else_value, else_locals, else_flows_to_merge, else_inline_locals}
 
       # Merge block
       ctx.current_block = merge_block
 
       # Count flowing branches
-      flowing_branches = branches.select { |_, _, _, flows| flows }
+      flowing_branches = branches.select { |_, _, _, flows, _| flows }
 
       if flowing_branches.empty?
+        merge_inline_caller_locals_after_if(
+          ctx,
+          pre_inline_caller_locals,
+          [] of {BlockId, Array(Hash(String, ValueId))}
+        )
         # All branches return/raise - emit nil placeholder
         nil_lit = Literal.new(ctx.next_id, TypeRef::NIL, nil)
         ctx.emit(nil_lit)
         return nil_lit.id
       elsif flowing_branches.size == 1
         # Only one branch flows - use its value and locals
-        exit_block, value, locals, _ = flowing_branches.first
+        exit_block, value, locals, _, inline_locals = flowing_branches.first
         locals.each { |name, val| ctx.register_local(name, val) }
+        merge_inline_caller_locals_after_if(
+          ctx,
+          pre_inline_caller_locals,
+          [{exit_block, inline_locals}]
+        )
         return value
       else
         # Multiple branches flow - create phi
@@ -38960,8 +39047,10 @@ module Crystal::HIR
           ctx.emit(nil_lit)
           # Must merge locals even when the if value itself is void/nil,
           # because variables may have been modified in the branches.
-          flowing_branch_info = flowing_branches.map { |exit_block, _, locals, _| {exit_block, locals} }
+          flowing_branch_info = flowing_branches.map { |exit_block, _, locals, _, _| {exit_block, locals} }
           merge_if_branch_locals(ctx, pre_branch_locals, flowing_branch_info)
+          flowing_inline_info = flowing_branches.map { |exit_block, _, _, _, inline_locals| {exit_block, inline_locals} }
+          merge_inline_caller_locals_after_if(ctx, pre_inline_caller_locals, flowing_inline_info)
           return nil_lit.id
         end
 
@@ -38994,10 +39083,86 @@ module Crystal::HIR
         ctx.emit(phi)
 
         # Merge local variables from flowing branches.
-        flowing_branch_info = flowing_branches.map { |exit_block, _, locals, _| {exit_block, locals} }
+        flowing_branch_info = flowing_branches.map { |exit_block, _, locals, _, _| {exit_block, locals} }
         merge_if_branch_locals(ctx, pre_branch_locals, flowing_branch_info)
+        flowing_inline_info = flowing_branches.map { |exit_block, _, _, _, inline_locals| {exit_block, inline_locals} }
+        merge_inline_caller_locals_after_if(ctx, pre_inline_caller_locals, flowing_inline_info)
 
         return phi.id
+      end
+    end
+
+    private def merge_inline_caller_locals_after_if(
+      ctx : LoweringContext,
+      pre_inline_caller_locals : Array(Hash(String, ValueId)),
+      branch_inline_info : Array({BlockId, Array(Hash(String, ValueId))})
+    ) : Nil
+      return if pre_inline_caller_locals.empty?
+
+      if branch_inline_info.empty?
+        @inline_caller_locals_stack = pre_inline_caller_locals.map(&.dup)
+        return
+      end
+
+      if branch_inline_info.size == 1
+        _, inline_snapshot = branch_inline_info.first
+        merged_single = pre_inline_caller_locals.map(&.dup)
+        limit = merged_single.size < inline_snapshot.size ? merged_single.size : inline_snapshot.size
+        i = 0
+        while i < limit
+          merged_single[i] = inline_snapshot[i].dup
+          i += 1
+        end
+        @inline_caller_locals_stack = merged_single
+        return
+      end
+
+      saved_ctx_locals = ctx.save_locals
+      merged_stack = pre_inline_caller_locals.map(&.dup)
+
+      begin
+        merged_stack.each_index do |idx|
+          pre_locals = pre_inline_caller_locals[idx]? || ({} of String => ValueId)
+          branch_locals_info = branch_inline_info.map do |(exit_block, inline_snapshot)|
+            locals = inline_snapshot[idx]? || pre_locals
+            {exit_block, locals}
+          end
+
+          ctx.restore_locals(pre_locals)
+          merge_if_branch_locals(ctx, pre_locals, branch_locals_info)
+          merged_stack[idx] = ctx.save_locals
+        end
+      ensure
+        ctx.restore_locals(saved_ctx_locals)
+      end
+
+      @inline_caller_locals_stack = merged_stack
+    end
+
+    private def merge_inline_caller_locals_for_inline_return(
+      ctx : LoweringContext,
+      pre_caller_locals : Hash(String, ValueId),
+      branch_locals_info : Array({BlockId, Hash(String, ValueId)})
+    ) : Nil
+      return if @inline_caller_locals_stack.empty?
+
+      if branch_locals_info.empty?
+        @inline_caller_locals_stack[-1] = pre_caller_locals.dup
+        return
+      end
+
+      if branch_locals_info.size == 1
+        @inline_caller_locals_stack[-1] = branch_locals_info.first[1].dup
+        return
+      end
+
+      saved_ctx_locals = ctx.save_locals
+      begin
+        ctx.restore_locals(pre_caller_locals)
+        merge_if_branch_locals(ctx, pre_caller_locals, branch_locals_info)
+        @inline_caller_locals_stack[-1] = ctx.save_locals
+      ensure
+        ctx.restore_locals(saved_ctx_locals)
       end
     end
 
@@ -39315,6 +39480,7 @@ module Crystal::HIR
 
       # Save locals state before branching
       pre_branch_locals = ctx.save_locals
+      pre_inline_caller_locals = @inline_caller_locals_stack.map(&.dup)
       truthy_targets = truthy_narrowing_targets(node.condition)
       is_a_targets = is_a_narrowing_targets(node.condition)
 
@@ -39329,6 +39495,7 @@ module Crystal::HIR
       ctx.terminate(Branch.new(neg_cond.id, then_block, else_block))
 
       # Then (was unless body)
+      @inline_caller_locals_stack = pre_inline_caller_locals.map(&.dup)
       ctx.current_block = then_block
       ctx.restore_locals(pre_branch_locals)
       ctx.push_scope(ScopeKind::Block)
@@ -39336,18 +39503,24 @@ module Crystal::HIR
       then_exit = ctx.current_block
       ctx.pop_scope
       then_locals = ctx.save_locals
+      then_inline_locals = @inline_caller_locals_stack.map(&.dup)
 
       # Check if then branch flows to merge (not terminated by return/raise)
       then_block_data = ctx.get_block(ctx.current_block)
       then_has_noreturn = then_block_data.instructions.any? { |inst| inst.is_a?(Raise) || inst.is_a?(Return) }
-      then_flows_to_merge = then_block_data.terminator.is_a?(Unreachable) &&
-                            !then_has_noreturn &&
-                            !control_flow_dead_block?(ctx, then_exit)
-      if then_flows_to_merge
+      then_term = then_block_data.terminator
+      then_jump_to_merge = then_term.is_a?(Jump) && then_term.target == merge_block
+      then_flows_to_merge = then_jump_to_merge || (
+        then_term.is_a?(Unreachable) &&
+        !then_has_noreturn &&
+        !control_flow_dead_block?(ctx, then_exit)
+      )
+      if then_flows_to_merge && !then_jump_to_merge
         ctx.terminate(Jump.new(merge_block))
       end
 
       # Else branch (if any)
+      @inline_caller_locals_stack = pre_inline_caller_locals.map(&.dup)
       ctx.current_block = else_block
       ctx.restore_locals(pre_branch_locals)
       ctx.push_scope(ScopeKind::Block)
@@ -39362,15 +39535,20 @@ module Crystal::HIR
                    end
       else_exit = ctx.current_block
       else_locals = ctx.save_locals
+      else_inline_locals = @inline_caller_locals_stack.map(&.dup)
       ctx.pop_scope
 
       # Check if else branch flows to merge
       else_block_data = ctx.get_block(ctx.current_block)
       else_has_noreturn = else_block_data.instructions.any? { |inst| inst.is_a?(Raise) || inst.is_a?(Return) }
-      else_flows_to_merge = else_block_data.terminator.is_a?(Unreachable) &&
-                            !else_has_noreturn &&
-                            !control_flow_dead_block?(ctx, else_exit)
-      if else_flows_to_merge
+      else_term = else_block_data.terminator
+      else_jump_to_merge = else_term.is_a?(Jump) && else_term.target == merge_block
+      else_flows_to_merge = else_jump_to_merge || (
+        else_term.is_a?(Unreachable) &&
+        !else_has_noreturn &&
+        !control_flow_dead_block?(ctx, else_exit)
+      )
+      if else_flows_to_merge && !else_jump_to_merge
         ctx.terminate(Jump.new(merge_block))
       end
 
@@ -39392,6 +39570,11 @@ module Crystal::HIR
           if phi_type == TypeRef::VOID || phi_type == TypeRef::NIL
             nil_lit = Literal.new(ctx.next_id, TypeRef::NIL, nil)
             ctx.emit(nil_lit)
+            merge_inline_caller_locals_after_if(
+              ctx,
+              pre_inline_caller_locals,
+              [{then_exit, then_inline_locals}, {else_exit, else_inline_locals}]
+            )
             return nil_lit.id
           end
 
@@ -39424,19 +39607,39 @@ module Crystal::HIR
           end
           ctx.emit(phi)
           ctx.register_type(phi.id, phi_type)
+          merge_inline_caller_locals_after_if(
+            ctx,
+            pre_inline_caller_locals,
+            [{then_exit, then_inline_locals}, {else_exit, else_inline_locals}]
+          )
           return phi.id
         elsif then_flows_to_merge
           # Only then flows - use then_value, then_locals
           then_locals.each { |name, val| ctx.register_local(name, val) }
+          merge_inline_caller_locals_after_if(
+            ctx,
+            pre_inline_caller_locals,
+            [{then_exit, then_inline_locals}]
+          )
           return then_value
         else
           # Only else flows - use else_value, else_locals
           else_locals.each { |name, val| ctx.register_local(name, val) }
+          merge_inline_caller_locals_after_if(
+            ctx,
+            pre_inline_caller_locals,
+            [{else_exit, else_inline_locals}]
+          )
           return else_value
         end
       end
 
       # Neither branch flows to merge - emit nil placeholder
+      merge_inline_caller_locals_after_if(
+        ctx,
+        pre_inline_caller_locals,
+        [] of {BlockId, Array(Hash(String, ValueId))}
+      )
       nil_lit = Literal.new(ctx.next_id, TypeRef::NIL, nil)
       ctx.emit(nil_lit)
       nil_lit.id
@@ -41355,6 +41558,11 @@ module Crystal::HIR
             current_block = ctx.current_block
             ctx.terminate(Jump.new(exit_block))
             inline_return.incoming << {current_block, value_id.not_nil!}
+            if return_locals = @inline_yield_return_caller_locals_stack.last?
+              if caller_locals = @inline_caller_locals_stack.last?
+                return_locals << {current_block, caller_locals.dup}
+              end
+            end
             nil_lit = Literal.new(ctx.next_id, TypeRef::NIL, nil)
             ctx.emit(nil_lit)
             return nil_lit.id
@@ -57757,6 +57965,7 @@ module Crystal::HIR
         end
         inline_return = InlineReturnContext.new(ctx.create_block, [] of {BlockId, ValueId}, ctx.function.id)
         @inline_yield_return_stack << inline_return
+        @inline_yield_return_caller_locals_stack << ([] of {BlockId, Hash(String, ValueId)})
 
         old_current_class = @current_class
         old_current_method = @current_method
@@ -57957,9 +58166,17 @@ module Crystal::HIR
         if ctx.get_block(ctx.current_block).terminator.is_a?(Unreachable)
           ctx.terminate(Jump.new(inline_return.exit_block))
           inline_return.incoming << {ctx.current_block, result_value}
+          if return_locals = @inline_yield_return_caller_locals_stack.last?
+            if current_caller_locals = @inline_caller_locals_stack.last?
+              return_locals << {ctx.current_block, current_caller_locals.dup}
+            end
+          end
         end
 
         ctx.switch_to_block(inline_return.exit_block)
+        if return_locals = @inline_yield_return_caller_locals_stack.last?
+          merge_inline_caller_locals_for_inline_return(ctx, caller_locals, return_locals)
+        end
 
         begin
           if inline_return.incoming.empty?
@@ -58041,6 +58258,7 @@ module Crystal::HIR
         @inline_yield_block_return_stack.pop? if pushed_block
         @inline_yield_name_stack.pop? if pushed_name
         @inline_yield_return_stack.pop?
+        @inline_yield_return_caller_locals_stack.pop?
         @inline_yield_return_override_stack.pop? if pushed_override
         # Restore caller locals (including any mutations made inside the inlined block body).
         if restored = @inline_caller_locals_stack.pop?
@@ -63714,20 +63932,20 @@ module Crystal::HIR
       block = ctx.get_block(ctx.current_block)
       term = block.terminator
 
-      # Explicit return always terminates the current control-flow path.
-      return true if term.is_a?(Return)
+      # Any concrete terminator means there is no fallthrough in this block.
+      # Keep lowering only while the block still has the placeholder Unreachable.
+      # (Special case below preserves explicit raise handling for Unreachable.)
+      return true unless term.is_a?(Unreachable)
 
       # We use Unreachable as both a default placeholder terminator and the
       # explicit terminator for `raise`. Disambiguate by checking whether this
       # block actually ends in a Raise instruction.
-      if term.is_a?(Unreachable)
-        insts = block.instructions
-        if insts.size > 0
-          last = insts[insts.size - 1]
-          return true if last.is_a?(Raise)
-          prev = insts.size > 1 ? insts[insts.size - 2] : nil
-          return true if prev && prev.is_a?(Raise)
-        end
+      insts = block.instructions
+      if insts.size > 0
+        last = insts[insts.size - 1]
+        return true if last.is_a?(Raise)
+        prev = insts.size > 1 ? insts[insts.size - 2] : nil
+        return true if prev && prev.is_a?(Raise)
       end
 
       false
