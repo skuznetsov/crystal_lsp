@@ -2257,6 +2257,12 @@ module Crystal::HIR
     @inline_caller_method_is_class_stack : Array(Bool) = [] of Bool
     # Preserve caller type-parameter bindings for block bodies during yield inlining.
     @inline_caller_type_param_map_stack : Array(Hash(String, String)) = [] of Hash(String, String)
+    # Names assigned/declared inside currently inlined callee functions.
+    # Used to avoid accidentally capturing same-named caller locals for loop PHIs.
+    @inline_callee_local_names_stack : Array(Set(String)) = [] of Set(String)
+    # Lexically-active caller-local stack index for the current inline block body.
+    # Restricts PHI fallback lookup to the correct lexical caller chain.
+    @inline_active_caller_locals_index_stack : Array(Int32) = [] of Int32
     # Loop-carried locals for inline yield contexts (used to keep phi-bound values stable).
     @inline_loop_vars_stack : Array(Set(String)) = [] of Set(String)
     # Pre-revert values for inline loop vars: saved before inline_loop_vars reverts them,
@@ -39148,11 +39154,13 @@ module Crystal::HIR
 
       if branch_locals_info.empty?
         @inline_caller_locals_stack[-1] = pre_caller_locals.dup
+        debug_inline_locals_snapshot(ctx, "inline_return:empty", @inline_caller_locals_stack[-1])
         return
       end
 
       if branch_locals_info.size == 1
         @inline_caller_locals_stack[-1] = branch_locals_info.first[1].dup
+        debug_inline_locals_snapshot(ctx, "inline_return:single", @inline_caller_locals_stack[-1])
         return
       end
 
@@ -39161,9 +39169,29 @@ module Crystal::HIR
         ctx.restore_locals(pre_caller_locals)
         merge_if_branch_locals(ctx, pre_caller_locals, branch_locals_info)
         @inline_caller_locals_stack[-1] = ctx.save_locals
+        debug_inline_locals_snapshot(ctx, "inline_return:merged", @inline_caller_locals_stack[-1])
       ensure
         ctx.restore_locals(saved_ctx_locals)
       end
+    end
+
+    private def debug_inline_locals_snapshot(
+      ctx : LoweringContext,
+      tag : String,
+      locals : Hash(String, ValueId),
+    ) : Nil
+      return unless env_get("DEBUG_INLINE_LOCALS")
+
+      watch_raw = env_get("DEBUG_INLINE_LOCALS_NAMES") || "new_entry_index,entry_hash,index,entry,x"
+      watch_names = watch_raw.split(',').map(&.strip).reject(&.empty?)
+      pairs = [] of String
+      watch_names.each do |name|
+        if val = locals[name]?
+          pairs << "#{name}=%#{val}:#{ctx.type_of(val).id}"
+        end
+      end
+      return if pairs.empty?
+      STDERR.puts "[INLINE_LOCALS] #{tag} fn=#{ctx.function.name} #{pairs.join(" ")}"
     end
 
     # Merge locals from two branches, creating phi nodes where needed
@@ -40306,19 +40334,73 @@ module Crystal::HIR
     end
 
     private def lookup_local_for_phi(ctx : LoweringContext, name : String, inline_vars : Set(String)) : ValueId?
+      debug_lookup = env_get("DEBUG_LOOP_PHI_LOOKUP")
       if val = ctx.lookup_local(name)
+        if debug_lookup
+          STDERR.puts "[LOOP_PHI_LOOKUP] fn=#{ctx.function.name} var=#{name} source=ctx val=#{val} type=#{ctx.type_of(val).id}"
+        end
         return val
       end
 
-      # Search through ALL stack entries (not just last) — outer-scope variables
-      # from deeply nested inline yields may be several levels up.
-      @inline_caller_locals_stack.reverse_each do |locals|
-        if val = locals[name]?
-          inline_vars.add(name)
-          return val
+      # When lowering loops inside an inlined callee, don't capture same-named
+      # caller locals for variables that are local to the callee body itself.
+      if callee_locals = @inline_callee_local_names_stack.last?
+        if callee_locals.includes?(name)
+          if debug_lookup
+            STDERR.puts "[LOOP_PHI_LOOKUP] fn=#{ctx.function.name} var=#{name} source=blocked_callee_local"
+          end
+          return nil
         end
       end
 
+      # During inline block-body lowering, restrict fallback capture to the
+      # lexical caller chain selected for that block body. This prevents
+      # same-named locals from unrelated inline frames polluting loop PHIs.
+      if active_idx = @inline_active_caller_locals_index_stack.last?
+        idx = active_idx
+        while idx >= 0
+          if locals = @inline_caller_locals_stack[idx]?
+            if val = locals[name]?
+              val_type = ctx.type_of(val)
+              if val_type == TypeRef::NIL || val_type == TypeRef::VOID
+                if debug_lookup
+                  STDERR.puts "[LOOP_PHI_LOOKUP] fn=#{ctx.function.name} var=#{name} source=inline_stack_skip idx=#{idx} val=#{val} type=#{val_type.id}"
+                end
+                idx -= 1
+                next
+              end
+              inline_vars.add(name)
+              if debug_lookup
+                STDERR.puts "[LOOP_PHI_LOOKUP] fn=#{ctx.function.name} var=#{name} source=inline_stack idx=#{idx} val=#{val} type=#{val_type.id}"
+              end
+              return val
+            end
+          end
+          idx -= 1
+        end
+      else
+        # Fallback (non-inline or legacy paths): search through all stack entries.
+        @inline_caller_locals_stack.reverse_each do |locals|
+          if val = locals[name]?
+            val_type = ctx.type_of(val)
+            if val_type == TypeRef::NIL || val_type == TypeRef::VOID
+              if debug_lookup
+                STDERR.puts "[LOOP_PHI_LOOKUP] fn=#{ctx.function.name} var=#{name} source=inline_stack_legacy_skip val=#{val} type=#{val_type.id}"
+              end
+              next
+            end
+            inline_vars.add(name)
+            if debug_lookup
+              STDERR.puts "[LOOP_PHI_LOOKUP] fn=#{ctx.function.name} var=#{name} source=inline_stack_legacy val=#{val} type=#{val_type.id}"
+            end
+            return val
+          end
+        end
+      end
+
+      if debug_lookup
+        STDERR.puts "[LOOP_PHI_LOOKUP] fn=#{ctx.function.name} var=#{name} source=miss"
+      end
       nil
     end
 
@@ -40342,6 +40424,170 @@ module Crystal::HIR
         end
       end
       ctx.lookup_local(var_name)
+    end
+
+    private def snapshot_inline_caller_locals_for_return(caller_locals : Hash(String, ValueId)) : Hash(String, ValueId)
+      snapshot = caller_locals.dup
+      if loop_vars = inline_loop_vars_union
+        loop_vars.each do |name|
+          if saved = @inline_loop_var_backedge_values[name]?
+            snapshot[name] = saved
+          end
+        end
+      end
+      snapshot
+    end
+
+    # Collect names that are local to an inlined callee function body, without
+    # pulling assigned vars from the caller's inline-yield block.
+    private def inline_callee_local_names(
+      func_def : CrystalV2::Compiler::Frontend::DefNode,
+      callee_arena : CrystalV2::Compiler::Frontend::ArenaLike,
+    ) : Set(String)
+      names = Set(String).new
+
+      if params = func_def.params
+        params.each do |param|
+          if pname = param.name
+            names.add(String.new(pname))
+          end
+        end
+      end
+
+      if body = func_def.body
+        old_arena = @arena
+        saved_inline_yield_block_stack = @inline_yield_block_stack
+        saved_inline_yield_block_arena_stack = @inline_yield_block_arena_stack
+        saved_inline_yield_block_param_types_stack = @inline_yield_block_param_types_stack
+        begin
+          @arena = callee_arena
+          @inline_yield_block_stack = [] of CrystalV2::Compiler::Frontend::BlockNode
+          @inline_yield_block_arena_stack = [] of CrystalV2::Compiler::Frontend::ArenaLike
+          @inline_yield_block_param_types_stack = [] of Array(TypeRef)?
+          collect_assigned_vars(body).each { |name| names.add(name) }
+          collect_block_param_names(body, names)
+        ensure
+          @inline_yield_block_stack = saved_inline_yield_block_stack
+          @inline_yield_block_arena_stack = saved_inline_yield_block_arena_stack
+          @inline_yield_block_param_types_stack = saved_inline_yield_block_param_types_stack
+          @arena = old_arena
+        end
+      end
+
+      names
+    end
+
+    # Collect block parameter names declared inside a body (recursively).
+    private def collect_block_param_names(
+      body : Array(ExprId),
+      names : Set(String),
+      visited_blocks : Set(UInt64)? = nil,
+    ) : Nil
+      visited_blocks ||= Set(UInt64).new
+      body.each do |expr_id|
+        collect_block_param_names_in_expr(expr_id, names, visited_blocks)
+      end
+    end
+
+    private def collect_block_param_names_in_expr(
+      expr_id : ExprId,
+      names : Set(String),
+      visited_blocks : Set(UInt64),
+    ) : Nil
+      node = @arena[expr_id]
+      case node
+      when CrystalV2::Compiler::Frontend::WhileNode
+        collect_block_param_names(node.body, names, visited_blocks)
+      when CrystalV2::Compiler::Frontend::LoopNode
+        collect_block_param_names(node.body, names, visited_blocks)
+      when CrystalV2::Compiler::Frontend::IfNode
+        collect_block_param_names(node.then_body, names, visited_blocks)
+        if elsifs = node.elsifs
+          elsifs.each do |elsif_branch|
+            collect_block_param_names(elsif_branch.body, names, visited_blocks)
+          end
+        end
+        if else_body = node.else_body
+          collect_block_param_names(else_body, names, visited_blocks)
+        end
+      when CrystalV2::Compiler::Frontend::UnlessNode
+        collect_block_param_names(node.then_branch, names, visited_blocks)
+        if else_body = node.else_branch
+          collect_block_param_names(else_body, names, visited_blocks)
+        end
+      when CrystalV2::Compiler::Frontend::CaseNode
+        node.when_branches.each do |when_branch|
+          collect_block_param_names(when_branch.body, names, visited_blocks)
+        end
+        if else_body = node.else_branch
+          collect_block_param_names(else_body, names, visited_blocks)
+        end
+      when CrystalV2::Compiler::Frontend::BinaryNode
+        collect_block_param_names_in_expr(node.left, names, visited_blocks)
+        collect_block_param_names_in_expr(node.right, names, visited_blocks)
+      when CrystalV2::Compiler::Frontend::AssignNode
+        collect_block_param_names_in_expr(node.value, names, visited_blocks)
+      when CrystalV2::Compiler::Frontend::MultipleAssignNode
+        collect_block_param_names_in_expr(node.value, names, visited_blocks)
+      when CrystalV2::Compiler::Frontend::TypeDeclarationNode
+        if value = node.value
+          collect_block_param_names_in_expr(value, names, visited_blocks)
+        end
+      when CrystalV2::Compiler::Frontend::GroupingNode
+        collect_block_param_names_in_expr(node.expression, names, visited_blocks)
+      when CrystalV2::Compiler::Frontend::CallNode
+        node.args.each { |arg| collect_block_param_names_in_expr(arg, names, visited_blocks) }
+        if block_id = node.block
+          block_node = @arena[block_id]
+          if block_node.is_a?(CrystalV2::Compiler::Frontend::BlockNode)
+            block_obj_id = block_node.object_id
+            unless visited_blocks.includes?(block_obj_id)
+              visited_blocks.add(block_obj_id)
+              if params = block_node.params
+                params.each do |param|
+                  if pname = param.name
+                    names.add(String.new(pname))
+                  end
+                end
+              end
+              collect_block_param_names(block_node.body, names, visited_blocks)
+            end
+          end
+        end
+      when CrystalV2::Compiler::Frontend::YieldNode
+        if inline_block = @inline_yield_block_stack.last?
+          block_obj_id = inline_block.object_id
+          unless visited_blocks.includes?(block_obj_id)
+            visited_blocks.add(block_obj_id)
+            popped_block = @inline_yield_block_stack.pop
+            popped_arena = @inline_yield_block_arena_stack.pop?
+            popped_param_types = @inline_yield_block_param_types_stack.pop?
+            old_arena = @arena
+            if popped_arena
+              @arena = popped_arena
+            end
+            begin
+              if params = inline_block.params
+                params.each do |param|
+                  if pname = param.name
+                    names.add(String.new(pname))
+                  end
+                end
+              end
+              collect_block_param_names(inline_block.body, names, visited_blocks)
+            ensure
+              @arena = old_arena
+              @inline_yield_block_stack << popped_block
+              if pa = popped_arena
+                @inline_yield_block_arena_stack << pa
+              end
+              if pp = popped_param_types
+                @inline_yield_block_param_types_stack << pp
+              end
+            end
+          end
+        end
+      end
     end
 
     private def lower_until(ctx : LoweringContext, node : CrystalV2::Compiler::Frontend::UntilNode) : ValueId
@@ -40432,7 +40678,12 @@ module Crystal::HIR
           phi_nodes[var_name] = phi
           ctx.register_local(var_name, phi.id)
           if inline_vars.includes?(var_name)
-            @inline_caller_locals_stack[-1][var_name] = phi.id
+            @inline_caller_locals_stack.reverse_each do |locals|
+              if locals.has_key?(var_name)
+                locals[var_name] = phi.id
+                break
+              end
+            end
           end
         end
       end
@@ -40452,6 +40703,11 @@ module Crystal::HIR
       # Body block
       ctx.current_block = body_block
       ctx.push_scope(ScopeKind::Loop)
+      @loop_exit_stack << exit_block
+      @loop_cond_stack << cond_block
+      @loop_phi_stack << phi_nodes
+      @loop_break_info_stack << [] of {BlockId, Hash(String, ValueId)}
+      @loop_break_value_stack << [] of {BlockId, ValueId}
       pushed_inline = false
       if !inline_vars.empty?
         @inline_loop_vars_stack << inline_vars
@@ -40462,7 +40718,12 @@ module Crystal::HIR
         lower_body(ctx, node.body)
       ensure
         @inline_loop_vars_stack.pop? if pushed_inline
+        @loop_exit_stack.pop?
+        @loop_cond_stack.pop?
+        @loop_phi_stack.pop?
       end
+      break_info = @loop_break_info_stack.pop
+      break_values = @loop_break_value_stack.pop
       body_exit_block = ctx.current_block
       ctx.pop_scope
 
@@ -40497,15 +40758,86 @@ module Crystal::HIR
         ctx.terminate(Jump.new(cond_block))
       end
 
-      # Exit block
+      # Exit block - merge normal exit + break paths
       ctx.current_block = exit_block
-      phi_nodes.each do |var_name, phi|
-        ctx.register_local(var_name, phi.id)
+
+      if break_info.empty?
+        phi_nodes.each do |var_name, phi|
+          if inline_vars.includes?(var_name)
+            if saved = @inline_loop_var_backedge_values[var_name]?
+              ctx.register_local(var_name, saved)
+              @inline_caller_locals_stack.reverse_each do |locals|
+                if locals.has_key?(var_name)
+                  locals[var_name] = saved
+                  break
+                end
+              end
+              next
+            end
+          end
+          ctx.register_local(var_name, phi.id)
+        end
+      else
+        phi_nodes.each do |var_name, cond_phi|
+          exit_phi = Phi.new(ctx.next_id, cond_phi.type)
+          # Normal exit path comes from `cond_true_block` (condition became true).
+          exit_phi.add_incoming(cond_true_block, cond_phi.id)
+          break_info.each do |break_block, break_locals|
+            if break_val = break_locals[var_name]?
+              exit_phi.add_incoming(break_block, break_val)
+            else
+              exit_phi.add_incoming(break_block, cond_phi.id)
+            end
+          end
+          ctx.emit(exit_phi)
+          ctx.register_local(var_name, exit_phi.id)
+        end
       end
 
-      nil_lit = Literal.new(ctx.next_id, TypeRef::NIL, nil)
-      ctx.emit(nil_lit)
-      nil_lit.id
+      # Until expression result: nil for normal exit, break value for break exit
+      if break_values.empty?
+        nil_lit = Literal.new(ctx.next_id, TypeRef::NIL, nil)
+        ctx.emit(nil_lit)
+        nil_lit.id
+      else
+        break_type = ctx.type_of(break_values.first[1])
+        nil_lit = Literal.new(ctx.next_id, TypeRef::NIL, nil)
+        ctx.emit_to_block(cond_true_block, nil_lit)
+        ctx.register_type(nil_lit.id, TypeRef::NIL)
+        result_type = break_type
+        if break_type != TypeRef::NIL
+          result_type = union_type_for_values(break_type, TypeRef::NIL)
+          result_type = break_type if result_type == TypeRef::VOID
+        end
+        result_phi = Phi.new(ctx.next_id, result_type)
+        if is_union_type?(result_type) && result_type != TypeRef::NIL
+          nil_wrap = UnionWrap.new(ctx.next_id, result_type, nil_lit.id, 0)
+          ctx.emit_to_block(cond_true_block, nil_wrap)
+          ctx.register_type(nil_wrap.id, result_type)
+          result_phi.add_incoming(cond_true_block, nil_wrap.id)
+        else
+          result_phi.add_incoming(cond_true_block, nil_lit.id)
+        end
+        break_values.each do |break_block, break_val|
+          if is_union_type?(result_type) && ctx.type_of(break_val) != result_type
+            val_type = ctx.type_of(break_val)
+            variant_id = get_union_variant_id(result_type, val_type)
+            if variant_id && variant_id >= 0
+              wrap = UnionWrap.new(ctx.next_id, result_type, break_val, variant_id)
+              ctx.emit_to_block(break_block, wrap)
+              ctx.register_type(wrap.id, result_type)
+              result_phi.add_incoming(break_block, wrap.id)
+            else
+              result_phi.add_incoming(break_block, break_val)
+            end
+          else
+            result_phi.add_incoming(break_block, break_val)
+          end
+        end
+        ctx.emit(result_phi)
+        ctx.register_type(result_phi.id, result_type)
+        result_phi.id
+      end
     end
 
     private def lower_ternary(ctx : LoweringContext, node : CrystalV2::Compiler::Frontend::TernaryNode) : ValueId
@@ -41560,7 +41892,7 @@ module Crystal::HIR
             inline_return.incoming << {current_block, value_id.not_nil!}
             if return_locals = @inline_yield_return_caller_locals_stack.last?
               if caller_locals = @inline_caller_locals_stack.last?
-                return_locals << {current_block, caller_locals.dup}
+                return_locals << {current_block, snapshot_inline_caller_locals_for_return(caller_locals)}
               end
             end
             nil_lit = Literal.new(ctx.next_id, TypeRef::NIL, nil)
@@ -41761,9 +42093,15 @@ module Crystal::HIR
         # Capture current variable values at break point for exit phi construction
         if phi_nodes = @loop_phi_stack.last?
           if break_info = @loop_break_info_stack.last?
+            inline_loop_vars = inline_loop_vars_union
             break_locals = {} of String => ValueId
             phi_nodes.each_key do |var_name|
-              if val = ctx.lookup_local(var_name)
+              val = if loop_vars = inline_loop_vars
+                      resolve_loop_updated_value(ctx, var_name, loop_vars)
+                    else
+                      ctx.lookup_local(var_name)
+                    end
+              if val
                 break_locals[var_name] = val
               end
             end
@@ -41822,9 +42160,15 @@ module Crystal::HIR
         # Patch phi nodes with current variable values so the loop header
         # sees updated variables when we jump back from this block
         if phi_nodes = @loop_phi_stack.last?
+          inline_loop_vars = inline_loop_vars_union
           current_block = ctx.current_block
           phi_nodes.each do |var_name, phi|
-            if updated_val = ctx.lookup_local(var_name)
+            updated_val = if loop_vars = inline_loop_vars
+                            resolve_loop_updated_value(ctx, var_name, loop_vars)
+                          else
+                            ctx.lookup_local(var_name)
+                          end
+            if updated_val
               incoming_val = updated_val
               phi_type = ctx.type_of(phi.id)
               val_type = ctx.type_of(updated_val)
@@ -46894,6 +47238,18 @@ module Crystal::HIR
           if env_get("DEBUG_FROM_IO_CALL") && method_name == "from_io"
             STDERR.puts "[FROM_IO_CLASS] owner=#{class_name_str} receiver_id=#{receiver_id || "nil"} force_instance=#{force_instance_receiver}"
           end
+          # `type.from_io(self, format)` in IO#read_bytes passes a type as a value.
+          # Force class-method lowering for from_io when the owner type is known.
+          # Otherwise lowering can incorrectly treat the local `type` value as an
+          # instance receiver and shift call arguments (io <- type, format <- self).
+          if method_name == "from_io"
+            if class_from_io = resolve_class_method_with_inheritance(class_name_str, method_name)
+              full_method_name = class_from_io
+              static_class_name = class_name_str
+              receiver_id = nil
+              force_instance_receiver = false
+            end
+          end
           if env_get("DEBUG_EXE_PATH_CALL") && method_name == "executable_path"
             raw_obj = stringify_type_expr(callee_node.object) || "(unknown)"
             STDERR.puts "[DEBUG_EXE_PATH_CALL] obj=#{obj_node.class.name.split("::").last} raw=#{raw_obj} resolved=#{class_name_str} current=#{@current_class || "nil"} override=#{@current_namespace_override || "nil"}"
@@ -47283,6 +47639,21 @@ module Crystal::HIR
             recv_desc = @module.get_type_descriptor(receiver_type)
             recv_name = recv_desc ? recv_desc.name : "nil"
             STDERR.puts "[FROM_IO_RECV] type=#{recv_name} id=#{receiver_type.id} literal=#{receiver_is_type_literal}"
+          end
+          # Some generic paths represent `type` as a runtime local value (e.g.
+          # IO#read_bytes(type, format) calling `type.from_io(self, format)`).
+          # For from_io we must dispatch as a class method on the concrete type
+          # and MUST NOT pass that runtime local as receiver.
+          if method_name == "from_io" && !receiver_is_type_literal
+            recv_name = get_type_name_from_ref(receiver_type)
+            if !recv_name.empty?
+              if class_from_io = resolve_class_method_with_inheritance(recv_name, method_name)
+                full_method_name = class_from_io
+                static_class_name = recv_name
+                receiver_id = nil
+                receiver_is_type_literal = true
+              end
+            end
           end
           ensure_monomorphized_type(receiver_type) unless receiver_type == TypeRef::VOID
           if debug_env_filter_match?("DEBUG_EACH_RESOLVE", method_name)
@@ -51198,7 +51569,18 @@ module Crystal::HIR
               module_base = module_base[0, paren]
             end
             module_method_base = "#{module_base}.#{method_name}"
-            if !(has_function_base?(module_method_base) || @function_defs.has_key?(module_method_base))
+            # Keep class/module dot-dispatch when the currently resolved dot target
+            # is already known. Rewriting `.` -> `#` here would corrupt ABI for
+            # calls like `type.from_io(self, format)` where receiver is a type value.
+            dot_target_exists = @module.has_function?(mangled_method_name) ||
+                                @function_types.has_key?(mangled_method_name) ||
+                                has_function_base?(base_method_name) ||
+                                @function_defs.has_key?(base_method_name) ||
+                                @function_types.has_key?(base_method_name) ||
+                                class_method_overload_exists?(base_method_name)
+            if !(dot_target_exists ||
+                 has_function_base?(module_method_base) ||
+                 @function_defs.has_key?(module_method_base))
               # Module-typed receivers should dispatch to instance-style (#) methods
               # only when no module class-method exists.
               mangled_method_name = mangled_method_name.sub(".", "#")
@@ -55125,12 +55507,15 @@ module Crystal::HIR
 
     # Resolve Hash::Entry(K, V) layout from class metadata.
     # Returns: {entry_size, key_offset, value_offset, hash_offset}
-    # Fallback values keep compatibility if metadata is unavailable.
+    # Fallback is computed from declared field order in stdlib:
+    #   Entry(K, V) = { @hash : UInt32, @key : K, @value : V }.
     private def hash_entry_layout(key_type : TypeRef, value_type : TypeRef) : {Int32, Int32, Int32, Int32}
-      entry_size = 24_i32
-      key_offset = 0_i32
-      value_offset = 8_i32
-      hash_offset = 12_i32
+      hash_field_type = TypeRef::UINT32
+      hash_offset = 0_i32
+      key_offset = align_offset(hash_offset + field_storage_size(hash_field_type), type_alignment(key_type))
+      value_offset = align_offset(key_offset + field_storage_size(key_type), type_alignment(value_type))
+      max_align = {type_alignment(hash_field_type), type_alignment(key_type), type_alignment(value_type)}.max || 1
+      entry_size = align_offset(value_offset + field_storage_size(value_type), max_align)
 
       return {entry_size, key_offset, value_offset, hash_offset} if key_type == TypeRef::VOID || value_type == TypeRef::VOID
 
@@ -55138,7 +55523,20 @@ module Crystal::HIR
       value_name = get_type_name_from_ref(value_type)
       entry_name = "Hash::Entry(#{key_name}, #{value_name})"
 
-      if entry_info = @class_info[entry_name]?
+      entry_info = @class_info[entry_name]?
+      if !entry_info
+        entry_ref = type_ref_for_name(entry_name)
+        if entry_ref != TypeRef::VOID
+          entry_info = @class_info_by_type_id[entry_ref.id]?
+          unless entry_info
+            if desc = @module.get_type_descriptor(entry_ref)
+              entry_info = @class_info[desc.name]?
+            end
+          end
+        end
+      end
+
+      if entry_info
         entry_size = entry_info.size
         if key_ivar = entry_info.ivars.find { |iv| iv.name == "@key" || iv.name == "key" }
           key_offset = key_ivar.offset
@@ -55163,9 +55561,8 @@ module Crystal::HIR
     #   offset 28: @deleted_count (i32)
     #   entries_size = @size + @deleted_count
     # Entry layout:
-    #   offset 0:  key (ptr for reference types, inline for value types)
-    #   offset 8:  value (varies by type)
-    #   offset 12: hash_or_deleted flag (i32, 0 = deleted)
+    #   offset 0:  hash_or_deleted flag (UInt32, 0 = deleted)
+    #   then @key/@value with ABI alignment and storage sizing.
     private def lower_hash_each_dynamic(
       ctx : LoweringContext,
       hash_id : ValueId,
@@ -57938,8 +58335,10 @@ module Crystal::HIR
 
       # Isolate callee locals from caller locals, but keep caller locals available for block bodies.
       caller_locals = ctx.save_locals
+      callee_local_names = inline_callee_local_names(func_def, callee_arena)
       @inline_caller_locals_stack << caller_locals
       @inline_caller_function_id_stack << ctx.function.id
+      @inline_callee_local_names_stack << callee_local_names
       preserved_locals = {} of String => ValueId
       ctx.restore_locals(preserved_locals)
       @inline_yield_function_depth += 1
@@ -58147,20 +58546,25 @@ module Crystal::HIR
             result_value = lower_body(ctx, inline_body)
           end
         end
-        if inline_param_map.empty?
-          if namespace_override
-            with_namespace_override(namespace_override) { apply_inline.call }
-          else
-            apply_inline.call
-          end
-        else
-          with_type_param_map(inline_param_map) do
+        @inline_active_caller_locals_index_stack << (@inline_caller_locals_stack.size - 1)
+        begin
+          if inline_param_map.empty?
             if namespace_override
               with_namespace_override(namespace_override) { apply_inline.call }
             else
               apply_inline.call
             end
+          else
+            with_type_param_map(inline_param_map) do
+              if namespace_override
+                with_namespace_override(namespace_override) { apply_inline.call }
+              else
+                apply_inline.call
+              end
+            end
           end
+        ensure
+          @inline_active_caller_locals_index_stack.pop?
         end
 
         if ctx.get_block(ctx.current_block).terminator.is_a?(Unreachable)
@@ -58168,7 +58572,7 @@ module Crystal::HIR
           inline_return.incoming << {ctx.current_block, result_value}
           if return_locals = @inline_yield_return_caller_locals_stack.last?
             if current_caller_locals = @inline_caller_locals_stack.last?
-              return_locals << {ctx.current_block, current_caller_locals.dup}
+              return_locals << {ctx.current_block, snapshot_inline_caller_locals_for_return(current_caller_locals)}
             end
           end
         end
@@ -58265,6 +58669,7 @@ module Crystal::HIR
           ctx.restore_locals(restored)
         end
         @inline_caller_function_id_stack.pop?
+        @inline_callee_local_names_stack.pop?
         @arena = caller_arena
         @inline_arenas = old_inline_arenas
         @inline_yield_function_depth -= 1
@@ -58288,6 +58693,10 @@ module Crystal::HIR
         # registered function_id against ctx.function.id.
         owner = @block_owner[block.object_id]?
         owner_fn_id = @block_owner_function_ids[block.object_id]?
+        # If block owner belongs to a different lowered function, caller-local
+        # SSA ids from @inline_caller_locals_stack are not valid in this function.
+        # In that case keep lowering in current-function locals.
+        cross_function_owner = owner_fn_id && owner_fn_id != ctx.function.id
         # Function id is the strongest ownership signal for non-local return routing.
         # Lexical owner checks can mismatch after temporary @current_class/method
         # rebinding in nested inline contexts and then incorrectly route `return`
@@ -58463,6 +58872,10 @@ module Crystal::HIR
           end
         end
         result = if caller_locals = @inline_caller_locals_stack[caller_locals_index]?
+                   use_stack_caller_locals = !cross_function_owner
+                   if cross_function_owner
+                     caller_locals = ctx.save_locals
+                   end
                    if owner_self_id = @block_owner_self_ids[block.object_id]?
                      unless caller_locals.has_key?("self")
                        caller_locals = caller_locals.dup
@@ -58490,147 +58903,173 @@ module Crystal::HIR
                    begin
                      saved_callee_locals = ctx.save_locals
                      ctx.restore_locals(caller_locals)
-
-                     caller_locals_before_params = ctx.save_locals
-                     param_names = [] of String
-                     if params = block.params
-                       params.each do |param|
-                         if pname = param.name
-                           param_names << String.new(pname)
-                         end
-                       end
+                     if use_stack_caller_locals
+                       @inline_active_caller_locals_index_stack << caller_locals_index
                      end
-
-                     # Bind block parameters to yield arguments (in caller scope).
-                     param_names.each_with_index do |param_name, idx|
-                       next unless idx < yield_args.size
-                       arg_id = yield_args[idx]
-                       if param_types && (param_type = param_types[idx]?) && param_type != TypeRef::VOID
-                         # When the yield arg already has a concrete type, prefer it over the
-                         # pre-computed hint from block_param_types_for_call. The hint can be
-                         # wrong for methods like exec_recursive_clone where the block param
-                         # type doesn't correspond to the receiver's element type.
-                         arg_actual_type = ctx.type_of(arg_id)
-                         # Prefer the actual type from the yield arg over the pre-computed
-                         # hint when both are concrete but different. The flowing type is
-                         # authoritative (e.g., Hash(UInt64, UInt64) vs fallback Tuple(String, Box)).
-                         use_type = if arg_actual_type != TypeRef::VOID && arg_actual_type != param_type
-                                      arg_actual_type
-                                    else
-                                      param_type
-                                    end
-                         ctx.register_local(param_name, arg_id)
-                         ctx.register_type(arg_id, use_type)
-                         update_typeof_local(param_name, use_type)
-                         update_typeof_local_name(param_name, get_type_name_from_ref(use_type))
-                       else
-                         ctx.register_local(param_name, arg_id)
-                         ctx.register_type(arg_id, ctx.type_of(arg_id))
-                       end
-                     end
-
-                     body_result = begin
-                       # The block body belongs to the *caller* and may itself contain `yield`.
-                       # Temporarily disable the current inlined-yield substitution so nested `yield`
-                       # in the block body can bind to an outer inlining context (if any).
-                       popped_block = @inline_yield_block_stack.pop?
-                       popped_arena = @inline_yield_block_arena_stack.pop?
-                       popped_param_types = @inline_yield_block_param_types_stack.pop?
-                       if popped_block && popped_block.object_id != block.object_id
-                         # Unexpected mismatch; restore stacks and continue without popping.
-                         @inline_yield_block_stack << popped_block
-                         @inline_yield_block_arena_stack << popped_arena if popped_arena
-                         @inline_yield_block_param_types_stack << popped_param_types
-                         popped_block = nil
-                         popped_arena = nil
-                         popped_param_types = nil
-                       end
-
-                       old_arena = @arena
-                       begin
-                         block_arena = resolve_arena_for_block(block, old_arena)
-                         chosen_arena = block_arena || popped_arena || @inline_yield_block_arena_stack.last? || old_arena
-                         @arena = chosen_arena
-                         # When inlining a block body inside a loop, push a continuation
-                         # block onto @loop_cond_stack so that `next` inside the block
-                         # jumps to post-yield code (e.g., @pos advance in each), not
-                         # directly to the enclosing loop condition.
-                         yield_cont_block : BlockId? = nil
-                         pushed_yield_loop = false
-                         if @loop_cond_stack.size > 0
-                           yield_cont_block = ctx.create_block
-                           @loop_cond_stack << yield_cont_block
-                           @loop_phi_stack << {} of String => HIR::Phi
-                           pushed_yield_loop = true
-                         end
-                         block_body_lr = begin
-                           lower_body(ctx, block.body)
-                         ensure
-                           if pushed_yield_loop
-                             @loop_cond_stack.pop?
-                             @loop_phi_stack.pop?
+                     begin
+                       caller_locals_before_params = ctx.save_locals
+                       param_names = [] of String
+                       if params = block.params
+                         params.each do |param|
+                           if pname = param.name
+                             param_names << String.new(pname)
                            end
-                           @arena = old_arena
                          end
-                         if ycb = yield_cont_block
-                           ctx.terminate(Jump.new(ycb))
-                           ctx.switch_to_block(ycb)
+                       end
+
+                       # Bind block parameters to yield arguments (in caller scope).
+                       param_names.each_with_index do |param_name, idx|
+                         next unless idx < yield_args.size
+                         arg_id = yield_args[idx]
+                         if param_types && (param_type = param_types[idx]?) && param_type != TypeRef::VOID
+                           # When the yield arg already has a concrete type, prefer it over the
+                           # pre-computed hint from block_param_types_for_call. The hint can be
+                           # wrong for methods like exec_recursive_clone where the block param
+                           # type doesn't correspond to the receiver's element type.
+                           arg_actual_type = ctx.type_of(arg_id)
+                           # Prefer the actual type from the yield arg over the pre-computed
+                           # hint when both are concrete but different. The flowing type is
+                           # authoritative (e.g., Hash(UInt64, UInt64) vs fallback Tuple(String, Box)).
+                           use_type = if arg_actual_type != TypeRef::VOID && arg_actual_type != param_type
+                                        arg_actual_type
+                                      else
+                                        param_type
+                                      end
+                           ctx.register_local(param_name, arg_id)
+                           ctx.register_type(arg_id, use_type)
+                           update_typeof_local(param_name, use_type)
+                           update_typeof_local_name(param_name, get_type_name_from_ref(use_type))
+                         else
+                           ctx.register_local(param_name, arg_id)
+                           ctx.register_type(arg_id, ctx.type_of(arg_id))
                          end
-                         block_body_lr
-                       ensure
-                         if popped_block
+                       end
+
+                       body_result = begin
+                         # The block body belongs to the *caller* and may itself contain `yield`.
+                         # Temporarily disable the current inlined-yield substitution so nested `yield`
+                         # in the block body can bind to an outer inlining context (if any).
+                         popped_block = @inline_yield_block_stack.pop?
+                         popped_arena = @inline_yield_block_arena_stack.pop?
+                         popped_param_types = @inline_yield_block_param_types_stack.pop?
+                         if popped_block && popped_block.object_id != block.object_id
+                           # Unexpected mismatch; restore stacks and continue without popping.
                            @inline_yield_block_stack << popped_block
+                           @inline_yield_block_arena_stack << popped_arena if popped_arena
                            @inline_yield_block_param_types_stack << popped_param_types
-                           if restored_arena = popped_arena
-                             @inline_yield_block_arena_stack << restored_arena
-                           else
-                             @inline_yield_block_arena_stack << old_arena
+                           popped_block = nil
+                           popped_arena = nil
+                           popped_param_types = nil
+                         end
+
+                         old_arena = @arena
+                         begin
+                           block_arena = resolve_arena_for_block(block, old_arena)
+                           chosen_arena = block_arena || popped_arena || @inline_yield_block_arena_stack.last? || old_arena
+                           @arena = chosen_arena
+                           # When inlining a block body inside a loop, push a continuation
+                           # block onto @loop_cond_stack so that `next` inside the block
+                           # jumps to post-yield code (e.g., @pos advance in each), not
+                           # directly to the enclosing loop condition.
+                           yield_cont_block : BlockId? = nil
+                           pushed_yield_loop = false
+                           if @loop_cond_stack.size > 0
+                             yield_cont_block = ctx.create_block
+                             @loop_cond_stack << yield_cont_block
+                             @loop_phi_stack << {} of String => HIR::Phi
+                             pushed_yield_loop = true
+                           end
+                           block_body_lr = begin
+                             lower_body(ctx, block.body)
+                           ensure
+                             if pushed_yield_loop
+                               @loop_cond_stack.pop?
+                               @loop_phi_stack.pop?
+                             end
+                             @arena = old_arena
+                           end
+                           if ycb = yield_cont_block
+                             ctx.terminate(Jump.new(ycb))
+                             ctx.switch_to_block(ycb)
+                           end
+                           block_body_lr
+                         ensure
+                           if popped_block
+                             @inline_yield_block_stack << popped_block
+                             @inline_yield_block_param_types_stack << popped_param_types
+                             if restored_arena = popped_arena
+                               @inline_yield_block_arena_stack << restored_arena
+                             else
+                               @inline_yield_block_arena_stack << old_arena
+                             end
                            end
                          end
                        end
-                     end
 
-                     if env_get("DEBUG_INLINE_YIELD_RESULT")
-                       arg_names = yield_args.map { |arg_id| get_type_name_from_ref(ctx.type_of(arg_id)) }.join(",")
-                       res_type = ctx.type_of(body_result)
-                       res_name = res_type == TypeRef::VOID ? "Void" : get_type_name_from_ref(res_type)
-                       callee_name = @inline_yield_name_stack.last? || ""
-                       STDERR.puts "[INLINE_YIELD_RESULT] callee=#{callee_name} args=#{arg_names} result=#{res_name}"
-                     end
-
-                     caller_locals_after = ctx.save_locals
-                     # Block parameters must not leak outside the block.
-                     param_names.each do |name|
-                       if prev = caller_locals_before_params[name]?
-                         caller_locals_after[name] = prev
-                       else
-                         caller_locals_after.delete(name)
+                       if env_get("DEBUG_INLINE_YIELD_RESULT")
+                         arg_names = yield_args.map { |arg_id| get_type_name_from_ref(ctx.type_of(arg_id)) }.join(",")
+                         res_type = ctx.type_of(body_result)
+                         res_name = res_type == TypeRef::VOID ? "Void" : get_type_name_from_ref(res_type)
+                         callee_name = @inline_yield_name_stack.last? || ""
+                         STDERR.puts "[INLINE_YIELD_RESULT] callee=#{callee_name} args=#{arg_names} result=#{res_name}"
                        end
-                     end
 
-                     # If we're in an inline loop context, keep phi-bound locals stable across iterations.
-                     if loop_vars = inline_loop_vars_union
-                       loop_vars.each do |name|
-                         if prev = caller_locals[name]?
-                           # Save the pre-revert value so the enclosing while loop can use
-                           # it for the PHI backedge incoming value. Without this, the
-                           # updated value (e.g., new_entry_index + 1) would be lost after
-                           # the revert restores the PHI value.
-                            if updated = caller_locals_after[name]?
-                              if updated != prev
-                                @inline_loop_var_backedge_values[name] = updated
-                              end
-                            end
-                            caller_locals_after[name] = prev
+                       caller_locals_after = ctx.save_locals
+                       # Block parameters must not leak outside the block.
+                       param_names.each do |name|
+                         if prev = caller_locals_before_params[name]?
+                           caller_locals_after[name] = prev
                          else
                            caller_locals_after.delete(name)
                          end
                        end
-                     end
-                     @inline_caller_locals_stack[caller_locals_index] = caller_locals_after
 
-                     ctx.restore_locals(saved_callee_locals)
-                     body_result
+                       # If we're in an inline loop context, keep phi-bound locals stable across iterations.
+                       if loop_vars = inline_loop_vars_union
+                         loop_vars.each do |name|
+                           if prev = caller_locals[name]?
+                             # Save the pre-revert value so the enclosing while loop can use
+                             # it for the PHI backedge incoming value. Without this, the
+                             # updated value (e.g., new_entry_index + 1) would be lost after
+                             # the revert restores the PHI value.
+                              if updated = caller_locals_after[name]?
+                                if updated != prev
+                                  @inline_loop_var_backedge_values[name] = updated
+                                end
+                              end
+                              caller_locals_after[name] = prev
+                           else
+                             caller_locals_after.delete(name)
+                           end
+                         end
+                       end
+                       # Inline block writeback must not erase concrete caller locals
+                       # (numeric/pointer/struct/class) into Nil/Void due cross-path
+                       # merge artifacts from nested inline lowering.
+                       caller_locals.each do |name, prev|
+                         next unless updated = caller_locals_after[name]?
+                         next if updated == prev
+                         updated_type = ctx.type_of(updated)
+                         next unless updated_type == TypeRef::NIL || updated_type == TypeRef::VOID
+
+                         prev_type = ctx.type_of(prev)
+                         prev_desc = @module.get_type_descriptor(prev_type)
+                         prev_pointer_like = prev_type == TypeRef::POINTER || prev_desc.try(&.kind) == TypeKind::Pointer
+                         prev_struct_or_class = prev_desc && (prev_desc.kind == TypeKind::Struct || prev_desc.kind == TypeKind::Class)
+                         if numeric_primitive?(prev_type) || prev_pointer_like || prev_struct_or_class
+                           caller_locals_after[name] = prev
+                         end
+                       end
+                       if use_stack_caller_locals
+                         debug_inline_locals_snapshot(ctx, "inline_block:after idx=#{caller_locals_index}", caller_locals_after)
+                         @inline_caller_locals_stack[caller_locals_index] = caller_locals_after
+                       end
+
+                       ctx.restore_locals(saved_callee_locals)
+                       body_result
+                     ensure
+                       @inline_active_caller_locals_index_stack.pop? if use_stack_caller_locals
+                     end
                    ensure
                      @current_class = old_inline_class
                      @current_method = old_inline_method

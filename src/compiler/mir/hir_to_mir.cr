@@ -1359,6 +1359,25 @@ module Crystal
       0
     end
 
+    # Resolve MIR element type for HIR Pointer(T).
+    private def pointer_element_mir_type(pointer_hir_type : HIR::TypeRef?) : TypeRef?
+      return nil unless pointer_hir_type
+      desc = @hir_module.get_type_descriptor(pointer_hir_type)
+      return nil unless desc
+      return nil unless desc.name.starts_with?("Pointer(")
+
+      if elem_hir = desc.type_params.first?
+        return convert_type(elem_hir)
+      end
+
+      elem_name = desc.name[8, desc.name.size - 9]
+      if elem_mir = @mir_module.type_registry.get_by_name(elem_name)
+        return TypeRef.new(elem_mir.id)
+      end
+
+      nil
+    end
+
     # ─────────────────────────────────────────────────────────────────────────
     # Index Access Lowering
     # ─────────────────────────────────────────────────────────────────────────
@@ -1665,9 +1684,13 @@ module Crystal
         # signature does not include receiver `self`. For those, drop the receiver
         # argument before coercion to keep call ABI aligned with callee params.
         callee_param_count = func.params.size
-        drop_dispatch_receiver = callee_param_count <= args.size - 1 &&
-                                 method_name_str.includes?('.') &&
-                                 !method_name_str.includes?('#')
+        drop_dispatch_receiver = should_drop_dispatch_receiver?(
+          call.receiver,
+          method_name_str,
+          args,
+          func,
+          hir_args_for_coerce
+        )
 
         effective_args = args
         effective_hir_args = hir_args_for_coerce
@@ -2002,15 +2025,19 @@ module Crystal
         if call_func
           callee_param_count = call_func.params.size
           coerced_args = cand_args
-          # Module/class dispatch can route to static methods (dot methods) whose
-          # signature does not include receiver `self`. In that case, drop the
-          # dispatch receiver argument before coercion.
-          drop_dispatch_receiver = callee_param_count <= cand_args.size - 1 &&
-                                   call_func.name.includes?('.') &&
-                                   !call_func.name.includes?('#')
           if hir_call
             recv_id = hir_call.receiver
             hir_args_with_receiver = recv_id ? [recv_id] + hir_call.args : hir_call.args
+            # Module/class dispatch can route to static methods whose signature
+            # does not include receiver `self`. Also guard against leaked
+            # dispatch receivers where only shifted arg alignment matches ABI.
+            drop_dispatch_receiver = should_drop_dispatch_receiver?(
+              recv_id,
+              call_func.name,
+              cand_args,
+              call_func,
+              hir_args_with_receiver
+            )
             effective_args = cand_args
             effective_hir_args = hir_args_with_receiver
             if drop_dispatch_receiver
@@ -2032,6 +2059,9 @@ module Crystal
               coerced_args = coerce_call_args(dispatch_builder, effective_args, effective_hir_args, call_func)
             end
           else
+            drop_dispatch_receiver = callee_param_count <= cand_args.size - 1 &&
+                                     call_func.name.includes?('.') &&
+                                     !call_func.name.includes?('#')
             effective_args = drop_dispatch_receiver ? cand_args[1, callee_param_count] : cand_args
             if callee_param_count < effective_args.size
               coerced_args = effective_args[0, callee_param_count]
@@ -2847,6 +2877,55 @@ module Crystal
         end
       end
       nil
+    end
+
+    private def should_drop_dispatch_receiver?(
+      receiver : HIR::ValueId?,
+      method_name : String,
+      mir_args : Array(ValueId),
+      callee_func : MIR::Function,
+      hir_args_with_receiver : Array(HIR::ValueId),
+    ) : Bool
+      callee_param_count = callee_func.params.size
+      return false unless receiver
+      return false unless callee_param_count <= mir_args.size - 1
+
+      # Explicit class/module calls are static at ABI level (no receiver param).
+      if method_name.includes?('.') && !method_name.includes?('#')
+        return true
+      end
+
+      # Generic metaclass dispatch can leak a synthetic receiver value into the
+      # arg list. When arity is receiver+N but callee expects N, keep receiver
+      # only if it matches param[0]; otherwise use shifted args if they match.
+      return false unless mir_args.size == callee_param_count + 1
+      return false if hir_args_with_receiver.size < 2
+      first_param = callee_func.params.first?.try(&.type)
+      return false unless first_param
+
+      keep_type = convert_type(@hir_value_types[hir_args_with_receiver[0]]? || HIR::TypeRef::VOID)
+      drop_type = convert_type(@hir_value_types[hir_args_with_receiver[1]]? || HIR::TypeRef::VOID)
+      keep_match = call_arg_matches_param_type?(keep_type, first_param)
+      drop_match = call_arg_matches_param_type?(drop_type, first_param)
+
+      !keep_match && drop_match
+    end
+
+    private def call_arg_matches_param_type?(arg_type : TypeRef, param_type : TypeRef) : Bool
+      return true if arg_type == param_type
+      if param_type == TypeRef::POINTER
+        return reference_like_mir_type?(arg_type)
+      end
+      if is_union_type?(param_type)
+        return get_union_variant_id(arg_type, param_type) >= 0
+      end
+      false
+    end
+
+    private def reference_like_mir_type?(type : TypeRef) : Bool
+      return true if type == TypeRef::POINTER
+      return true if type.reference?
+      false
     end
 
     # Coerce call arguments to match function parameter types
@@ -3803,8 +3882,10 @@ module Crystal
       ptr = get_value(store.pointer)
       val = get_value(store.value)
 
-      # Get the element type from the value being stored
-      elem_type = get_arg_type(store.value)
+      # Element stride must come from pointer type (Pointer(T)), not value type.
+      # Value type can be alias/wrapper (e.g. Hash::Entry vs Entry) and produce
+      # wrong GEP scaling.
+      elem_type = pointer_element_mir_type(@hir_value_types[store.pointer]?) || get_arg_type(store.value)
 
       if idx = store.index
         # ptr[idx] = val - need GEP then store

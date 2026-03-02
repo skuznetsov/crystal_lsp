@@ -1,5 +1,52 @@
 # Crystal v2 — Active Work (codegen branch)
 
+## 2026-03-02: Root-cause fix — `type.from_io(self, format)` ABI corruption in `IO#read_bytes`
+
+### Symptom
+- Stage2 bootstrap remained unstable/slow; prior failing pattern included `byteformat` path.
+- Historical LLVM snapshot showed wrong call shape in `IO#read_bytes$$UInt32...`:
+  - call into `UInt32$Hfrom_io...` with shifted args (`type,self`) and dropped `format`.
+
+### Localization (root cause)
+- `ast_to_hir` resolved call-sites correctly as class calls (`UInt32.from_io...`, receiver absent),
+  confirmed via `DEBUG_FROM_IO_CALL=1 DEBUG_CALL_TRACE=from_io`.
+- Corruption happened after that in dispatch/lowering boundaries:
+  1) module-like receiver rewrite path could flip valid dot-dispatch into hash-dispatch (`.` -> `#`) when owner inference was weak;
+  2) MIR call ABI alignment had no generic guard for leaked dispatch receiver values in arity-mismatch situations.
+
+### Fixes
+- `src/compiler/hir/ast_to_hir.cr`
+  - In module-like receiver rewrite block, added `dot_target_exists` guard.
+  - If current dot target is already known/resolvable, forbid `.` -> `#` rewrite.
+- `src/compiler/mir/hir_to_mir.cr`
+  - Added `should_drop_dispatch_receiver?` guard and used it in:
+    - normal `lower_call`
+    - dispatch-call lowering path
+  - Added strict first-parameter alignment checks to drop leaked dispatch receiver only when shifted args match callee ABI better.
+
+### Evidence
+- HIR/MIR name dump confirms dot-targets exist for from_io:
+  - `DEBUG_MIR_FUNC_NAMES=/tmp/mir_names_fromio.txt DEBUG_MIR_FUNC_MATCH=from_io ...`
+  - HIR and MIR both list `UInt32.from_io$...` (dot form).
+- Emitted LLVM IR after fix (fresh build with `--emit llvm-ir`):
+  - `/tmp/test_byteformat_dotguard_emit.ll`
+  - `IO$Hread_bytes$$UInt32...` now calls:
+    - `@UInt32$Dfrom_io$$IO_IO$CCByteFormat$CCLittleEndian(ptr %self, ptr %format)`
+  - i.e. no `inttoptr(type)` receiver leak and no dropped `format`.
+- Safety/regression:
+  - `scripts/run_safe.sh /tmp/test_byteformat_dotguard.bin 5 512` → `byteformat_u32_ok`
+  - `regression_tests/run_all.sh /tmp/stage1_dbg_fromio_dotguard` → `61 passed, 0 failed`
+
+### Bootstrap timing snapshot (current branch)
+- Stage1 release (original compiler):
+  - `/usr/bin/time -p crystal build src/crystal_v2.cr --release -o /tmp/stage1_rel_fromio_fix`
+  - `real 407.46`
+- Stage2 release (built by stage1, watchdog 180s):
+  - `/usr/bin/time -p scripts/timeout_sample_lldb.sh -t 180 --series-start 30 --series-interval 60 --series-duration 8 -o /tmp/stage2_rel_fromio_fix_diag -- /tmp/stage1_rel_fromio_fix src/crystal_v2.cr --release -o /tmp/stage2_rel_fromio_fix`
+  - timed out at 180s (`real 193.01` including diagnostics), output binary not produced.
+  - series samples (30s/90s/150s) and timeout sample collected in `/tmp/stage2_rel_fromio_fix_diag`.
+  - final hotspots: `String#index`, `LLVMIRGenerator#emit_function`, `String#size`, `_platform_memmove`.
+
 ## 2026-03-02: Root-cause fix — `UnionWrap` cross-block slot corruption (infinite `puts`, `%r174` opt failure)
 
 ### Symptom (mini-oracles)
