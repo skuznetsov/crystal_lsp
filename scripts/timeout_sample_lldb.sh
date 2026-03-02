@@ -8,6 +8,12 @@ Usage:
 
 Options:
   -t, --timeout SEC       Timeout before sampling (default: 300)
+  -m, --memory-limit MB   Kill if process RSS (parent + children) exceeds MB (default: 0, disabled)
+      --memory-percent PCT Kill if process RSS exceeds a percentage of total RAM (default: disabled, range 1-100)
+      --memory-prewarn-pct PCT  Start early memory diagnostics when RSS exceeds this percentage of limit (disabled, range 1-99)
+      --memory-prewarn-lldb-timeout SEC  prewarn LLDB timeout seconds (default: 5)
+      --memory-prewarn-sample-secs SEC  prewarn sample duration in seconds (default: --sample)
+      --memory-check-sec SEC  Interval between memory checks in seconds (default: 1)
   -s, --sample SEC        sample(1) duration in seconds (default: 10)
   -l, --lldb-timeout SEC  LLDB attach/backtrace timeout (default: 20)
   -n, --top N             Number of hotspot symbols (default: 5)
@@ -24,6 +30,14 @@ USAGE
 }
 
 TIMEOUT_SECS=300
+MEMORY_LIMIT_MB=0
+MEMORY_LIMIT_PCT=0
+MEMORY_PREWARN_PCT=0
+MEMORY_PREWARN_MB=0
+MEMORY_PREWARN_TRIGGERED=0
+MEMORY_CHECK_SECS=1
+MEMORY_PREWARN_LLDB_TIMEOUT=5
+MEMORY_PREWARN_SAMPLE_SECS=0
 SAMPLE_SECS=10
 LLDB_TIMEOUT_SECS=20
 TOP_N=5
@@ -39,6 +53,18 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     -t|--timeout)
       TIMEOUT_SECS="${2:-}"; shift 2 ;;
+    -m|--memory-limit)
+      MEMORY_LIMIT_MB="${2:-}"; shift 2 ;;
+    --memory-percent)
+      MEMORY_LIMIT_PCT="${2:-}"; shift 2 ;;
+    --memory-prewarn-pct)
+      MEMORY_PREWARN_PCT="${2:-}"; shift 2 ;;
+    --memory-prewarn-lldb-timeout)
+      MEMORY_PREWARN_LLDB_TIMEOUT="${2:-}"; shift 2 ;;
+    --memory-prewarn-sample-secs)
+      MEMORY_PREWARN_SAMPLE_SECS="${2:-}"; shift 2 ;;
+    --memory-check-sec)
+      MEMORY_CHECK_SECS="${2:-}"; shift 2 ;;
     -s|--sample)
       SAMPLE_SECS="${2:-}"; shift 2 ;;
     -l|--lldb-timeout)
@@ -83,11 +109,95 @@ mkdir -p "$OUT_DIR"
 if (( SERIES_SAMPLE_SECS <= 0 )); then
   SERIES_SAMPLE_SECS="$SAMPLE_SECS"
 fi
+MEMORY_LIMIT_MODE="disabled"
+
+if (( MEMORY_LIMIT_MB > 0 && MEMORY_LIMIT_PCT > 0 )); then
+  echo "[error] use either --memory-limit or --memory-percent, not both" >&2
+  usage >&2
+  exit 2
+fi
+
+if (( MEMORY_LIMIT_PCT > 0 )); then
+  if (( MEMORY_LIMIT_PCT < 1 || MEMORY_LIMIT_PCT > 100 )); then
+    echo "[error] --memory-percent must be in 1..100" >&2
+    usage >&2
+    exit 2
+  fi
+  get_total_ram_mb() {
+    if command -v sysctl >/dev/null 2>&1; then
+      local mem_bytes
+      mem_bytes="$(sysctl -n hw.memsize 2>/dev/null || true)"
+      if [[ -n "${mem_bytes:-}" ]]; then
+        printf '%s\n' "$((mem_bytes / 1024 / 1024))"
+        return 0
+      fi
+    fi
+
+    if [[ -r /proc/meminfo ]]; then
+      awk '/^MemTotal:/ { print int($2 / 1024); exit }' /proc/meminfo 2>/dev/null || true
+      return 0
+    fi
+
+    return 1
+  }
+
+  TOTAL_RAM_MB="$(get_total_ram_mb || true)"
+  if [[ -z "${TOTAL_RAM_MB:-}" || "${TOTAL_RAM_MB}" = "0" ]]; then
+    echo "[error] failed to detect physical RAM for --memory-percent" >&2
+    usage >&2
+    exit 2
+  fi
+
+  MEMORY_LIMIT_MB=$((TOTAL_RAM_MB * MEMORY_LIMIT_PCT / 100))
+  if (( MEMORY_LIMIT_MB <= 0 )); then
+    echo "[error] invalid computed memory limit" >&2
+    exit 2
+  fi
+  MEMORY_LIMIT_MODE="percent"
+fi
+
+if (( MEMORY_LIMIT_MB > 0 && MEMORY_LIMIT_PCT == 0 )); then
+  MEMORY_LIMIT_MODE="fixed"
+fi
+
+if (( MEMORY_PREWARN_PCT > 0 )); then
+  if [[ "$MEMORY_LIMIT_MODE" == "disabled" ]]; then
+    echo "[error] --memory-prewarn-pct requires either --memory-limit or --memory-percent" >&2
+    usage >&2
+    exit 2
+  fi
+  if (( MEMORY_PREWARN_PCT < 1 || MEMORY_PREWARN_PCT > 99 )); then
+    echo "[error] --memory-prewarn-pct must be in 1..99" >&2
+    usage >&2
+    exit 2
+  fi
+  MEMORY_PREWARN_MB=$((MEMORY_LIMIT_MB * MEMORY_PREWARN_PCT / 100))
+  if (( MEMORY_PREWARN_MB <= 0 )); then
+    MEMORY_PREWARN_MB=1
+  fi
+fi
+
+if (( MEMORY_PREWARN_LLDB_TIMEOUT < 0 )); then
+  echo "[error] --memory-prewarn-lldb-timeout must be >= 0" >&2
+  usage >&2
+  exit 2
+fi
+if (( MEMORY_PREWARN_SAMPLE_SECS < 0 )); then
+  echo "[error] --memory-prewarn-sample-secs must be >= 0" >&2
+  usage >&2
+  exit 2
+fi
+if (( MEMORY_PREWARN_SAMPLE_SECS <= 0 )); then
+  MEMORY_PREWARN_SAMPLE_SECS="$SAMPLE_SECS"
+fi
 
 CMD=("$@")
 CMD_LOG="$OUT_DIR/command.log"
 SAMPLE_LOG="$OUT_DIR/sample.txt"
 SAMPLE_CHILD_LOG="$OUT_DIR/sample.child.txt"
+MEMORY_PREWARN_SAMPLE="$OUT_DIR/memory_prewarn.sample.txt"
+MEMORY_PREWARN_LLDB_CMD="$OUT_DIR/memory_prewarn.lldb.commands"
+MEMORY_PREWARN_LLDB_LOG="$OUT_DIR/memory_prewarn.lldb.txt"
 HOTSPOT_LOG="$OUT_DIR/hotspots.txt"
 LLDB_LOG="$OUT_DIR/lldb.txt"
 LLDB_CMDS="$OUT_DIR/lldb.commands"
@@ -108,6 +218,41 @@ else
   NEXT_SERIES_TS=0
 fi
 TIMED_OUT=0
+MEMORY_LIMIT_EXCEEDED=0
+MEMORY_BYTES=0
+LAST_MEMORY_CHECK_TS=0
+EXIT_CODE=124
+
+collect_descendants_pids() {
+  local parent="$1"
+  local child=""
+  while read -r child; do
+    [[ -z "${child:-}" ]] && continue
+    echo "$child"
+    collect_descendants_pids "$child"
+  done < <(pgrep -P "$parent" || true)
+}
+
+total_rss_kb() {
+  local root_pid="$1"
+  local -a pids=("$root_pid")
+  local child=""
+  while read -r child; do
+    [[ -z "${child:-}" ]] && continue
+    pids+=("$child")
+  done < <(collect_descendants_pids "$root_pid")
+
+  local total=0
+  for child in "${pids[@]}"; do
+    if kill -0 "$child" 2>/dev/null; then
+      local rss
+      rss="$(ps -o rss= -p "$child" 2>/dev/null | tr -d '[:space:]' || true)"
+      [[ -z "$rss" ]] && rss=0
+      total=$((total + rss))
+    fi
+  done
+  printf '%s' "$total"
+}
 
 collect_descendants_live() {
   local parent="$1"
@@ -175,6 +320,46 @@ while kill -0 "$PID" 2>/dev/null; do
     run_periodic_sample "$NOW_TS"
     NEXT_SERIES_TS=$((NOW_TS + SERIES_INTERVAL_SECS))
   fi
+  if (( MEMORY_CHECK_SECS > 0 && MEMORY_LIMIT_MB > 0 )); then
+    if (( NOW_TS - LAST_MEMORY_CHECK_TS >= MEMORY_CHECK_SECS )); then
+      MEMORY_BYTES=$(total_rss_kb "$PID")
+  if (( MEMORY_PREWARN_MB > 0 && MEMORY_PREWARN_TRIGGERED == 0 )) && (( MEMORY_BYTES >= MEMORY_PREWARN_MB * 1024 )); then
+        MEMORY_PREWARN_TRIGGERED=1
+        if command -v sample >/dev/null 2>&1; then
+          sample "$PID" "$MEMORY_PREWARN_SAMPLE_SECS" -file "$MEMORY_PREWARN_SAMPLE" >/dev/null 2>&1 || true
+        fi
+        if command -v lldb >/dev/null 2>&1; then
+          {
+            echo "process attach --pid $PID"
+            echo "thread backtrace all"
+            echo "process detach"
+            echo "quit"
+          } > "$MEMORY_PREWARN_LLDB_CMD"
+          lldb -b -s "$MEMORY_PREWARN_LLDB_CMD" > "$MEMORY_PREWARN_LLDB_LOG" 2>&1 &
+          PREWARN_LC_PID=$!
+          PREWARN_LC_TS=$(date +%s)
+          while kill -0 "$PREWARN_LC_PID" 2>/dev/null; do
+            PREWARN_NOW_TS=$(date +%s)
+            if (( PREWARN_NOW_TS - PREWARN_LC_TS >= MEMORY_PREWARN_LLDB_TIMEOUT )); then
+              kill -TERM "$PREWARN_LC_PID" 2>/dev/null || true
+              sleep 1
+              kill -KILL "$PREWARN_LC_PID" 2>/dev/null || true
+              break
+            fi
+            sleep 1
+          done
+          wait "$PREWARN_LC_PID" 2>/dev/null || true
+        fi
+        PREWARN_MB=$((MEMORY_BYTES / 1024))
+        echo "[memory-prewarn] threshold=${MEMORY_PREWARN_MB}MB pct=${MEMORY_PREWARN_PCT}% used=${PREWARN_MB}MB sample=$MEMORY_PREWARN_SAMPLE lldb=$MEMORY_PREWARN_LLDB_LOG" | tee -a "$OUT_DIR/summary.txt"
+      fi
+      if (( MEMORY_BYTES >= MEMORY_LIMIT_MB * 1024 )); then
+        MEMORY_LIMIT_EXCEEDED=1
+        break
+      fi
+      LAST_MEMORY_CHECK_TS=$NOW_TS
+    fi
+  fi
   if (( NOW_TS - START_TS >= TIMEOUT_SECS )); then
     TIMED_OUT=1
     break
@@ -182,7 +367,7 @@ while kill -0 "$PID" 2>/dev/null; do
   sleep 1
 done
 
-if (( TIMED_OUT == 0 )); then
+if (( TIMED_OUT == 0 && MEMORY_LIMIT_EXCEEDED == 0 )); then
   set +e
   wait "$PID"
   STATUS=$?
@@ -197,7 +382,18 @@ if (( TIMED_OUT == 0 )); then
   exit "$STATUS"
 fi
 
-echo "[timeout] ${TIMEOUT_SECS}s (pid=$PID)" | tee -a "$OUT_DIR/summary.txt"
+if (( MEMORY_LIMIT_EXCEEDED == 1 )); then
+  EXIT_CODE=125
+  echo "[memory-limit] threshold=${MEMORY_LIMIT_MB}MB exceeded" | tee -a "$OUT_DIR/summary.txt"
+  echo "[memory-source] mode=${MEMORY_LIMIT_MODE}" | tee -a "$OUT_DIR/summary.txt"
+  LIMIT_MB=$((MEMORY_BYTES / 1024))
+  echo "[memory-kill] pid=$PID used=${LIMIT_MB}MB limit=${MEMORY_LIMIT_MB}MB" | tee -a "$OUT_DIR/summary.txt"
+  if (( MEMORY_PREWARN_TRIGGERED == 1 )); then
+    echo "[memory-prewarn] triggered=1" | tee -a "$OUT_DIR/summary.txt"
+  fi
+else
+  echo "[timeout] ${TIMEOUT_SECS}s (pid=$PID)" | tee -a "$OUT_DIR/summary.txt"
+fi
 
 collect_descendants() {
   local parent="$1"
@@ -402,4 +598,4 @@ if [[ -s "$HOTSPOT_LOG" ]]; then
   cat "$HOTSPOT_LOG"
 fi
 
-exit 124
+exit "$EXIT_CODE"
