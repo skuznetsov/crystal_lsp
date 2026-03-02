@@ -2166,6 +2166,7 @@ module Crystal::HIR
     @module_defs_cache_version : Int32
     @module_include_alias_cache : Hash({String, String?, Int32}, String)
     @module_alias_prefix_cache : Hash({String, Int32}, String)
+    @resolve_module_ns_cache : Hash({String, String, Int32}, String?)
     @module_def_lookup_cache_version : Int32
     @module_def_lookup_cache : Hash(String, Tuple(CrystalV2::Compiler::Frontend::DefNode, CrystalV2::Compiler::Frontend::ArenaLike)?)
     @module_class_def_lookup_cache : Hash(String, Tuple(CrystalV2::Compiler::Frontend::DefNode, CrystalV2::Compiler::Frontend::ArenaLike)?)
@@ -2543,6 +2544,7 @@ module Crystal::HIR
       @module_defs_cache_version = 0
       @module_include_alias_cache = {} of {String, String?, Int32} => String
       @module_alias_prefix_cache = {} of {String, Int32} => String
+      @resolve_module_ns_cache = {} of {String, String, Int32} => String?
       @module_def_lookup_cache_version = 0
       @module_def_lookup_cache = {} of String => Tuple(CrystalV2::Compiler::Frontend::DefNode, CrystalV2::Compiler::Frontend::ArenaLike)?
       @module_class_def_lookup_cache = {} of String => Tuple(CrystalV2::Compiler::Frontend::DefNode, CrystalV2::Compiler::Frontend::ArenaLike)?
@@ -6229,7 +6231,17 @@ module Crystal::HIR
       element_type = ctx.type_of(array_id)
       if type_desc = @module.get_type_descriptor(element_type)
         if elem_name = element_type_for_type_name(type_desc.name)
-          return type_ref_for_name(elem_name)
+          resolved = type_ref_for_name(elem_name)
+          if resolved != TypeRef::VOID
+            return resolved
+          end
+          # Type not found in registry. Reference types (Tuples, classes, etc.)
+          # are stored as pointers in array buffers — use POINTER so the GEP
+          # stride is 8 bytes (ptr) instead of falling back to i32 (4 bytes).
+          if elem_name.starts_with?("Tuple(") || elem_name.starts_with?("NamedTuple(") ||
+             elem_name.includes?("::") || elem_name[0]?.try(&.uppercase?)
+            return TypeRef::POINTER
+          end
         end
       end
       return default_type if element_type == TypeRef::VOID
@@ -8302,6 +8314,16 @@ module Crystal::HIR
     # Resolve an unqualified module name against progressively shorter owner namespaces.
     # Example: owner "A::B::C", module "M" -> tries "A::B::M", then "A::M".
     private def resolve_module_name_in_owner_namespaces(owner_class : String, module_name : String) : String?
+      cache_key = {owner_class, module_name, @module_defs_cache_version}
+      if @resolve_module_ns_cache.has_key?(cache_key)
+        return @resolve_module_ns_cache[cache_key]
+      end
+      result = resolve_module_name_in_owner_namespaces_impl(owner_class, module_name)
+      @resolve_module_ns_cache[cache_key] = result
+      result
+    end
+
+    private def resolve_module_name_in_owner_namespaces_impl(owner_class : String, module_name : String) : String?
       scan_end = owner_class.bytesize
       while scan_end > 0
         idx = owner_class.rindex("::", scan_end - 1)
@@ -11213,6 +11235,7 @@ module Crystal::HIR
       @module_defs_cache_version += 1
       @module_include_alias_cache.clear
       @module_alias_prefix_cache.clear
+      @resolve_module_ns_cache.clear
       @annotation_type_ref_cache.clear
       clear_defined_method_scan_caches
       clear_receiver_specialization_caches
