@@ -7052,12 +7052,15 @@ module Crystal::MIR
       hoisted_allocas = [] of String
       processed_block_ir = IO::Memory.new
       block_ir.each_line do |line|
-        stripped = line.lstrip
-        # Fast-path: only real SSA assignment lines can be allocas.
-        # This avoids expensive substring scans on comments/labels.
-        if alloca_assignment_line?(stripped)
+        # Fast-path without allocating `lstrip` per line.
+        bytes = line.to_slice
+        pos = 0
+        while pos < bytes.size && (bytes[pos] == 32_u8 || bytes[pos] == 9_u8)
+          pos += 1
+        end
+        if pos < bytes.size && bytes[pos] == 37_u8 && !line.byte_index(" = alloca ", pos).nil?
           hoisted_allocas << line
-          processed_block_ir << "  ; hoisted: " << stripped << '\n'
+          processed_block_ir << "  ; hoisted: " << line << '\n'
         else
           processed_block_ir << line << '\n'
         end

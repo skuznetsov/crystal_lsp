@@ -8691,3 +8691,47 @@ crystal build -Ddebug_hooks src/crystal_v2.cr -o bin/crystal_v2 --no-debug
 - Stage2 no longer trapped on the previously fixed inline-return local-corruption mini-oracles.
 - Release stage2 still exceeds current 3-minute watchdog budget on this branch.
 - Remaining debug-regression failures (`run_all`): 5/61.
+
+## 2026-03-02: Perf pass — remove per-line `lstrip` in alloca-hoist scan
+
+### What changed
+- `src/compiler/mir/llvm_backend.cr` (`emit_function`):
+  - In block IR post-pass (`hoisted_allocas` extraction), replaced `line.lstrip` + `alloca_assignment_line?` with byte-scan on original line:
+    - skip leading spaces/tabs by bytes
+    - require first non-space byte to be `%`
+    - check `byte_index(" = alloca ", pos)` from that offset
+  - This removes one string allocation/scan per emitted IR line in the hot loop.
+- Reverted the temporary `find_type_ref_for_llvm_type` cache experiment (no clear benefit in previous run).
+
+### Validation
+- Debug stage1 build:
+  - `/usr/bin/time -p crystal build src/crystal_v2.cr -o /tmp/stage1_dbg_alloca_trimless`
+  - result: `real 7.86`
+- Regression suite:
+  - `regression_tests/run_all.sh /tmp/stage1_dbg_alloca_trimless`
+  - result: `61 passed, 0 failed`
+- Release stage1 build:
+  - `/usr/bin/time -p crystal build src/crystal_v2.cr --release -o /tmp/stage1_rel_alloca_no_lstrip`
+  - result: `real 430.86`
+- Release stage2 (watchdog + samples):
+  - `/usr/bin/time -p scripts/timeout_sample_lldb.sh -t 180 --series-start 30 --series-interval 60 --series-duration 8 -o /tmp/stage2_rel_alloca_no_lstrip_diag -- /tmp/stage1_rel_alloca_no_lstrip src/crystal_v2.cr --release -o /tmp/stage2_rel_alloca_no_lstrip`
+  - result: timeout `124`, `real 192.78` (including diagnostics), sample series count `3`
+
+### Comparison
+- Previous comparable run: `/tmp/stage2_rel_type_lookup_cache_diag` → `real 193.95`
+- Current: `192.78` (about `-1.17s`, ~`0.6%` faster), but still above 180s watchdog target.
+
+### Hotspot notes
+- Aggregate top symbols:
+  - `LLVMIRGenerator#emit_function`
+  - `String#index`
+  - `LLVMIRGenerator#emit`
+  - `_platform_memmove`
+  - `GC_malloc_kind`
+- Early sample series (`30s`, `90s`) still show heavy HIR work:
+  - `AstToHir#type_ref_for_name`
+  - `AstToHir#substitute_type_params_in_type_name`
+  - `AstToHir#register_concrete_class`
+
+### Next
+- Target next perf root-cause in HIR type-resolution path (`type_ref_for_name` / concrete class registration), guided by mini-oracles and sample deltas.
