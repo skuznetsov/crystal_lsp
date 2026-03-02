@@ -92,6 +92,22 @@
     - `String#index`: `93 -> 71`
   - new lldb timeout frame moved to `emit_union_unwrap` (`llvm_backend.cr:14241`) via `String#include?`.
 
+### Follow-up iteration (emit_union_unwrap micro-opt)
+- Additional optimization in `src/compiler/mir/llvm_backend.cr`:
+  - `emit_union_unwrap` now precomputes union-shape flags (`*.ends_with?(".union")`)
+    and reuses them instead of repeated `includes?` scans and nullable branches.
+  - Also removed repeated `.includes?(".union")` checks for `actual_union_val_type`.
+- Sanity:
+  - `/usr/bin/time -p crystal build src/crystal_v2.cr -o /tmp/stage1_dbg_unionunwrap_perf` → `real 6.17`
+  - `byteformat` guard stays green (`byteformat_u32_ok`).
+- Release timing:
+  - `/usr/bin/time -p crystal build src/crystal_v2.cr --release -o /tmp/stage1_rel_unionunwrap_perf` → `real 409.09`
+  - `/usr/bin/time -p scripts/timeout_sample_lldb.sh -t 180 --series-start 30 --series-interval 60 --series-duration 8 -o /tmp/stage2_rel_unionunwrap_perf_diag -- /tmp/stage1_rel_unionunwrap_perf src/crystal_v2.cr --release -o /tmp/stage2_rel_unionunwrap_perf`
+  - still timeout at 180s (`real 192.90`), but hotspot profile changed materially:
+    - `String#index` dropped out of top-5 timeout hotspots.
+    - Dominant timeout frame is now GC (`GC_mark_from` / `GC_alloc_large`) while emitting LLVM.
+    - `emit_function` remains present but no longer top bottleneck in timeout snapshot.
+
 ## 2026-03-02: Root-cause fix — `UnionWrap` cross-block slot corruption (infinite `puts`, `%r174` opt failure)
 
 ### Symptom (mini-oracles)

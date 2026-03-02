@@ -14213,7 +14213,9 @@ module Crystal::MIR
       # Union may be passed by value - need to store to stack first
       union_val = value_ref(inst.union_value)
       def_union_type_ref = find_def_inst(inst.union_value).try(&.type)
-      union_type_ref = if def_union_type_ref && @type_mapper.llvm_type(def_union_type_ref).includes?(".union")
+      def_union_type = def_union_type_ref ? @type_mapper.llvm_type(def_union_type_ref) : nil
+      def_union_is_union = !!(def_union_type && def_union_type.ends_with?(".union"))
+      union_type_ref = if def_union_type_ref && def_union_is_union
                          def_union_type_ref
                        else
                          @value_types[inst.union_value]? || def_union_type_ref || TypeRef::POINTER
@@ -14221,24 +14223,27 @@ module Crystal::MIR
       static_union_type = @type_mapper.llvm_type(union_type_ref)
       slot_union_type = @cross_block_slot_types[inst.union_value]?
       emitted_union_type = @emitted_value_types[union_val]?
-      def_union_type = def_union_type_ref ? @type_mapper.llvm_type(def_union_type_ref) : nil
-      union_type = if emitted_union_type && emitted_union_type.includes?(".union")
-                     emitted_union_type
-                   elsif slot_union_type && slot_union_type.includes?(".union")
-                     slot_union_type
-                   elsif def_union_type && def_union_type.includes?(".union")
-                     def_union_type
+      emitted_union_is_union = !!(emitted_union_type && emitted_union_type.ends_with?(".union"))
+      slot_union_is_union = !!(slot_union_type && slot_union_type.ends_with?(".union"))
+      union_type = if emitted_union_is_union
+                     emitted_union_type.not_nil!
+                   elsif slot_union_is_union
+                     slot_union_type.not_nil!
+                   elsif def_union_is_union
+                     def_union_type.not_nil!
                    else
                      static_union_type
                    end
+      union_type_is_union = union_type.ends_with?(".union")
       result_type = @type_mapper.llvm_type(inst.type)
       base_name = name.lstrip('%')
 
       # value_ref can cast cross-block union values to ptr when @value_types was
       # polluted to POINTER. For UnionUnwrap we need the raw union struct payload.
-      if union_type.includes?(".union")
+      if union_type_is_union
         emitted_from_ref = @emitted_value_types[union_val]?
-        unless emitted_from_ref && emitted_from_ref.includes?(".union")
+        emitted_from_ref_is_union = !!(emitted_from_ref && emitted_from_ref.ends_with?(".union"))
+        unless emitted_from_ref_is_union
           if slot_name = @cross_block_slots[inst.union_value]?
             c = @cond_counter
             @cond_counter += 1
@@ -14258,7 +14263,7 @@ module Crystal::MIR
       end
 
       # Check if LLVM type is actually a union struct (not just ptr)
-      if union_type.includes?(".union")
+      if union_type_is_union
         # Store union value to stack to get pointer for GEP
         emit "%#{base_name}.union_ptr = alloca #{union_type}, align 8"
         # Coerce source value to the expected union layout before storing.
@@ -14319,6 +14324,7 @@ module Crystal::MIR
       else
         # Not a union struct - just use the value directly
         actual_union_val_type = @emitted_value_types[union_val]? || union_type
+        actual_union_is_union = actual_union_val_type.ends_with?(".union")
         # Check if union_val is an integer literal (type mismatch from defaulting to POINTER)
         is_int_literal = union_val.match(/^-?\d+$/) && union_val != "null"
 
@@ -14335,7 +14341,7 @@ module Crystal::MIR
           if actual_union_val_type == "ptr"
             safe_val = (union_val == "0") ? "null" : union_val
             emit "#{name} = bitcast ptr #{safe_val} to ptr"
-          elsif actual_union_val_type.starts_with?('i') && !actual_union_val_type.includes?(".union")
+          elsif actual_union_val_type.starts_with?('i') && !actual_union_is_union
             emit "#{name} = inttoptr #{actual_union_val_type} #{union_val} to ptr"
           elsif actual_union_val_type == "double"
             emit "%#{base_name}.bits = bitcast double #{union_val} to i64"
@@ -14350,7 +14356,7 @@ module Crystal::MIR
         elsif result_type.starts_with?('i')
           if actual_union_val_type == "ptr"
             emit "#{name} = ptrtoint ptr #{union_val} to #{result_type}"
-          elsif actual_union_val_type.starts_with?('i') && !actual_union_val_type.includes?(".union")
+          elsif actual_union_val_type.starts_with?('i') && !actual_union_is_union
             if actual_union_val_type == result_type
               emit "#{name} = add #{result_type} #{union_val}, 0"
             else
