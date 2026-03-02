@@ -8781,3 +8781,18 @@ crystal build -Ddebug_hooks src/crystal_v2.cr -o bin/crystal_v2 --no-debug
 ### Decision
 - Branches A-D are explicitly **reverted** from code to avoid performance-noise accumulation.
 - Active best-known snapshot remains commit `71dd9cd9` with stage2 watchdog `real 192.78`.
+
+### Branch E (additional): remove long `; hoisted: <alloca>` comment payload
+- Change:
+  - In `emit_function` alloca post-pass, replaced full-line hoisted comments with newline placeholders only.
+- Validation:
+  - `regression_tests/run_all.sh /tmp/stage1_dbg_hoisted_blank` → `61 passed, 0 failed`
+  - Stage2 watchdog repeat #1:
+    - `/usr/bin/time -p scripts/timeout_sample_lldb.sh -t 180 ... /tmp/stage1_rel_hoisted_blank ...`
+    - `real 193.09` (timeout)
+  - Stage2 watchdog repeat #2:
+    - `/usr/bin/time -p scripts/timeout_sample_lldb.sh -t 180 ... /tmp/stage1_rel_hoisted_blank ...`
+    - `real 192.68` (timeout)
+- Result:
+  - Inconclusive/noise-level effect (mean `192.89`, around current baseline envelope).
+  - Branch **reverted** to avoid carrying uncertain perf-only change.
