@@ -43,8 +43,10 @@
 - Stage2 attempts with release stage1:
   - `/usr/bin/time -p scripts/timeout_sample_lldb.sh -t 180 ... -- /tmp/stage1_rel_rootfix6 src/crystal_v2.cr --release -o /tmp/stage2_rel_rootfix6`
   - `/usr/bin/time -p scripts/timeout_sample_lldb.sh -t 180 ... -- /tmp/stage1_rel_rootfix6 src/crystal_v2.cr --release -o /tmp/stage2_rel_rootfix6_try1`
+  - `/usr/bin/time -p scripts/timeout_sample_lldb.sh -t 210 ... -- /tmp/stage1_rel_rootfix6 src/crystal_v2.cr --release -o /tmp/stage2_rel_rootfix6_t210`
   - both hit watchdog timeout at 180s (no `%r174` opt error), hotspots in late LLVM optimization (`Twine`, `mem2reg`, `InstCombine`).
-  - `stage2_rel_rootfix6_try1` was not produced before timeout.
+  - 210s run also timed out (still no `%r174` opt error).
+  - `stage2_rel_rootfix6_try1` and `stage2_rel_rootfix6_t210` were not produced before timeout.
 - Regression suite snapshot (`regression_tests/run_all.sh /tmp/stage1_dbg_rootfix6`):
   - `61 passed, 0 failed (61 total)`.
 
