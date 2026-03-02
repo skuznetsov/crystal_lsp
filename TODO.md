@@ -8864,3 +8864,37 @@ crystal build -Ddebug_hooks src/crystal_v2.cr -o bin/crystal_v2 --no-debug
 - For apples-to-apples stage2 timing against historical no-pipeline snapshots, disable it explicitly:
   - `env CRYSTAL_V2_PIPELINE_CACHE=0 ...`
   - observed watchdog run: `real 193.31` (timeout) on `/tmp/stage1_rel_envflags_cached`.
+
+## 2026-03-02: Full-stage2 cold/warm behavior with restored pipeline cache
+
+### Setup
+- Stage1 used: `/tmp/stage1_rel_pipeline_cache_on` (release build with pipeline-cache re-enabled path).
+- Watchdog rule tested at `t=300`.
+
+### Cold run (`t=300`)
+- Command:
+  - `/usr/bin/time -p scripts/timeout_sample_lldb.sh -t 300 ... -- /tmp/stage1_rel_pipeline_cache_on src/crystal_v2.cr --release -o /tmp/stage2_rel_pipecache_t300_cold`
+- Result:
+  - timeout (`124`), `real 314.45` (includes diagnostics overhead)
+  - timeout hotspots were predominantly LLVM toolchain internals (`opt`/analysis), not HIR lowering.
+
+### Warm run (same command, second pass)
+- Command:
+  - `/usr/bin/time -p scripts/timeout_sample_lldb.sh -t 300 ... -- /tmp/stage1_rel_pipeline_cache_on src/crystal_v2.cr --release -o /tmp/stage2_rel_pipecache_t300_warm`
+- Result:
+  - success (`0`), `real 103.55`
+
+### Warm run with `--stats` (cache counters)
+- Command:
+  - `/usr/bin/time -p scripts/timeout_sample_lldb.sh -t 300 ... -- /tmp/stage1_rel_pipeline_cache_on src/crystal_v2.cr --release --stats -o /tmp/stage2_rel_pipecache_t300_warm_stats`
+- Result:
+  - success, `real 8.09`
+  - timing line:
+    - `Timing (ms): ... llvm_cache=2 hit/0 miss pipeline_cache=1 hit/0 miss`
+
+### Interpretation
+- Restored caches are operational and can drastically accelerate repeated stage2 runs once the first full pass completes.
+- Cold-path bottleneck remains unsolved; at `t=300` it can still stall inside LLVM optimization/toolchain phase.
+- Practical workflow split:
+  - cold-path debugging (root-cause perf/stability in stage2 generation and LLVM handoff),
+  - warm-path iteration (fast repro loops once caches are populated).
