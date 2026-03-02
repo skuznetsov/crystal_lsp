@@ -114,10 +114,30 @@ module Crystal::MIR
   class LLVMTypeMapper
     @type_registry : TypeRegistry
     @type_ref_cache : Hash(TypeRef, String)
+    # Union descriptors for detecting all-reference-type unions (stored as ptr, not struct)
+    property union_descriptors : Hash(TypeRef, UnionDescriptor)?
 
     def initialize(@type_registry : TypeRegistry)
       @type_ref_cache = {} of TypeRef => String
       @mangle_cache = {} of String => String
+    end
+
+    # Check if a union type contains ONLY reference types (classes) and/or Nil.
+    # Such unions are stored as raw pointers (like original Crystal) because
+    # the type_id is already in each object's header — no union discriminator needed.
+    def is_all_ref_union?(type_ref : TypeRef) : Bool
+      descs = @union_descriptors
+      return false unless descs
+      desc = descs[type_ref]?
+      return false unless desc
+      desc.variants.all? do |variant|
+        next true if variant.type_ref == TypeRef::NIL || variant.type_ref == TypeRef::VOID
+        if vtype = @type_registry.get(variant.type_ref)
+          vtype.kind.reference?
+        else
+          false
+        end
+      end
     end
 
     def llvm_type(type_ref : TypeRef) : String
@@ -213,12 +233,51 @@ module Crystal::MIR
       when .pointer?                    then "ptr"
       when .reference?                  then "ptr"
       when .struct?                     then "ptr"  # Structs passed by pointer in our ABI
-      when .union?                      then "%#{mangle_name(type.name)}.union"
+      when .union?
+        # Unions of ALL reference types (classes + Nil) are stored as raw pointers.
+        # The type_id for dispatch lives in each object's header, so no union
+        # discriminator struct is needed.  This matches original Crystal's ABI and
+        # keeps Array element strides consistent (Pointer(T)#[]= stores ptr).
+        if is_all_ref_union_by_name?(type.name)
+          "ptr"
+        else
+          "%#{mangle_name(type.name)}.union"
+        end
       when .proc?                       then "%__crystal_proc"  # { ptr, ptr }
       when .tuple?                      then "ptr"  # Tuple values are represented by pointer in current ABI
       when .array?                      then compute_array_type(type)
       when .enum?                       then "i32"
       else                                   "ptr"
+      end
+    end
+
+    # Check if a union type (by name) has only reference/Nil variants.
+    # Uses the union_descriptors if available, otherwise falls back to checking
+    # each pipe-separated variant name in the type registry.
+    private def is_all_ref_union_by_name?(name : String) : Bool
+      # Fast path: check union descriptors if available
+      if descs = @union_descriptors
+        descs.each_value do |desc|
+          next unless desc.name == name
+          return desc.variants.all? do |variant|
+            next true if variant.type_ref == TypeRef::NIL || variant.type_ref == TypeRef::VOID
+            if vtype = @type_registry.get(variant.type_ref)
+              vtype.kind.reference?
+            else
+              false
+            end
+          end
+        end
+      end
+      # Fallback: parse the union name "A | B | Nil" and check each in registry
+      name.split(" | ").all? do |part|
+        stripped = part.strip
+        next true if stripped == "Nil" || stripped == "Void"
+        if found = @type_registry.get_by_name(stripped)
+          found.kind.reference?
+        else
+          false  # Unknown type — assume not all-ref to be safe
+        end
       end
     end
 
@@ -539,6 +598,7 @@ module Crystal::MIR
 
     def initialize(@module : Module)
       @type_mapper = LLVMTypeMapper.new(@module.type_registry)
+      @type_mapper.union_descriptors = @module.union_descriptors
       @output = IO::Memory.new
       @indent = 0
       @value_names = {} of ValueId => String
@@ -4678,14 +4738,9 @@ module Crystal::MIR
       emit_raw "  %exc = getelementptr i8, ptr %raw, i64 8\n"
       emit_raw "  call void @llvm.memset.p0.i64(ptr %exc, i8 0, i64 #{runtime_error_size}, i1 false)\n"
       emit_raw "  store i32 #{runtime_error_type_id}, ptr %exc\n"
-      emit_raw "  %msg_union.ptr = alloca %Nil$_$OR$_String.union, align 8\n"
-      emit_raw "  %msg_union.type_id_ptr = getelementptr %Nil$_$OR$_String.union, ptr %msg_union.ptr, i32 0, i32 0\n"
-      emit_raw "  store i32 1, ptr %msg_union.type_id_ptr\n"
-      emit_raw "  %msg_union.payload_ptr = getelementptr %Nil$_$OR$_String.union, ptr %msg_union.ptr, i32 0, i32 1\n"
-      emit_raw "  store ptr %msg, ptr %msg_union.payload_ptr, align 8\n"
-      emit_raw "  %msg_union = load %Nil$_$OR$_String.union, ptr %msg_union.ptr\n"
+      emit_raw "  ; Nil|String is all-ref union — store as raw ptr (not union struct)\n"
       emit_raw "  %msg_field = getelementptr i8, ptr %exc, i64 8\n"
-      emit_raw "  store %Nil$_$OR$_String.union %msg_union, ptr %msg_field\n"
+      emit_raw "  store ptr %msg, ptr %msg_field\n"
       emit_raw "  store ptr %exc, ptr @__crystal_exc_ptr\n"
       emit_raw "  %depth = load i32, ptr @__crystal_exc_depth\n"
       emit_raw "  %has_handler = icmp sgt i32 %depth, 0\n"
@@ -5688,6 +5743,11 @@ module Crystal::MIR
         emit_raw "; #{mangled} — direct String hash override (bypass vdispatch)\n"
         emit_raw "define i32 @#{mangled}(ptr %self, ptr %key) {\n"
         emit_raw "entry:\n"
+        emit_raw "  %key_null = icmp eq ptr %key, null\n"
+        emit_raw "  br i1 %key_null, label %ret_null_hash, label %do_hash\n"
+        emit_raw "ret_null_hash:\n"
+        emit_raw "  ret i32 0\n"
+        emit_raw "do_hash:\n"
         emit_raw "  %hasher = call ptr @Crystal$CCHasher$Dnew(i64 0, i64 0)\n"
         # String hash: read bytesize from offset 4, get data ptr at offset 12
         # Then hash each byte (like Crystal::Hasher#bytes does)
@@ -5699,8 +5759,8 @@ module Crystal::MIR
         # Simple approach: hash the bytesize and first 8 bytes as i64 chunks
         emit_raw "  br label %hash_loop\n"
         emit_raw "hash_loop:\n"
-        emit_raw "  %i = phi i64 [0, %entry], [%i_next, %hash_continue]\n"
-        emit_raw "  %h = phi ptr [%hasher, %entry], [%h_next, %hash_continue]\n"
+        emit_raw "  %i = phi i64 [0, %do_hash], [%i_next, %hash_continue]\n"
+        emit_raw "  %h = phi ptr [%hasher, %do_hash], [%h_next, %hash_continue]\n"
         emit_raw "  %done = icmp sge i64 %i, %bs64\n"
         emit_raw "  br i1 %done, label %hash_finish, label %hash_body\n"
         emit_raw "hash_body:\n"
@@ -5745,6 +5805,11 @@ module Crystal::MIR
         emit_raw "; #{mangled} — direct HIR::TypeRef hash override (bypass vdispatch)\n"
         emit_raw "define i32 @#{mangled}(ptr %self, ptr %key) {\n"
         emit_raw "entry:\n"
+        emit_raw "  %key_null = icmp eq ptr %key, null\n"
+        emit_raw "  br i1 %key_null, label %ret_null_hash, label %do_hash\n"
+        emit_raw "ret_null_hash:\n"
+        emit_raw "  ret i32 0\n"
+        emit_raw "do_hash:\n"
         emit_raw "  %hasher = call ptr @Crystal$CCHasher$Dnew(i64 0, i64 0)\n"
         emit_raw "  %id = load i32, ptr %key\n"
         emit_raw "  %id64 = zext i32 %id to i64\n"
@@ -5766,6 +5831,11 @@ module Crystal::MIR
         emit_raw "; #{mangled} — direct MIR::TypeRef hash override (bypass vdispatch)\n"
         emit_raw "define i32 @#{mangled}(ptr %self, ptr %key) {\n"
         emit_raw "entry:\n"
+        emit_raw "  %key_null = icmp eq ptr %key, null\n"
+        emit_raw "  br i1 %key_null, label %ret_null_hash, label %do_hash\n"
+        emit_raw "ret_null_hash:\n"
+        emit_raw "  ret i32 0\n"
+        emit_raw "do_hash:\n"
         emit_raw "  %hasher = call ptr @Crystal$CCHasher$Dnew(i64 0, i64 0)\n"
         emit_raw "  %id = load i32, ptr %key\n"
         emit_raw "  %id64 = zext i32 %id to i64\n"
@@ -8320,7 +8390,33 @@ module Crystal::MIR
         emit "%#{base_name}.type_id_ptr = getelementptr #{union_type}, ptr %#{base_name}.ptr, i32 0, i32 0"
         # Use globally unique type_ref.id as discriminator
         phi_global_vid = variant_global_id(union_type_ref, variant_type_id)
-        emit "store i32 #{phi_global_vid}, ptr %#{base_name}.type_id_ptr"
+
+        # For ptr values in unions with a Nil variant: at runtime the ptr may be
+        # null (representing nil), so select the correct discriminator dynamically.
+        # Without this, a null ptr gets tagged as String (etc.) and downstream
+        # truthiness checks (type_id == 0) incorrectly treat nil as truthy.
+        nil_aware_ptr = false
+        if val_llvm_type == "ptr" && phi_global_vid != 0
+          if union_desc = @module.get_union_descriptor(union_type_ref)
+            nil_aware_ptr = union_desc.variants.any? { |v| v.type_ref == TypeRef::NIL }
+          end
+        end
+
+        if nil_aware_ptr
+          check_ref = val_ref
+          check_ref = "null" if check_ref == "0"
+          if check_ref == "null"
+            # Known null at compile time → Nil discriminator
+            emit "store i32 0, ptr %#{base_name}.type_id_ptr"
+          else
+            # Runtime null check → select between Nil and variant discriminator
+            emit "%#{base_name}.nil_check = icmp eq ptr #{check_ref}, null"
+            emit "%#{base_name}.dyn_type_id = select i1 %#{base_name}.nil_check, i32 0, i32 #{phi_global_vid}"
+            emit "store i32 %#{base_name}.dyn_type_id, ptr %#{base_name}.type_id_ptr"
+          end
+        else
+          emit "store i32 #{phi_global_vid}, ptr %#{base_name}.type_id_ptr"
+        end
         emit "%#{base_name}.payload_ptr = getelementptr #{union_type}, ptr %#{base_name}.ptr, i32 0, i32 1"
         if val_llvm_type == "void"
           emit "store i8 0, ptr %#{base_name}.payload_ptr, align 4"
@@ -8515,6 +8611,31 @@ module Crystal::MIR
       end
 
       case inst
+      when Undef
+        # MIR Undef: emit a safe default value so the SSA name is defined.
+        undef_llvm_type = @type_mapper.llvm_type(inst.type)
+        if undef_llvm_type == "ptr"
+          emit "#{name} = inttoptr i64 0 to ptr"
+          record_emitted_type(name, "ptr")
+        elsif undef_llvm_type == "float"
+          emit "#{name} = fadd float 0.0, 0.0"
+          record_emitted_type(name, "float")
+        elsif undef_llvm_type == "double"
+          emit "#{name} = fadd double 0.0, 0.0"
+          record_emitted_type(name, "double")
+        elsif undef_llvm_type.starts_with?('i')
+          emit "#{name} = add #{undef_llvm_type} 0, 0"
+          record_emitted_type(name, undef_llvm_type)
+        elsif undef_llvm_type.includes?(".union")
+          emit "; hoisted: #{name}.undef_ptr = alloca #{undef_llvm_type}, align 8"
+          emit "store #{undef_llvm_type} zeroinitializer, ptr #{name}.undef_ptr"
+          emit "#{name} = load #{undef_llvm_type}, ptr #{name}.undef_ptr"
+          record_emitted_type(name, undef_llvm_type)
+        else
+          emit "#{name} = inttoptr i64 0 to ptr"
+          record_emitted_type(name, "ptr")
+        end
+        @value_types[inst.id] = inst.type
       when Constant
         emit_constant(inst, name)
       when Alloc
@@ -9150,6 +9271,16 @@ module Crystal::MIR
 
       # Union types can't store raw integer literals like 0/null.
       val = normalize_union_value(val, val_type_str)
+
+      # Final safety: if the store type is a union struct but the value's
+      # emitted type is "ptr" (e.g., payload was extracted from union by value_ref),
+      # use "ptr" to avoid LLVM type mismatch.
+      if val_type_str.includes?(".union") && val.starts_with?('%')
+        final_emitted = @emitted_value_types[val]?
+        if final_emitted == "ptr"
+          val_type_str = "ptr"
+        end
+      end
 
       # TSan instrumentation: report write before store
       if @emit_tsan
@@ -10365,7 +10496,8 @@ module Crystal::MIR
       if src_type == dst_type
         base_name = name.lstrip('%')
         if dst_type == "ptr"
-          emit "#{name} = bitcast ptr #{value} to ptr"
+          val = (value == "0") ? "null" : value
+          emit "#{name} = bitcast ptr #{val} to ptr"
         elsif dst_type == "float"
           emit "#{name} = fadd float #{value}, 0.0"
         elsif dst_type == "double"
@@ -10669,7 +10801,8 @@ module Crystal::MIR
       if dst_type == "void"
         if src_type == "ptr"
           # ptr to void conversion: emit identity bitcast (ptr to ptr)
-          emit "#{name} = bitcast ptr #{value} to ptr"
+          safe_value = (value == "0") ? "null" : value
+          emit "#{name} = bitcast ptr #{safe_value} to ptr"
           @value_types[inst.id] = TypeRef::POINTER
           return
         else
@@ -13605,7 +13738,9 @@ module Crystal::MIR
 
       # Fallback: values loaded from cross-block slots are named like %rN.fromslot.*
       # Their real LLVM type is the slot type, not always @value_types[N].
-      if val.starts_with?('%')
+      # Only use slot type if we don't already have a precise emitted type for this
+      # exact value — a subsequent cast/unwrap may have changed the type.
+      if val.starts_with?('%') && !@emitted_value_types.has_key?(val)
         if match = val.match(/^%r(\d+)\.fromslot/)
           slot_id = ValueId.new(match[1].to_i)
           if slot_type = @cross_block_slot_types[slot_id]?
@@ -14070,7 +14205,8 @@ module Crystal::MIR
           end
         elsif result_type == "ptr"
           if actual_union_val_type == "ptr"
-            emit "#{name} = bitcast ptr #{union_val} to ptr"
+            safe_val = (union_val == "0") ? "null" : union_val
+            emit "#{name} = bitcast ptr #{safe_val} to ptr"
           elsif actual_union_val_type.starts_with?('i') && !actual_union_val_type.includes?(".union")
             emit "#{name} = inttoptr #{actual_union_val_type} #{union_val} to ptr"
           elsif actual_union_val_type == "double"
@@ -14219,8 +14355,19 @@ module Crystal::MIR
             ptr_val = "%#{base_name}.inttoptr"
           end
         end
-        emit "%#{base_name}.is_null = icmp eq ptr #{ptr_val}, null"
-        emit "#{name} = select i1 %#{base_name}.is_null, i32 0, i32 1"
+        # For all-ref unions (multiple class variants stored as raw ptr),
+        # read the type_id from the object header — not just a null check.
+        # This matches how emit_union_is handles all-ref unions.
+        if @type_mapper.is_all_ref_union?(union_type_ref)
+          emit "%#{base_name}.is_null = icmp eq ptr #{ptr_val}, null"
+          # Read type_id from object header at offset 0 (safe only when non-null)
+          emit "%#{base_name}.obj_tid_raw = load i32, ptr #{ptr_val}"
+          # Return 0 for null (Nil), otherwise the actual type_id from header
+          emit "#{name} = select i1 %#{base_name}.is_null, i32 0, i32 %#{base_name}.obj_tid_raw"
+        else
+          emit "%#{base_name}.is_null = icmp eq ptr #{ptr_val}, null"
+          emit "#{name} = select i1 %#{base_name}.is_null, i32 0, i32 1"
+        end
       end
     end
 
@@ -14319,12 +14466,39 @@ module Crystal::MIR
             ptr_val = "%#{base_name}.inttoptr"
           end
         end
-        if inst.variant_type_id == 0
-          # Checking if value IS variant 0 (nil): ptr == null
-          emit "#{name} = icmp eq ptr #{ptr_val}, null"
-        else
-          # Checking if value IS a non-nil variant: ptr != null
-          emit "#{name} = icmp ne ptr #{ptr_val}, null"
+        # For all-ref unions (multiple class variants stored as raw ptr),
+        # read the type_id from the object header and compare against the
+        # expected global type_ref.id — not just a null check.
+        all_ref_handled = false
+        if @type_mapper.is_all_ref_union?(union_type_ref)
+          if union_desc = @module.get_union_descriptor(union_type_ref)
+            variant = union_desc.variants.find { |v| v.type_id == inst.variant_type_id }
+            if variant
+              if variant.type_ref == TypeRef::NIL || variant.type_ref == TypeRef::VOID
+                # Nil variant: check ptr == null
+                emit "#{name} = icmp eq ptr #{ptr_val}, null"
+                all_ref_handled = true
+              else
+                # Class variant: load type_id from object header, compare
+                expected_tid = variant.type_ref.id.to_i32
+                emit "%#{base_name}.is_null = icmp eq ptr #{ptr_val}, null"
+                emit "%#{base_name}.obj_tid = load i32, ptr #{ptr_val}"
+                emit "%#{base_name}.tid_match = icmp eq i32 %#{base_name}.obj_tid, #{expected_tid}"
+                # Must be non-null AND type_id matches
+                emit "#{name} = select i1 %#{base_name}.is_null, i1 false, i1 %#{base_name}.tid_match"
+                all_ref_handled = true
+              end
+            end
+          end
+        end
+        unless all_ref_handled
+          if inst.variant_type_id == 0
+            # Checking if value IS variant 0 (nil): ptr == null
+            emit "#{name} = icmp eq ptr #{ptr_val}, null"
+          else
+            # Checking if value IS a non-nil variant: ptr != null
+            emit "#{name} = icmp ne ptr #{ptr_val}, null"
+          end
         end
       end
       record_emitted_type(name, "i1")
@@ -15363,6 +15537,13 @@ module Crystal::MIR
           elsif part_llvm_type.includes?(".union")
             # Union type — must check payload type, not always assume ptr.
             # For Nil|Int32, payload is i32; for Nil|String, payload is ptr.
+            # IMPORTANT: If the value was already unwrapped from a union to ptr
+            # (e.g., via cross-block slot load), treat it as ptr, not union.
+            emitted_part_type = @emitted_value_types[part_ref]?
+            if emitted_part_type == "ptr"
+              string_parts << part_ref
+              next
+            end
             # IMPORTANT: The actual slot type may differ from the MIR TypeRef.
             # If the slot stores a primitive (not a union), use the slot type instead.
             actual_slot_type = @cross_block_slot_types[part_id]?
@@ -15390,6 +15571,12 @@ module Crystal::MIR
             # (e.g., Hash#[] returns %String$_$OR$_UInt32.union but caller expects %Nil$_$OR$_String.union).
             # Use the emitted type for the store to avoid LLVM type mismatch errors.
             store_union_type = @emitted_value_types[part_ref]?
+            # If emitted type is ptr (e.g., payload extracted from union by value_ref),
+            # treat as ptr string directly — cannot store ptr as union struct.
+            if store_union_type == "ptr"
+              string_parts << part_ref
+              next
+            end
             store_union_type = part_llvm_type unless store_union_type && store_union_type.includes?(".union")
             emit "%#{base_name}.union_ptr#{idx} = alloca #{part_llvm_type}, align 8"
             emit "store #{store_union_type} #{normalize_union_value(part_ref, store_union_type)}, ptr %#{base_name}.union_ptr#{idx}"
@@ -16164,6 +16351,11 @@ module Crystal::MIR
       end
       # Check if this was a void call - return safe default literal
       if @void_values.includes?(id)
+        # If the value type is ptr, return "null" instead of "0"
+        # (LLVM pointer constants must use "null", not "0")
+        if val_type = @value_types[id]?
+          return "null" if @type_mapper.llvm_type(val_type) == "ptr"
+        end
         return "0"
       end
       # For cross-block values in phi mode, use direct value reference.
