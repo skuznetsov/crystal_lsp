@@ -3337,12 +3337,17 @@ module Crystal::MIR
       emit_raw "  ret ptr %arr\n"
       emit_raw "}\n\n"
 
-      # Hash entry access helpers for Hash#each/keys intrinsics
-      # Hash layout: offset 8=@entries(ptr) where entries is a pointer table (Entry*[]).
+      # Hash entry access helpers for Hash#each/keys intrinsics.
+      # Hash layout: offset 8=@entries(ptr) where entries stores Entry pointers.
       # hash_offset is provided by HIR from Hash::Entry(K,V) ClassInfo.
       emit_raw "define ptr @__crystal_v2_hash_get_entry_ptr(ptr %hash, i32 %index, i32 %entry_size) {\n"
       emit_raw "  %entries_addr = getelementptr i8, ptr %hash, i32 8\n"
       emit_raw "  %entries = load ptr, ptr %entries_addr\n"
+      emit_raw "  %entries_null = icmp eq ptr %entries, null\n"
+      emit_raw "  br i1 %entries_null, label %ret_null, label %compute\n"
+      emit_raw "ret_null:\n"
+      emit_raw "  ret ptr null\n"
+      emit_raw "compute:\n"
       emit_raw "  %idx64 = sext i32 %index to i64\n"
       emit_raw "  %entry_addr = getelementptr ptr, ptr %entries, i64 %idx64\n"
       emit_raw "  %entry = load ptr, ptr %entry_addr\n"
@@ -6036,6 +6041,29 @@ module Crystal::MIR
         return true
       end
 
+      # Hash#get_entry(pointer-index) — pointer-index decoding.
+      # In current Hash paths, nil reaches this overload as `ptr null` and
+      # represents index 0 (ptrtoint null == 0). Returning null here breaks
+      # compaction/linear-scan logic that intentionally probes entry 0.
+      if mangled.includes?("$Hget_entry$$Pointer") && mangled.includes?("Hash$L")
+        emit_raw "; #{mangled} — pointer-index get_entry override\n"
+        emit_raw "define ptr @#{mangled}(ptr %self, ptr %index) {\n"
+        emit_raw "entry:\n"
+        emit_raw "  %entries_ptr = getelementptr i8, ptr %self, i32 8\n"
+        emit_raw "  %entries = load ptr, ptr %entries_ptr\n"
+        emit_raw "  %entries_null = icmp eq ptr %entries, null\n"
+        emit_raw "  br i1 %entries_null, label %ret_null, label %load_entry\n"
+        emit_raw "load_entry:\n"
+        emit_raw "  %idx64 = ptrtoint ptr %index to i64\n"
+        emit_raw "  %entry_addr = getelementptr ptr, ptr %entries, i64 %idx64\n"
+        emit_raw "  %loaded_entry = load ptr, ptr %entry_addr\n"
+        emit_raw "  ret ptr %loaded_entry\n"
+        emit_raw "ret_null:\n"
+        emit_raw "  ret ptr null\n"
+        emit_raw "}\n\n"
+        return true
+      end
+
       # Hash#set_entry — fix stride to match malloc_entries (8 bytes per slot).
       if mangled.includes?("$Hset_entry$$Int32_Hash$CCEntry$L")
         # Root-cause fix: disable pointer-slot override.
@@ -6052,6 +6080,29 @@ module Crystal::MIR
         emit_raw "  %offset = mul i64 %idx64, 8\n"
         emit_raw "  %slot = getelementptr i8, ptr %entries, i64 %offset\n"
         emit_raw "  store ptr %value, ptr %slot\n"
+        emit_raw "  ret void\n"
+        emit_raw "}\n\n"
+        return true
+      end
+
+      # Hash#set_entry(nilable_index, Entry) where index flows as ptr-encoded Int.
+      # In compaction paths nilable index values can reach this overload encoded as
+      # ptr (null => 0). The default lowered body may collapse index to slot 0.
+      # Decode ptr index explicitly and write to the corresponding entry slot.
+      if mangled.includes?("$Hset_entry$$Nil_Hash$CCEntry$L") && mangled.includes?("Hash$L")
+        emit_raw "; #{mangled} — pointer-index set_entry override\n"
+        emit_raw "define void @#{mangled}(ptr %self, ptr %index, ptr %value) {\n"
+        emit_raw "entry:\n"
+        emit_raw "  %entries_ptr = getelementptr i8, ptr %self, i32 8\n"
+        emit_raw "  %entries = load ptr, ptr %entries_ptr\n"
+        emit_raw "  %entries_null = icmp eq ptr %entries, null\n"
+        emit_raw "  br i1 %entries_null, label %ret_void, label %store_entry\n"
+        emit_raw "store_entry:\n"
+        emit_raw "  %idx64 = ptrtoint ptr %index to i64\n"
+        emit_raw "  %entry_addr = getelementptr ptr, ptr %entries, i64 %idx64\n"
+        emit_raw "  store ptr %value, ptr %entry_addr\n"
+        emit_raw "  ret void\n"
+        emit_raw "ret_void:\n"
         emit_raw "  ret void\n"
         emit_raw "}\n\n"
         return true
@@ -6973,12 +7024,19 @@ module Crystal::MIR
       # These are scratch allocas for union operations (store→GEP→load patterns)
       # that are safe to allocate once in the entry block and reuse.
       hoisted_allocas = [] of String
+      processed_block_ir = IO::Memory.new
       block_ir.each_line do |line|
         stripped = line.lstrip
-        if stripped.includes?("= alloca ") && !stripped.starts_with?(';')
+        # Fast-path: only real SSA assignment lines can be allocas.
+        # This avoids expensive substring scans on comments/labels.
+        if stripped.starts_with?('%') && stripped.includes?("= alloca ")
           hoisted_allocas << line
+          processed_block_ir << "  ; hoisted: " << stripped << '\n'
+        else
+          processed_block_ir << line << '\n'
         end
       end
+      processed_block_ir_str = processed_block_ir.to_s
       # Emit hoisted allocas in entry block (before the br)
       hoisted_allocas.each do |alloca_line|
         emit_raw alloca_line
@@ -6993,16 +7051,7 @@ module Crystal::MIR
       # Emit block IR with allocas replaced by no-ops (comments).
       # The alloca SSA names are now defined in the entry block.
       begin
-        block_ir.each_line do |line|
-          stripped = line.lstrip
-          if stripped.includes?("= alloca ") && !stripped.starts_with?(';')
-            # Replace with comment — the alloca is now in the entry block
-            emit_raw "  ; hoisted: #{stripped}\n"
-          else
-            emit_raw line
-            emit_raw "\n"
-          end
-        end
+        emit_raw processed_block_ir_str
       rescue ex : IO::EOFError
         if ENV["CRYSTAL2_STAGE2_DEBUG"]? == "1" || ENV["STAGE2_BOOTSTRAP_TRACE"]?
           STDERR.puts "[LLVM_EMIT_EOF] func=#{func.name} blocks=#{func.blocks.size} block_ir_bytes=#{block_ir.bytesize} hoisted_allocas=#{hoisted_allocas.size}"

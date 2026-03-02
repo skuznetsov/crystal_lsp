@@ -47,6 +47,37 @@
   - series samples (30s/90s/150s) and timeout sample collected in `/tmp/stage2_rel_fromio_fix_diag`.
   - final hotspots: `String#index`, `LLVMIRGenerator#emit_function`, `String#size`, `_platform_memmove`.
 
+## 2026-03-02: Perf fix — single-pass alloca hoist rewrite in LLVM block emission
+
+### Problem pattern
+- Stage2 timeout samples showed heavy `String#index/includes?` cost in `LLVMIRGenerator#emit_function`
+  during block IR alloca hoist rewrite.
+- Previous implementation scanned `block_ir` twice with substring checks on every line.
+
+### Fix (`src/compiler/mir/llvm_backend.cr`)
+- Reworked alloca rewrite to a single classification pass:
+  - collect hoisted allocas
+  - build preprocessed block IR once (`processed_block_ir`)
+  - emit preprocessed block IR directly (no second `each_line` + `includes?` pass)
+- Added fast-path filter: only lines starting with `%` are tested for `= alloca`.
+
+### Evidence
+- Build sanity:
+  - `/usr/bin/time -p crystal build src/crystal_v2.cr -o /tmp/stage1_dbg_perf_emit`
+  - `real 6.12`
+- Byteformat guard still valid:
+  - `/tmp/stage1_dbg_perf_emit regression_tests/test_byteformat_decode_u32.cr -o /tmp/test_byteformat_perf_emit.bin`
+  - `scripts/run_safe.sh /tmp/test_byteformat_perf_emit.bin 5 512` → `byteformat_u32_ok`
+- Release timing comparison (same watchdog profile):
+  - pre-fix: `/tmp/stage1_rel_fromio_fix` + timeout run → stage2 timed out, final hotspot `String#index` count `112`
+  - post-fix:
+    - `/usr/bin/time -p crystal build src/crystal_v2.cr --release -o /tmp/stage1_rel_perf_emit` → `real 407.86`
+    - `/usr/bin/time -p scripts/timeout_sample_lldb.sh -t 180 --series-start 30 --series-interval 60 --series-duration 8 -o /tmp/stage2_rel_perf_emit_diag -- /tmp/stage1_rel_perf_emit src/crystal_v2.cr --release -o /tmp/stage2_rel_perf_emit`
+    - timeout persists at 180s (`real 193.96`), but final hotspot mix shifted:
+      - `String#index`: `112 -> 93`
+      - `LLVMIRGenerator#emit_function`: `54 -> 33`
+    - new dominant frame at timeout: `emit_union_is` (`llvm_backend.cr:14544`) via `String#include?`.
+
 ## 2026-03-02: Root-cause fix — `UnionWrap` cross-block slot corruption (infinite `puts`, `%r174` opt failure)
 
 ### Symptom (mini-oracles)
