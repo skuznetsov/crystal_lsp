@@ -78,6 +78,20 @@
       - `LLVMIRGenerator#emit_function`: `54 -> 33`
     - new dominant frame at timeout: `emit_union_is` (`llvm_backend.cr:14544`) via `String#include?`.
 
+### Follow-up iteration (emit_union_is micro-opt)
+- Additional optimization in `src/compiler/mir/llvm_backend.cr`:
+  - `emit_union_is` now precomputes `*.ends_with?(".union")` flags once and reuses them
+    instead of repeated `includes?` scans on hot paths.
+- Sanity:
+  - `/usr/bin/time -p crystal build src/crystal_v2.cr -o /tmp/stage1_dbg_unionis_perf` → `real 6.11`
+  - `byteformat` guard stays green (`byteformat_u32_ok`).
+- Release timing:
+  - `/usr/bin/time -p crystal build src/crystal_v2.cr --release -o /tmp/stage1_rel_unionis_perf` → `real 406.48`
+  - `/usr/bin/time -p scripts/timeout_sample_lldb.sh -t 180 --series-start 30 --series-interval 60 --series-duration 8 -o /tmp/stage2_rel_unionis_perf_diag -- /tmp/stage1_rel_unionis_perf src/crystal_v2.cr --release -o /tmp/stage2_rel_unionis_perf`
+  - still timeout at 180s (`real 192.86`), but final hotspot reduced further:
+    - `String#index`: `93 -> 71`
+  - new lldb timeout frame moved to `emit_union_unwrap` (`llvm_backend.cr:14241`) via `String#include?`.
+
 ## 2026-03-02: Root-cause fix — `UnionWrap` cross-block slot corruption (infinite `puts`, `%r174` opt failure)
 
 ### Symptom (mini-oracles)
