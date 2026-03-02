@@ -14514,15 +14514,7 @@ module Crystal::MIR
           emit "#{name} = add i32 0, 0"
           return
         end
-        ptr_val = union_val
-        if union_val =~ /^\d+$/ || union_val == "null"
-          if union_val == "0" || union_val == "null"
-            ptr_val = "null"
-          else
-            emit "%#{base_name}.inttoptr = inttoptr i64 #{union_val} to ptr"
-            ptr_val = "%#{base_name}.inttoptr"
-          end
-        end
+        ptr_val = normalize_ptr_for_null_check(union_val, base_name)
         # For all-ref unions (multiple class variants stored as raw ptr),
         # read the type_id from the object header — not just a null check.
         # This matches how emit_union_is handles all-ref unions.
@@ -14628,17 +14620,7 @@ module Crystal::MIR
           record_emitted_type(name, "i1")
           return
         end
-        ptr_val = union_val
-        if union_val =~ /^\d+$/ || union_val == "null"
-          # Integer literal or null - convert to ptr for comparison
-          if union_val == "0" || union_val == "null"
-            ptr_val = "null"
-          else
-            # Non-zero integer literal - convert to ptr via inttoptr
-            emit "%#{base_name}.inttoptr = inttoptr i64 #{union_val} to ptr"
-            ptr_val = "%#{base_name}.inttoptr"
-          end
-        end
+        ptr_val = normalize_ptr_for_null_check(union_val, base_name)
         # For all-ref unions (multiple class variants stored as raw ptr),
         # read the type_id from the object header and compare against the
         # expected global type_ref.id — not just a null check.
@@ -14675,6 +14657,36 @@ module Crystal::MIR
         end
       end
       record_emitted_type(name, "i1")
+    end
+
+    # Null checks for pointer-like control/data paths must operate on `ptr`.
+    # Cross-block loads can surface as integer-typed temporaries before late
+    # adaptation; normalize those values here to keep IR type-safe.
+    private def normalize_ptr_for_null_check(val : String, base_name : String) : String
+      return "null" if val == "0" || val == "null"
+
+      if val =~ /^\d+$/
+        cast_name = "%#{base_name}.lit_inttoptr.#{@cond_counter}"
+        @cond_counter += 1
+        emit "#{cast_name} = inttoptr i64 #{val} to ptr"
+        record_emitted_type(cast_name, "ptr")
+        return cast_name
+      end
+
+      if actual_type = @emitted_value_types[val]?
+        if actual_type == "ptr"
+          return val
+        end
+        if actual_type.starts_with?('i') && !actual_type.includes?(".")
+          cast_name = "%#{base_name}.val_inttoptr.#{@cond_counter}"
+          @cond_counter += 1
+          emit "#{cast_name} = inttoptr #{actual_type} #{val} to ptr"
+          record_emitted_type(cast_name, "ptr")
+          return cast_name
+        end
+      end
+
+      val
     end
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -16439,7 +16451,7 @@ module Crystal::MIR
           # Pointer type: compare against null
           c = @cond_counter
           @cond_counter += 1
-          cond_ptr = cond == "0" ? "null" : cond
+          cond_ptr = normalize_ptr_for_null_check(cond, "cond#{c}")
           emit "%cond#{c}.not_null = icmp ne ptr #{cond_ptr}, null"
           emit "br i1 %cond#{c}.not_null, label %#{then_block}, label %#{else_block}"
         elsif cond_type
@@ -16456,7 +16468,8 @@ module Crystal::MIR
             if cond_llvm_type == "double" || cond_llvm_type == "float"
               emit "%cond#{c}.not_zero = fcmp one #{cond_llvm_type} #{cond}, 0.0"
             elsif cond_llvm_type == "ptr"
-              emit "%cond#{c}.not_zero = icmp ne ptr #{cond}, null"
+              cond_ptr = normalize_ptr_for_null_check(cond, "cond#{c}")
+              emit "%cond#{c}.not_zero = icmp ne ptr #{cond_ptr}, null"
             else
               emit "%cond#{c}.not_zero = icmp ne #{cond_llvm_type} #{cond}, 0"
             end

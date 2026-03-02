@@ -8898,3 +8898,105 @@ crystal build -Ddebug_hooks src/crystal_v2.cr -o bin/crystal_v2 --no-debug
 - Practical workflow split:
   - cold-path debugging (root-cause perf/stability in stage2 generation and LLVM handoff),
   - warm-path iteration (fast repro loops once caches are populated).
+
+## 2026-03-02: Stage2 stability pass — cross-block pointer null-check normalization
+
+### Context
+- While testing a structural `optnone` experiment, stage2 hit deterministic IR type errors:
+  - `%r69.fromslot.*` loaded as `i64`, then used in `icmp eq ptr ...` (in `LLVMIRGenerator#emit_cast(Cast_String)` path).
+  - After first fix attempt, a second mismatch appeared (`ptr` used where `i32` expected in `CLI#emit_timings`).
+- Pattern: cross-block values may be represented as integer-typed slot loads in some block-order paths; pointer null-check sites emitted raw `ptr` comparisons without normalizing those temporaries.
+
+### Refuted branch (reverted)
+- Branch: global pointer/union expected-type preference in `value_ref` and slot typing.
+- Outcome:
+  - Introduced broad regressions (`opt failed` across many `run_all` tests).
+  - Reverted as over-broad (symptom-masking across unrelated paths).
+
+### Landed fix (root-cause scoped)
+- File: `src/compiler/mir/llvm_backend.cr`
+- Added helper:
+  - `normalize_ptr_for_null_check(val, base_name)`:
+    - `0/null` → `null`,
+    - integer literals → `inttoptr`,
+    - emitted integer temporaries (including fromslot loads) → `inttoptr`,
+    - preserves already-`ptr` values.
+- Applied this normalization at pointer-null check emission sites:
+  - `emit_union_type_id_get` non-union path,
+  - `emit_union_is` non-union path,
+  - branch terminator pointer-condition compares.
+- This keeps pointer semantics local to pointer-null checks instead of globally rewriting value typing rules.
+
+### Validation
+- Debug build:
+  - `crystal build src/crystal_v2.cr -o /tmp/stage1_dbg_ptrnull_norm`
+- Regression suite:
+  - `regression_tests/run_all.sh /tmp/stage1_dbg_ptrnull_norm`
+  - result: `61 passed, 0 failed`
+- Release stage1 (original compiler, isolated cache):
+  - `/usr/bin/time -p env CRYSTAL_CACHE_DIR=/tmp/crystal_cache_orig_rel2 crystal build src/crystal_v2.cr --release -o /tmp/stage1_rel_ptrnull_norm`
+  - result: `real 416.90`
+- Stage2 cold (`t=180`):
+  - `/usr/bin/time -p scripts/timeout_sample_lldb.sh -t 180 -- /tmp/stage1_rel_ptrnull_norm src/crystal_v2.cr --release -o /tmp/stage2_rel_ptrnull_norm_t180`
+  - result: timeout `124`, `real 193.38`
+  - hotspots: `LLVMIRGenerator#emit_function`, `String#index`, `_platform_memmove`, GC
+- Stage2 long window (`t=300`):
+  - `/usr/bin/time -p scripts/timeout_sample_lldb.sh -t 300 -- /tmp/stage1_rel_ptrnull_norm src/crystal_v2.cr --release -o /tmp/stage2_rel_ptrnull_norm_t300`
+  - result: timeout `124`, `real 313.59`
+  - no `opt failed` type-mismatch in `command.log`; timeout hotspot moved to LLVM backend internals (`DAGCombiner`, alias analysis, `_qsort`)
+- Stage2 warm with stats:
+  - `/usr/bin/time -p scripts/timeout_sample_lldb.sh -t 180 -- /tmp/stage1_rel_ptrnull_norm src/crystal_v2.cr --release --stats -o /tmp/stage2_rel_ptrnull_norm_t180_warm_stats`
+  - result: success `0`, `real 78.14`
+  - timing: `parse=462.7 prelude=205.6 user=257.1 opt=4929.8 llc=63016.4 link=164.7 compile=71285.8 total=77598.6 llvm_cache=1 hit/1 miss pipeline_cache=1 hit/0 miss`
+
+### Interpretation
+- Stability improved: previously observed stage2 IR type-mismatch crashes in this path were not reproduced after the scoped fix.
+- Performance root cause remains:
+  - cold stage2 still exceeds 180s,
+  - long run still spends most time in LLVM backend/codegen passes.
+- Warm-path bootstrap is now fast again (~78s), consistent with cache-assisted runs.
+
+## 2026-03-02: Final revalidation on clean tree (without `optnone` experiment)
+
+### Why
+- The temporary large-function `optnone` path was an exploratory perf branch, not part of the root-cause type-safety fix.
+- It was removed to keep the change-set minimal and semantic.
+
+### Final code state
+- `src/compiler/mir/llvm_backend.cr`:
+  - `normalize_ptr_for_null_check` used in:
+    - `emit_union_type_id_get` non-union null checks,
+    - `emit_union_is` non-union null checks,
+    - branch terminator pointer comparisons.
+  - no `optnone`/`noinline` structural guard in emitted function definitions.
+
+### Validation (final)
+- Regression suite:
+  - `regression_tests/run_all.sh /tmp/stage1_dbg_ptrnull_norm_nooptnone`
+  - result: `61 passed, 0 failed`
+- Stage1 release (original compiler, isolated cache):
+  - `/usr/bin/time -p env CRYSTAL_CACHE_DIR=/tmp/crystal_cache_orig_rel3 crystal build src/crystal_v2.cr --release -o /tmp/stage1_rel_ptrnull_norm_nooptnone`
+  - result: `real 420.36`
+- Stage2 cold (`t=180`):
+  - `/usr/bin/time -p scripts/timeout_sample_lldb.sh -t 180 -- /tmp/stage1_rel_ptrnull_norm_nooptnone src/crystal_v2.cr --release -o /tmp/stage2_rel_ptrnull_norm_nooptnone_t180`
+  - result: timeout `124`, `real 192.86`
+  - hotspots: GC/memmove/string + `LLVMIRGenerator#emit_function`
+- Stage2 long (`t=300`):
+  - `/usr/bin/time -p scripts/timeout_sample_lldb.sh -t 300 -- /tmp/stage1_rel_ptrnull_norm_nooptnone src/crystal_v2.cr --release -o /tmp/stage2_rel_ptrnull_norm_nooptnone_t300`
+  - result: timeout `124`, `real 303.41`
+  - `command.log`: no `opt failed` type-mismatch
+  - timeout hotspots in LLVM backend internals (`SelectionDAGISel`, sorting/AA paths), i.e. perf bottleneck not IR validity.
+
+### Stage2 practical speed (warm path)
+- Warm run (pipeline hit, llvm miss):
+  - `/usr/bin/time -p scripts/timeout_sample_lldb.sh -t 180 -- /tmp/stage1_rel_ptrnull_norm_nooptnone src/crystal_v2.cr --release --stats -o /tmp/stage2_rel_ptrnull_norm_nooptnone_t180_warm_stats_clean`
+  - result: success, `real 88.30`
+  - timing: `total=88048.1ms llvm_cache=0 hit/2 miss pipeline_cache=1 hit/0 miss`
+- Warm run (pipeline hit, llvm hit):
+  - `/usr/bin/time -p scripts/timeout_sample_lldb.sh -t 180 -- /tmp/stage1_rel_ptrnull_norm_nooptnone src/crystal_v2.cr --release --stats -o /tmp/stage2_rel_ptrnull_norm_nooptnone_t180_warm_stats_hit`
+  - result: success, `real 10.14`
+  - timing: `total=9876.7ms llvm_cache=2 hit/0 miss pipeline_cache=1 hit/0 miss`
+
+### Notes
+- After repeated timeout-kills, stale/corrupt cached artifacts can cause transient link failures; rotating `tmp/llvm_cache` restored deterministic warm runs.
+- Current root-cause fix addresses IR type correctness for pointer null-check paths; remaining issue is cold-path backend performance.
