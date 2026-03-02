@@ -26,6 +26,10 @@ Options:
   -b, --breakpoints LIST  Comma-separated LLDB breakpoint symbols
       --no-lldb           Skip LLDB attach/backtrace
   -h, --help              Show this help
+
+Examples:
+  scripts/timeout_sample_lldb.sh -m 2048 --memory-prewarn-pct 85 --memory-prewarn-sample-secs 3 --memory-prewarn-lldb-timeout 8 --timeout 30 -- ./build/my_app
+  scripts/timeout_sample_lldb.sh --memory-percent 25 --memory-check-sec 2 --memory-prewarn-pct 80 --timeout 120 -- ./gradlew test
 USAGE
 }
 
