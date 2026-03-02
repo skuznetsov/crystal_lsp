@@ -1,5 +1,67 @@
 # Crystal v2 — Active Work (codegen branch)
 
+## 2026-03-01: Stage2 Bootstrap Performance — 549s → 266s (-52%)
+
+### Phase 1: Module alias cache invalidation storm (549s → 286s, -48%)
+
+Profiling (macOS `sample`, 30s at 60s into stage2 HIR) revealed:
+- **ALL 22231 samples on a SINGLE call stack:**
+  `monomorphize_generic_class → register_concrete_class → record_module_inclusion
+   → resolve_module_alias_for_include → resolve_module_alias_prefix
+   → byte_slice (String alloc) → GC_malloc_kind_global → GC_collect_or_expand`
+- **66% of HIR time in GC** triggered by `String#byte_slice?` inside `resolve_module_alias_prefix`
+- Root cause: cache key `{module_name, @module_defs_cache_version, @resolved_type_name_cache_epoch}`
+  includes `@resolved_type_name_cache_epoch` which increments on every class registration.
+- Fix: Removed epoch from module alias cache keys + stopped clearing those caches
+  in `invalidate_resolved_type_name_cache_for`.
+
+### Phase 2: Method scan + annotation cache epoch decoupling (286s → 266s, -7%)
+
+- Removed epoch from `collect_defined_instance_method_full_names` and
+  `collect_defined_class_method_full_names` cache keys — scan fixed AST bodies.
+- Removed all cache clears from `invalidate_resolved_type_name_cache_for` —
+  annotation cache clear was redundant (epoch in key), method scan caches don't
+  depend on registered types.
+- Added `@resolve_module_ns_cache` for `resolve_module_name_in_owner_namespaces`.
+
+### Phase 3: Analysis (wall hit at ~266s)
+
+Post-optimization profile (15133 samples, 2.4GB heap):
+- GC: 34% leaf samples (down from 66%), but only 15% of wall-clock time
+  - Measured: `GC_DONT_GC=1` gives 227s (vs 266s) — GC = 40s, 15% of total
+- String#hash: 16% (2413 leaf samples) — ubiquitous Hash lookups
+- String#rindex: 12% (1780 leaf) — namespace scanning
+- monomorphize_generic_class: 65% inclusive — genuine work
+- register_module_instance_methods_for: 10.6% — byte_slice + deferred context
+- Even with GC disabled, HIR alone takes 157s — the work is genuine O(N*M)
+  where N = generic instantiations, M = module includes per class
+
+### Results:
+```
+Stage2 bootstrap:  549s → 266s  (-52%)
+HIR phase:         458s → 172s  (-62%)
+Stress N=4000:    36.7s → 5.0s  (-86%)
+Superlinear ratio: 5.84x → 2.42x (HIR, near-linear)
+No-GC lower bound: 227s (HIR=157s) — GC overhead ~15%
+```
+
+### Also applied (earlier in session):
+- Reusable vdispatch candidates buffer (MIR GC pressure fix)
+- Span-based yield cache key (generic instantiation cache sharing)
+- Stable positive init cache (allocator_init_def_key_for)
+- Tuple-keyed alias cache (REVERTED — caused 51s stage2 regression)
+- Tuple destructuring support for block params
+
+### TODO (performance — reaching 75s requires structural changes):
+- [ ] String interning: Replace string-keyed hashes with integer IDs (16% in String#hash)
+- [ ] Lazy monomorphization: Don't process includes until methods are actually needed
+- [ ] Reduce work in register_module_instance_methods_for (10.6% of HIR)
+- [ ] Consider epoch removal from annotation_type_ref_cache (needs careful analysis)
+- [ ] Fix stage2 runtime ExprId OOB crash
+- [ ] Achieve stage2 → stage3 bootstrap
+
+---
+
 ## 2026-03-01: Bootstrap Stage2 Fixes (3 critical bugs found & fixed)
 
 ### Fixes applied (all verified with regression tests):
