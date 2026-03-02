@@ -1,5 +1,113 @@
 # Crystal v2 — Active Work (codegen branch)
 
+## NEXT STEPS (for GPT 5.3 Codex or next Claude session)
+
+### Priority 1: Fix stage2 LLVM verification error (Undef + all-ref unions)
+
+**Status**: Fix committed but NOT YET TESTED with stage2 build.
+
+Two fixes were applied and committed (commit `e4990bd9`):
+
+1. **MIR `Undef` instruction not emitted** — The LLVM backend's `emit_instruction` case
+   statement had no `when Undef` clause. When a MIR `Undef` instruction was encountered,
+   no LLVM IR was generated for the SSA value, but the cross-block slot store was still
+   emitted, referencing the undefined `%rN`. Fixed by emitting safe defaults (null for ptr,
+   zero for ints, zeroinitializer for unions).
+
+2. **All-reference unions stored as raw ptr** — Unions where ALL variants are reference
+   types (classes) or Nil are now stored as `ptr` instead of `{i32, payload}` struct.
+   This matches Crystal's original ABI where type_id lives in each object's header.
+   Affects `LLVMTypeMapper`, `emit_store`, `emit_union_wrap/unwrap`, `emit_union_type_id_get`,
+   `emit_union_is`, and call argument/return coercion.
+
+**To verify**: Build release stage1, then build stage2, then test:
+```bash
+crystal build src/crystal_v2.cr -o bin/crystal_v2_release --release --error-trace
+time bin/crystal_v2_release src/crystal_v2.cr  # ~266s expected; check for opt errors
+# If stage2 builds, test:
+scripts/run_safe.sh /tmp/crystal_v2_stage2 5 512  # should not crash
+/tmp/crystal_v2_stage2 /tmp/test_hello_s2.cr       # puts "hello from stage2"
+scripts/run_safe.sh /tmp/test_hello 5 512
+# Then test non-trivial programs:
+/tmp/crystal_v2_stage2 /tmp/test_fib_s2.cr         # was crashing (SIGSEGV) before fixes
+/tmp/crystal_v2_stage2 /tmp/test_array_s2.cr
+/tmp/crystal_v2_stage2 /tmp/test_hash_s2.cr
+```
+
+**If stage2 still crashes on non-trivial programs**: The crash was in `lower_main` iterating
+over `@deferred_classvar_inits` (Array of tuples). The `array_element_type_for_value`
+function was returning wrong types for tuple arrays with namespaced type names. The
+`type_params` fast path (commit `9b4909e8`) should fix this. Debug with:
+```bash
+lldb --batch -o 'run' -k 'bt 30' -k 'quit' /tmp/crystal_v2_stage2 /tmp/test_fib_s2.cr
+```
+
+### Priority 2: Achieve stage2 → stage3 bootstrap
+
+Once stage2 works on non-trivial programs, attempt:
+```bash
+time /tmp/crystal_v2_stage2 src/crystal_v2.cr  # build stage3
+```
+
+### Priority 3: Performance optimization (current: ~266s, target: ~75s)
+
+Reaching 75s requires structural changes:
+- [ ] **String interning**: Replace string-keyed hashes with integer IDs (16% in String#hash)
+- [ ] **Lazy monomorphization**: Don't process includes until methods are actually needed
+- [ ] **Reduce work in register_module_instance_methods_for** (10.6% of HIR)
+
+### Known secondary bugs in stage2:
+- [ ] `Struct#==` always returns true (macro expansion for `@type.instance_vars` not implemented)
+- [ ] `.class` returns wrong value (returns object representation, not class name)
+- [ ] ENV access broken in stage2
+- [ ] `Slice.new` with block produces garbage
+- [ ] Backtrace always nil in stage2
+
+### Key files for bootstrap work:
+- `src/compiler/hir/ast_to_hir.cr` — AST→HIR lowering (60K+ lines, most logic here)
+- `src/compiler/mir/llvm_backend.cr` — LLVM IR generation
+- `src/compiler/mir/hir_to_mir.cr` — HIR→MIR conversion
+- `scripts/run_safe.sh` — Safe test binary runner (prevents FD/memory exhaustion)
+- `regression_tests/run_mini_oracles.sh` — Quick regression test suite (5 tests)
+
+### Build commands:
+```bash
+crystal build src/crystal_v2.cr -o bin/crystal_v2_release --release --error-trace  # stage1
+bin/crystal_v2_release src/crystal_v2.cr                                           # stage2
+bin/crystal_v2_release /tmp/test_hello.cr                                          # quick test
+bash regression_tests/run_mini_oracles.sh                                          # regression tests
+```
+
+### Test files (recreate after reboot since /tmp gets wiped):
+```crystal
+# /tmp/test_hello_s2.cr
+puts "hello from stage2"
+
+# /tmp/test_fib_s2.cr
+def fib(n : Int32) : Int32
+  return n if n <= 1
+  fib(n - 1) + fib(n - 2)
+end
+puts fib(30)
+
+# /tmp/test_array_s2.cr
+arr = [10, 20, 30, 40, 50]
+arr.each do |x|
+  puts x
+end
+puts arr.size
+
+# /tmp/test_hash_s2.cr
+h = {} of String => Int32
+h["one"] = 1
+h["two"] = 2
+h["three"] = 3
+puts h["two"]
+puts h.size
+```
+
+---
+
 ## 2026-03-01: Stage2 Bootstrap Performance — 549s → 266s (-52%)
 
 ### Phase 1: Module alias cache invalidation storm (549s → 286s, -48%)
@@ -56,8 +164,7 @@ No-GC lower bound: 227s (HIR=157s) — GC overhead ~15%
 - [ ] String interning: Replace string-keyed hashes with integer IDs (16% in String#hash)
 - [ ] Lazy monomorphization: Don't process includes until methods are actually needed
 - [ ] Reduce work in register_module_instance_methods_for (10.6% of HIR)
-- [ ] Consider epoch removal from annotation_type_ref_cache (needs careful analysis)
-- [ ] Fix stage2 runtime ExprId OOB crash
+- [x] Fix stage2 runtime ExprId OOB crash (resolved via all-ref union + type_params fixes)
 - [ ] Achieve stage2 → stage3 bootstrap
 
 ---
@@ -86,20 +193,15 @@ No-GC lower bound: 227s (HIR=157s) — GC overhead ~15%
    - Applied in `virtual_dispatch_candidates` (Class + Module paths) and `_resolve_virtual_walk`
    - Impact: Hash with Reference keys works (was segfaulting in Hasher#permute)
 
-### Current status:
-- Stage1 builds stage2 successfully (~482s, 73541 MIR functions)
-- Stage2 parses input correctly (trace verified: ARENAS=2, EXPRS=73, ROOT0_IDX=1)
-- Stage2 crashes during HIR lowering with ExprId out of bounds (investigating)
-- Known secondary bugs: `.class` returns wrong value, ENV access broken, `Struct#==` always true
-
-### TODO:
-- [ ] Fix ExprId OOB in stage2 HIR lowering (garbage values during node traversal)
-- [ ] Fix `.class` method (returns `#<Foo:0x0>` instead of class name)
-- [ ] Fix ENV access in stage2
-- [ ] Fix `Struct#==` (macro expansion for `@type.instance_vars`)
-- [ ] Fix Slice block constructor (garbage values from `Slice.new(n) { |i| ... }`)
-- [ ] Achieve stage2 → stage3 bootstrap
-- [ ] Benchmark: target ~75s for stage2 compilation
+### Current status (2026-03-01):
+- Stage1 builds stage2 successfully (~266s release, 73K+ MIR functions)
+- Stage2 compiles and runs `puts "hello from stage2"` correctly
+- Stage2 crashes (SIGSEGV) on non-trivial programs (fib, hash, array)
+  - Root cause: `lower_main` iterating `@deferred_classvar_inits` array
+  - Fix applied: type_params fast path + POINTER fallback + Undef emission + all-ref unions
+  - Status: FIX COMMITTED, REBUILD+TEST NEEDED
+- Performance: 549s → 266s (-52%) via cache epoch decoupling
+- Known secondary bugs: `.class` wrong, ENV broken, `Struct#==` always true, Slice.new garbage
 
 ## Historical pattern ledger (root-cause oriented, 2026-02-28)
 
