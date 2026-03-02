@@ -108,6 +108,22 @@
     - Dominant timeout frame is now GC (`GC_mark_from` / `GC_alloc_large`) while emitting LLVM.
     - `emit_function` remains present but no longer top bottleneck in timeout snapshot.
 
+### Follow-up iteration (alloca-line detection fast path)
+- Additional optimization in `src/compiler/mir/llvm_backend.cr`:
+  - Added byte-level helper `alloca_assignment_line?` and replaced hot
+    `stripped.includes?("= alloca ")` checks in `emit_function` with this helper.
+  - Goal: remove `String#include?/index` from alloca-hoist scanning loop.
+- Sanity:
+  - `/usr/bin/time -p crystal build src/crystal_v2.cr -o /tmp/stage1_dbg_alloca_scan_perf` → `real 6.33`
+  - `byteformat` guard stays green (`byteformat_u32_ok`).
+- Release timing:
+  - `/usr/bin/time -p crystal build src/crystal_v2.cr --release -o /tmp/stage1_rel_alloca_scan_perf` → `real 410.32`
+  - `/usr/bin/time -p scripts/timeout_sample_lldb.sh -t 180 --series-start 30 --series-interval 60 --series-duration 8 -o /tmp/stage2_rel_alloca_scan_perf_diag -- /tmp/stage1_rel_alloca_scan_perf src/crystal_v2.cr --release -o /tmp/stage2_rel_alloca_scan_perf`
+  - still timeout at 180s (`real 192.94`), output binary not produced.
+  - timeout frame moved deeper into union/typemap path:
+    - `llvm_type`/`Hash#[]?` lookup chain (`llvm_backend.cr:13019`, `emit_union_wrap`).
+  - final top hotspots now GC/memmove + `emit_function`; string scanning pressure reduced in timeout top list.
+
 ## 2026-03-02: Root-cause fix — `UnionWrap` cross-block slot corruption (infinite `puts`, `%r174` opt failure)
 
 ### Symptom (mini-oracles)
