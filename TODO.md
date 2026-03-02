@@ -1,5 +1,33 @@
 # Crystal v2 — Active Work (codegen branch)
 
+## 2026-03-02: Root cause localized — postfix `if` misparsed in member no-parens calls
+
+### Symptom reproduced with mini-oracle
+- Repro script:
+  - `flag = false`
+  - `1_000_000.times { STDERR.puts "TRACE" if flag }`
+  - `puts "done"`
+- Built by original compiler: exits fast, prints `done`.
+- Built by stage1 (self-host): floods `stderr` with only `\n`, timeout.
+
+### Localization
+- MIR/HIR dumps for repro showed unconditional call pattern:
+  - `call IO#puts$Nil | String(phi("TRACE", nil))`
+  - instead of conditional call guarded by `flag`.
+- Therefore bug is pre-LLVM (frontend parse/lowering shape), not backend codegen.
+
+### Root-cause fix
+- `src/compiler/frontend/parser.cr`
+  - In `parse_member_access` no-parens argument parsing, wrap argument/value parsing with
+    `without_postfix_modifiers { parse_op_assign }` (same policy already used in identifier no-parens path).
+  - This preserves semantics:
+    - `obj.meth arg if cond` => postfix modifier on whole call
+    - `obj.meth(arg if cond)` => conditional argument only with explicit parentheses
+
+### Regression guard
+- Added `regression_tests/postfix_if_member_call_no_parens.cr`
+  - Detects this exact semantic regression.
+
 ## 2026-03-02: Stage2 immediate trap root-cause fixed; stage2 wall-time bottleneck remains
 
 ### What was fixed (root-cause, not symptom)

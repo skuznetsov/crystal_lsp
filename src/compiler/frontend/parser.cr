@@ -11375,7 +11375,7 @@ current_token.kind == Token::Kind::Identifier &&
                     star_token = current_token
                     advance
                     skip_trivia
-                    value_expr = parse_op_assign
+                    value_expr = without_postfix_modifiers { parse_op_assign }
                     if value_expr.invalid?
                       @parsing_call_args -= 1
                       return PREFIX_ERROR
@@ -11425,7 +11425,7 @@ current_token.kind == Token::Kind::Identifier &&
                     skip_trivia
                     arg = parse_block_shorthand(amp_token)
                   else
-                    arg = parse_op_assign
+                    arg = without_postfix_modifiers { parse_op_assign }
                   end
                   if arg.invalid?
                     @parsing_call_args -= 1
@@ -11446,7 +11446,7 @@ current_token.kind == Token::Kind::Identifier &&
                     advance # consume ':'
                     skip_trivia
 
-                    value_expr = parse_op_assign
+                    value_expr = without_postfix_modifiers { parse_op_assign }
                     if value_expr.invalid?
                       @parsing_call_args -= 1
                       return PREFIX_ERROR
@@ -11574,7 +11574,7 @@ current_token.kind == Token::Kind::Identifier &&
                           skip_trivia
                           parse_block_shorthand(amp_token)
                         else
-                          parse_op_assign
+                          without_postfix_modifiers { parse_op_assign }
                         end
                   if arg.invalid?
                     @parsing_call_args -= 1
@@ -11595,7 +11595,7 @@ current_token.kind == Token::Kind::Identifier &&
                     advance # consume ':'
                     skip_trivia
 
-                    value_expr = parse_op_assign
+                    value_expr = without_postfix_modifiers { parse_op_assign }
                     if value_expr.invalid?
                       @parsing_call_args -= 1
                       return PREFIX_ERROR
