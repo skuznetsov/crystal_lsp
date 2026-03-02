@@ -1495,6 +1495,7 @@ module CrystalV2
 
         # Save to pipeline cache on miss
         if options.pipeline_cache && !pipeline_cache_file.empty?
+          FileUtils.mkdir_p(File.dirname(pipeline_cache_file))
           FileUtils.cp(ll_file, pipeline_cache_file)
           File.write(pipeline_cache_file + ".libs", options.link_libraries.join("\n") + "\n")
           @pipeline_cache_misses += 1

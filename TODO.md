@@ -8838,3 +8838,29 @@ crystal build -Ddebug_hooks src/crystal_v2.cr -o bin/crystal_v2 --no-debug
 ### Interpretation
 - Pipeline cache feature is now functionally restored and validated.
 - For full stage2 bootstrap under strict 180s watchdog, current bottleneck remains *before cache-save point* (run times out, so warm-cache benefit cannot materialize for that target yet).
+
+## 2026-03-02: Follow-up experiments after pipeline-cache re-enable
+
+### Branch F (refuted/reverted): HIR debug ENV checks precomputed into booleans
+- Idea:
+  - Replace hot-path `env_get/env_has` checks in `AstToHir` (`DEBUG_MONO`, `DEBUG_TYPE_PATH`, `DEBUG_WUINT128`, `DEBUG_TUPLE_PAREN`) with precomputed bool flags.
+- Outcome:
+  - No clear stage2 gain in watchdog window; branch was reverted from code.
+  - This branch also exposed a real pipeline-cache save robustness bug (below).
+
+### Root-cause reliability fix: ensure pipeline cache directory exists before save
+- Problem found during `run_all`:
+  - `test_generics_stack` intermittently failed with:
+    - `error: file not found ... tmp/pipeline_cache/...ll`
+  - Cause: cache-save path could run when `tmp/pipeline_cache` was absent.
+- Fix (`src/compiler/cli.cr`):
+  - Before save:
+    - `FileUtils.mkdir_p(File.dirname(pipeline_cache_file))`
+- Validation:
+  - After fix: `regression_tests/run_all.sh /tmp/stage1_dbg_envflags_cached2` → `61 passed, 0 failed`.
+
+### Additional measurement note
+- With pipeline cache enabled by default, cold run pays hash/setup overhead.
+- For apples-to-apples stage2 timing against historical no-pipeline snapshots, disable it explicitly:
+  - `env CRYSTAL_V2_PIPELINE_CACHE=0 ...`
+  - observed watchdog run: `real 193.31` (timeout) on `/tmp/stage1_rel_envflags_cached`.
