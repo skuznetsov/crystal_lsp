@@ -8796,3 +8796,45 @@ crystal build -Ddebug_hooks src/crystal_v2.cr -o bin/crystal_v2 --no-debug
 - Result:
   - Inconclusive/noise-level effect (mean `192.89`, around current baseline envelope).
   - Branch **reverted** to avoid carrying uncertain perf-only change.
+
+## 2026-03-02: Root-cause cleanup — pipeline cache path was hard-disabled
+
+### Finding
+- `src/compiler/cli.cr` had pipeline cache code guarded by `if false && options.pipeline_cache` in both:
+  - cache lookup/read path (`[1/6]` pre-HIR section),
+  - cache save path (after LLVM IR write).
+- Effect: CLI/env exposed `pipeline_cache` as enabled, but runtime behavior was always disabled (`pipeline_cache=0 hit/0 miss`).
+
+### Fix
+- Re-enabled both code paths by removing hard-false guards:
+  - `if options.pipeline_cache`
+  - `if options.pipeline_cache && !pipeline_cache_file.empty?`
+
+### Validation
+- Debug compiler build:
+  - `/usr/bin/time -p crystal build src/crystal_v2.cr -o /tmp/stage1_dbg_pipeline_cache_on`
+  - `real 8.92`
+- Mini-oracle (same source compiled twice):
+  - run #1:
+    - `/tmp/stage1_dbg_pipeline_cache_on --release --debug-profile regression_tests/basic_sanity.cr -o /tmp/basic_sanity_pipe_probe_1`
+    - `Timing ... total=10767.4 ... llvm_cache=2 hit/0 miss pipeline_cache=0 hit/1 miss`
+  - run #2:
+    - `/tmp/stage1_dbg_pipeline_cache_on --release --debug-profile regression_tests/basic_sanity.cr -o /tmp/basic_sanity_pipe_probe_2`
+    - `Timing ... total=956.6 ... llvm_cache=2 hit/0 miss pipeline_cache=1 hit/0 miss`
+- Regression suite:
+  - `regression_tests/run_all.sh /tmp/stage1_dbg_pipeline_cache_on`
+  - `61 passed, 0 failed`
+
+### Stage2 impact at current 180s watchdog
+- Stage1 release:
+  - `crystal build src/crystal_v2.cr --release -o /tmp/stage1_rel_pipeline_cache_on`
+- Stage2 cold:
+  - `/usr/bin/time -p scripts/timeout_sample_lldb.sh -t 180 ... -- /tmp/stage1_rel_pipeline_cache_on src/crystal_v2.cr --release -o /tmp/stage2_rel_pipecache_cold`
+  - timeout, `real 193.86`
+- Stage2 warm (same stage1, second run):
+  - `/usr/bin/time -p scripts/timeout_sample_lldb.sh -t 180 ... -- /tmp/stage1_rel_pipeline_cache_on src/crystal_v2.cr --release -o /tmp/stage2_rel_pipecache_warm`
+  - timeout, `real 193.68`
+
+### Interpretation
+- Pipeline cache feature is now functionally restored and validated.
+- For full stage2 bootstrap under strict 180s watchdog, current bottleneck remains *before cache-save point* (run times out, so warm-cache benefit cannot materialize for that target yet).

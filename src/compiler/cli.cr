@@ -742,7 +742,7 @@ module CrystalV2
         pipeline_cache_file = ""
         ll_file = options.output + ".ll"
 
-        if false && options.pipeline_cache
+        if options.pipeline_cache
           pipeline_cache_dir = File.expand_path("tmp/pipeline_cache", Dir.current)
           FileUtils.mkdir_p(pipeline_cache_dir)
           digest = Digest::SHA256.new
@@ -1494,7 +1494,7 @@ module CrystalV2
         end
 
         # Save to pipeline cache on miss
-        if false && options.pipeline_cache && !pipeline_cache_file.empty?
+        if options.pipeline_cache && !pipeline_cache_file.empty?
           FileUtils.cp(ll_file, pipeline_cache_file)
           File.write(pipeline_cache_file + ".libs", options.link_libraries.join("\n") + "\n")
           @pipeline_cache_misses += 1
