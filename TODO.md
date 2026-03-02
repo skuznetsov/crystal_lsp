@@ -1,5 +1,45 @@
 # Crystal v2 — Active Work (codegen branch)
 
+## 2026-03-02: Stage2 immediate trap root-cause fixed; stage2 wall-time bottleneck remains
+
+### What was fixed (root-cause, not symptom)
+
+1. **Invalid scalar null stores in global path** (`src/compiler/mir/llvm_backend.cr`)
+   - Added final store literal normalization by destination LLVM type.
+   - Prevents invalid IR like `store i32 null, ...`.
+
+2. **Union-to-scalar coercion stored raw `null` into union alloca** (`emit_call` arg coercion path)
+   - In `union_to_int` and `union_to_fp`, store now uses `normalize_union_value(...)`.
+   - Eliminates `opt: null must be a pointer type` in `%union_to_int.*` / `%union_to_fp.*`.
+
+3. **Critical regression from over-aggressive `value_ref` fallback to `null`**
+   - Previous guard replaced valid SSA pointers with `null` when bookkeeping metadata was missing.
+   - This produced broken constructors (`Dnew` paths calling `initialize(ptr null)` and `ret ptr null`), leading to immediate `EXC_BREAKPOINT` in stage2-built compiler.
+   - Fixed by only falling back to defaults when MIR definition is truly missing (`find_def_inst(id).nil?`) or explicit `Undef`.
+   - If MIR def exists, keep named SSA value (`%rN`) even without emitted-type bookkeeping.
+
+### Evidence
+
+- `stage1` rebuild (original compiler, release):
+  - `/usr/bin/time -p crystal build src/crystal_v2.cr --release -o /tmp/stage1_rel_20260302_guardfix3`
+  - `real 435.46`
+
+- Stage2 LL validation after guard fix:
+  - In `/tmp/stage2_rel_20260302_guardfix3_fresh1.ll`, constructors now keep allocated pointer:
+    - `CrystalV2::Compiler::Frontend::ExprId#new`: `initialize(ptr %r1, ...)` and `ret ptr %r1` (no `ptr null`)
+    - `Crystal::System::FileDescriptor#from_stdio`: uses `%r2/%r3` object pointers (no null-base object init)
+
+- Stage2 bootstrap runtime status:
+  - `t=180`: timeout (~194s wall incl. diagnostics), no IR verification error
+  - `t=240`: timeout (~245s wall incl. diagnostics), hotspots in LLVM codegen/asm (`SelectionDAGISel`, `MachObjectWriter`, symbol table, mem2reg/SROA)
+  - This indicates current blocker is **performance (late LLVM pipeline)**, not the prior correctness traps.
+
+### Current state
+
+- Immediate stage2→stage3 trap reproducer is addressed at IR generation level (null-substitution in constructors removed).
+- Stage2 release bootstrap still exceeds watchdog budget on this branch; stage3 bootstrap not yet reached in watchdog-limited runs.
+- Next iteration should focus on LLVM pipeline cost control / cache effectiveness (not on constructor correctness paths).
+
 ## NEXT STEPS (for GPT 5.3 Codex or next Claude session)
 
 ### Priority 1: Fix stage2 LLVM verification error (Undef + all-ref unions)

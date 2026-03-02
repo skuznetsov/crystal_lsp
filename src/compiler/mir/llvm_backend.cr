@@ -8739,16 +8739,49 @@ module Crystal::MIR
       # Store to cross-block slot if this value is used across blocks
       # This centralizes the logic that was previously only in emit_load
       # When in phi block, defer EVERYTHING (including wrapping) to after all phis
-      if @in_phi_block && produces_value && (slot_name = @cross_block_slots[inst.id]?)
-        @deferred_phi_store_ops << {inst.id, name, slot_name}
-      elsif produces_value && (slot_name = @cross_block_slots[inst.id]?)
-        emit_cross_block_slot_store(inst.id, name, slot_name)
+        if @in_phi_block && produces_value && (slot_name = @cross_block_slots[inst.id]?)
+          @deferred_phi_store_ops << {inst.id, name, slot_name}
+        elsif produces_value && (slot_name = @cross_block_slots[inst.id]?)
+          if @constant_values.has_key?(inst.id) || @emitted_value_types.has_key?(name)
+            emit_cross_block_slot_store(inst.id, name, slot_name)
+          else
+            if ENV["CRYSTAL2_STAGE2_DEBUG"]? == "1" || ENV["STAGE2_BOOTSTRAP_TRACE"]?
+              STDERR.puts "[LLVM_MISSING_VALUE] func=#{@current_func_name} inst=#{inst.class.name} id=#{inst.id} slot=%#{slot_name}"
+            end
+            emit_cross_block_slot_default_store(inst.id, slot_name)
+          end
+        end
       end
-    end
 
-    private def emit_cross_block_slot_store(inst_id : ValueId, name : String, slot_name : String)
-      val_type = @value_types[inst_id]?
-      return unless val_type
+      private def emit_cross_block_slot_default_store(inst_id : ValueId, slot_name : String)
+        slot_llvm_type = @cross_block_slot_types[inst_id]? ||
+                         begin
+                           if val_type = @value_types[inst_id]?
+                             @type_mapper.llvm_type(val_type)
+                           else
+                             "ptr"
+                           end
+                         end
+        slot_llvm_type = "ptr" if slot_llvm_type == "void"
+
+        if slot_llvm_type.includes?(".union")
+          base = "r#{inst_id}.slot_default"
+          emit "%#{base}.ptr = alloca #{slot_llvm_type}, align 8"
+          emit "store #{slot_llvm_type} zeroinitializer, ptr %#{base}.ptr"
+          emit "%#{base}.val = load #{slot_llvm_type}, ptr %#{base}.ptr"
+          emit "store #{slot_llvm_type} %#{base}.val, ptr %#{slot_name}"
+        elsif slot_llvm_type == "ptr"
+          emit "store ptr null, ptr %#{slot_name}"
+        elsif slot_llvm_type == "float" || slot_llvm_type == "double"
+          emit "store #{slot_llvm_type} 0.0, ptr %#{slot_name}"
+        else
+          emit "store #{slot_llvm_type} 0, ptr %#{slot_name}"
+        end
+      end
+
+      private def emit_cross_block_slot_store(inst_id : ValueId, name : String, slot_name : String)
+        val_type = @value_types[inst_id]?
+        return unless val_type
       llvm_type = @type_mapper.llvm_type(val_type)
       llvm_type = "ptr" if llvm_type == "void"
       # Check actual emitted type — the value may have been emitted with a different
@@ -12378,7 +12411,7 @@ module Crystal::MIR
                    @cond_counter += 1
                    val = value_ref(a)
                    emit "%union_to_int.#{c}.ptr = alloca #{actual_llvm_type}, align 8"
-                   emit "store #{actual_llvm_type} #{val}, ptr %union_to_int.#{c}.ptr"
+                   emit "store #{actual_llvm_type} #{normalize_union_value(val, actual_llvm_type)}, ptr %union_to_int.#{c}.ptr"
                    emit "%union_to_int.#{c}.payload_ptr = getelementptr #{actual_llvm_type}, ptr %union_to_int.#{c}.ptr, i32 0, i32 1"
                    emit "%union_to_int.#{c}.val = load #{expected_llvm_type}, ptr %union_to_int.#{c}.payload_ptr, align 4"
                    "#{expected_llvm_type} %union_to_int.#{c}.val"
@@ -12391,7 +12424,7 @@ module Crystal::MIR
                    @cond_counter += 1
                    val = value_ref(a)
                    emit "%union_to_fp.#{c}.ptr = alloca #{actual_llvm_type}, align 8"
-                   emit "store #{actual_llvm_type} #{val}, ptr %union_to_fp.#{c}.ptr"
+                   emit "store #{actual_llvm_type} #{normalize_union_value(val, actual_llvm_type)}, ptr %union_to_fp.#{c}.ptr"
                    emit "%union_to_fp.#{c}.payload_ptr = getelementptr #{actual_llvm_type}, ptr %union_to_fp.#{c}.ptr, i32 0, i32 1"
                    emit "%union_to_fp.#{c}.val = load #{expected_llvm_type}, ptr %union_to_fp.#{c}.payload_ptr, align 4"
                    "#{expected_llvm_type} %union_to_fp.#{c}.val"
@@ -13917,6 +13950,7 @@ module Crystal::MIR
         end
       end
 
+      val = normalize_value_for_store_type(val, llvm_type)
       emit "store #{llvm_type} #{val}, ptr @#{actual_global}"
     end
 
@@ -16061,7 +16095,7 @@ module Crystal::MIR
               c = @cond_counter
               @cond_counter += 1
               emit "%ret_union_extract.#{c}.ptr = alloca #{val_llvm_type}, align 8"
-              emit "store #{val_llvm_type} #{val_ref}, ptr %ret_union_extract.#{c}.ptr"
+                emit "store #{val_llvm_type} #{normalize_union_value(val_ref, val_llvm_type)}, ptr %ret_union_extract.#{c}.ptr"
               emit "%ret_union_extract.#{c}.payload_ptr = getelementptr #{val_llvm_type}, ptr %ret_union_extract.#{c}.ptr, i32 0, i32 1"
               emit "%ret_union_extract.#{c}.val = load #{@current_return_type}, ptr %ret_union_extract.#{c}.payload_ptr, align 4"
               emit "ret #{@current_return_type} %ret_union_extract.#{c}.val"
@@ -16070,7 +16104,7 @@ module Crystal::MIR
               c = @cond_counter
               @cond_counter += 1
               emit "%ret_union_to_ptr.#{c}.ptr = alloca #{val_llvm_type}, align 8"
-              emit "store #{val_llvm_type} #{val_ref}, ptr %ret_union_to_ptr.#{c}.ptr"
+                emit "store #{val_llvm_type} #{normalize_union_value(val_ref, val_llvm_type)}, ptr %ret_union_to_ptr.#{c}.ptr"
               emit "%ret_union_to_ptr.#{c}.payload_ptr = getelementptr #{val_llvm_type}, ptr %ret_union_to_ptr.#{c}.ptr, i32 0, i32 1"
               emit "%ret_union_to_ptr.#{c}.val = load ptr, ptr %ret_union_to_ptr.#{c}.payload_ptr, align 4"
               emit "ret ptr %ret_union_to_ptr.#{c}.val"
@@ -16079,7 +16113,7 @@ module Crystal::MIR
               c = @cond_counter
               @cond_counter += 1
               emit "%ret_union_to_float.#{c}.ptr = alloca #{val_llvm_type}, align 8"
-              emit "store #{val_llvm_type} #{val_ref}, ptr %ret_union_to_float.#{c}.ptr"
+                emit "store #{val_llvm_type} #{normalize_union_value(val_ref, val_llvm_type)}, ptr %ret_union_to_float.#{c}.ptr"
               emit "%ret_union_to_float.#{c}.payload_ptr = getelementptr #{val_llvm_type}, ptr %ret_union_to_float.#{c}.ptr, i32 0, i32 1"
               emit "%ret_union_to_float.#{c}.val = load #{@current_return_type}, ptr %ret_union_to_float.#{c}.payload_ptr, align 4"
               emit "ret #{@current_return_type} %ret_union_to_float.#{c}.val"
@@ -16089,7 +16123,7 @@ module Crystal::MIR
               @cond_counter += 1
               # Store source union to get its pointers
               emit "%ret_union_conv.#{c}.src_ptr = alloca #{val_llvm_type}, align 8"
-              emit "store #{val_llvm_type} #{val_ref}, ptr %ret_union_conv.#{c}.src_ptr"
+                emit "store #{val_llvm_type} #{normalize_union_value(val_ref, val_llvm_type)}, ptr %ret_union_conv.#{c}.src_ptr"
               # Get source type_id
               emit "%ret_union_conv.#{c}.src_type_ptr = getelementptr #{val_llvm_type}, ptr %ret_union_conv.#{c}.src_ptr, i32 0, i32 0"
               emit "%ret_union_conv.#{c}.type_id = load i32, ptr %ret_union_conv.#{c}.src_type_ptr"
@@ -16465,12 +16499,43 @@ module Crystal::MIR
         end
         return temp_name
       end
-      # Otherwise reference by name
-      if name = @value_names[id]?
-        "%#{name}"
-      else
-        # Value was never emitted yet.
-        # In phi mode: return forward reference (LLVM phi nodes support this for loop back-edges)
+        # Otherwise reference by name
+        if name = @value_names[id]?
+          ref_name = "%#{name}"
+          # A value name may exist even when the defining instruction wasn't
+          # materialized (for example, it was rewritten away during MIR passes).
+          # Returning a raw `%rN` here can produce invalid IR with undefined SSA use.
+          unless @in_phi_mode
+            has_materialized_ref =
+              @constant_values.has_key?(id) ||
+              @cross_block_slots.has_key?(id) ||
+              @emitted_allocas.includes?(id) ||
+              @current_func_params.any? { |p| p.index == id } ||
+              @emitted_value_types.has_key?(ref_name)
+            unless has_materialized_ref
+              # Keep named SSA values when MIR still has a concrete definition.
+              # This prevents false "null" substitution for valid values (notably
+              # object allocation/new paths) while still guarding truly missing defs.
+              def_inst = find_def_inst(id)
+              if def_inst.nil? || def_inst.is_a?(Undef)
+                if val_type = @value_types[id]?
+                  llvm_type = @type_mapper.llvm_type(val_type)
+                  if llvm_type == "ptr" || llvm_type == "void" || llvm_type.includes?(".union")
+                    return "null"
+                  elsif llvm_type == "float" || llvm_type == "double"
+                    return "0.0"
+                  else
+                    return "0"
+                  end
+                end
+                return "null"
+              end
+            end
+          end
+          ref_name
+        else
+          # Value was never emitted yet.
+          # In phi mode: return forward reference (LLVM phi nodes support this for loop back-edges)
         # Outside phi mode: return default value
         if @in_phi_mode
           # Forward reference for phi node from loop back-edge
@@ -16572,6 +16637,29 @@ module Crystal::MIR
       else
         val
       end
+    end
+
+    # Normalize scalar/pointer literals before final store emission.
+    # Prevent invalid IR like `store i32 null, ...` when a nil-like value leaks
+    # into non-pointer code paths.
+    private def normalize_value_for_store_type(val : String, llvm_type : String) : String
+      return normalize_union_value(val, llvm_type) if llvm_type.includes?(".union")
+
+      if val == "null"
+        return "null" if llvm_type == "ptr"
+        return "0.0" if llvm_type == "float" || llvm_type == "double"
+        return "0"
+      end
+
+      if llvm_type == "ptr" && val == "0"
+        return "null"
+      end
+
+      if (llvm_type == "float" || llvm_type == "double") && val == "0"
+        return "0.0"
+      end
+
+      val
     end
 
     private def union_variant_tokens_for_llvm_union(llvm_type : String) : Array(String)
