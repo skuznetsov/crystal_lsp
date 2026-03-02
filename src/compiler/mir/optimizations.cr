@@ -1546,9 +1546,9 @@ module Crystal::MIR
       case term
       when Return
         if value = term.value
-          new_value = resolve(value, replacements, block_id, use_index, def_blocks, def_index, dominance_info)
+          new_value : ValueId = resolve(value, replacements, block_id, use_index, def_blocks, def_index, dominance_info)
           if ENV["MIR_CP_DEBUG"]?
-            STDERR.puts "[MIR_CP] ret value=#{value} new_value=#{new_value}"
+            STDERR.puts "[MIR_CP] ret value=#{value.to_u32} new_value=#{new_value.to_u32}"
           end
           return term if new_value == value
           return Return.new(new_value)
@@ -1576,18 +1576,19 @@ module Crystal::MIR
       def_index : Hash(ValueId, Int32),
       dominance_info : DominanceInfo?
     ) : ValueId
-      current = id
+      current : ValueId = id
       hops = 0
 
       while next_id = replacements[current]?
-        break if next_id == current
+        resolved_next : ValueId = next_id.to_u32
+        break if resolved_next == current
         break if hops >= 64
-        break unless @assume_dominates || dominates_use?(next_id, use_block, use_index, def_blocks, def_index, dominance_info)
-        current = next_id
+        break unless @assume_dominates || dominates_use?(resolved_next, use_block, use_index, def_blocks, def_index, dominance_info)
+        current = resolved_next
         hops += 1
       end
 
-      current
+      current.to_u32
     end
 
     private struct DominanceInfo

@@ -7042,7 +7042,7 @@ module Crystal::MIR
         emit_block(block, func)
       end
 
-      block_ir = @output.to_s
+      block_ir_output = @output
       @output = saved_output
       @toplevel_output = nil
 
@@ -7051,7 +7051,8 @@ module Crystal::MIR
       # that are safe to allocate once in the entry block and reuse.
       hoisted_allocas = [] of String
       processed_block_ir = IO::Memory.new
-      block_ir.each_line do |line|
+      block_ir_output.rewind
+      while line = block_ir_output.gets
         # Fast-path without allocating `lstrip` per line.
         bytes = line.to_slice
         pos = 0
@@ -7065,7 +7066,6 @@ module Crystal::MIR
           processed_block_ir << line << '\n'
         end
       end
-      processed_block_ir_str = processed_block_ir.to_s
       # Emit hoisted allocas in entry block (before the br)
       hoisted_allocas.each do |alloca_line|
         emit_raw alloca_line
@@ -7080,10 +7080,14 @@ module Crystal::MIR
       # Emit block IR with allocas replaced by no-ops (comments).
       # The alloca SSA names are now defined in the entry block.
       begin
-        emit_raw processed_block_ir_str
+        processed_block_ir.rewind
+        while line = processed_block_ir.gets
+          emit_raw line
+          emit_raw "\n"
+        end
       rescue ex : IO::EOFError
         if ENV["CRYSTAL2_STAGE2_DEBUG"]? == "1" || ENV["STAGE2_BOOTSTRAP_TRACE"]?
-          STDERR.puts "[LLVM_EMIT_EOF] func=#{func.name} blocks=#{func.blocks.size} block_ir_bytes=#{block_ir.bytesize} hoisted_allocas=#{hoisted_allocas.size}"
+          STDERR.puts "[LLVM_EMIT_EOF] func=#{func.name} blocks=#{func.blocks.size} hoisted_allocas=#{hoisted_allocas.size}"
         end
         raise ex
       end
@@ -15658,11 +15662,13 @@ module Crystal::MIR
           string_parts << part_ref
         elsif part_type == TypeRef::CHAR
           # Convert char (i32 codepoint) to string
-          emit "%#{base_name}.conv#{idx} = call ptr @__crystal_v2_char_to_string(i32 #{part_ref})"
+          char_arg = interpolation_i32_arg(part_ref, part_id, base_name, idx, part_type)
+          emit "%#{base_name}.conv#{idx} = call ptr @__crystal_v2_char_to_string(i32 #{char_arg})"
           string_parts << "%#{base_name}.conv#{idx}"
         elsif part_type == TypeRef::INT32 || part_type == TypeRef::UINT32
           # Convert int32 to string
-          emit "%#{base_name}.conv#{idx} = call ptr @__crystal_v2_int_to_string(i32 #{part_ref})"
+          int_arg = interpolation_i32_arg(part_ref, part_id, base_name, idx, part_type)
+          emit "%#{base_name}.conv#{idx} = call ptr @__crystal_v2_int_to_string(i32 #{int_arg})"
           string_parts << "%#{base_name}.conv#{idx}"
         elsif part_type == TypeRef::INT64 || part_type == TypeRef::UINT64
           # Convert int64 to string
@@ -15691,7 +15697,8 @@ module Crystal::MIR
           # Check actual LLVM type - might be i32 (enum/symbol) that needs conversion
           part_llvm_type = part_type ? @type_mapper.llvm_type(part_type) : "ptr"
           if part_llvm_type == "i32"
-            emit "%#{base_name}.conv#{idx} = call ptr @__crystal_v2_int_to_string(i32 #{part_ref})"
+            int_arg = interpolation_i32_arg(part_ref, part_id, base_name, idx, part_type)
+            emit "%#{base_name}.conv#{idx} = call ptr @__crystal_v2_int_to_string(i32 #{int_arg})"
             string_parts << "%#{base_name}.conv#{idx}"
           elsif part_llvm_type == "i64"
             emit "%#{base_name}.conv#{idx} = call ptr @__crystal_v2_int64_to_string(i64 #{part_ref})"
@@ -15736,7 +15743,8 @@ module Crystal::MIR
               # Slot is a primitive — use the primitive conversion path instead of union
               case actual_slot_type
               when "i32"
-                emit "%#{base_name}.conv#{idx} = call ptr @__crystal_v2_int_to_string(i32 #{part_ref})"
+                int_arg = interpolation_i32_arg(part_ref, part_id, base_name, idx, part_type)
+                emit "%#{base_name}.conv#{idx} = call ptr @__crystal_v2_int_to_string(i32 #{int_arg})"
               when "i64"
                 emit "%#{base_name}.conv#{idx} = call ptr @__crystal_v2_int64_to_string(i64 #{part_ref})"
               when "i1"
@@ -15860,6 +15868,37 @@ module Crystal::MIR
           emit "store ptr #{part}, ptr %#{base_name}.slot#{i}"
         end
         emit "#{name} = call ptr @__crystal_v2_string_interpolate(ptr %#{base_name}.arr, i32 #{n})"
+      end
+    end
+
+    # Ensure interpolation operand is materialized as i32 for int/char conversion
+    # helpers (ptr-encoded scalar slots, widened ints, etc.).
+    private def interpolation_i32_arg(part_ref : String, part_id : ValueId, base_name : String, idx : Int32, hint_type : TypeRef?) : String
+      return part_ref unless part_ref.starts_with?('%')
+
+      actual_type = @emitted_value_types[part_ref]? ||
+                    @cross_block_slot_types[part_id]? ||
+                    hint_type.try { |t| @type_mapper.llvm_type(t) }
+      return part_ref unless actual_type
+
+      cast_name = "%#{base_name}.i32_cast#{idx}"
+      case actual_type
+      when "i32"
+        part_ref
+      when "ptr"
+        emit "#{cast_name} = ptrtoint ptr #{part_ref} to i32"
+        cast_name
+      when "i64", "i128"
+        emit "#{cast_name} = trunc #{actual_type} #{part_ref} to i32"
+        cast_name
+      when "i16", "i8", "i1"
+        signed = hint_type == TypeRef::INT8 || hint_type == TypeRef::INT16 || hint_type == TypeRef::INT32 ||
+                 hint_type == TypeRef::INT64 || hint_type == TypeRef::INT128
+        op = signed ? "sext" : "zext"
+        emit "#{cast_name} = #{op} #{actual_type} #{part_ref} to i32"
+        cast_name
+      else
+        part_ref
       end
     end
 

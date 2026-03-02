@@ -15272,7 +15272,7 @@ module Crystal::HIR
             register_class_with_name(member, full_nested_name)
             # When parent has active type substitutions and nested type is generic,
             # also monomorphize the nested type with the substituted type args.
-            # E.g., Hash(String, Int32)::Entry(K, V) → Hash::Entry(String, Int32)
+            # E.g., Hash(String, Int32)::Entry(K, V) -> Hash::Entry(String, Int32)
             if !@type_param_map.empty? && (nested_type_params = member.type_params) && nested_type_params.size > 0
               type_args = nested_type_params.map { |p| @type_param_map[String.new(p)]? || String.new(p) }
               if concrete_type_args?(type_args)
@@ -33194,6 +33194,12 @@ module Crystal::HIR
         nil_lit.id
       when CrystalV2::Compiler::Frontend::GlobalVarDeclNode
         # Global variable declaration ($name : Type) - declaration only, return nil
+        nil_lit = Literal.new(ctx.next_id, TypeRef::NIL, nil)
+        ctx.emit(nil_lit)
+        nil_lit.id
+      when CrystalV2::Compiler::Frontend::InstanceVarDeclNode
+        # Instance variable declaration (@name : Type [= value]) is declaration-only here.
+        # Field registration/default handling is performed by class/member collection passes.
         nil_lit = Literal.new(ctx.next_id, TypeRef::NIL, nil)
         ctx.emit(nil_lit)
         nil_lit.id

@@ -9081,3 +9081,31 @@ crystal build -Ddebug_hooks src/crystal_v2.cr -o bin/crystal_v2 --no-debug
   - stage1 (release/original): `437.51s`
   - stage2 (`t300` watchdog run): exceeded `300s` and timed out at `313.12s`
 - Compared to previous `t180` run on same commit (`193.01s` timeout), long-window hotspot dominance moved from HIR type-name/hash lookup to MIR/LLVM emission path.
+
+## 2026-03-02 (Omni) — stage2 stabilization update
+
+### Root-cause fixes integrated
+- HIR lowering: added explicit `InstanceVarDeclNode` handling in `lower_expr` (declaration-only `nil` result).
+  - Effect: removed early stage2 failure `Unsupported AST node type: CrystalV2::Compiler::Frontend::InstanceVarDeclNode`.
+- LLVM backend string interpolation: added dynamic coercion helper for i32 interpolation arguments (`ptr/i64/i16/i8/i1 -> i32`) before `__crystal_v2_int_to_string`.
+  - Effect: removed LLVM opt crash `error: '%r14.fromslot.6' defined with type 'ptr' but expected 'i32'` in stage2 release bootstrap.
+- CopyPropagation pass: hardened `ValueId` typing flow in `resolve`/`rewrite_terminator` with explicit `ValueId` annotations and `to_u32` normalization.
+
+### Regression safety
+- Full regression suite passed on current code:
+  - `regression_tests/run_all.sh /tmp/stage1_dbg_post_revert_nested`
+  - Result: `62 passed, 0 failed out of 62 tests`.
+- Note: attempted nested generic lazy-mono gating in `register_concrete_class` caused `test_init_obj` segfault; that gating was reverted (correctness-first).
+
+### Bootstrap timings (current state)
+- Stage1 (original compiler, `--release`, cold cache):
+  - `/usr/bin/time -p env CRYSTAL_CACHE_DIR=/tmp/crystal_cache_stage1_rel_final crystal build src/crystal_v2.cr --release -o /tmp/stage1_rel_final --error-trace`
+  - `real 423.86s`
+- Stage2 (new stage1, `--release`, no pipeline/llvm cache, watchdog):
+  - `/usr/bin/time -p env CRYSTAL_CACHE_DIR=/tmp/crystal_cache_stage2_rel_final CRYSTAL_V2_PIPELINE_CACHE=0 CRYSTAL_V2_LLVM_CACHE=0 scripts/timeout_sample_lldb.sh --timeout 300 ... -- /tmp/stage1_rel_final src/crystal_v2.cr --release -o /tmp/stage2_rel_final`
+  - Timeout at 300s (`real 311.22s`, killed by watchdog).
+  - Latest hotspots (sample): `GC_malloc_kind`, `GC_generic_malloc_many`, `Crystal::MIR::DeadCodeEliminationPass#run`, `Crystal::MIR::RCElisionPass#run`, `LLVMTypeMapper#mangle_name`.
+
+### Current interpretation
+- stage2 failure mode shifted from hard LLVM type-crash to performance timeout in MIR optimization / allocation-heavy region.
+- Next root-cause lane: DCE/RCElision pass-level profiling + mini-oracle for pass budgets (without reintroducing nested mono correctness regressions).
