@@ -9000,3 +9000,61 @@ crystal build -Ddebug_hooks src/crystal_v2.cr -o bin/crystal_v2 --no-debug
 ### Notes
 - After repeated timeout-kills, stale/corrupt cached artifacts can cause transient link failures; rotating `tmp/llvm_cache` restored deterministic warm runs.
 - Current root-cause fix addresses IR type correctness for pointer null-check paths; remaining issue is cold-path backend performance.
+
+## 2026-03-02: Root-cause fix for `File.info?` return annotation drift (`Info?` -> wrong namespace)
+
+### Problem
+- Stage1-generated code mis-typed `File.info?` as `Nil | Crystal::DWARF::Info` (instead of `Nil | File::Info`).
+- This propagated into `Dir.exists?` and produced runtime crashes in stage1-built binaries (mini repro: `puts Dir.exists?(".")`).
+
+### Root cause
+- In `register_concrete_class` method-signature registration (`src/compiler/hir/ast_to_hir.cr`), return annotation resolution used:
+  - `resolved_rt_name = resolve_type_name_in_context(rt_name)`
+  - but then ignored it and did `type_ref_for_name(rt_name)`.
+- For `File.info? : Info?`, raw `rt_name` could resolve through short-name fallback to unrelated `Crystal::DWARF::Info`.
+
+### Fix
+- Keep the resolved type-name authoritative during signature registration:
+  - changed `type_ref_for_name(rt_name)` -> `type_ref_for_name(resolved_rt_name)`.
+- Also kept forward-ref preference improvements in type resolver around unqualified nested names in class scope.
+
+### Validation
+- Mini repro source:
+  - `/tmp/repro_dir_exists.cr`:
+    - `puts Dir.exists?(".")`
+- Debug stage1 build:
+  - `/usr/bin/time -p crystal build src/crystal_v2.cr -o /tmp/stage1_dbg_fileinfo_rootfix3 --error-trace`
+  - result: `real 8.74`
+- FTYPE trace (no cache):
+  - `CRYSTAL_V2_PIPELINE_CACHE=0 DEBUG_SET_FTYPE='File.info?' /tmp/stage1_dbg_fileinfo_rootfix3 /tmp/repro_dir_exists.cr -o /tmp/repro_dir_exists_fileinfo_rootfix3_bin`
+  - key signal:
+    - `File.info?$Path | String type=Nil | File::Info`
+    - no `File.info?... type=Nil | Crystal::DWARF::Info`
+- LLVM IR check:
+  - `/tmp/stage1_dbg_fileinfo_rootfix3 --emit llvm-ir /tmp/repro_dir_exists.cr -o /tmp/repro_dir_exists_rootfix3_emit`
+  - `Dir.exists?` now calls `@File$Dinfo...` with `%Nil$_$OR$_File$CCInfo.union` (not `DWARF$CCInfo`).
+- Runtime check:
+  - `/tmp/stage1_dbg_fileinfo_rootfix3 /tmp/repro_dir_exists.cr -o /tmp/repro_dir_exists_rootfix3_bin`
+  - `scripts/run_safe.sh /tmp/repro_dir_exists_rootfix3_bin 5 512`
+  - result: stdout `true`, exit `0`.
+- Regression suite:
+  - `regression_tests/run_all.sh /tmp/stage1_dbg_fileinfo_rootfix3`
+  - result: `61 passed, 0 failed`.
+
+### Bootstrap timing snapshot (this branch)
+- Stage1 release (original compiler, isolated cache):
+  - `/usr/bin/time -p env CRYSTAL_CACHE_DIR=/tmp/crystal_cache_orig_rel_fileinfo_rootfix3 crystal build src/crystal_v2.cr --release -o /tmp/stage1_rel_fileinfo_rootfix3`
+  - result: `real 437.51`
+- Stage2 release (watchdog 180s + series samples):
+  - `/usr/bin/time -p scripts/timeout_sample_lldb.sh -t 180 --series-start 30 --series-interval 60 --series-duration 8 -o /tmp/stage2_rel_fileinfo_rootfix3_diag -- /tmp/stage1_rel_fileinfo_rootfix3 src/crystal_v2.cr --release -o /tmp/stage2_rel_fileinfo_rootfix3`
+  - result: timeout `124`, `real 193.01`
+  - top hotspots:
+    - `String@Object#hash`
+    - `Crystal::HIR::AstToHir#type_ref_for_name`
+    - `Crystal::HIR::AstToHir#substitute_type_params_in_type_name`
+    - `String#index`
+    - `Hash(String, String)#find_entry`
+
+### Notes
+- One initial stage1 release attempt with shared default cache failed in original compiler cache-rename path (`File::NotFoundError` under `~/.cache/crystal`); isolated `CRYSTAL_CACHE_DIR` run succeeded.
+- Stage2 stability issue shifted back to known perf/hot-loop area (`type_ref_for_name`/string-hash path), while the `File.info?` IR correctness issue is fixed on mini-oracle.

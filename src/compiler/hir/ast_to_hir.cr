@@ -1688,6 +1688,30 @@ module Crystal::HIR
       if old_type == return_type
         return false
       end
+      # For methods with explicit return annotations, don't allow later contextual
+      # inference passes to overwrite an already-concrete registered return type.
+      # This prevents namespace drift (for example File::Info? -> Crystal::DWARF::Info?)
+      # when callsite inference runs under a different @current_class.
+      if old_type &&
+         old_type != TypeRef::VOID &&
+         old_type != TypeRef::NIL &&
+         old_type != TypeRef::POINTER &&
+         old_type != return_type &&
+         function_has_explicit_return_annotation?(name)
+        if filter = env_get("DEBUG_SET_FTYPE")
+          if name.includes?(filter)
+            old_name = get_type_name_from_ref(old_type)
+            new_name = get_type_name_from_ref(return_type)
+            STDERR.puts "[SET_FTYPE_SKIP_ANNOTATED] name=#{name} old=#{old_name} new=#{new_name} current=#{@current_class || ""}##{@current_method || ""}"
+            if env_get("DEBUG_SET_FTYPE_SKIP_BT")
+              caller.first(10).each do |frame|
+                STDERR.puts "[SET_FTYPE_SKIP_BT] #{frame}"
+              end
+            end
+          end
+        end
+        return false
+      end
       # Do not downgrade a known concrete return type to VOID.
       # VOID writes are often provisional/failed inference states; allowing
       # them to overwrite concrete types causes unstable codegen (different
@@ -1719,6 +1743,19 @@ module Crystal::HIR
         @function_type_keys_by_base_size = @function_types.size
       end
       true
+    end
+
+    private def function_has_explicit_return_annotation?(name : String) : Bool
+      if def_node = @function_defs[name]?
+        return !def_node.return_type.nil?
+      end
+      base_name = strip_type_suffix(name)
+      if base_name != name
+        if def_node = @function_defs[base_name]?
+          return !def_node.return_type.nil?
+        end
+      end
+      false
     end
 
     # Register a function def and update the method index for fast parent lookups.
@@ -7864,12 +7901,13 @@ module Crystal::HIR
       init_params
     end
 
-    private def annotation_type_ref(type_name : String, owner_name : String? = nil) : TypeRef
-      cache_key = {type_name, owner_name, @module_defs_cache_version, @resolved_type_name_cache_epoch}
-      if cached = @annotation_type_ref_cache[cache_key]?
-        return cached
-      end
-      resolved_name = normalize_declared_type_name(type_name, owner_name)
+      private def annotation_type_ref(type_name : String, owner_name : String? = nil) : TypeRef
+        cache_key = {type_name, owner_name, @module_defs_cache_version, @resolved_type_name_cache_epoch}
+        if cached = @annotation_type_ref_cache[cache_key]?
+          return cached
+        end
+        absolute_annotation = type_name.strip.starts_with?("::")
+        resolved_name = normalize_declared_type_name(type_name, owner_name)
       if resolved_name.ends_with?('*')
         pointer_depth = 0
         base = resolved_name
@@ -7893,8 +7931,9 @@ module Crystal::HIR
         @current_class = owner_name
         @current_namespace_override = nil
       end
-      begin
-        if namespace_separator_index(resolved_name).nil?
+      resolved = TypeRef::VOID
+        begin
+          if namespace_separator_index(resolved_name).nil?
           if contextual_alias = resolve_contextual_type_alias_name(resolved_name)
             resolved_name = contextual_alias
             STDERR.puts "[HANDLE_ANNOT] contextual=#{resolved_name}" if debug_handle
@@ -7914,6 +7953,12 @@ module Crystal::HIR
             end
           end
         end
+        if absolute_annotation && !resolved_name.starts_with?("::")
+          resolved_name = "::#{resolved_name}"
+        end
+        # Resolve while owner context is active. Restoring context before this call
+        # can redirect names like `File::Info?` into unrelated namespaces.
+        resolved = type_ref_for_name(resolved_name)
       ensure
         if owner_name
           @current_class = old_class
@@ -7921,7 +7966,6 @@ module Crystal::HIR
         end
       end
       STDERR.puts "[HANDLE_ANNOT] final=#{resolved_name}" if debug_handle
-      resolved = type_ref_for_name(resolved_name)
       @annotation_type_ref_cache[cache_key] = resolved
       resolved
     end
@@ -15478,7 +15522,7 @@ module Crystal::HIR
                                 STDERR.puts "[DEBUG_ENUM_RETURN] class=#{class_name} rt=#{rt_name} resolved=#{resolved_rt_name} enum=#{enum_return_name || "(nil)"}"
                               end
                               inferred = module_like_type_name?(rt_name) ? infer_concrete_return_type_from_body(member, class_name, member_arena) : nil
-                              resolved = inferred || type_ref_for_name(rt_name)
+                              resolved = inferred || type_ref_for_name(resolved_rt_name)
                               if resolved == TypeRef::VOID && method_name.ends_with?('?')
                                 self_type = type_ref
                                 resolved = infer_unannotated_query_return_type(method_name, self_type) || resolved
@@ -27438,7 +27482,16 @@ module Crystal::HIR
             end
             return result if found
             if result == name
-              if nested = @nested_type_names[current_base]? || @nested_type_names[current]?
+              # For top-level class/module scopes, prefer a local forward reference
+              # over a unique short-name match in an unrelated namespace.
+              # Example: inside `File`, unresolved `Info` should become `File::Info`
+              # (defined later via require) rather than `Crystal::DWARF::Info`.
+              if !current_base.includes?("::") &&
+                 (@class_info.has_key?(current_base) ||
+                  @module_defs.has_key?(current_base) ||
+                  @generic_templates.has_key?(current_base))
+                result = "#{current_base}::#{name}"
+              elsif nested = @nested_type_names[current_base]? || @nested_type_names[current]?
                 if nested.includes?(name)
                   result = "#{current_base}::#{name}"
                 end
@@ -27446,7 +27499,7 @@ module Crystal::HIR
             end
             # First, check short_type_index for matches in the current namespace,
             # then fall back to sibling matches in the parent namespace.
-            if (candidates = @short_type_index[name]?) && candidates.size >= 1
+            if result == name && (candidates = @short_type_index[name]?) && candidates.size >= 1
               current_matches = candidates.select { |c| c.starts_with?("#{current_base}::") }
               if current_matches.size == 1
                 result = current_matches.first
@@ -27546,7 +27599,10 @@ module Crystal::HIR
               end
             else
               namespace = nil
-              if current_base.includes?("::") || @module_defs.has_key?(current_base)
+              if current_base.includes?("::") ||
+                 @module_defs.has_key?(current_base) ||
+                 @class_info.has_key?(current_base) ||
+                 @generic_templates.has_key?(current_base)
                 nested = @nested_type_names[current_base]? || @nested_type_names[current]?
                 if nested && nested.includes?(name)
                   namespace = current_base
@@ -27727,7 +27783,6 @@ module Crystal::HIR
       end
 
       if candidates = @short_type_index[name]?
-        return candidates.first if candidates.size == 1
         # Walk the namespace chain for candidate matching (not just direct parent).
         # E.g., when @current_class = "A::B::C", check "A::B::C::", then "A::B::", then "A::".
         if override = @current_namespace_override
@@ -27763,6 +27818,29 @@ module Crystal::HIR
           end
         end
         return name if candidates.includes?(name)
+        # If short-name candidates exist but none match the active namespace chain,
+        # prefer a local forward reference over binding to an unrelated namespace.
+        # This avoids signature drift such as resolving `Info` inside `File` to
+        # `Crystal::DWARF::Info` just because it appears first in short_type_index.
+        if name[0]?.try(&.uppercase?)
+          if override = @current_namespace_override
+            override_base = if info = split_generic_base_and_args(override)
+                              info[:base]
+                            else
+                              override
+                            end
+            return "#{override_base}::#{name}" unless override_base.empty?
+          end
+          if current = @current_class
+            current_base = if info = split_generic_base_and_args(current)
+                             info[:base]
+                           else
+                             current
+                           end
+            return "#{current_base}::#{name}" unless current_base.empty?
+          end
+        end
+        return candidates.first if candidates.size == 1
         return candidates.min_by(&.size)
       end
 
@@ -31568,28 +31646,46 @@ module Crystal::HIR
 
       # Determine return type (default to Void if not specified)
       return_type = TypeRef::VOID
-      resolve_declared_return = -> do
-        if rt = node.return_type
-          rt_string = String.new(rt)
-          resolved_name = resolve_type_name_in_context(rt_string)
-          resolved = type_ref_for_name(resolved_name)
-          if resolved == TypeRef::VOID && resolved_name != rt_string
-            resolved = type_ref_for_name(rt_string)
+      saved_signature_scan_mode = @signature_scan_mode
+      @signature_scan_mode = false
+      begin
+        resolve_declared_type = ->(rt_string : String) do
+          normalized_rt = rt_string.strip
+          if normalized_rt.starts_with?("::")
+            # Absolute annotations must be context-free; resolving them through
+            # namespace-sensitive lookup can drift across phases.
+            direct = type_ref_for_name(normalized_rt)
+            if direct == TypeRef::VOID
+              stripped_rt = normalized_rt.size > 2 ? normalized_rt[2..] : ""
+              direct = stripped_rt.empty? ? TypeRef::VOID : type_ref_for_name(stripped_rt)
+            end
+            direct
+          else
+            resolved_name = resolve_type_name_in_context(normalized_rt)
+            resolved = type_ref_for_name(resolved_name)
+            if resolved == TypeRef::VOID && resolved_name != normalized_rt
+              resolved = type_ref_for_name(normalized_rt)
+            end
+            resolved
           end
-          resolved
-        elsif base_name.ends_with?('?')
-          TypeRef::BOOL
-        else
-          TypeRef::VOID
         end
-      end
-      if extra_type_params.empty?
-        return_type = resolve_declared_return.call
-      else
-        with_type_param_map(extra_type_params) do
+        resolve_declared_return = -> do
+          if rt = node.return_type
+            rt_string = String.new(rt)
+            resolve_declared_type.call(rt_string)
+          elsif base_name.ends_with?('?')
+            TypeRef::BOOL
+          else
+            TypeRef::VOID
+          end
+        end
+        if extra_type_params.empty?
           return_type = resolve_declared_return.call
+        else
+          with_type_param_map(extra_type_params) do
+            return_type = resolve_declared_return.call
+          end
         end
-      end
 
       # Top-level functions support overloading, so use mangled names consistently.
       # Exception: stdlib fun main is a C-ABI entrypoint and must stay unmangled.
@@ -31610,19 +31706,17 @@ module Crystal::HIR
       # Re-resolve annotated return type after type-param map merge.
       # Generic signatures like `: T*` may resolve to VOID before lazy specialization
       # mappings are attached.
-      if rt = node.return_type
-        resolved_return = with_type_param_map(extra_type_params) do
-          rt_string = String.new(rt)
-          resolved_name = resolve_type_name_in_context(rt_string)
-          resolved = type_ref_for_name(resolved_name)
-          if resolved == TypeRef::VOID && resolved_name != rt_string
-            resolved = type_ref_for_name(rt_string)
+        if rt = node.return_type
+          resolved_return = with_type_param_map(extra_type_params) do
+            rt_string = String.new(rt)
+            resolve_declared_type.call(rt_string)
           end
-          resolved
+          if resolved_return != TypeRef::VOID || return_type == TypeRef::VOID
+            return_type = resolved_return
+          end
         end
-        if resolved_return != TypeRef::VOID || return_type == TypeRef::VOID
-          return_type = resolved_return
-        end
+      ensure
+        @signature_scan_mode = saved_signature_scan_mode
       end
 
       if registered = @function_types[full_name]?
@@ -31743,7 +31837,7 @@ module Crystal::HIR
         @current_def_return_type = saved_def_return_type
       end
 
-      # Coerce return value to match declared return type if needed.
+        # Coerce return value to match declared return type if needed.
       # This handles cases like returning {nil, 1} (Tuple(Nil, Int32))
       # from a function with return type {Int32?, Int32?} (Tuple(Int32|Nil, Int32|Nil)).
       if return_type != TypeRef::VOID
@@ -41944,7 +42038,7 @@ module Crystal::HIR
       end
     end
 
-    private def infer_yield_return_type(ctx : LoweringContext) : TypeRef?
+      private def infer_yield_return_type(ctx : LoweringContext) : TypeRef?
       func_name = ctx.function.name
       if @inline_yield_block_body_depth > 0 && @current_class && @current_method
         sep = @current_method_is_class ? "." : "#"
