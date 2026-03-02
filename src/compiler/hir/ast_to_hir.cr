@@ -6230,6 +6230,12 @@ module Crystal::HIR
     ) : TypeRef
       element_type = ctx.type_of(array_id)
       if type_desc = @module.get_type_descriptor(element_type)
+        # Prefer type_params: the descriptor for Array(T) stores T's TypeRef directly.
+        # This avoids name-based lookup which fails when names have full namespaces.
+        if type_desc.kind == TypeKind::Array && !type_desc.type_params.empty?
+          elem_ref = type_desc.type_params.first
+          return elem_ref if elem_ref != TypeRef::VOID
+        end
         if elem_name = element_type_for_type_name(type_desc.name)
           resolved = type_ref_for_name(elem_name)
           if resolved != TypeRef::VOID
@@ -54459,6 +54465,21 @@ module Crystal::HIR
 
       # Get element: arr[i]
       element_type = array_element_type_for_value(ctx, array_id, TypeRef::INT32)
+      # For tuple destructuring, resolve element type from type_params if
+      # name-based lookup returned a wrong/default type (e.g. INT32 or VOID).
+      if params = block.params
+        if params.size > 1
+          if element_type == TypeRef::VOID || element_type == TypeRef::INT32
+            arr_type = ctx.type_of(array_id)
+            if arr_desc = @module.get_type_descriptor(arr_type)
+              if arr_desc.kind == TypeKind::Array && !arr_desc.type_params.empty?
+                candidate = arr_desc.type_params.first
+                element_type = candidate if candidate != TypeRef::VOID
+              end
+            end
+          end
+        end
+      end
       index_get = IndexGet.new(ctx.next_id, element_type, array_id, index_phi.id)
       ctx.emit(index_get)
       ctx.register_type(index_get.id, element_type)
@@ -54627,6 +54648,21 @@ module Crystal::HIR
 
       # Get element: arr[i]
       element_type = array_element_type_for_value(ctx, array_id, TypeRef::INT32)
+      # For tuple destructuring, resolve element type from type_params if
+      # name-based lookup returned a wrong/default type (e.g. INT32 or VOID).
+      if params = block.params
+        if params.size > 1
+          if element_type == TypeRef::VOID || element_type == TypeRef::INT32
+            arr_type = ctx.type_of(array_id)
+            if arr_desc = @module.get_type_descriptor(arr_type)
+              if arr_desc.kind == TypeKind::Array && !arr_desc.type_params.empty?
+                candidate = arr_desc.type_params.first
+                element_type = candidate if candidate != TypeRef::VOID
+              end
+            end
+          end
+        end
+      end
       index_get = IndexGet.new(ctx.next_id, element_type, array_id, index_phi.id)
       ctx.emit(index_get)
       ctx.register_type(index_get.id, element_type)
@@ -55388,6 +55424,19 @@ module Crystal::HIR
 
       # Get element: arr[i]
       element_type = array_element_type_for_value(ctx, array_id, TypeRef::INT32)
+      # For tuple destructuring, resolve element type from type_params if
+      # name-based lookup returned a wrong/default type (e.g. INT32 or VOID).
+      if tuple_destruct_names
+        if element_type == TypeRef::VOID || element_type == TypeRef::INT32
+          arr_type = ctx.type_of(array_id)
+          if arr_desc = @module.get_type_descriptor(arr_type)
+            if arr_desc.kind == TypeKind::Array && !arr_desc.type_params.empty?
+              candidate = arr_desc.type_params.first
+              element_type = candidate if candidate != TypeRef::VOID
+            end
+          end
+        end
+      end
       index_get = IndexGet.new(ctx.next_id, element_type, array_id, index_phi.id)
       ctx.emit(index_get)
       ctx.register_type(index_get.id, element_type)
