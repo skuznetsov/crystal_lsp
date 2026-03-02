@@ -2171,8 +2171,8 @@ module Crystal::HIR
     @module_class_def_lookup_cache : Hash(String, Tuple(CrystalV2::Compiler::Frontend::DefNode, CrystalV2::Compiler::Frontend::ArenaLike)?)
     @instance_method_names_cache : Hash(String, Array(String))
     @instance_method_names_cache_version : Int32
-    @defined_instance_method_full_names_cache : Hash({String, UInt64, Int32, Int32}, Set(String))
-    @defined_class_method_full_names_cache : Hash({String, UInt64, Int32, Int32}, Set(String))
+    @defined_instance_method_full_names_cache : Hash({String, UInt64, Int32}, Set(String))
+    @defined_class_method_full_names_cache : Hash({String, UInt64, Int32}, Set(String))
 
     # Type aliases (alias_name -> target_type_name)
     @type_aliases : Hash(String, String)
@@ -2548,8 +2548,8 @@ module Crystal::HIR
       @module_class_def_lookup_cache = {} of String => Tuple(CrystalV2::Compiler::Frontend::DefNode, CrystalV2::Compiler::Frontend::ArenaLike)?
       @instance_method_names_cache = {} of String => Array(String)
       @instance_method_names_cache_version = 0
-      @defined_instance_method_full_names_cache = {} of {String, UInt64, Int32, Int32} => Set(String)
-      @defined_class_method_full_names_cache = {} of {String, UInt64, Int32, Int32} => Set(String)
+      @defined_instance_method_full_names_cache = {} of {String, UInt64, Int32} => Set(String)
+      @defined_class_method_full_names_cache = {} of {String, UInt64, Int32} => Set(String)
         @type_aliases = {} of String => String
         @resolved_type_alias_cache = Hash(String, String).new(initial_capacity: 4096)
         @type_alias_keys_by_suffix = {} of String => Array(String)
@@ -7366,7 +7366,7 @@ module Crystal::HIR
     end
 
     private def collect_defined_instance_method_full_names(class_name : String, body : Array(ExprId)) : Set(String)
-      cache_key = {class_name, body.object_id, @module_defs_cache_version, @resolved_type_name_cache_epoch}
+      cache_key = {class_name, body.object_id, @module_defs_cache_version}
       if cached = @defined_instance_method_full_names_cache[cache_key]?
         return cached.dup
       end
@@ -7492,7 +7492,7 @@ module Crystal::HIR
     end
 
     private def collect_defined_class_method_full_names(class_name : String, body : Array(ExprId)) : Set(String)
-      cache_key = {class_name, body.object_id, @module_defs_cache_version, @resolved_type_name_cache_epoch}
+      cache_key = {class_name, body.object_id, @module_defs_cache_version}
       if cached = @defined_class_method_full_names_cache[cache_key]?
         return cached.dup
       end
@@ -55371,29 +55371,16 @@ module Crystal::HIR
       ctx.register_local(elem_param_name, index_get.id)
 
       # Tuple destructuring: extract fields from the element and register each as a local
+      # Same pattern as lower_array_each_dynamic (line 54611+)
       if tuple_destruct_names
-        tuple_desc = @module.get_type_descriptor(element_type)
-        if tuple_desc && (tuple_desc.kind == Crystal::HIR::TypeKind::Tuple || tuple_desc.name.starts_with?("Tuple("))
-          tuple_element_types = tuple_desc.type_params.reject { |t| t == Crystal::HIR::TypeRef::VOID }
-          tuple_destruct_names.each_with_index do |name, idx|
-            field_type = if idx < tuple_element_types.size
-                           tuple_element_types[idx]
-                         else
-                           TypeRef::POINTER
-                         end
-            idx_lit = Literal.new(ctx.next_id, TypeRef::INT32, idx.to_i64)
-            ctx.emit(idx_lit)
-            ctx.register_type(idx_lit.id, TypeRef::INT32)
-            field_get = IndexGet.new(ctx.next_id, field_type, index_get.id, idx_lit.id)
-            ctx.emit(field_get)
-            ctx.register_type(field_get.id, field_type)
-            ctx.register_local(name, field_get.id)
-          end
-        else
-          # Not a recognized Tuple — just register the first name as the whole element
-          if first_name = tuple_destruct_names.first?
-            ctx.register_local(first_name, index_get.id)
-          end
+        tuple_destruct_names.each_with_index do |name, idx|
+          elem_type = tuple_element_type(element_type, idx) || TypeRef::VOID
+          idx_lit = Literal.new(ctx.next_id, TypeRef::INT32, idx.to_i64)
+          ctx.emit(idx_lit)
+          elem_extract = IndexGet.new(ctx.next_id, elem_type, index_get.id, idx_lit.id)
+          ctx.emit(elem_extract)
+          ctx.register_type(elem_extract.id, elem_type)
+          ctx.register_local(name, elem_extract.id)
         end
       end
 
@@ -64410,14 +64397,13 @@ module Crystal::HIR
       @resolved_type_name_cache_epoch &+= 1
       @resolved_type_name_invalidations[name] = @resolved_type_name_cache_epoch
       @resolved_type_name_invalidations[short] = @resolved_type_name_cache_epoch if short
-      # Module-alias caches key on @module_defs_cache_version (not epoch) —
-      # they depend only on @type_aliases and @module_defs, both of which have
-      # their own invalidation paths (register_type_alias, bump_module_defs_cache_version).
-      # Clearing them here was the dominant bottleneck during monomorphization:
-      # every class registration cleared the caches, forcing re-allocation of
-      # prefix substrings via byte_slice → Boehm GC full-heap scans (66% of HIR time).
-      @annotation_type_ref_cache.clear
-      clear_defined_method_scan_caches
+      # Caches that key on @module_defs_cache_version (not epoch) are NOT cleared
+      # here — they depend on @type_aliases and @module_defs, which have their own
+      # invalidation paths (register_type_alias, bump_module_defs_cache_version).
+      # Defined-method-scan caches scan fixed AST bodies; their results don't
+      # change when new generic instances are registered during monomorphization.
+      # The annotation cache still includes epoch in key for correctness (the
+      # epoch change naturally causes a miss, so clearing is redundant).
     end
 
       private def resolved_type_name_cache_entry_valid?(name : String, entry : ResolvedTypeNameCacheEntry) : Bool
