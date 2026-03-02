@@ -9058,3 +9058,26 @@ crystal build -Ddebug_hooks src/crystal_v2.cr -o bin/crystal_v2 --no-debug
 ### Notes
 - One initial stage1 release attempt with shared default cache failed in original compiler cache-rename path (`File::NotFoundError` under `~/.cache/crystal`); isolated `CRYSTAL_CACHE_DIR` run succeeded.
 - Stage2 stability issue shifted back to known perf/hot-loop area (`type_ref_for_name`/string-hash path), while the `File.info?` IR correctness issue is fixed on mini-oracle.
+
+## 2026-03-02: Same commit, extended stage2 window (`t=300`) for speed delta check
+
+### Command
+- `/usr/bin/time -p scripts/timeout_sample_lldb.sh -t 300 --series-start 30 --series-interval 60 --series-duration 8 -o /tmp/stage2_rel_fileinfo_rootfix3_t300_diag -- /tmp/stage1_rel_fileinfo_rootfix3 src/crystal_v2.cr --release -o /tmp/stage2_rel_fileinfo_rootfix3_t300`
+
+### Result
+- exit: `124` (timeout)
+- wall: `real 313.12`
+- series samples: `5`
+- top hotspots:
+  - `Crystal::MIR::LLVMIRGenerator#emit_function`
+  - `String#index`
+  - `GC_malloc_kind`
+  - `_platform_memmove`
+  - `Crystal::MIR::LLVMIRGenerator#emit`
+
+### Interpretation
+- Current branch still does not complete cold stage2 within `300s`.
+- Relative speed snapshot on this commit:
+  - stage1 (release/original): `437.51s`
+  - stage2 (`t300` watchdog run): exceeded `300s` and timed out at `313.12s`
+- Compared to previous `t180` run on same commit (`193.01s` timeout), long-window hotspot dominance moved from HIR type-name/hash lookup to MIR/LLVM emission path.
