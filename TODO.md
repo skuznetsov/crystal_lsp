@@ -1,5 +1,43 @@
 # Crystal v2 — Active Work (codegen branch)
 
+## 2026-03-03: Stage2 macro segfault -> deterministic ExprId OOB (partial stabilization)
+
+### What changed in this iteration (`src/compiler/frontend/parser.cr`)
+- Reworked macro body flow to avoid fragile tuple/bool handling in stage2 codegen paths:
+  - `parse_macro_body` now returns only `Array(MacroPiece)`.
+  - call sites (`parse_macro_definition`, `parse_macro_verbatim_control`, `parse_macro_body_until_branch`)
+    use `pieces = parse_macro_body(...)` and set trim flags to `false` for now.
+- Hardened statement-start detection in `parse_macro_body` to avoid chained nullable access.
+- Simplified macro header identifier check and receiver-dot detection:
+  - explicit `name_is_identifier` branch,
+  - receiver check via `slice_eq?(current_token.slice, ".")`.
+
+### Regression oracle update
+- `regression_tests/stage2_macro_parse_index_oob_repro.sh` now treats all currently observed signatures as reproduced:
+  - segfault (`status=139`),
+  - `Index out of bounds`,
+  - `ExprId out of bounds`.
+
+### Evidence
+- Stage1 release (`/tmp/stage1_rel_macrofix4`):
+  - `/usr/bin/time -p crystal build src/crystal_v2.cr --release -o /tmp/stage1_rel_macrofix4`
+  - `real 447.01`.
+- Stage2 release (`/tmp/stage2_rel_macrofix4`):
+  - `/usr/bin/time -p /tmp/stage1_rel_macrofix4 src/crystal_v2.cr --release -o /tmp/stage2_rel_macrofix4`
+  - `real 304.07`.
+- Macro mini-repro (`macro x ... end`, `--no-prelude`) now fails deterministically with diagnostic instead of segfault:
+  - `error: ExprId out of bounds: 1 (arena=:0, current=:0, sources=1, inline_arenas=0)`.
+- LLDB disassembly no longer shows previous `ldrb [0x8]/[0x9]` crash site at macro-body transition.
+- Stage2 still not stable overall:
+  - minimal smoke compile (`puts "hello"`) still fails with `error: Index out of bounds`.
+- Stage1 regression sweep on patched tree:
+  - `regression_tests/run_all.sh /tmp/stage1_rel_macrofix4`
+  - `64 passed, 0 failed`.
+
+### Current verdict
+- Progress: crash class moved from hard segfault to deterministic, reproducible diagnostics.
+- Remaining blocker for stage2->stage3 remains unresolved (`ExprId`/`Index` out-of-bounds on minimal compiles).
+
 ## 2026-03-03: Autonomous bootstrap timing pass + stage2 stability audit (handoff)
 
 ### Critical evaluation of latest Claude work

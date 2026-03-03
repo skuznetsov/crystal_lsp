@@ -1774,15 +1774,17 @@ module CrystalV2
             # Keep a valid (possibly empty) slice to avoid null-slice crashes.
             macro_name_slice = "".to_slice
 
-            receiver_present = false
-
             # Handle identifier-like macro names (including keywords used as names)
-            if name_token.kind == Token::Kind::Identifier || is_keyword_identifier?(name_token)
+            name_is_identifier = name_token.kind == Token::Kind::Identifier
+            unless name_is_identifier
+              name_is_identifier = is_keyword_identifier?(name_token)
+            end
+            if name_is_identifier
               macro_name_slice = name_token.slice
               advance
 
               # Macro can't have a receiver: detect identifier DOT identifier
-              if current_token.kind == Token::Kind::Operator && current_token.slice == ".".to_slice
+              if current_token.kind == Token::Kind::Operator && slice_eq?(current_token.slice, ".")
                 @diagnostics << Diagnostic.new("macro can't have a receiver", name_token.span.cover(current_token.span))
                 # Consume dot and next identifier to recover
                 advance
@@ -1853,9 +1855,9 @@ module CrystalV2
             # Allow immediate separators after header (e.g., `struct X; end`)
             skip_statement_end
 
-            debug { "parse_macro_definition: name=#{String.new(macro_name_slice)} entering body, token=#{current_token.kind}" }
-            pieces, trim_left, trim_right = parse_macro_body
-            debug { "parse_macro_definition: exited body token=#{current_token.kind}" }
+            pieces = parse_macro_body
+            trim_left = false
+            trim_right = false
             # Allow trailing separators before 'end'
             skip_statement_end
 
@@ -7336,7 +7338,7 @@ module CrystalV2
           end
         end
 
-        private def parse_macro_body(stop_on_branch : Bool = false)
+        private def parse_macro_body(stop_on_branch : Bool = false) : Array(MacroPiece)
           @macro_mode += 1
           begin
             pieces = Array(MacroPiece).new(16)
@@ -7345,8 +7347,6 @@ module CrystalV2
             buffer_end_token : Token? = nil
             control_depth = 0
             block_depth = 0
-            macro_trim_left = false
-            macro_trim_right = false
             trim_next_left = false
             trim_final = false
             trim_gap = false
@@ -7477,8 +7477,6 @@ module CrystalV2
                 flush_macro_text(buffer, pieces, trim_applied, buffer_start_token, buffer_end_token)
                 buffer_start_token = nil
                 buffer_end_token = nil
-                macro_trim_left ||= already_empty && trim_applied
-
                 piece, effect, skip_whitespace = parse_macro_control_piece(left_trim)
                 pieces << piece
 
@@ -7521,8 +7519,6 @@ module CrystalV2
                   control_depth -= 1 if control_depth > 0
                 end
 
-                macro_trim_right ||= skip_whitespace
-                macro_trim_right ||= skip_whitespace
                 trim_next_left = skip_whitespace
                 next
               elsif macro_expression_start?
@@ -7535,8 +7531,6 @@ module CrystalV2
                 flush_macro_text(buffer, pieces, trim_applied, buffer_start_token, buffer_end_token)
                 buffer_start_token = nil
                 buffer_end_token = nil
-                macro_trim_left ||= already_empty && trim_applied
-
                 piece, skip_whitespace = parse_macro_expression_piece(left_trim)
                 pieces << piece
 
@@ -7550,8 +7544,6 @@ module CrystalV2
                 flush_macro_text(buffer, pieces, false, buffer_start_token, buffer_end_token)
                 buffer_start_token = nil
                 buffer_end_token = nil
-                macro_trim_left ||= already_empty
-
                 piece, skip_whitespace = parse_macro_variable_piece
                 pieces << piece
                 trim_next_left = skip_whitespace
@@ -7568,11 +7560,13 @@ module CrystalV2
               # stop on the outer macro 'end' when control_depth == 0 and
               # block_depth == 0 and the current token is End.
               prev_tok = previous_token
-              starts_statement = prev_tok.nil? ||
-                                 prev_tok.kind.in?(Token::Kind::Newline, Token::Kind::Semicolon) ||
-                                 prev_tok.span.end_line < token.span.start_line
-              if !starts_statement && prev_tok
-                starts_statement = prev_tok.kind.in?(Token::Kind::Private, Token::Kind::Protected, Token::Kind::Abstract)
+              starts_statement = true
+              if prev_tok
+                starts_statement = prev_tok.kind.in?(Token::Kind::Newline, Token::Kind::Semicolon) ||
+                                   prev_tok.span.end_line < token.span.start_line
+                if !starts_statement
+                  starts_statement = prev_tok.kind.in?(Token::Kind::Private, Token::Kind::Protected, Token::Kind::Abstract)
+                end
               end
               abstract_def = starts_statement && token.kind == Token::Kind::Def &&
                              prev_tok && prev_tok.kind == Token::Kind::Abstract
@@ -7610,11 +7604,7 @@ module CrystalV2
             end
 
             flush_macro_text(buffer, pieces, trim_final, buffer_start_token, buffer_end_token)
-            {
-              pieces,
-              macro_trim_left,
-              macro_trim_right,
-            }
+            pieces
           ensure
             @macro_mode -= 1
           end
@@ -14029,7 +14019,9 @@ current_token.kind == Token::Kind::Identifier &&
 
           # Parse the macro body - it will consume {% end %} automatically
           # parse_macro_body handles the {% end %} internally and adds it to pieces
-          pieces, macro_trim_left, macro_trim_right = parse_macro_body
+          pieces = parse_macro_body
+          macro_trim_left = false
+          macro_trim_right = false
 
           # After parse_macro_body, {% end %} has already been consumed
           # Use current token's span start as the end of verbatim block
@@ -14101,7 +14093,9 @@ current_token.kind == Token::Kind::Identifier &&
         # Full implementation would properly parse expressions and text
         private def parse_macro_body_until_branch(stop_on_branch : Bool = true) : ExprId
           start_span = current_token.span
-          pieces, macro_trim_left, macro_trim_right = parse_macro_body(stop_on_branch)
+          pieces = parse_macro_body(stop_on_branch)
+          macro_trim_left = false
+          macro_trim_right = false
           end_span = @previous_token ? @previous_token.not_nil!.span : start_span
           body_span = start_span.cover(end_span)
           @arena.add_typed(MacroLiteralNode.new(body_span, pieces, macro_trim_left, macro_trim_right))

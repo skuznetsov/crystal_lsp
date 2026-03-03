@@ -23,8 +23,10 @@ set +e
 status=$?
 set -e
 
-if [[ $status -eq 139 ]] || grep -q "Index out of bounds" "$ERR" || grep -q "Index out of bounds" "$OUT"; then
-  echo "reproduced: stage2 macro parse crashes (index/oob signature)"
+if [[ $status -eq 139 ]] || \
+   grep -q "Index out of bounds" "$ERR" || grep -q "Index out of bounds" "$OUT" || \
+   grep -q "ExprId out of bounds" "$ERR" || grep -q "ExprId out of bounds" "$OUT"; then
+  echo "reproduced: stage2 macro parse fails (segfault/index/exprid signature)"
   echo "compiler: $COMPILER"
   echo "status: $status"
   echo "tmp_dir: $TMP_DIR"
