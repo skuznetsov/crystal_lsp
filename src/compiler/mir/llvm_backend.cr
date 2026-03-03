@@ -7061,7 +7061,6 @@ module Crystal::MIR
         end
         if pos < bytes.size && bytes[pos] == 37_u8 && !line.byte_index(" = alloca ", pos).nil?
           hoisted_allocas << line
-          processed_block_ir << "  ; hoisted: " << line << '\n'
         else
           processed_block_ir << line << '\n'
         end

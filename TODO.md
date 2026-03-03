@@ -9387,3 +9387,45 @@ crystal build -Ddebug_hooks src/crystal_v2.cr -o bin/crystal_v2 --no-debug
 ### Interpretation
 - This is a root-cause pipeline improvement (eliminates text IR print/parse overhead between `opt` and `llc`).
 - Cold stage2 still misses `t=300`, but execution now reaches deeper codegen (`llc`) before watchdog, confirming improved front-half compile pipeline throughput.
+
+## 2026-03-03 (Omni) — LLVM IR size reduction via hoisted-alloca comment removal
+
+### Problem pattern
+- Even after `.opt.bc` handoff, cold stage2 was close to watchdog and IR text remained extremely large.
+- In `emit_function`, hoisted alloca lines were duplicated as debug comments (`; hoisted: ...`) in processed block output.
+- This duplication inflates `.ll` size without semantic benefit.
+
+### Fix
+- File: `src/compiler/mir/llvm_backend.cr`
+- In block IR post-processing (`emit_function` hoist path), removed comment emission for hoisted allocas:
+  - kept actual hoisted `alloca` emission in entry block,
+  - dropped duplicate debug-comment line in block body.
+- Semantics unchanged; only textual IR volume reduced.
+
+### Validation
+- Full regressions:
+  - `regression_tests/run_all.sh tmp/stage1_dbg_no_hoisted_comments`
+  - result: `62 passed, 0 failed`.
+- Stage1 release build:
+  - `CRYSTAL_CACHE_DIR=/tmp/crystal_cache_stage1_rel_trim crystal build src/crystal_v2.cr --release -o tmp/stage1_rel_no_hoisted_comments`
+  - result: `real 6:57.64`.
+- Stage2 cold no-cache (`t=300`) with watchdog:
+  - `CRYSTAL_V2_PIPELINE_CACHE=0 CRYSTAL_V2_LLVM_CACHE=0 scripts/timeout_sample_lldb.sh -t 300 ... -- tmp/stage1_rel_no_hoisted_comments src/crystal_v2.cr --release -o /tmp/stage2_rel_no_hoisted_comments`
+  - result: success (`status=0`) with 5 sample snapshots.
+- Timed repeat:
+  - `/usr/bin/time -p env CRYSTAL_V2_PIPELINE_CACHE=0 CRYSTAL_V2_LLVM_CACHE=0 scripts/timeout_sample_lldb.sh -t 300 ... -- tmp/stage1_rel_no_hoisted_comments src/crystal_v2.cr --release -o /tmp/stage2_rel_no_hoisted_comments_timed`
+  - result:
+    - `real 297.24`
+    - `user 280.32`
+    - `sys 9.64`
+
+### Size / throughput evidence
+- Previous `.ll` (with `.opt.bc` but with hoisted comments): `~8.67 GB`.
+- New `.ll` (without hoisted comments): `~7.18 GB` (`-17%` approx).
+- Stage2 now completes under 300s watchdog where previous branch timed out at 300s.
+
+### Stage1 vs Stage2 speed snapshot (current branch)
+- Stage1 release (original compiler): `real 417.34s` (6:57.64).
+- Stage2 release (new stage1, no caches): `real 297.24s`.
+- Delta:
+  - stage2 faster by `~120.40s` (`~28.8%` faster than stage1 in this measurement setup).
