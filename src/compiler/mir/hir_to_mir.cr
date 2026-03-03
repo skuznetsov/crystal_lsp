@@ -3862,8 +3862,11 @@ module Crystal
       if idx = load.index
         # ptr[idx] - need GEP then load
         index = get_value(idx)
-        elem_type = convert_type(load.type)
-        gep = builder.gep_dynamic(ptr, index, elem_type)
+        # Element stride must follow container storage ABI:
+        # non-inline values (including tuples/structs) occupy pointer-sized slots.
+        elem_type = pointer_element_mir_type(@hir_value_types[load.pointer]?) || convert_type(load.type)
+        elem_size = container_elem_storage_size_u64(@mir_module.type_registry.get(elem_type))
+        gep = builder.gep_dynamic(ptr, index, elem_type, elem_size)
         # Our compiler heap-allocates structs, so Pointer(Struct) buffers
         # store heap pointers (not inline data). Always load the pointer
         # from the buffer slot, then FieldGet dereferences it.
@@ -3890,7 +3893,8 @@ module Crystal
       if idx = store.index
         # ptr[idx] = val - need GEP then store
         index = get_value(idx)
-        gep = builder.gep_dynamic(ptr, index, elem_type)
+        elem_size = container_elem_storage_size_u64(@mir_module.type_registry.get(elem_type))
+        gep = builder.gep_dynamic(ptr, index, elem_type, elem_size)
         builder.store(gep, val)
       else
         # ptr.value = val - direct store
@@ -3906,9 +3910,13 @@ module Crystal
       ptr = get_value(add.pointer)
       offset = get_value(add.offset)
       elem_type = convert_type(add.element_type)
+      elem_size = add.element_byte_size
+      if elem_size == 0_u64
+        elem_size = container_elem_storage_size_u64(@mir_module.type_registry.get(elem_type))
+      end
 
       # GEP with dynamic offset computes ptr + offset * sizeof(elem)
-      builder.gep_dynamic(ptr, offset, elem_type, add.element_byte_size)
+      builder.gep_dynamic(ptr, offset, elem_type, elem_size)
     end
 
     private def lower_pointer_realloc(realloc : HIR::PointerRealloc) : ValueId

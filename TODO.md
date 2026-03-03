@@ -1,5 +1,59 @@
 # Crystal v2 — Active Work (codegen branch)
 
+## 2026-03-03: Root-cause fix — `Pointer(Tuple(...))` stride mismatch in `Array#push` path
+
+### Problem pattern
+- Repro for `Array(Tuple(ExprId, ArenaLike))` crashed after first element:
+  - printed `10`, then segfault on second element access.
+- LLVM IR showed write/read stride mismatch for the same array:
+  - write path (`Array#push`) used byte offset `idx * 16` and stored `ptr value`,
+  - read path used `getelementptr ptr` (stride `8`).
+- This corrupted element #2 reads (`load ptr` from mid-slot / uninitialized bytes).
+
+### Repro oracle
+- Added targeted regression:
+  - `regression_tests/test_exprid_arena_tuple_array.cr`
+  - expected marker: `exprid_arena_tuple_array_ok`
+- Also kept local minimal script used during localization:
+  - `tmp_repro_main_exprs_tuple.cr`
+
+### Root cause
+- In `HIR -> MIR` pointer lowering, `ptr[idx]` for `Pointer(T)` did not pass container storage stride.
+- Backend fallback inferred tuple byte size (`16`) when `T` was tuple-like and LLVM type was `ptr`,
+  while runtime/container ABI stores non-inline values in pointer slots (`8`).
+
+### Fix (`src/compiler/mir/hir_to_mir.cr`)
+- `lower_pointer_load`: for indexed loads, resolve pointer element type from `Pointer(T)` and pass
+  `container_elem_storage_size_u64(...)` into `builder.gep_dynamic`.
+- `lower_pointer_store`: same stride source for indexed stores.
+- `lower_pointer_add`: if explicit `element_byte_size` is zero, fill from
+  `container_elem_storage_size_u64(...)`.
+- Result: pointer arithmetic for `Pointer(Tuple(...))` now uses pointer-slot stride where required.
+
+### Evidence
+- Before fix, repro crashed:
+  - `/tmp/stage1_dbg_reverted_exprid tmp_repro_main_exprs_tuple.cr -o /tmp/repro_main_exprs_tuple.bin`
+  - `scripts/run_safe.sh /tmp/repro_main_exprs_tuple.bin` -> segfault (exit `139`) after printing `10`.
+- After fix:
+  - `crystal build src/crystal_v2.cr -o /tmp/stage1_dbg_ptr_stride_fix`
+  - `/tmp/stage1_dbg_ptr_stride_fix tmp_repro_main_exprs_tuple.cr -o /tmp/repro_main_exprs_tuple_fix.bin`
+  - `scripts/run_safe.sh /tmp/repro_main_exprs_tuple_fix.bin` -> prints `10`, `20`, exit `0`.
+- LLVM IR confirmation (post-fix repro):
+  - `/tmp/repro_main_exprs_tuple_fix_emit.ll`
+  - `Array...#push...` now uses `getelementptr ptr, ptr %r4, i64 %idx` (no `idx*16` byte GEP).
+- Mini-oracles with new regression:
+  - `bash regression_tests/run_mini_oracles.sh /tmp/stage1_dbg_ptr_stride_fix`
+  - `6 passed, 0 failed`.
+- Stage2 diagnostic run (debug stage1, watchdog 180s):
+  - `/usr/bin/time -p scripts/timeout_sample_lldb.sh -t 180 -o /tmp/stage2_dbg_ptr_stride_fix_diag -- /tmp/stage1_dbg_ptr_stride_fix src/crystal_v2.cr -o /tmp/stage2_dbg_ptr_stride_fix`
+  - timeout `124` (`real 193.53`), no segfault; top hotspots in `Hasher/String/hash` and `AstToHir#type_ref_for_name`.
+- Bootstrap timing snapshot (release path):
+  - stage1 (original compiler): `/usr/bin/time -p crystal build src/crystal_v2.cr --release -o /tmp/stage1_rel_ptr_stride_fix`
+    - `real 408.44`
+  - stage2 (new stage1, watchdog 180s): `/usr/bin/time -p scripts/timeout_sample_lldb.sh -t 180 -o /tmp/stage2_rel_ptr_stride_fix_diag -- /tmp/stage1_rel_ptr_stride_fix src/crystal_v2.cr --release -o /tmp/stage2_rel_ptr_stride_fix`
+    - timeout `124`, `real 194.04` (no binary produced within 180s)
+    - timeout hotspots: `String#index`, `LLVMIRGenerator#emit_function`, `String#size`, `_platform_memmove`.
+
 ## 2026-03-03: Refuted perf branch C — cached `union_variant_type_ref` in `emit_union_is`
 
 ### Experiment

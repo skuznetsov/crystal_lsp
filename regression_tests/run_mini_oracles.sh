@@ -12,6 +12,7 @@ Defaults:
     regression_tests/file_join_splat.cr
     regression_tests/forall_nil_union_return.cr
     regression_tests/test_byteformat_decode_u32.cr
+    regression_tests/test_exprid_arena_tuple_array.cr
     regression_tests/test_nested_macro_record.cr
     regression_tests/test_select_map_stress.cr
 
@@ -46,6 +47,7 @@ DEFAULT_TESTS=(
   "regression_tests/file_join_splat.cr"
   "regression_tests/forall_nil_union_return.cr"
   "regression_tests/test_byteformat_decode_u32.cr"
+  "regression_tests/test_exprid_arena_tuple_array.cr"
   "regression_tests/test_nested_macro_record.cr"
   "regression_tests/test_select_map_stress.cr"
 )
