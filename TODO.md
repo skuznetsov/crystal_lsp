@@ -20,6 +20,29 @@
 - No measurable stage2 win at 300s watchdog; stage1 got slower.
 - Branch reverted; keep focus on workload-shape/root-cause reductions, not local union lookup micro-caches.
 
+## 2026-03-03: Refuted perf branch D — precompute non-value defs in cross-block prepass
+
+### Experiment
+- Reworked `prepass_detect_cross_block_values` to avoid repeated `func.blocks.each { find(id) }` scans:
+  - precomputed `non_value_defs` in pass1,
+  - replaced repeated defining-instruction scans for operands/phi/branch with `Set#include?`.
+
+### Evidence
+- Build + sanity:
+  - `/usr/bin/time -p crystal build src/crystal_v2.cr -o /tmp/stage1_dbg_prepass_defs --error-trace` -> `real 8.97`
+  - `bash regression_tests/run_mini_oracles.sh /tmp/stage1_dbg_prepass_defs` -> `5 passed, 0 failed`
+- Stage1 release with branch:
+  - `CRYSTAL_CACHE_DIR=/tmp/crystal_cache_stage1_rel_prepass_defs /usr/bin/time -p crystal build src/crystal_v2.cr --release -o /tmp/stage1_rel_prepass_defs --error-trace`
+  - `real 446.92`
+- Stage2 no-cache (`t=300`) with branch:
+  - `CRYSTAL_V2_PIPELINE_CACHE=0 CRYSTAL_V2_LLVM_CACHE=0 /usr/bin/time -p scripts/timeout_sample_lldb.sh -t 300 --series-start 30 --series-interval 60 --series-duration 8 -o /tmp/stage2_rel_prepass_defs_nocache_t300 -- /tmp/stage1_rel_prepass_defs src/crystal_v2.cr --release -o /tmp/stage2_rel_prepass_defs_nocache`
+  - timeout `124`, `real 313.32` (baseline no-cache `313.06`).
+  - timeout hotspot class remained GC/string/LLVM emit heavy.
+
+### Verdict
+- The change did not improve stage2 wall time under the 300s watchdog.
+- Branch reverted; keep optimization pressure on higher-yield root causes (monomorphization fanout / emit allocation model).
+
 ## 2026-03-03: Refuted perf branches + baseline refresh (root-cause mode)
 
 ### Branch A (refuted): pre-index `mangled_name -> Type` in LLVM backend init
