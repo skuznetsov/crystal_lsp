@@ -9250,3 +9250,55 @@ crystal build -Ddebug_hooks src/crystal_v2.cr -o bin/crystal_v2 --no-debug
 ### Current interpretation
 - stage2 failure mode shifted from hard LLVM type-crash to performance timeout in MIR optimization / allocation-heavy region.
 - Next root-cause lane: DCE/RCElision pass-level profiling + mini-oracle for pass budgets (without reintroducing nested mono correctness regressions).
+
+## 2026-03-03 (Omni) — Nested generic fanout fix without ABI/layout regression
+
+### Problem
+- Stage2 cold bootstrap remained unstable/slow; prior attempt to reduce nested generic monomorphization fanout by hard lazy gating introduced a correctness regression:
+  - `regression_tests/test_init_obj.cr` segfault (`Hash(String, Int32)` entry layout mismatch in generated code).
+- At the same time, full eager nested monomorphization caused excessive fanout and high MIR volume.
+
+### Root cause
+- Not all nested generic specializations are optional in lazy mode.
+- Some parent layouts depend on concrete nested generic instantiations during registration (classic case: `Hash(K, V)` fields tied to `Entry(K, V)` ABI/layout).
+
+### Fix (root-cause scoped, no hardcoded symbols)
+- File: `src/compiler/hir/ast_to_hir.cr`
+- In `register_concrete_class` pass0 nested specialization:
+  - changed condition from unconditional nested specialization (when type params exist) to:
+    - `@eager_monomorphization || nested_generic_required_by_layout?(...)`
+- Added layout-aware detection helpers:
+  - `nested_generic_required_by_layout?`
+  - `type_expr_references_nested_generic?`
+- Detection scans parent class body for layout-relevant declarations referencing nested generic names:
+  - `InstanceVarDeclNode`
+  - `TypeDeclarationNode`
+  - `ClassVarDeclNode`
+  - `DefNode` instance-var parameter annotations (`initialize(@x : ...)` style)
+
+### Validation
+- Mini repro oracle:
+  - `regression_tests/test_init_obj.cr`
+  - with fixed branch: no segfault (`10`, `10`, `done`).
+- Full regressions:
+  - `regression_tests/run_all.sh /tmp/stage1_dbg_nested_layout_gate`
+  - result: `62 passed, 0 failed`.
+- Stage1 release build (original compiler, isolated cache):
+  - `CRYSTAL_CACHE_DIR=/tmp/crystal_cache_stage1_rel crystal build src/crystal_v2.cr --release -o /tmp/stage1_rel_nested_layout_gate`
+  - result: success, `real 7:46.87`.
+- Stage2 release bootstrap (new stage1, no pipeline/llvm cache, watchdog `t=300`):
+  - `CRYSTAL_V2_PIPELINE_CACHE=0 CRYSTAL_V2_LLVM_CACHE=0 scripts/timeout_sample_lldb.sh -t 300 -- /tmp/stage1_rel_nested_layout_gate src/crystal_v2.cr --release -o /tmp/stage2_rel_nested_layout_gate_dbg`
+  - result: timeout `124` at 300s; no `.ll file not found` reproduced on this fresh run.
+  - progress markers:
+    - `[LLVM] total MIR functions: 59749`
+    - `[LLVM] RTA kept: 31107`
+  - timeout hotspots dominated by LLVM `opt` internals (AA/known-bits/new), i.e. cold backend perf path.
+
+### Notes
+- One initial stage1 release attempt with shared default Crystal cache failed in original compiler internals:
+  - rename failure under `~/.cache/crystal/...` (`File::NotFoundError`).
+  - Re-running with isolated `CRYSTAL_CACHE_DIR` was stable.
+- Net effect of this commit scope:
+  - correctness regression from naive nested lazy gating removed,
+  - nested monomorphization remains controlled by structural layout need instead of hardcoded method/type symbols,
+  - remaining blocker is cold-stage2 performance, not immediate correctness crash.

@@ -15273,7 +15273,11 @@ module Crystal::HIR
             # When parent has active type substitutions and nested type is generic,
             # also monomorphize the nested type with the substituted type args.
             # E.g., Hash(String, Int32)::Entry(K, V) -> Hash::Entry(String, Int32)
-            if !@type_param_map.empty? && (nested_type_params = member.type_params) && nested_type_params.size > 0
+            needs_layout_nested_mono = nested_generic_required_by_layout?(class_body, nested_name, full_nested_name)
+            if (@eager_monomorphization || needs_layout_nested_mono) &&
+               !@type_param_map.empty? &&
+               (nested_type_params = member.type_params) &&
+               nested_type_params.size > 0
               type_args = nested_type_params.map { |p| @type_param_map[String.new(p)]? || String.new(p) }
               if concrete_type_args?(type_args)
                 specialized_nested = "#{full_nested_name}(#{type_args.join(", ")})"
@@ -16099,6 +16103,47 @@ module Crystal::HIR
 
       # Register "new" allocator function
       register_function_type("#{class_name}.new", type_ref)
+    end
+
+    # In lazy monomorphization mode, avoid eager nested fanout unless parent layout
+    # directly depends on the nested generic type (e.g. Hash(K, V) fields referencing
+    # Entry(K, V)). This preserves ABI/layout correctness without materializing all
+    # nested generic variants up front.
+    private def nested_generic_required_by_layout?(
+      class_body : Array(CrystalV2::Compiler::Frontend::ExprId),
+      nested_short_name : String,
+      nested_full_name : String,
+    ) : Bool
+      class_body.each do |expr_id|
+        member = unwrap_visibility_member(@arena[expr_id])
+        case member
+        when CrystalV2::Compiler::Frontend::InstanceVarDeclNode
+          return true if type_expr_references_nested_generic?(String.new(member.type), nested_short_name, nested_full_name)
+        when CrystalV2::Compiler::Frontend::TypeDeclarationNode
+          return true if type_expr_references_nested_generic?(String.new(member.declared_type), nested_short_name, nested_full_name)
+        when CrystalV2::Compiler::Frontend::ClassVarDeclNode
+          return true if type_expr_references_nested_generic?(String.new(member.type), nested_short_name, nested_full_name)
+        when CrystalV2::Compiler::Frontend::DefNode
+          next unless (params = member.params)
+          params.each do |param|
+            next unless param.is_instance_var
+            next unless (ta = param.type_annotation)
+            return true if type_expr_references_nested_generic?(String.new(ta), nested_short_name, nested_full_name)
+          end
+        end
+      end
+
+      false
+    end
+
+    private def type_expr_references_nested_generic?(type_expr : String, nested_short_name : String, nested_full_name : String) : Bool
+      return false if type_expr.empty?
+
+      compact = type_expr.gsub(/\s+/, "")
+      short_pat = "#{nested_short_name}("
+      full_pat = "#{nested_full_name}("
+
+      compact.includes?(short_pat) || compact.includes?(full_pat)
     end
 
     # Flush all pending monomorphizations (call after all templates are registered)
