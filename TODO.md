@@ -9362,6 +9362,9 @@ crystal build -Ddebug_hooks src/crystal_v2.cr -o bin/crystal_v2 --no-debug
   - temporary artifact: `#{ll_file}.opt.ll` -> `#{ll_file}.opt.bc`
   - command: `opt ... -S -o ...` -> `opt ... -o ...` (bitcode output)
 - No CLI flag changes; only internal compiler pipeline artifact format changed.
+- Added cleanup for the temporary optimized artifact after link:
+  - delete `opt_ll_file` when it is an intermediate (`opt_ll_file != ll_file`)
+  - avoids leaving `*.ll.opt.bc` artifacts in `regression_tests/`.
 
 ### Validation
 - Full regressions on debug stage1:

@@ -1689,6 +1689,9 @@ module CrystalV2
 
         # Clean up intermediate files
         File.delete(obj_file) if File.exists?(obj_file)
+        if options.llvm_opt && opt_ll_file != ll_file && File.exists?(opt_ll_file)
+          File.delete(opt_ll_file)
+        end
         return 0
       end
 
