@@ -1,5 +1,51 @@
 # Crystal v2 — Active Work (codegen branch)
 
+## 2026-03-03: Stage2 macro parser crash narrowed to `parse_macro_definition` path
+
+### New pinpoint (after require-path fixes)
+- `stage2` no longer fails with previous prelude-require `ExprId out of bounds` signature as first failure.
+- Current top blocker is a parser crash on macro definitions:
+  - minimal repro file:
+    - `macro x`
+    - `end`
+  - command:
+    - `<stage2_compiler> repro.cr --no-prelude -o repro.bin`
+  - observed: `status=139` (segfault).
+
+### Oracle
+- Added and used:
+  - `regression_tests/stage2_macro_parse_index_oob_repro.sh <stage2_compiler>`
+- Current status on latest stage2:
+  - **reproduced** (segfault / index-oob signature).
+
+### LLDB localization
+- LLDB on stage2 minimal repro points to:
+  - `Frontend::Parser#parse_macro_definition`
+  - stop reason: `EXC_BAD_ACCESS` at this function.
+- Added env-gated trace markers in parser:
+  - `DEBUG_PARSE_MACRO_DEF=1`
+- Trace shows:
+  - `[MACRO_DEF] enter`
+  - `[MACRO_DEF] name= token=144`
+  - `[MACRO_DEF] before_body`
+  - then segfault.
+- `token=144` maps to `Token::Kind::Newline`.
+
+### Parser hardening applied in this iteration (`src/compiler/frontend/parser.cr`)
+- Added parser index invariant clamp in `current_token`:
+  - keep `@index` within `[0, @tokens.size-1]`.
+- Added macro-control parse recovery helpers (`IndexError` -> sync + `NilNode`) for:
+  - control expressions (`if/unless/while/elsif`, `for ... in ...` iterable),
+  - macro expression assign parse in `{% ... %}` paths.
+- Added defensive initialization:
+  - `macro_name_slice = "".to_slice` in `parse_macro_definition`.
+- Added env-gated trace prints in `parse_macro_definition` for stage2 localization.
+
+### Current verdict
+- Require-path/root require fallback issue moved forward (prelude requires now actually start loading `lib_c.cr`, then `macros.cr`).
+- Remaining blocker is now isolated to macro definition parsing in stage2-generated binary.
+- Next branch should focus only on `parse_macro_definition` / `parse_macro_body` invariants with the new mini-oracle.
+
 ## 2026-03-03: Require-path root-cause progress + new stage2 parser macro repro
 
 ### What moved forward

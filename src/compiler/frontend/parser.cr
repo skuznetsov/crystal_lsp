@@ -950,6 +950,19 @@ module CrystalV2
         private def current_token
           Watchdog.check!
           ensure_token(@index)
+          # Parser index invariant hardening: keep @index within token array bounds.
+          # Non-streaming parser preloads tokens, so out-of-range @index indicates
+          # state drift (often from recovery/lookahead paths). Clamp instead of
+          # crashing with IndexError.
+          if @tokens.empty?
+            # Extremely defensive fallback; normal parser always has at least EOF.
+            return Token.new(Token::Kind::EOF, "".to_slice, Span.new(0, 0, 0, 0, 0, 0))
+          end
+          if @index < 0
+            @index = 0
+          elsif @index >= @tokens.size
+            @index = @tokens.size - 1
+          end
           tok = @tokens[@index]
           if @macro_mode == 0
             case tok.kind
@@ -1745,12 +1758,18 @@ module CrystalV2
         end
 
         private def parse_macro_definition : ExprId
+          if ENV["DEBUG_PARSE_MACRO_DEF"]?
+            STDERR.puts "[MACRO_DEF] enter"
+          end
           macro_token = current_token
           advance
           skip_trivia
 
           name_token = current_token
-          macro_name_slice : Slice(UInt8)
+          # Defensive initialization: stage2 self-hosted builds have shown
+          # occasional branch miscompilation around macro name paths.
+          # Keep a valid (possibly empty) slice to avoid null-slice crashes.
+          macro_name_slice = "".to_slice
 
           receiver_present = false
 
@@ -1827,15 +1846,27 @@ module CrystalV2
             end
           end
 
+          if ENV["DEBUG_PARSE_MACRO_DEF"]?
+            STDERR.puts "[MACRO_DEF] name=#{String.new(macro_name_slice)} token=#{current_token.kind}"
+          end
+
           macro_params = skip_macro_parameters(macro_token, macro_name_slice)
           # Allow immediate separators after header (e.g., `struct X; end`)
           skip_statement_end
+
+          if ENV["DEBUG_PARSE_MACRO_DEF"]?
+            STDERR.puts "[MACRO_DEF] before_body"
+          end
 
           debug { "parse_macro_definition: name=#{String.new(macro_name_slice)} entering body, token=#{current_token.kind}" }
           pieces, trim_left, trim_right = parse_macro_body
           debug { "parse_macro_definition: exited body token=#{current_token.kind}" }
           # Allow trailing separators before 'end'
           skip_statement_end
+
+          if ENV["DEBUG_PARSE_MACRO_DEF"]?
+            STDERR.puts "[MACRO_DEF] after_body token=#{current_token.kind}"
+          end
 
           # In some complex macro bodies (especially those mixing control
           # macros and nested language constructs) our lightweight macro body
@@ -1858,6 +1889,10 @@ module CrystalV2
           body_span = end_span ? name_token.span.cover(end_span) : name_token.span
           macro_span = end_span ? macro_token.span.cover(end_span) : macro_token.span
 
+          if ENV["DEBUG_PARSE_MACRO_DEF"]?
+            STDERR.puts "[MACRO_DEF] build_nodes"
+          end
+
           body_id = @arena.add_typed(
             MacroLiteralNode.new(
               body_span,
@@ -1867,7 +1902,7 @@ module CrystalV2
             )
           )
 
-          @arena.add_typed(
+          result = @arena.add_typed(
             MacroDefNode.new(
               macro_span,
               macro_name_slice,
@@ -1875,6 +1910,10 @@ module CrystalV2
               macro_params
             )
           )
+          if ENV["DEBUG_PARSE_MACRO_DEF"]?
+            STDERR.puts "[MACRO_DEF] exit"
+          end
+          result
         end
 
         # Phase PERCENT_LITERALS: Parse optional receiver for class/singleton methods
@@ -13202,7 +13241,7 @@ current_token.kind == Token::Kind::Identifier &&
 
           skip_macro_whitespace
 
-          iterable = with_macro_terminator(:control) { parse_expression(0) }
+          iterable = parse_macro_control_expression_with_recovery(current_token)
 
           {vars, iterable}
         end
@@ -13245,7 +13284,7 @@ current_token.kind == Token::Kind::Identifier &&
               iter_vars, iterable = parse_macro_for_header
             when "if", "unless", "while", "elsif"
               skip_macro_whitespace
-              expr = with_macro_terminator(:control) { parse_expression(0) }
+              expr = parse_macro_control_expression_with_recovery(current_token)
             when "verbatim"
               # verbatim requires 'do' keyword before %}: {% verbatim do %}
               skip_macro_whitespace
@@ -13320,7 +13359,7 @@ current_token.kind == Token::Kind::Identifier &&
 
             # Parse a full expression allowing assignment inside {% %}
             # This mirrors macro expression semantics (e.g., {% x = 1 %})
-            expr = with_macro_terminator(:control) { parse_op_assign }
+            expr = parse_macro_control_assign_with_recovery(start_token)
 
             # CRITICAL: Skip whitespace BEFORE resetting @in_macro_expression flag
             # This allows newlines to be skipped (matching original parser behavior)
@@ -13890,7 +13929,7 @@ current_token.kind == Token::Kind::Identifier &&
 
           # Parse as assignment/expression (like original parser's parse_op_assign)
           # This handles: x = 123, method_call, @type, etc.
-          expr = parse_op_assign
+          expr = parse_macro_control_assign_with_recovery(keyword_token)
 
           if expr.invalid?
             expr = fallback_macro_expression(keyword_token)
@@ -13904,6 +13943,22 @@ current_token.kind == Token::Kind::Identifier &&
           fast_forward_macro_expression
           name_slice = @string_pool.intern(keyword_token.slice)
           @arena.add_typed(IdentifierNode.new(keyword_token.span, name_slice))
+        end
+
+        private def parse_macro_control_expression_with_recovery(error_token : Token) : ExprId
+          with_macro_terminator(:control) { parse_expression(0) }
+        rescue ex : IndexError
+          @diagnostics << Diagnostic.new("Recovered from macro control parse index error", error_token.span)
+          fast_forward_macro_expression
+          @arena.add_typed(NilNode.new(error_token.span))
+        end
+
+        private def parse_macro_control_assign_with_recovery(error_token : Token) : ExprId
+          with_macro_terminator(:control) { parse_op_assign }
+        rescue ex : IndexError
+          @diagnostics << Diagnostic.new("Recovered from macro expression parse index error", error_token.span)
+          fast_forward_macro_expression
+          @arena.add_typed(NilNode.new(error_token.span))
         end
 
         private def fast_forward_macro_expression
