@@ -1,5 +1,25 @@
 # Crystal v2 — Active Work (codegen branch)
 
+## 2026-03-03: Bootstrap timing snapshot after `800f88ec` + residual stage2 instability
+
+### Stage1 / Stage2 timing (release bootstrap path)
+- Stage1 (`original crystal --release`):
+  - `/usr/bin/time -p crystal build src/crystal_v2.cr --release -o /tmp/stage1_rel_800f88ec --error-trace`
+  - `real 480.48`
+- Stage2 (`stage1_rel` -> compiler rebuild, watchdog 300s + sampling):
+  - `/usr/bin/time -p scripts/timeout_sample_lldb.sh --timeout 300 --series-start 30 --series-interval 60 --series-duration 8 --out /tmp/stage2_rel_800f88ec_t300 -- /tmp/stage1_rel_800f88ec src/crystal_v2.cr --release -o /tmp/stage2_rel_800f88ec`
+  - completed with `status=0`, `real 281.50`
+  - sampling artifacts: `/tmp/stage2_rel_800f88ec_t300/sample_series/`
+
+### Delta
+- Stage2 faster than Stage1 by `198.98s` (~`41.4%` faster, ~`1.71x` speedup).
+
+### Remaining blocker (root-cause still open)
+- Fresh stage2 compiler still fails on minimal smoke compile:
+  - `/tmp/stage2_rel_800f88ec /tmp/stage2_puts1.cr -o /tmp/stage2_puts1.bin`
+  - error: `ExprId out of bounds: 1 (arena=:0)`
+- So bootstrap step itself finishes, but produced stage2 binary is not yet stable for next-stage compilation.
+
 ## 2026-03-03: Root-cause fix — `Tuple(A, ...)` (single-letter class) collapsed to `Void`
 
 ### Problem pattern
