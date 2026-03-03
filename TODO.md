@@ -1,5 +1,40 @@
 # Crystal v2 — Active Work (codegen branch)
 
+## 2026-03-03: Require-path root-cause progress + new stage2 parser macro repro
+
+### What moved forward
+- `src/compiler/cli.cr`:
+  - `extract_require_literals_from_source` switched to deterministic non-regex parsing.
+  - source-fallback now reports `entries/resolved/unresolved` in verbose mode.
+  - `try_require_path` switched from `File.file?/Dir.exists?` to `File.exists?` + direct `foo/foo.cr` probing.
+  - added fail-soft guards for invalid `ExprId`/`RequireNode.path` and `IndexError` in require-scan loop.
+
+### Evidence (stage2 behavior change)
+- Previous blocker `ExprId out of bounds (arena=:0)` on minimal compile is no longer reproduced by the old oracle:
+  - `regression_tests/stage2_exprid_arena_oob_repro.sh /tmp/stage2_rel_reqindexguard2`
+  - result: `not reproduced`, status changed to `1` with `error: Index out of bounds`.
+- Verbose trace now shows real prelude require resolution starts working:
+  - fallback on prelude reports `entries=71`;
+  - stage2 loads at least `/src/stdlib/lib_c.cr` and then `/src/stdlib/macros.cr` before crashing.
+
+### New localized blocker (faster oracle)
+- New repro script added:
+  - `regression_tests/stage2_macro_parse_index_oob_repro.sh <stage2_compiler>`
+- Minimal signature:
+  - compile a tiny file with only:
+    - `macro x`
+    - `end`
+    - with `--no-prelude`
+  - current stage2 reproduces parser crash (`status=139` or `Index out of bounds`).
+
+### Timing snapshot on this branch
+- Stage1 (`original crystal --release`):
+  - `/usr/bin/time -p crystal build src/crystal_v2.cr --release -o /tmp/stage1_rel_reqindexguard2 --error-trace`
+  - `real 435.74`
+- Stage2 (`/tmp/stage1_rel_reqindexguard2`, watchdog 300):
+  - cold: timeout (`real 313.72`)
+  - warm: success (`real 55.86`)
+
 ## 2026-03-03: Bootstrap timing snapshot after `800f88ec` + residual stage2 instability
 
 ### Stage1 / Stage2 timing (release bootstrap path)

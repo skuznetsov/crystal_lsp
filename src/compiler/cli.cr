@@ -788,6 +788,7 @@ module CrystalV2
         first_arena = first_entry[0]
         sources_by_arena = {} of Frontend::ArenaLike => String
         paths_by_arena = {} of Frontend::ArenaLike => String
+        main_arenas = [] of Frontend::ArenaLike
         # Populate arena→path and arena→source maps from all_arenas.
         # Required for __FILE__/__DIR__ resolution and diagnostics.
         arena_map_i = 0
@@ -796,12 +797,13 @@ module CrystalV2
           map_arena = map_entry[0]
           map_path = map_entry[2]
           map_source = map_entry[3]
+          main_arenas << map_arena
           paths_by_arena[map_arena] = map_path
           sources_by_arena[map_arena] = map_source
           arena_map_i += 1
         end
         stage2_debug("[STAGE2_DEBUG] hir setup maps ready size=#{sources_by_arena.size}", err_io)
-        hir_converter = HIR::AstToHir.new(first_arena, input_file, sources_by_arena, paths_by_arena)
+        hir_converter = HIR::AstToHir.new(first_arena, input_file, sources_by_arena, paths_by_arena, main_arenas)
         stage2_debug("[STAGE2_DEBUG] hir converter created", err_io)
         link_libs.each { |lib_name| hir_converter.module.add_link_library(lib_name) }
         stage2_debug("[STAGE2_DEBUG] hir link libs attached", err_io)
@@ -817,7 +819,6 @@ module CrystalV2
         lib_nodes = [] of Tuple(Frontend::LibNode, Frontend::ArenaLike, Array(Tuple(Frontend::AnnotationNode, Frontend::ArenaLike)))
         constant_exprs = [] of Tuple(Frontend::ExprId, Frontend::ArenaLike)
         main_exprs = [] of UInt64
-        main_expr_arenas = [] of Frontend::ArenaLike
         acyclic_types = Set(String).new
 
         flags = Runtime.target_flags
@@ -827,7 +828,6 @@ module CrystalV2
         while arena_i < all_arenas.size
           entry = all_arenas.unsafe_fetch(arena_i)
           arena = entry[0]
-          main_expr_arenas << arena
           exprs = entry[1]
           file_path = entry[2]
           source = entry[3]
@@ -1175,7 +1175,7 @@ module CrystalV2
         # Create main function from top-level expressions (or user-defined main)
         STDERR.puts "  Creating main function..." if options.progress
         if main_exprs.size > 0
-          hir_converter.lower_main(main_exprs, main_expr_arenas)
+          hir_converter.lower_main(main_exprs)
         elsif main_def = def_nodes.find { |(n, _)| String.new(n.name) == "main" && !(n.receiver.try { |recv| String.new(recv) == HIR::AstToHir::FUN_DEF_RECEIVER } || false) }
           hir_converter.arena = main_def[1]
           hir_converter.lower_main_from_def(main_def[0])
@@ -1183,7 +1183,7 @@ module CrystalV2
           # Keep runtime contract stable: Crystal.main_user_code always expects
           # __crystal_main(argc, argv), even when user code has no top-level
           # expressions and no explicit main definition.
-          hir_converter.lower_main(main_exprs, main_expr_arenas)
+          hir_converter.lower_main(main_exprs)
         end
 
         after_lower_main = hir_converter.module.function_count
@@ -1840,7 +1840,64 @@ module CrystalV2
               log(options, out_io, "  Require cache miss: #{abs_path}") if options.verbose
               requires = [] of String
               exprs.each do |expr_id|
-                process_require_node(arena, expr_id, base_dir, input_file, results, loaded, options, out_io, requires)
+                begin
+                  process_require_node(arena, expr_id, base_dir, input_file, results, loaded, options, out_io, requires)
+                rescue ex : IndexError
+                  if options.verbose
+                    log(options, out_io, "    [req] IndexError in require scan expr=#{expr_id.index}: #{ex.message}")
+                  end
+                end
+              end
+              needs_source_fallback = requires.empty? || requires.any? { |req| !loaded.includes?(File.expand_path(req)) }
+              if needs_source_fallback
+                if options.verbose && !requires.empty?
+                  missing = 0
+                  requires.each do |req|
+                    unless loaded.includes?(File.expand_path(req))
+                      missing += 1
+                    end
+                  end
+                  if missing > 0
+                    log(options, out_io, "  Require AST/source mismatch: #{missing} unresolved after AST scan, using source fallback")
+                  end
+                end
+                fallback_requires = extract_require_literals_from_source(source)
+                if options.verbose
+                  log(options, out_io, "  Source require fallback entries=#{fallback_requires.size}")
+                end
+                fallback_resolved = 0
+                fallback_unresolved = 0
+                fallback_requires.each do |req_path|
+                  resolved = resolve_require_path(req_path, base_dir, input_file)
+                  if resolved
+                    case resolved
+                    when String
+                      fallback_resolved += 1
+                      requires << resolved
+                      parse_file_recursive(resolved, results, loaded, input_file, options, out_io)
+                    when Array
+                      fallback_resolved += resolved.size
+                      resolved.each do |file|
+                        requires << file
+                        parse_file_recursive(file, results, loaded, input_file, options, out_io)
+                      end
+                    end
+                  elsif req_path.includes?('*')
+                    Dir.glob(path_join(base_dir, req_path)).sort.each do |file|
+                      fallback_resolved += 1
+                      requires << file
+                      parse_file_recursive(file, results, loaded, input_file, options, out_io)
+                    end
+                  else
+                    fallback_unresolved += 1
+                    if options.verbose && fallback_unresolved <= 5
+                      log(options, out_io, "  Source fallback unresolved require: #{req_path}")
+                    end
+                  end
+                end
+                if options.verbose
+                  log(options, out_io, "  Source fallback resolved=#{fallback_resolved} unresolved=#{fallback_unresolved}")
+                end
               end
               save_require_cache(abs_path, requires)
             end
@@ -1871,7 +1928,64 @@ module CrystalV2
         base_dir = File.dirname(abs_path)
         requires = [] of String
         exprs.each do |expr_id|
-          process_require_node(arena, expr_id, base_dir, input_file, results, loaded, options, out_io, requires)
+          begin
+            process_require_node(arena, expr_id, base_dir, input_file, results, loaded, options, out_io, requires)
+          rescue ex : IndexError
+            if options.verbose
+              log(options, out_io, "    [req] IndexError in require scan expr=#{expr_id.index}: #{ex.message}")
+            end
+          end
+        end
+        needs_source_fallback = requires.empty? || requires.any? { |req| !loaded.includes?(File.expand_path(req)) }
+        if needs_source_fallback
+          if options.verbose && !requires.empty?
+            missing = 0
+            requires.each do |req|
+              unless loaded.includes?(File.expand_path(req))
+                missing += 1
+              end
+            end
+            if missing > 0
+              log(options, out_io, "  Require AST/source mismatch: #{missing} unresolved after AST scan, using source fallback")
+            end
+          end
+          fallback_requires = extract_require_literals_from_source(source)
+          if options.verbose
+            log(options, out_io, "  Source require fallback entries=#{fallback_requires.size}")
+          end
+          fallback_resolved = 0
+          fallback_unresolved = 0
+          fallback_requires.each do |req_path|
+            resolved = resolve_require_path(req_path, base_dir, input_file)
+            if resolved
+              case resolved
+              when String
+                fallback_resolved += 1
+                requires << resolved
+                parse_file_recursive(resolved, results, loaded, input_file, options, out_io)
+              when Array
+                fallback_resolved += resolved.size
+                resolved.each do |file|
+                  requires << file
+                  parse_file_recursive(file, results, loaded, input_file, options, out_io)
+                end
+              end
+            elsif req_path.includes?('*')
+              Dir.glob(path_join(base_dir, req_path)).sort.each do |file|
+                fallback_resolved += 1
+                requires << file
+                parse_file_recursive(file, results, loaded, input_file, options, out_io)
+              end
+            else
+              fallback_unresolved += 1
+              if options.verbose && fallback_unresolved <= 5
+                log(options, out_io, "  Source fallback unresolved require: #{req_path}")
+              end
+            end
+          end
+          if options.verbose
+            log(options, out_io, "  Source fallback resolved=#{fallback_resolved} unresolved=#{fallback_unresolved}")
+          end
         end
 
         results << {arena, exprs, abs_path, source}
@@ -1903,6 +2017,12 @@ module CrystalV2
         out_io : IO,
         requires_out : Array(String)? = nil
       )
+        if expr_id.index < 0 || expr_id.index >= arena.size
+          if options.verbose
+            log(options, out_io, "    [req] skip invalid expr id=#{expr_id.index} arena.size=#{arena.size}")
+          end
+          return
+        end
         node = arena[expr_id]
         # Bootstrap verbose: report which node type was seen
         if options.verbose
@@ -1923,16 +2043,34 @@ module CrystalV2
             end
           end
         when Frontend::RequireNode
+          if node.path.index < 0 || node.path.index >= arena.size
+            if options.verbose
+              log(options, out_io, "    [req] skip invalid require path expr id=#{node.path.index} arena.size=#{arena.size}")
+            end
+            return
+          end
           path_node = arena[node.path]
           if path_node.is_a?(Frontend::StringNode)
             req_path = String.new(path_node.value)
+            if options.verbose
+              log(options, out_io, "    [req-path] #{req_path}")
+            end
             resolved = resolve_require_path(req_path, base_dir, input_file)
             case resolved
             when String
+              if options.verbose
+                log(options, out_io, "    [req-resolved] #{resolved}")
+              end
               requires_out << resolved if requires_out
               parse_file_recursive(resolved, results, loaded, input_file, options, out_io)
             when Array
+              if options.verbose
+                log(options, out_io, "    [req-resolved] array count=#{resolved.size}")
+              end
               resolved.each do |file|
+                if options.verbose
+                  log(options, out_io, "      [req-resolved-item] #{file}")
+                end
                 requires_out << file if requires_out
                 parse_file_recursive(file, results, loaded, input_file, options, out_io)
               end
@@ -1980,12 +2118,56 @@ module CrystalV2
 
       private def source_has_glob_require?(source : String) : Bool
         source.each_line do |line|
-          next unless line.includes?("require")
-          if line.matches?(/\brequire\s+["'][^"']*[\*\?\[]/)
-            return true
+          if req_path = parse_require_literal_line(line)
+            return true if req_path.includes?('*') || req_path.includes?('?') || req_path.includes?('[')
           end
         end
         false
+      end
+
+      private def parse_require_literal_line(line : String) : String?
+        stripped = line.lstrip
+        return nil if stripped.empty? || stripped.starts_with?('#')
+
+        kw = "require"
+        return nil unless stripped.starts_with?(kw)
+        return nil if stripped.bytesize == kw.bytesize
+
+        i = kw.bytesize
+        next_ch = stripped.byte_at(i)
+        return nil unless next_ch == ' '.ord.to_u8 || next_ch == '\t'.ord.to_u8
+
+        while i < stripped.bytesize
+          ch = stripped.byte_at(i)
+          break unless ch == ' '.ord.to_u8 || ch == '\t'.ord.to_u8
+          i += 1
+        end
+        return nil if i >= stripped.bytesize
+
+        quote = stripped.byte_at(i)
+        return nil unless quote == '"'.ord.to_u8 || quote == '\''.ord.to_u8
+        i += 1
+        start = i
+
+        while i < stripped.bytesize
+          break if stripped.byte_at(i) == quote
+          i += 1
+        end
+        return nil if i <= start || i >= stripped.bytesize
+
+        value = stripped.byte_slice(start, i - start)
+        return nil unless value
+        value.dup
+      end
+
+      private def extract_require_literals_from_source(source : String) : Array(String)
+        requires = [] of String
+        source.each_line do |line|
+          if req_path = parse_require_literal_line(line)
+            requires << req_path
+          end
+        end
+        requires.uniq
       end
 
       private def require_cache_path(file_path : String) : String
@@ -3440,37 +3622,35 @@ module CrystalV2
       private def try_require_path(path : String) : String | Array(String) | Nil
         # Try with .cr extension first
         cr_path = path + ".cr"
-        if File.file?(cr_path)
+        if File.exists?(cr_path)
           # For crystal/system modules, also load the unix variant
           # (since macro conditionals aren't evaluated, we load all platform files)
           if path.includes?("/crystal/system/") && !path.includes?("/unix/") && !path.includes?("/win32/") && !path.includes?("/wasi/")
             unix_path = path.gsub("/crystal/system/", "/crystal/system/unix/") + ".cr"
-            if File.file?(unix_path)
+            if File.exists?(unix_path)
               return [cr_path, unix_path]
             end
           end
           return cr_path
         end
 
-        # If path exists as a directory, look for dir/basename.cr inside it
-        if Dir.exists?(path)
-          basename = File.basename(path)
-          inner_path = path_join(path, basename + ".cr")
-          if File.file?(inner_path)
-            # For crystal/system modules, also load the unix variant
-            if path.includes?("/crystal/system/") && !path.includes?("/unix/") && !path.includes?("/win32/") && !path.includes?("/wasi/")
-              unix_path = path.gsub("/crystal/system/", "/crystal/system/unix/")
-              unix_inner = path_join(unix_path, basename + ".cr")
-              if File.file?(unix_inner)
-                return [inner_path, unix_inner]
-              end
+        # Directory convention fallback: foo/foo.cr
+        basename = File.basename(path)
+        inner_path = path_join(path, basename + ".cr")
+        if File.exists?(inner_path)
+          # For crystal/system modules, also load the unix variant
+          if path.includes?("/crystal/system/") && !path.includes?("/unix/") && !path.includes?("/win32/") && !path.includes?("/wasi/")
+            unix_path = path.gsub("/crystal/system/", "/crystal/system/unix/")
+            unix_inner = path_join(unix_path, basename + ".cr")
+            if File.exists?(unix_inner)
+              return [inner_path, unix_inner]
             end
-            return inner_path
           end
+          return inner_path
         end
 
         # Try exact path if it's a file
-        return path if File.file?(path)
+        return path if File.exists?(path)
 
         nil
       end
