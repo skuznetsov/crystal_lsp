@@ -43,6 +43,61 @@
   - reduce generic-instantiation fanout before MIR,
   - mini-oracle-first iterations, then full stage2 `t=300`.
 
+## 2026-03-03: Root-cause reduction — gate union variant pre-expansion to eager mono only
+
+### Problem pattern
+- In `monomorphize_generic_class`, union type args were always pre-expanded:
+  - `T | U | ...` triggered extra `{base(T), base(U), ...}` specializations up front.
+- In lazy bootstrap mode this created avoidable specialization fanout and inflated pending lowering work.
+
+### Fix (`src/compiler/hir/ast_to_hir.cr`)
+- Changed union split pre-expansion guard:
+  - from unconditional `if type_args.size == 1 && type_args[0].includes?('|')`
+  - to `if @eager_monomorphization && type_args.size == 1 && type_args[0].includes?('|')`
+- Rationale:
+  - eager mode may still want broad pre-materialization;
+  - lazy mode should keep only on-demand specialization to avoid queue explosion.
+
+### Evidence
+- Build sanity:
+  - `/usr/bin/time -p crystal build src/crystal_v2.cr -o /tmp/stage1_dbg_union_split_gate --error-trace` -> `real 12.13`
+- Mini oracles:
+  - `bash regression_tests/run_mini_oracles.sh /tmp/stage1_dbg_union_split_gate` -> `5 passed, 0 failed`
+- Full regression:
+  - `regression_tests/run_all.sh /tmp/stage1_dbg_union_split_gate` -> `62 passed, 0 failed`
+- Release stage1:
+  - `CRYSTAL_CACHE_DIR=/tmp/crystal_cache_stage1_rel_union_split_gate /usr/bin/time -p crystal build src/crystal_v2.cr --release -o /tmp/stage1_rel_union_split_gate --error-trace`
+  - `real 436.66`
+
+### Quantitative impact on monomorphization flood (no-cache, t=120, release stage1)
+- Baseline:
+  - `/tmp/stage2_rel_baseline_monosamples_t120/command.log`
+  - `PENDING iteration=5: 31919`
+  - top mono sources at iteration 5:
+    - `Array: 764`, `Array::FlattenHelper: 758`
+    - `Pointer: 539`, `Pointer::Appender: 537`
+    - `Hash: 510`, `Hash::Entry: 513`, iterators ~`496-522`
+- After fix:
+  - `/tmp/stage2_rel_union_split_gate_monosamples_t120/command.log`
+  - `PENDING iteration=5: 29742` (−2177, ~−6.8%)
+  - top mono sources at iteration 5:
+    - `Array: 752`, `Array::FlattenHelper: 746`
+    - `Pointer: 532`, `Pointer::Appender: 530`
+    - `Hash: 323`, `Hash::Entry: 326`, iterators ~`309-335`
+
+### Stage2 bootstrap timing snapshot (still timeout, but phase advanced)
+- No-cache (`t=300`):
+  - `/usr/bin/time -p scripts/timeout_sample_lldb.sh -t 300 ... -o /tmp/stage2_rel_union_split_gate_nocache_t300 -- /tmp/stage1_rel_union_split_gate ...`
+  - timeout `124`, `real 313.06`, no output stage2 binary.
+  - timeout hotspots moved to late LLVM emission (`emit_function` / `emit`) rather than earlier HIR-only dominance.
+- Cache-default (`t=300`):
+  - `/usr/bin/time -p scripts/timeout_sample_lldb.sh -t 300 ... -o /tmp/stage2_rel_union_split_gate_cache_t300 -- /tmp/stage1_rel_union_split_gate ...`
+  - timeout `124`, `real 313.42`, no output stage2 binary.
+
+### Status
+- Root-cause fanout reduced and regressions remain green.
+- Stage2 still does not complete within 300s; next branch should target remaining HIR string/hash churn and LLVM emit-path allocation pressure.
+
 ## 2026-03-02: Root-cause fix — `type.from_io(self, format)` ABI corruption in `IO#read_bytes`
 
 ### Symptom

@@ -16526,7 +16526,10 @@ module Crystal::HIR
       template = @generic_templates[base_name]?
       return unless template
 
-      if type_args.size == 1 && type_args[0].includes?('|')
+      # Expanding union args into per-variant specializations is useful in eager
+      # monomorphization mode, but in lazy mode it amplifies specialization fanout
+      # and can flood pending lowering with variants that are never called.
+      if @eager_monomorphization && type_args.size == 1 && type_args[0].includes?('|')
         split_union_type_names(type_args[0]).each do |part|
           part = part.strip
           next if part.empty?
