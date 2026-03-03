@@ -1,5 +1,48 @@
 # Crystal v2 — Active Work (codegen branch)
 
+## 2026-03-03: Refuted perf branches + baseline refresh (root-cause mode)
+
+### Branch A (refuted): pre-index `mangled_name -> Type` in LLVM backend init
+- Experiment:
+  - Added `@type_by_mangled_name` and eager `build_type_lookup_index` in `LLVMIRGenerator#initialize`.
+  - Replaced two `Pointer(T)#bytesize/#clear` lookups with hash lookups.
+- Evidence:
+  - Stage1 release regressed to `real 506.11`.
+  - Stage2 `t=300` timed out (`real 313.42`), LLDB at timeout:
+    - `LLVMIRGenerator#initialize -> build_type_lookup_index -> LLVMTypeMapper#mangle_name -> GC_*`.
+- Verdict:
+  - This is startup work amplification, not a root-cause fix.
+  - Branch reverted.
+
+### Branch B (refuted): `mangle_function_name`/`function_full_name_for_def` fast-path rewrite
+- Experiment:
+  - Rewrote mangling to single-pass (no `reject/map/join` allocations) and added untyped def fast-path.
+- Evidence:
+  - Debug build passed (`real 9.00`), release build passed (`real 437.49` with isolated `CRYSTAL_CACHE_DIR`).
+  - Controlled no-cache stage2 run:
+    - `CRYSTAL_V2_PIPELINE_CACHE=0 CRYSTAL_V2_LLVM_CACHE=0 ... -t 300`
+    - timeout persisted (`real 313.62`), no output stage2 binary.
+    - timeout hotspots still GC + MIR DCE (`GC_malloc_kind`, `GC_generic_malloc_many`, `DeadCodeEliminationPass#run`).
+- Verdict:
+  - No reliable stage2 wall-time gain in bootstrap profile; branch reverted.
+
+### Baseline refresh after reverts
+- Stage1 release (original compiler):
+  - `/usr/bin/time -p crystal build src/crystal_v2.cr --release -o /tmp/stage1_rel_baseline_after_revert --error-trace`
+  - `real 427.55`
+- Stage2 release (watchdog 300s):
+  - `/usr/bin/time -p scripts/timeout_sample_lldb.sh -t 300 --series-start 30 --series-interval 60 --series-duration 8 -o /tmp/stage2_rel_baseline_after_revert_t300 -- /tmp/stage1_rel_baseline_after_revert src/crystal_v2.cr --release -o /tmp/stage2_rel_baseline_after_revert`
+  - timeout (`real 313.23`), output binary not produced.
+  - timeout backtrace shows heavy path through:
+    - `register_concrete_class -> function_full_name_for_def -> mangle_function_name`
+    - plus long lowering chain (`lower_call/lower_node`).
+
+### Next root-cause branch (unchanged)
+- Keep focus on workload shape, not symptom masking:
+  - lazy monomorphization include flood (`register_concrete_class`/`type_ref_for_name` churn),
+  - reduce generic-instantiation fanout before MIR,
+  - mini-oracle-first iterations, then full stage2 `t=300`.
+
 ## 2026-03-02: Root-cause fix — `type.from_io(self, format)` ABI corruption in `IO#read_bytes`
 
 ### Symptom
