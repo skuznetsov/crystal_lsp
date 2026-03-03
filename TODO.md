@@ -1,5 +1,45 @@
 # Crystal v2 — Active Work (codegen branch)
 
+## 2026-03-03: Parser macro crash follow-up (still open, stronger pinpoint)
+
+### What was tried in this iteration
+- `src/compiler/frontend/parser.cr`:
+  - `parse_macro_definition` now starts with `skip_statement_end` and validates current token is `Macro`.
+  - switched header trivia handling to `skip_whitespace_and_comments` (no newline consume) for:
+    - initial macro header scan after `macro`,
+    - `skip_macro_parameters` pre-check.
+  - added parser-level rescue in `parse_macro_definition` for `IndexError`:
+    - emits diagnostic,
+    - returns `PREFIX_ERROR` instead of crashing.
+  - removed temporary `DEBUG_PARSE_MACRO_DEF` tracing noise from code.
+
+### Evidence
+- Stage1 debug builds still compile and parse macro mini-repro without parser crash.
+- Stage2 (`/tmp/stage2_rel_macro_def_rescue`) still reproduces:
+  - `regression_tests/stage2_macro_parse_index_oob_repro.sh /tmp/stage2_rel_macro_def_rescue`
+  - `status=139`.
+- LLDB continues to point at:
+  - `Frontend::Parser#parse_macro_definition` (EXC_BAD_ACCESS).
+
+### Timing snapshot (latest branch)
+- Stage1 release:
+  - `/usr/bin/time -p crystal build src/crystal_v2.cr --release -o /tmp/stage1_rel_macro_def_rescue --error-trace`
+  - `real 452.32`
+- Stage2 release (watchdog 300):
+  - cold: timeout (`real 313.98`)
+  - warm: success (`real 52.79`)
+
+### Current conclusion
+- Previous require-root issue remains improved (prelude fallback now resolves/loads real stdlib files).
+- Primary blocker for stable stage2→stage3 remains macro parser crash in `parse_macro_definition`.
+- Next high-value step:
+  - isolate exact crashing operation inside `parse_macro_definition` with one more targeted marker around:
+    - header name extraction,
+    - `skip_macro_parameters`,
+    - `parse_macro_body` return path,
+    - `expect_identifier("end")` path;
+  - then replace fragile operation with bounds-safe equivalent.
+
 ## 2026-03-03: Stage2 macro parser crash narrowed to `parse_macro_definition` path
 
 ### New pinpoint (after require-path fixes)

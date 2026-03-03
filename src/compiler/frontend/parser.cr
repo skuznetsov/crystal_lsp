@@ -1758,162 +1758,150 @@ module CrystalV2
         end
 
         private def parse_macro_definition : ExprId
-          if ENV["DEBUG_PARSE_MACRO_DEF"]?
-            STDERR.puts "[MACRO_DEF] enter"
-          end
-          macro_token = current_token
-          advance
-          skip_trivia
-
-          name_token = current_token
-          # Defensive initialization: stage2 self-hosted builds have shown
-          # occasional branch miscompilation around macro name paths.
-          # Keep a valid (possibly empty) slice to avoid null-slice crashes.
-          macro_name_slice = "".to_slice
-
-          receiver_present = false
-
-          # Handle identifier-like macro names (including keywords used as names)
-          if name_token.kind == Token::Kind::Identifier || is_keyword_identifier?(name_token)
-            macro_name_slice = name_token.slice
+          begin
+            skip_statement_end
+            macro_token = current_token
+            return PREFIX_ERROR unless macro_token.kind == Token::Kind::Macro
             advance
+            # IMPORTANT: macro name must be read as-is after `macro`.
+            # `skip_trivia` can consume a newline and desync header parsing in
+            # self-hosted stage2, causing parse_macro_definition crashes.
+            skip_whitespace_and_comments
 
-            # Macro can't have a receiver: detect identifier DOT identifier
-            if current_token.kind == Token::Kind::Operator && current_token.slice == ".".to_slice
-              @diagnostics << Diagnostic.new("macro can't have a receiver", name_token.span.cover(current_token.span))
-              # Consume dot and next identifier to recover
-              advance
-              skip_trivia
-              if current_token.kind == Token::Kind::Identifier
-                advance
-              end
-              return PREFIX_ERROR
-            end
+            name_token = current_token
+            # Defensive initialization: stage2 self-hosted builds have shown
+            # occasional branch miscompilation around macro name paths.
+            # Keep a valid (possibly empty) slice to avoid null-slice crashes.
+            macro_name_slice = "".to_slice
 
-            # Support setter-like macro names foo=
-            if current_token.kind == Token::Kind::Eq
-              advance
-              setter_name = String.build do |io|
-                io.write(macro_name_slice)
-                io.write_byte('='.ord.to_u8)
-              end
-              macro_name_slice = @string_pool.intern(setter_name.to_slice)
-            end
-          else
-            # Use case on token kind for non-identifier names
-            case name_token.kind
-            when Token::Kind::LBracket
-              bracket_start = name_token
-              advance
-              skip_trivia
+            receiver_present = false
 
-              unless current_token.kind == Token::Kind::RBracket
-                emit_unexpected(current_token)
-                return PREFIX_ERROR
-              end
-              bracket_end = current_token
-              advance
-              skip_trivia
-
-              if current_token.kind == Token::Kind::Eq
-                advance
-                macro_name_slice = @string_pool.intern("[]=".to_slice)
-              else
-                macro_name_slice = @string_pool.intern("[]".to_slice)
-              end
-
-              # For span calculations below keep original LBracket token
-              name_token = bracket_start
-            when Token::Kind::Do # Dot token not emitted; treat unexpected receiver tokens similarly
-              # Macro can't have a receiver
-              @diagnostics << Diagnostic.new("macro can't have a receiver", name_token.span)
-              return PREFIX_ERROR
-            when Token::Kind::Semicolon, # macro `;end
-                 Token::Kind::Plus, Token::Kind::Minus, Token::Kind::Star, Token::Kind::Slash,
-                 Token::Kind::FloorDiv, Token::Kind::Percent, Token::Kind::StarStar,
-                 Token::Kind::Less, Token::Kind::Greater, Token::Kind::LessEq, Token::Kind::GreaterEq,
-                 Token::Kind::EqEq, Token::Kind::EqEqEq, Token::Kind::NotEq, Token::Kind::Spaceship,
-                 Token::Kind::Match, Token::Kind::NotMatch,
-                 Token::Kind::Amp, Token::Kind::Pipe, Token::Kind::Caret, Token::Kind::Tilde,
-                 Token::Kind::LShift, Token::Kind::RShift,
-                 Token::Kind::DotDot, Token::Kind::DotDotDot,
-                 Token::Kind::AmpPlus, Token::Kind::AmpMinus, Token::Kind::AmpStar, Token::Kind::AmpStarStar
+            # Handle identifier-like macro names (including keywords used as names)
+            if name_token.kind == Token::Kind::Identifier || is_keyword_identifier?(name_token)
               macro_name_slice = name_token.slice
               advance
+
+              # Macro can't have a receiver: detect identifier DOT identifier
+              if current_token.kind == Token::Kind::Operator && current_token.slice == ".".to_slice
+                @diagnostics << Diagnostic.new("macro can't have a receiver", name_token.span.cover(current_token.span))
+                # Consume dot and next identifier to recover
+                advance
+                skip_trivia
+                if current_token.kind == Token::Kind::Identifier
+                  advance
+                end
+                return PREFIX_ERROR
+              end
+
+              # Support setter-like macro names foo=
+              if current_token.kind == Token::Kind::Eq
+                advance
+                setter_name = String.build do |io|
+                  io.write(macro_name_slice)
+                  io.write_byte('='.ord.to_u8)
+                end
+                macro_name_slice = @string_pool.intern(setter_name.to_slice)
+              end
             else
-              emit_unexpected(name_token)
-              return PREFIX_ERROR
+              # Use case on token kind for non-identifier names
+              case name_token.kind
+              when Token::Kind::LBracket
+                bracket_start = name_token
+                advance
+                skip_trivia
+
+                unless current_token.kind == Token::Kind::RBracket
+                  emit_unexpected(current_token)
+                  return PREFIX_ERROR
+                end
+                bracket_end = current_token
+                advance
+                skip_trivia
+
+                if current_token.kind == Token::Kind::Eq
+                  advance
+                  macro_name_slice = @string_pool.intern("[]=".to_slice)
+                else
+                  macro_name_slice = @string_pool.intern("[]".to_slice)
+                end
+
+                # For span calculations below keep original LBracket token
+                name_token = bracket_start
+              when Token::Kind::Do # Dot token not emitted; treat unexpected receiver tokens similarly
+                # Macro can't have a receiver
+                @diagnostics << Diagnostic.new("macro can't have a receiver", name_token.span)
+                return PREFIX_ERROR
+              when Token::Kind::Semicolon, # macro `;end
+                   Token::Kind::Plus, Token::Kind::Minus, Token::Kind::Star, Token::Kind::Slash,
+                   Token::Kind::FloorDiv, Token::Kind::Percent, Token::Kind::StarStar,
+                   Token::Kind::Less, Token::Kind::Greater, Token::Kind::LessEq, Token::Kind::GreaterEq,
+                   Token::Kind::EqEq, Token::Kind::EqEqEq, Token::Kind::NotEq, Token::Kind::Spaceship,
+                   Token::Kind::Match, Token::Kind::NotMatch,
+                   Token::Kind::Amp, Token::Kind::Pipe, Token::Kind::Caret, Token::Kind::Tilde,
+                   Token::Kind::LShift, Token::Kind::RShift,
+                   Token::Kind::DotDot, Token::Kind::DotDotDot,
+                   Token::Kind::AmpPlus, Token::Kind::AmpMinus, Token::Kind::AmpStar, Token::Kind::AmpStarStar
+                macro_name_slice = name_token.slice
+                advance
+              else
+                emit_unexpected(name_token)
+                return PREFIX_ERROR
+              end
             end
-          end
 
-          if ENV["DEBUG_PARSE_MACRO_DEF"]?
-            STDERR.puts "[MACRO_DEF] name=#{String.new(macro_name_slice)} token=#{current_token.kind}"
-          end
-
-          macro_params = skip_macro_parameters(macro_token, macro_name_slice)
-          # Allow immediate separators after header (e.g., `struct X; end`)
-          skip_statement_end
-
-          if ENV["DEBUG_PARSE_MACRO_DEF"]?
-            STDERR.puts "[MACRO_DEF] before_body"
-          end
-
-          debug { "parse_macro_definition: name=#{String.new(macro_name_slice)} entering body, token=#{current_token.kind}" }
-          pieces, trim_left, trim_right = parse_macro_body
-          debug { "parse_macro_definition: exited body token=#{current_token.kind}" }
-          # Allow trailing separators before 'end'
-          skip_statement_end
-
-          if ENV["DEBUG_PARSE_MACRO_DEF"]?
-            STDERR.puts "[MACRO_DEF] after_body token=#{current_token.kind}"
-          end
-
-          # In some complex macro bodies (especially those mixing control
-          # macros and nested language constructs) our lightweight macro body
-          # scanner can reach EOF without having seen the final `end` that
-          # closes the macro definition. For tooling purposes we prefer to
-          # recover instead of emitting a hard error: if we're already at EOF,
-          # treat the macro as closed and continue parsing the rest of the
-          # file.
-          end_token : Token? = nil
-          if current_token.kind == Token::Kind::EOF
-            end_token = previous_token
-          else
-            expect_identifier("end")
-            end_token = previous_token
+            macro_params = skip_macro_parameters(macro_token, macro_name_slice)
             # Allow immediate separators after header (e.g., `struct X; end`)
             skip_statement_end
-          end
 
-          end_span = end_token.try(&.span)
-          body_span = end_span ? name_token.span.cover(end_span) : name_token.span
-          macro_span = end_span ? macro_token.span.cover(end_span) : macro_token.span
+            debug { "parse_macro_definition: name=#{String.new(macro_name_slice)} entering body, token=#{current_token.kind}" }
+            pieces, trim_left, trim_right = parse_macro_body
+            debug { "parse_macro_definition: exited body token=#{current_token.kind}" }
+            # Allow trailing separators before 'end'
+            skip_statement_end
 
-          if ENV["DEBUG_PARSE_MACRO_DEF"]?
-            STDERR.puts "[MACRO_DEF] build_nodes"
-          end
+            # In some complex macro bodies (especially those mixing control
+            # macros and nested language constructs) our lightweight macro body
+            # scanner can reach EOF without having seen the final `end` that
+            # closes the macro definition. For tooling purposes we prefer to
+            # recover instead of emitting a hard error: if we're already at EOF,
+            # treat the macro as closed and continue parsing the rest of the
+            # file.
+            end_token : Token? = nil
+            if current_token.kind == Token::Kind::EOF
+              end_token = previous_token
+            else
+              expect_identifier("end")
+              end_token = previous_token
+              # Allow immediate separators after header (e.g., `struct X; end`)
+              skip_statement_end
+            end
 
-          body_id = @arena.add_typed(
-            MacroLiteralNode.new(
-              body_span,
-              pieces,
-              trim_left,
-              trim_right
+            end_span = end_token.try(&.span)
+            body_span = end_span ? name_token.span.cover(end_span) : name_token.span
+            macro_span = end_span ? macro_token.span.cover(end_span) : macro_token.span
+
+            body_id = @arena.add_typed(
+              MacroLiteralNode.new(
+                body_span,
+                pieces,
+                trim_left,
+                trim_right
+              )
             )
-          )
 
-          result = @arena.add_typed(
-            MacroDefNode.new(
-              macro_span,
-              macro_name_slice,
-              body_id,
-              macro_params
+            result = @arena.add_typed(
+              MacroDefNode.new(
+                macro_span,
+                macro_name_slice,
+                body_id,
+                macro_params
+              )
             )
-          )
-          if ENV["DEBUG_PARSE_MACRO_DEF"]?
-            STDERR.puts "[MACRO_DEF] exit"
+            result
+          rescue ex : IndexError
+            @diagnostics << Diagnostic.new("Recovered from macro definition parse index error", current_token.span)
+            PREFIX_ERROR
           end
-          result
         end
 
         # Phase PERCENT_LITERALS: Parse optional receiver for class/singleton methods
@@ -7202,7 +7190,7 @@ module CrystalV2
         end
 
         private def skip_macro_parameters(macro_token : Token, macro_name_slice : Slice(UInt8)) : Array(MacroDefNode::MacroParamDecl)
-          skip_trivia
+          skip_whitespace_and_comments
           return [] of MacroDefNode::MacroParamDecl unless current_token.kind == Token::Kind::LParen
 
           params = [] of MacroDefNode::MacroParamDecl
@@ -7335,6 +7323,17 @@ module CrystalV2
           internal = names.last
           external = names.size > 1 ? names.first : external_name
           MacroDefNode::MacroParamDecl.new(internal, external, prefix)
+        end
+
+        private def skip_whitespace_and_comments
+          loop do
+            case current_token.kind
+            when Token::Kind::Whitespace, Token::Kind::Comment
+              advance
+            else
+              break
+            end
+          end
         end
 
         private def parse_macro_body(stop_on_branch : Bool = false)
