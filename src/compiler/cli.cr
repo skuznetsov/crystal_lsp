@@ -1560,18 +1560,20 @@ module CrystalV2
 
         opt_tag = options.llvm_opt ? "opt=#{opt_flag}" : "opt=none"
         llc_tag = "llc=#{opt_flag}"
-        opt_cache_file = options.llvm_cache ? path_join(cache_dir, "#{digest_string("#{base_hash}|#{opt_tag}")}.opt.ll") : ""
+        opt_cache_file = options.llvm_cache ? path_join(cache_dir, "#{digest_string("#{base_hash}|#{opt_tag}")}.opt.bc") : ""
         obj_cache_file = options.llvm_cache ? path_join(cache_dir, "#{digest_string("#{base_hash}|#{opt_tag}|#{llc_tag}")}.o") : ""
 
         opt_ll_file = ll_file
         if options.llvm_opt
-          opt_ll_file = "#{ll_file}.opt.ll"
+          opt_ll_file = "#{ll_file}.opt.bc"
           opt_start = Time.instant
           if options.llvm_cache && File.exists?(opt_cache_file)
             FileUtils.cp(opt_cache_file, opt_ll_file)
             @llvm_cache_hits += 1
           else
-            opt_cmd = "opt #{opt_flag} -S -o #{opt_ll_file} #{ll_file} 2>&1"
+            # Keep optimized IR in bitcode form to avoid expensive text print/parse
+            # in large stage2 bootstrap modules.
+            opt_cmd = "opt #{opt_flag} -o #{opt_ll_file} #{ll_file} 2>&1"
             log(options, out_io, "  $ #{opt_cmd}")
             opt_result = `#{opt_cmd}`
             unless $?.success?

@@ -9348,3 +9348,39 @@ crystal build -Ddebug_hooks src/crystal_v2.cr -o bin/crystal_v2 --no-debug
 ### Interpretation
 - This is a root-cause improvement (less nested mono fanout) and is correctness-safe on current regression set.
 - Cold stage2 remains above watchdog budget; next bottleneck is deeper LLVM backend/output path.
+
+## 2026-03-03 (Omni) — LLVM handoff fix: `opt` intermediate as bitcode (`.bc`)
+
+### Problem pattern (from timeout samples)
+- In cold stage2 (`t=300`), once HIR/MIR finished, `opt` spent substantial time parsing/printing huge textual IR (`-S` path).
+- Hotspots previously showed LLVM AssemblyWriter/stream write pressure during `opt` output.
+
+### Root-cause adjustment
+- File: `src/compiler/cli.cr` (`compile_llvm_ir`)
+- Switched optimized intermediate from text IR to bitcode:
+  - cache artifact extension: `.opt.ll` -> `.opt.bc`
+  - temporary artifact: `#{ll_file}.opt.ll` -> `#{ll_file}.opt.bc`
+  - command: `opt ... -S -o ...` -> `opt ... -o ...` (bitcode output)
+- No CLI flag changes; only internal compiler pipeline artifact format changed.
+
+### Validation
+- Full regressions on debug stage1:
+  - `regression_tests/run_all.sh tmp/stage1_dbg_opt_bc`
+  - result: `62 passed, 0 failed`.
+- Stage1 release build:
+  - `CRYSTAL_CACHE_DIR=/tmp/crystal_cache_stage1_rel_trim crystal build src/crystal_v2.cr --release -o tmp/stage1_rel_opt_bc`
+  - result: success (`real 7:06.51`).
+- Stage2 cold no-cache (`t=300`):
+  - `CRYSTAL_V2_PIPELINE_CACHE=0 CRYSTAL_V2_LLVM_CACHE=0 scripts/timeout_sample_lldb.sh -t 300 ... -- tmp/stage1_rel_opt_bc src/crystal_v2.cr --release -o /tmp/stage2_rel_opt_bc`
+  - result: timeout `124` (still above watchdog).
+  - key progress marker:
+    - `[LLVM] total MIR functions: 58681`
+    - `[LLVM] RTA kept: 31353`
+  - sampled phase progression:
+    - `t=210s`: process is `opt`
+    - `t=270s`: process is already `llc` (previous branch was still inside `opt` print path at similar point).
+  - final timeout hotspots moved to `llc` backend work (`DAGCombiner::combine`, `SimplifyDemandedBits`, register tree destroy/free).
+
+### Interpretation
+- This is a root-cause pipeline improvement (eliminates text IR print/parse overhead between `opt` and `llc`).
+- Cold stage2 still misses `t=300`, but execution now reaches deeper codegen (`llc`) before watchdog, confirming improved front-half compile pipeline throughput.
