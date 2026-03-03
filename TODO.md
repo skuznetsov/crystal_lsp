@@ -18,6 +18,9 @@
 - Fresh stage2 compiler still fails on minimal smoke compile:
   - `/tmp/stage2_rel_800f88ec /tmp/stage2_puts1.cr -o /tmp/stage2_puts1.bin`
   - error: `ExprId out of bounds: 1 (arena=:0)`
+- Added quick repro oracle script:
+  - `regression_tests/stage2_exprid_arena_oob_repro.sh <stage2_compiler>`
+  - reproduces this exact failure on a minimal `puts 1` source.
 - So bootstrap step itself finishes, but produced stage2 binary is not yet stable for next-stage compilation.
 
 ## 2026-03-03: Root-cause fix — `Tuple(A, ...)` (single-letter class) collapsed to `Void`
