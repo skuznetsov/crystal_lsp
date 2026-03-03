@@ -22,9 +22,26 @@ set +e
 status=$?
 set -e
 
-if [[ $status -ne 0 ]] && grep -q "ExprId out of bounds" "$ERR"; then
+if [[ $status -eq 139 ]]; then
+  echo "reproduced: stage2 compiler segfaults on minimal compile"
+  echo "compiler: $COMPILER"
+  echo "status: $status"
+  echo "tmp_dir: $TMP_DIR"
+  exit 0
+fi
+
+if [[ $status -ne 0 ]] && (grep -q "ExprId out of bounds" "$ERR" || grep -q "ExprId out of bounds" "$OUT"); then
   echo "reproduced: ExprId out of bounds (arena=:0) on minimal compile"
   echo "compiler: $COMPILER"
+  echo "status: $status"
+  echo "tmp_dir: $TMP_DIR"
+  exit 0
+fi
+
+if [[ $status -ne 0 ]] && (grep -q "Index out of bounds" "$ERR" || grep -q "Index out of bounds" "$OUT"); then
+  echo "reproduced: Index out of bounds on minimal compile (new signature)"
+  echo "compiler: $COMPILER"
+  echo "status: $status"
   echo "tmp_dir: $TMP_DIR"
   exit 0
 fi

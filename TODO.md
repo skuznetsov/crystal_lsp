@@ -1,5 +1,49 @@
 # Crystal v2 — Active Work (codegen branch)
 
+## 2026-03-03: Autonomous bootstrap timing pass + stage2 stability audit (handoff)
+
+### Critical evaluation of latest Claude work
+- Positive:
+  - stage2 bootstrap path itself is real and reproducible on current branch.
+  - stage1 regression suite remains healthy (`regression_tests/run_all.sh` -> `64 passed, 0 failed`).
+- Gaps still open:
+  - parser hardening branch (index clamp + rescue fallback in `parse_macro_definition`) did **not** remove root crash;
+    stage2 still segfaults on minimal macro definition.
+  - old `ExprId out of bounds` oracle became stale for many runs because the failure signature shifted to generic
+    `Index out of bounds`; this hid a still-broken stage2 smoke path.
+
+### Fresh timing evidence (same tree, 2026-03-03)
+- Warm/no-isolated-cache run:
+  - stage1: `real 6.36` (`/tmp/stage1_rel_20260303_codex`)
+  - stage2: `real 321.27` (`/tmp/stage2_rel_20260303_codex`)
+  - verdict: warm stage1 is cache-contaminated and not suitable as baseline.
+- Controlled cold run (isolated cache dirs):
+  - stage1:
+    - `CRYSTAL_CACHE_DIR=/tmp/crystal_cache_stage1_cold_codex crystal build src/crystal_v2.cr --release -o /tmp/stage1_rel_20260303_codex_cold --error-trace`
+    - `real 441.39`
+  - stage2:
+    - `CRYSTAL_CACHE_DIR=/tmp/crystal_cache_stage2_cold_codex /tmp/stage1_rel_20260303_codex_cold src/crystal_v2.cr --release -o /tmp/stage2_rel_20260303_codex_cold`
+    - `real 220.31`
+
+### Stage1 vs Stage2 delta (cold controlled pair)
+- Absolute: `221.08s` faster (`441.39 - 220.31`).
+- Relative: `~50.1%` faster.
+- Speedup factor: `~2.00x`.
+
+### Stability status of fresh stage2
+- `bash regression_tests/stage2_macro_parse_index_oob_repro.sh /tmp/stage2_rel_20260303_codex_cold`
+  - reproduced (`status=139`, segfault).
+- Minimal smoke compile still broken:
+  - `/tmp/stage2_rel_20260303_codex_cold /tmp/stage2_smoke_hello_cold.cr -o /tmp/stage2_smoke_hello_cold.bin`
+  - `error: Index out of bounds`.
+
+### Regression oracle hardening done in this pass
+- Updated `regression_tests/stage2_exprid_arena_oob_repro.sh`:
+  - now treats all currently observed failure signatures as reproduction:
+    - segfault (`status=139`),
+    - `ExprId out of bounds`,
+    - `Index out of bounds` (new signature seen in current branch).
+
 ## 2026-03-03: Parser macro crash follow-up (still open, stronger pinpoint)
 
 ### What was tried in this iteration
