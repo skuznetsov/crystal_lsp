@@ -16119,10 +16119,6 @@ module Crystal::HIR
         case member
         when CrystalV2::Compiler::Frontend::InstanceVarDeclNode
           return true if type_expr_references_nested_generic?(String.new(member.type), nested_short_name, nested_full_name)
-        when CrystalV2::Compiler::Frontend::TypeDeclarationNode
-          return true if type_expr_references_nested_generic?(String.new(member.declared_type), nested_short_name, nested_full_name)
-        when CrystalV2::Compiler::Frontend::ClassVarDeclNode
-          return true if type_expr_references_nested_generic?(String.new(member.type), nested_short_name, nested_full_name)
         when CrystalV2::Compiler::Frontend::DefNode
           next unless (params = member.params)
           params.each do |param|
