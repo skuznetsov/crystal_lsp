@@ -1,5 +1,25 @@
 # Crystal v2 — Active Work (codegen branch)
 
+## 2026-03-03: Refuted perf branch C — cached `union_variant_type_ref` in `emit_union_is`
+
+### Experiment
+- Added cache `@union_variant_type_ref_cache : Hash({TypeRef, Int32}, TypeRef?)` in LLVM backend.
+- Reused cached variant lookup in `emit_union_is` and `variant_global_id(union_type_ref, variant_type_id)`.
+- Minor fast path for known zero/null union store value.
+
+### Evidence
+- Stage1 release with branch:
+  - `/usr/bin/time -p crystal build src/crystal_v2.cr --release -o /tmp/stage1_rel_union_variant_cache --error-trace`
+  - `real 437.82` (worse than refreshed baseline `427.55`).
+- Stage2 no-cache (`t=300`) with branch:
+  - `CRYSTAL_V2_PIPELINE_CACHE=0 CRYSTAL_V2_LLVM_CACHE=0 /usr/bin/time -p scripts/timeout_sample_lldb.sh -t 300 --series-start 30 --series-interval 60 --series-duration 8 -o /tmp/stage2_rel_union_variant_cache_nocache_t300 -- /tmp/stage1_rel_union_variant_cache src/crystal_v2.cr --release -o /tmp/stage2_rel_union_variant_cache_nocache`
+  - timeout `124`, `real 313.11` (baseline no-cache `313.06`).
+  - timeout hotspots unchanged class: `GC_*`, `LLVMIRGenerator#emit`, `LLVMIRGenerator#emit_function`.
+
+### Verdict
+- No measurable stage2 win at 300s watchdog; stage1 got slower.
+- Branch reverted; keep focus on workload-shape/root-cause reductions, not local union lookup micro-caches.
+
 ## 2026-03-03: Refuted perf branches + baseline refresh (root-cause mode)
 
 ### Branch A (refuted): pre-index `mangled_name -> Type` in LLVM backend init
