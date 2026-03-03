@@ -9302,3 +9302,49 @@ crystal build -Ddebug_hooks src/crystal_v2.cr -o bin/crystal_v2 --no-debug
   - correctness regression from naive nested lazy gating removed,
   - nested monomorphization remains controlled by structural layout need instead of hardcoded method/type symbols,
   - remaining blocker is cold-stage2 performance, not immediate correctness crash.
+
+## 2026-03-03 (Omni) — layout trigger narrowing (root-cause perf refinement)
+
+### Hypothesis
+- In layout-aware nested monomorphization gate, `TypeDeclarationNode` and `ClassVarDeclNode` checks were still over-triggering concrete nested specialization fanout.
+- If we restrict trigger to real instance-layout dependencies only, MIR volume should drop without reintroducing ABI regression.
+
+### Change
+- File: `src/compiler/hir/ast_to_hir.cr`
+- In `nested_generic_required_by_layout?`, removed trigger paths:
+  - `TypeDeclarationNode`
+  - `ClassVarDeclNode`
+- Kept trigger paths:
+  - `InstanceVarDeclNode`
+  - `DefNode` instance-var parameter annotations (`initialize(@x : T)`).
+
+### Fast oracle results
+- `CRYSTAL_V2_STOP_AFTER_MIR=1 CRYSTAL_V2_PIPELINE_CACHE=0 ... --stats`
+- Before narrowing:
+  - `hir=136038.6ms`, `hir_funcs=80867`, `mir_funcs=59749`, `total=150533.2ms`
+- After narrowing:
+  - `hir=122201.9ms`, `hir_funcs=78768`, `mir_funcs=58681`, `total=134772.1ms`
+- Delta:
+  - `mir_funcs -1068`
+  - `total -15.76s` on MIR-stop oracle.
+
+### Correctness checks
+- Mini repro:
+  - `test_init_obj` via `scripts/run_safe.sh` still passes (`10`, `10`, `done`).
+- Full regressions:
+  - `regression_tests/run_all.sh tmp/stage1_dbg_layout_trim`
+  - result: `62 passed, 0 failed`.
+
+### Stage2 cold check (`t=300`, no caches)
+- Command:
+  - `CRYSTAL_V2_PIPELINE_CACHE=0 CRYSTAL_V2_LLVM_CACHE=0 scripts/timeout_sample_lldb.sh -t 300 ... -- tmp/stage1_rel_layout_trim src/crystal_v2.cr --release -o /tmp/stage2_rel_layout_trim`
+- Result:
+  - timeout `124` at 300s (still not stage3-ready).
+  - progress markers:
+    - `[LLVM] total MIR functions: 58681`
+    - `[LLVM] RTA kept: 31353 (pruned 27328)`
+  - timeout sample hotspot is now LLVM IR/assembly writer path (not earlier type-resolution crash mode).
+
+### Interpretation
+- This is a root-cause improvement (less nested mono fanout) and is correctness-safe on current regression set.
+- Cold stage2 remains above watchdog budget; next bottleneck is deeper LLVM backend/output path.
