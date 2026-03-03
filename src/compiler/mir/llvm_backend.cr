@@ -1161,7 +1161,7 @@ module Crystal::MIR
         # (which has correct return type and arg types) over the ExternCall info
         # (which may have void return for unused results).
         # External library functions (GC, libc, etc.) must stay as declare.
-        call_info = name.includes?("$") ? @called_crystal_functions[name]? : nil
+        call_info = (name.includes?("$") && crystalish_extern_name?(name)) ? @called_crystal_functions[name]? : nil
         if call_info
           better_ret = call_info[0]
           return_type = better_ret if return_type == "void" && better_ret != "void"
@@ -1216,7 +1216,7 @@ module Crystal::MIR
           # External library functions (GC, libc, system) must stay as 'declare' so
           # the linker resolves them to the real implementations. Only V2-mangled
           # Crystal functions (those containing $) get stub bodies.
-          if name.includes?("$")
+          if name.includes?("$") && crystalish_extern_name?(name)
             ret_stmt = case return_type
                        when "void"   then "ret void"
                        when "ptr"    then "ret ptr null"
@@ -1279,7 +1279,7 @@ module Crystal::MIR
       # Any V2-mangled method name (contains $) that has no body
       # is dead code from type-inference gaps. Emit a stub to avoid linker errors.
       # Catches: $H (#), $D (.), $CC (::), $$ (param separator), $Q (?), $SHL (<<), etc.
-      is_v2_mangled = name.includes?("$")
+      is_v2_mangled = name.includes?("$") && crystalish_extern_name?(name)
 
       # Pointer::Appender#<<(UInt8) — real method, emit proper implementation.
       # Stores byte at current pointer, advances pointer by 1.
@@ -1857,7 +1857,16 @@ module Crystal::MIR
     end
 
     @[AlwaysInline]
+    private def extern_symbol_extension_name?(name : String) : Bool
+      # Platform-specific external aliases from lib_c, e.g.:
+      #   realpath = "realpath$DARWIN_EXTSN"
+      # These are C symbols and must stay external declarations.
+      name.matches?(/\A[a-z_][a-z0-9_]*\$[A-Z0-9_]+_EXTSN\z/)
+    end
+
+    @[AlwaysInline]
     private def crystalish_extern_name?(name : String) : Bool
+      return false if extern_symbol_extension_name?(name)
       # Namespaced or receiver-qualified: definitely Crystal.
       return true if name.includes?('#') || name.includes?('.') || name.includes?("::")
       # Type-suffixed or type-like: likely Crystal (Int32/UInt64/etc).
@@ -7112,6 +7121,9 @@ module Crystal::MIR
             type = "[#{inst.size} x i8]"
           end
           emit_raw "  #{name} = alloca #{type}, align #{inst.align}\n"
+          if type == "ptr"
+            emit_raw "  store ptr null, ptr #{name}\n"
+          end
           @emitted_allocas << inst.id
           @value_types[inst.id] = TypeRef::POINTER
           # Track element type for GEP
@@ -7138,6 +7150,9 @@ module Crystal::MIR
           alloca_type = "i8" if alloca_type == "void"
           alloca_name = "r#{operand_id}.addr"
           emit_raw "  %#{alloca_name} = alloca #{alloca_type}, align 8\n"
+          if alloca_type == "ptr"
+            emit_raw "  store ptr null, ptr %#{alloca_name}\n"
+          end
           @addressable_allocas[operand_id] = "%#{alloca_name}"
         end
       end
@@ -9138,6 +9153,9 @@ module Crystal::MIR
           type = "[#{inst.size} x i8]"
         end
         emit "#{name} = alloca #{type}, align #{inst.align}"
+        if type == "ptr"
+          emit "store ptr null, ptr #{name}"
+        end
       when MemoryStrategy::Slab
         size_class = compute_size_class(inst.size)
         emit "#{name} = call ptr @__crystal_v2_slab_alloc(i32 #{size_class})"
@@ -9532,6 +9550,7 @@ module Crystal::MIR
       base = value_ref(inst.base)
       index = value_ref(inst.index)
       element_type = @type_mapper.llvm_type(inst.element_type)
+      original_element_type = element_type
 
       # Void is not a valid GEP element type - use i8 (byte pointer arithmetic)
       if element_type == "void"
@@ -9654,12 +9673,20 @@ module Crystal::MIR
         idx64 = ext_name
       end
 
-      # For struct element types, multiply index by sizeof(struct) and use byte-level GEP.
-      # Without this, GEP ptr steps by sizeof(ptr)=8 instead of sizeof(struct).
-      if struct_elem_size > 0 && struct_elem_size != 8
-        byte_name = "#{name}.byte_offset"
-        emit "#{byte_name} = mul i64 #{idx64}, #{struct_elem_size}"
-        emit "#{name} = getelementptr i8, ptr #{base}, i64 #{byte_name}"
+      # For struct/byte-addressed element types, multiply index by explicit element size
+      # and use byte-level GEP.
+      # This is mandatory when original MIR element type is void (lowered to i8):
+      # if we emit `getelementptr i8, ... , idx` directly, runtime uses byte stride 1
+      # and corrupts pointer-slot arrays (e.g. Array(Tuple(...)) push paths).
+      use_byte_gep = struct_elem_size > 0 && (struct_elem_size != 8 || element_type == "i8" || original_element_type == "void")
+      if use_byte_gep
+        if struct_elem_size == 1
+          emit "#{name} = getelementptr i8, ptr #{base}, i64 #{idx64}"
+        else
+          byte_name = "#{name}.byte_offset"
+          emit "#{byte_name} = mul i64 #{idx64}, #{struct_elem_size}"
+          emit "#{name} = getelementptr i8, ptr #{base}, i64 #{byte_name}"
+        end
       else
         emit "#{name} = getelementptr #{element_type}, ptr #{base}, i64 #{idx64}"
       end
@@ -15576,6 +15603,20 @@ module Crystal::MIR
       # LLVM pointer constants must use `null` (not `0`)
       if element_type == "ptr" && value == "0"
         value = "null"
+      end
+
+      # Tuple elements are value types represented as ptr in current ABI.
+      # When writing into Array buffers, the incoming ptr often references a
+      # transient stack slot. Persist by copying tuple bytes to heap first.
+      if element_type == "ptr" && value != "null"
+        if elem_mir = @module.type_registry.get(inst.element_type)
+          if elem_mir.kind.tuple? && elem_mir.size > 0
+            tuple_copy_size = elem_mir.size.to_u64
+            emit "%#{base_name}.tuple_copy = call ptr @__crystal_v2_malloc64(i64 #{tuple_copy_size})"
+            emit "call void @llvm.memcpy.p0.p0.i64(ptr %#{base_name}.tuple_copy, ptr #{value}, i64 #{tuple_copy_size}, i1 false)"
+            value = "%#{base_name}.tuple_copy"
+          end
+        end
       end
 
       # Detect StaticArray — data is stored inline (no buffer pointer)

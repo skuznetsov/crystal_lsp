@@ -1,5 +1,41 @@
 # Crystal v2 — Active Work (codegen branch)
 
+## 2026-03-03: Root-cause fix — `Tuple(A, ...)` (single-letter class) collapsed to `Void`
+
+### Problem pattern
+- Mini-repro with `Array(Tuple(A, String, String, String))` produced wrong runtime behavior.
+- Emitted IR showed:
+  - `Pointer#<<` instead of `Array#<<`,
+  - `getelementptr i32` + `Int32#[]` on tuple reads.
+- HIR for repro confirmed degradation:
+  - `array_literal [] : 0`,
+  - `allocate 0(...)`,
+  - call path `%arr.Pointer#<<(...)`.
+
+### Root cause
+- In `type_ref_for_name` generic unresolved check, the non-template branch used:
+  - `param_name.matches?(/\A[A-Z]\z/) || unresolved_short_token`.
+- This marks any single-letter uppercase generic arg as unresolved, even when it is a valid user type.
+- For `Tuple(A, ...)` it forced `TypeRef::VOID`, which cascaded into pointer fallback codegen.
+
+### Fix (`src/compiler/hir/ast_to_hir.cr`)
+- Removed the unconditional single-letter rejection for non-template generics.
+- Kept only semantic unresolved detection via `has_unresolved_short_type_param_token?`.
+- Result: valid classes like `A` in `Tuple(A, ...)` now resolve normally.
+
+### Regression oracle
+- Added `regression_tests/stage1_tuple_single_letter_class_tuple_array.cr`
+  - marker: `tuple_single_letter_class_tuple_array_ok`.
+
+### Evidence
+- Repro source: `/tmp/repro_tuple_obj4.cr`.
+- Before fix (`bin/crystal_v2_stage1`):
+  - HIR snippet contained:
+    - `%... = array_literal [] : 0`
+    - `%... = allocate 0(...)`
+    - `%... = call %....Pointer#<<(...)`
+- After fix: expected path is concrete `Tuple(A, String, String, String)` and no pointer fallback for `arr <<` / `arr[0]`.
+
 ## 2026-03-03: Root-cause fix — `Pointer(Tuple(...))` stride mismatch in `Array#push` path
 
 ### Problem pattern

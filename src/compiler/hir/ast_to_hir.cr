@@ -2453,7 +2453,7 @@ module Crystal::HIR
 
     # Deferred constant initializations (non-numeric constants like string literals).
     # Stores: {owner_name, const_name, value_expr_id, arena}
-    @deferred_constant_inits : Array(Tuple(String, String, CrystalV2::Compiler::Frontend::ExprId, CrystalV2::Compiler::Frontend::ArenaLike))
+    @deferred_constant_inits : Array(Tuple(String, String, Int32, CrystalV2::Compiler::Frontend::ArenaLike))
 
     # Lazy classvar init: maps "Owner::cvar_name" → {expr_id, arena, owner_class}
     @classvar_lazy_init_info = {} of String => Tuple(CrystalV2::Compiler::Frontend::ExprId, CrystalV2::Compiler::Frontend::ArenaLike, String)
@@ -2670,7 +2670,7 @@ module Crystal::HIR
       @debug_callsite = nil
       @pending_def_annotations = [] of Tuple(CrystalV2::Compiler::Frontend::AnnotationNode, CrystalV2::Compiler::Frontend::ArenaLike)
       @deferred_classvar_inits = [] of Tuple(CrystalV2::Compiler::Frontend::ExprId, CrystalV2::Compiler::Frontend::ArenaLike, String)
-      @deferred_constant_inits = [] of Tuple(String, String, CrystalV2::Compiler::Frontend::ExprId, CrystalV2::Compiler::Frontend::ArenaLike)
+      @deferred_constant_inits = [] of Tuple(String, String, Int32, CrystalV2::Compiler::Frontend::ArenaLike)
       @pending_offsetof_constants = [] of Tuple(String, CrystalV2::Compiler::Frontend::ExprId, CrystalV2::Compiler::Frontend::ArenaLike, String?)
       @pending_enum_constant_resolutions = [] of Tuple(String, String, String)  # (enum_name, member_name, constant_key)
     end
@@ -14731,6 +14731,7 @@ module Crystal::HIR
 
       if splat_param_name
         splat_type = TypeRef::VOID
+        remaining = [] of TypeRef
         if !call_types.empty?
           remaining = call_types[call_index..-1]? || [] of TypeRef
           # Avoid re-wrapping: if single remaining arg is already a Tuple, use it directly
@@ -14740,7 +14741,7 @@ module Crystal::HIR
             splat_type = tuple_type_from_arg_types(remaining, allow_void: true)
           end
         end
-        if splat_type == TypeRef::VOID
+        if splat_type == TypeRef::VOID && !remaining.empty?
           if elem_type = param_type_map[splat_param_name.not_nil!]?
             if elem_type != TypeRef::VOID
               # Avoid re-wrapping: if elem_type is already a Tuple, use it directly
@@ -19045,6 +19046,7 @@ module Crystal::HIR
 
       if splat_param_name
         splat_type = TypeRef::VOID
+        remaining = [] of TypeRef
         if !call_types.empty?
           remaining = call_types[call_index..-1]? || [] of TypeRef
           # Avoid re-wrapping: if single remaining arg is already a Tuple, use it directly
@@ -19054,7 +19056,7 @@ module Crystal::HIR
             splat_type = tuple_type_from_arg_types(remaining, allow_void: true)
           end
         end
-        if splat_type == TypeRef::VOID
+        if splat_type == TypeRef::VOID && !remaining.empty?
           if elem_type = param_type_map[splat_param_name.not_nil!]?
             if elem_type != TypeRef::VOID
               # Avoid re-wrapping: if elem_type is already a Tuple, use it directly
@@ -25522,7 +25524,7 @@ module Crystal::HIR
     ])
 
     # Compute set of function def names and method names reachable from main expressions via BFS
-    def compute_ast_reachable_functions(main_exprs : Array(Tuple(CrystalV2::Compiler::Frontend::ExprId, CrystalV2::Compiler::Frontend::ArenaLike))) : NamedTuple(defs: Set(String), method_names: Set(String), owner_types: Set(String), method_bases: Set(String))
+    def compute_ast_reachable_functions(main_exprs : Array(UInt64)) : NamedTuple(defs: Set(String), method_names: Set(String), owner_types: Set(String), method_bases: Set(String))
       _ = main_exprs # conservative mode: keep API stable, skip AST BFS prepass
       t0 = Time.instant
       log_filter = ENV.has_key?("CRYSTAL_V2_AST_FILTER_LOG")
@@ -26700,7 +26702,7 @@ module Crystal::HIR
         @arena = old_a2
         if needs_deferred
           owner = owner_name || "$"
-          @deferred_constant_inits << {owner, name, value_id, arena}
+          @deferred_constant_inits << {owner, name, value_id.index, arena}
         end
       end
 
@@ -31654,11 +31656,12 @@ module Crystal::HIR
 
       if splat_param_name
         splat_type = TypeRef::VOID
+        remaining = [] of TypeRef
         if !call_types.empty?
           remaining = call_types[call_index..-1]? || [] of TypeRef
           splat_type = tuple_type_from_arg_types(remaining, allow_void: true)
         end
-        if splat_type == TypeRef::VOID
+        if splat_type == TypeRef::VOID && !remaining.empty?
           if elem_type = param_type_map[splat_param_name.not_nil!]?
             if elem_type != TypeRef::VOID
               splat_type = tuple_type_from_arg_types([elem_type], allow_void: true)
@@ -31964,7 +31967,7 @@ module Crystal::HIR
 
     # Lower top-level expressions into a synthetic main function
     # Note: Named __crystal_main because stdlib's fun main calls LibCrystalMain.__crystal_main
-    def lower_main(main_exprs : Array(Tuple(CrystalV2::Compiler::Frontend::ExprId, CrystalV2::Compiler::Frontend::ArenaLike))) : Crystal::HIR::Function
+    def lower_main(main_exprs : Array(UInt64), main_arenas : Array(CrystalV2::Compiler::Frontend::ArenaLike)) : Crystal::HIR::Function
       # Create __crystal_main function with void return type
       # Signature: fun __crystal_main(argc : Int32, argv : UInt8**)
       func = @module.create_function("__crystal_main", TypeRef::VOID)
@@ -32020,7 +32023,8 @@ module Crystal::HIR
         if env_has?("DEBUG_DEFERRED_CONST")
           STDERR.puts "[DEFERRED_CONST] Processing #{@deferred_constant_inits.size} deferred constants"
         end
-        @deferred_constant_inits.each do |(owner, const_name, value_id, init_arena)|
+        @deferred_constant_inits.each do |(owner, const_name, value_index, init_arena)|
+          value_id = CrystalV2::Compiler::Frontend::ExprId.new(value_index)
           @arena = init_arena
           old_class = @current_class
           @current_class = owner == "$" ? nil : owner
@@ -32101,11 +32105,12 @@ module Crystal::HIR
         end
         if env_has?("DEBUG_DEFERRED_CONST")
           STDERR.puts "[DEFERRED_CONST] Processing #{@deferred_constant_inits.size} deferred constant inits"
-          @deferred_constant_inits.each do |(owner, const_name, value_id, init_arena)|
+          @deferred_constant_inits.each do |(owner, const_name, _, init_arena)|
             STDERR.puts "[DEFERRED_CONST]   #{owner}::#{const_name}"
           end
         end
-        @deferred_constant_inits.each do |(owner, const_name, value_id, init_arena)|
+        @deferred_constant_inits.each do |(owner, const_name, value_index, init_arena)|
+          value_id = CrystalV2::Compiler::Frontend::ExprId.new(value_index)
           @arena = init_arena
           old_class = @current_class
           @current_class = owner == "$" ? nil : owner
@@ -32135,7 +32140,11 @@ module Crystal::HIR
       if debug_main
         STDERR.puts "[MAIN] lower_main exprs=#{main_exprs.size}"
       end
-      main_exprs.each_with_index do |(expr_id, arena), idx|
+      main_exprs.each_with_index do |packed_expr_ref, idx|
+        arena_index = (packed_expr_ref >> 32).to_i32
+        expr_index = (packed_expr_ref & 0xFFFF_FFFF_u64).to_i32
+        expr_id = CrystalV2::Compiler::Frontend::ExprId.new(expr_index)
+        arena = main_arenas[arena_index]
         # Switch arena context for this expression
         @arena = arena
         if debug_main && !slow_only
@@ -49423,6 +49432,31 @@ module Crystal::HIR
             entry_def = alt_entry[1]
           end
         end
+        if params = entry_def.params
+          splat_index : Int32? = nil
+          param_index = 0
+          params.each do |param|
+            next if param.is_block || named_only_separator?(param)
+            if param.is_splat && !param.is_double_splat
+              splat_index = param_index
+              break
+            end
+            param_index += 1
+          end
+
+          if splat_index && args.size <= splat_index
+            while args.size < splat_index
+              nil_lit = Literal.new(ctx.next_id, TypeRef::NIL, nil)
+              ctx.emit(nil_lit)
+              args << nil_lit.id
+              arg_types << TypeRef::NIL
+            end
+            empty_tuple_id = allocate_empty_tuple(ctx)
+            args << empty_tuple_id
+            arg_types << ctx.type_of(empty_tuple_id)
+            has_splat = true
+          end
+        end
         if env_has?("DEBUG_SLICE_EACH") && method_name == "each" && (lookup_name.includes?("Slice") || entry_name.includes?("Flags"))
           STDERR.puts "[SLICE_LOOKUP_HIT] lookup=#{lookup_name} → entry=#{entry_name}"
         end
@@ -54310,6 +54344,17 @@ module Crystal::HIR
     private def allocate_named_tuple(ctx : LoweringContext, values : Array(ValueId)) : ValueId
       named_tuple_type = ctx.get_type("NamedTuple")
       alloc = Allocate.new(ctx.next_id, named_tuple_type, values)
+      ctx.emit(alloc)
+      alloc.id
+    end
+
+    private def allocate_empty_tuple(ctx : LoweringContext) : ValueId
+      tuple_type = type_ref_for_name("Tuple()")
+      if tuple_type == TypeRef::VOID
+        tuple_type = type_ref_for_name("Tuple")
+      end
+      tuple_type = TypeRef::POINTER if tuple_type == TypeRef::VOID
+      alloc = Allocate.new(ctx.next_id, tuple_type, [] of ValueId)
       ctx.emit(alloc)
       alloc.id
     end
@@ -66229,7 +66274,11 @@ module Crystal::HIR
           if template = @generic_templates[base_name]?
             template.type_params.any? { |tp| contains_type_param_token?(param_name, tp) } || unresolved_short_token
           else
-            param_name.matches?(/\A[A-Z]\z/) || unresolved_short_token
+            # For non-template generics (notably Tuple(...)), treat short A-Z
+            # tokens as unresolved only when they are actually unknown.
+            # Otherwise valid user classes like `A` are incorrectly rejected,
+            # collapsing Tuple(A, ...) to Void and poisoning array/method lowering.
+            unresolved_short_token
           end
         end
         if unresolved_param
