@@ -1,5 +1,55 @@
 # Crystal v2 — Active Work (codegen branch)
 
+## 2026-03-04: New MIR/LLVM boundary oracle + refuted macro-control progress guard
+
+### New deterministic oracle added
+- `regression_tests/stage2_mir_setup_post_lowering_segfault_repro.sh`
+  - Repro target: minimal `macro x; end` with
+    `STAGE2_DEBUG=1 CRYSTAL_V2_MIR_SETUP_TRACE=1`.
+  - Reproduced condition:
+    - process exits with `139` (segfault),
+    - stderr contains `[MIR_SETUP] lowering bodies done funcs=1`.
+
+### Verification of the new oracle
+- Stage2 debug:
+  - `bash regression_tests/stage2_mir_setup_post_lowering_segfault_repro.sh /tmp/stage2_dbg_cached_wrapper`
+  - reproduced (`status=139`).
+- Stage2 release:
+  - `bash regression_tests/stage2_mir_setup_post_lowering_segfault_repro.sh /tmp/stage2_rel_cached_wrapper`
+  - reproduced (`status=139`).
+- Stage1 control:
+  - `bash regression_tests/stage2_mir_setup_post_lowering_segfault_repro.sh /tmp/stage1_rel_macro_recover_sync`
+  - not reproduced (`status=0`), and trace continues into LLVM emission (`RTA kept` line present).
+
+### Additional phase boundary evidence
+- `CRYSTAL_V2_STOP_AFTER_MIR=1` with stage2 debug on minimal macro repro:
+  - exits `0` (no crash).
+- `CRYSTAL_V2_LLVM_SETUP_TRACE=1` on the same repro:
+  - last marker before crash is `[LLVM_SETUP] before generator.new`.
+- Conclusion: this branch has a stable crash boundary after MIR and at/before LLVM generator initialization.
+
+### Refuted experiment: parser macro-control progress guard
+- Attempted change (local parser branch, reverted):
+  - added “must make progress” recovery guard around `parse_percent_macro_control`
+    in `parse_program` and `parse_statement`.
+- Motivation:
+  - `PARSER_DEBUG=1` showed repeated `%{...}` fallback cycles on token `114` (`LBracePercent`)
+    with `fast_forward_percent_block: self-contained ''`.
+- Evidence:
+  - stage1 debug build with patch:
+    - `/usr/bin/time -p scripts/build_stage1_original_debug.sh /tmp/stage1_dbg_macro_progress_guard --error-trace`
+    - `real 8.40`.
+  - stage2 debug build with patch:
+    - `/usr/bin/time -p scripts/build_stage2_debug.sh /tmp/stage1_dbg_macro_progress_guard /tmp/stage2_dbg_macro_progress_guard`
+    - `real 1403.43` (severe regression vs earlier debug stage2 ~`335.17`).
+  - Stability remained unchanged (all still reproduced):
+    - `stage2_exprid_arena_oob_repro` (`status=1`, index signature),
+    - `stage2_macro_parse_index_oob_repro` (`status=139`),
+    - `stage2_macro_record_heredoc_index_oob_repro` (`status=1`),
+    - `stage2_mir_setup_post_lowering_segfault_repro` (`status=139`).
+- Decision:
+  - branch rejected and parser guard patch reverted.
+
 ## 2026-03-04: Refuted parser macro-definition recovery sync experiment
 
 ### Hypothesis
