@@ -92,6 +92,23 @@ module CrystalV2
       # Top-level macro variable assignments (e.g., {% nums = %w(Int8 ...) %})
       @macro_text_vars = {} of String => String
 
+      # Stage2 has shown fragility with tuple payload reads in self-hosted mode.
+      # Keep parsed-unit fields named and typed to avoid tuple index lowering paths.
+      private struct ParsedUnit
+        getter arena : Frontend::AstArena
+        getter roots : Array(Frontend::ExprId)
+        getter path : String
+        getter source : String
+
+        def initialize(
+          @arena : Frontend::AstArena,
+          @roots : Array(Frontend::ExprId),
+          @path : String,
+          @source : String
+        )
+        end
+      end
+
       def initialize(@args : Array(String))
       end
 
@@ -673,7 +690,7 @@ module CrystalV2
 
         stage2_debug("[STAGE2_DEBUG] loaded_files init", err_io)
         loaded_files = Set(String).new
-        all_arenas = [] of Tuple(Frontend::AstArena, Array(Frontend::ExprId), String, String)
+        all_arenas = [] of ParsedUnit
 
         # Load prelude first (unless --no-prelude)
         unless options.no_prelude
@@ -784,8 +801,7 @@ module CrystalV2
         hir_start = Time.instant
 
         stage2_debug("[STAGE2_DEBUG] hir setup start", err_io)
-        first_entry = all_arenas.unsafe_fetch(0)
-        first_arena = first_entry[0]
+        first_arena = all_arenas.unsafe_fetch(0).arena
         sources_by_arena = {} of Frontend::ArenaLike => String
         paths_by_arena = {} of Frontend::ArenaLike => String
         main_arenas = [] of Frontend::ArenaLike
@@ -794,9 +810,12 @@ module CrystalV2
         arena_map_i = 0
         while arena_map_i < all_arenas.size
           map_entry = all_arenas.unsafe_fetch(arena_map_i)
-          map_arena = map_entry[0]
-          map_path = map_entry[2]
-          map_source = map_entry[3]
+          map_arena = map_entry.arena
+          map_path = map_entry.path
+          map_source = map_entry.source
+          if options.verbose
+            log(options, out_io, "    [hir-arena] idx=#{arena_map_i} size=#{map_arena.size} roots=#{map_entry.roots.size} path=#{map_path}")
+          end
           main_arenas << map_arena
           paths_by_arena[map_arena] = map_path
           sources_by_arena[map_arena] = map_source
@@ -827,10 +846,10 @@ module CrystalV2
         arena_i = 0
         while arena_i < all_arenas.size
           entry = all_arenas.unsafe_fetch(arena_i)
-          arena = entry[0]
-          exprs = entry[1]
-          file_path = entry[2]
-          source = entry[3]
+          arena = entry.arena
+          exprs = entry.roots
+          file_path = entry.path
+          source = entry.source
           safe_source = begin
             File.read(file_path)
           rescue
@@ -1790,7 +1809,7 @@ module CrystalV2
 
       private def parse_file_recursive(
         file_path : String,
-        results : Array(Tuple(Frontend::AstArena, Array(Frontend::ExprId), String, String)),
+        results : Array(ParsedUnit),
         loaded : Set(String),
         input_file : String,
         options : Options,
@@ -1901,7 +1920,7 @@ module CrystalV2
               end
               save_require_cache(abs_path, requires)
             end
-            results << {arena, exprs, abs_path, source}
+            results << ParsedUnit.new(arena, exprs, abs_path, source)
             log(options, out_io, "  AST cache hit: #{abs_path}") if options.verbose
             return
           end
@@ -1988,7 +2007,7 @@ module CrystalV2
           end
         end
 
-        results << {arena, exprs, abs_path, source}
+        results << ParsedUnit.new(arena, exprs, abs_path, source)
         stage2_debug("[STAGE2_DEBUG] parse_file_recursive appended abs_path=#{abs_path} results=#{results.size}", out_io)
 
         {% unless flag?(:bootstrap_fast) %}
@@ -2011,7 +2030,7 @@ module CrystalV2
         expr_id : Frontend::ExprId,
         base_dir : String,
         input_file : String,
-        results : Array(Tuple(Frontend::AstArena, Array(Frontend::ExprId), String, String)),
+        results : Array(ParsedUnit),
         loaded : Set(String),
         options : Options,
         out_io : IO,
@@ -2203,7 +2222,7 @@ module CrystalV2
       end
 
       private def collect_link_libraries(
-        all_arenas : Array(Tuple(Frontend::AstArena, Array(Frontend::ExprId), String, String)),
+        all_arenas : Array(ParsedUnit),
         options : Options,
         out_io : IO
       ) : Array(String)
@@ -2211,8 +2230,8 @@ module CrystalV2
         idx = 0
         while idx < all_arenas.size
           entry = all_arenas.unsafe_fetch(idx)
-          arena = entry[0]
-          exprs = entry[1]
+          arena = entry.arena
+          exprs = entry.roots
           expr_i = 0
           while expr_i < exprs.size
             expr_id = exprs.unsafe_fetch(expr_i)

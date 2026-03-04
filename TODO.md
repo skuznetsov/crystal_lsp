@@ -1,5 +1,56 @@
 # Crystal v2 — Active Work (codegen branch)
 
+## 2026-03-04: Release bootstrap repeated + `all_arenas` tuple hardening probe (still open)
+
+### Goal in this pass
+- Re-run autonomous bootstrap in the requested mode (`stage1 --release` -> `stage2 --release`) and re-measure stage1/stage2 delta.
+- Push stage2 stabilization on the current blocker (`ExprId`/`Index` OOB) with a focused `cli.cr` refactor and a deterministic repro oracle.
+
+### New bootstrap evidence (requested mode)
+- Baseline pair on current tree:
+  - stage1: `/usr/bin/time -p crystal build src/crystal_v2.cr --release -o /tmp/stage1_rel_phase_diag --error-trace`
+    - `real 442.89`
+  - stage2: `/usr/bin/time -p /tmp/stage1_rel_phase_diag src/crystal_v2.cr --release -o /tmp/stage2_rel_phase_diag`
+    - `real 319.95`
+  - delta: `122.94s` faster, `27.76%`, `1.38x`.
+
+### Stage2 stability snapshot on fresh stage2 (`/tmp/stage2_rel_phase_diag`)
+- `bash regression_tests/stage2_macro_parse_index_oob_repro.sh /tmp/stage2_rel_phase_diag`
+  - reproduced (`status=1`, stderr: `ExprId out of bounds: 1 ... arena=:0`).
+- `bash regression_tests/stage2_exprid_arena_oob_repro.sh /tmp/stage2_rel_phase_diag`
+  - reproduced (`status=1`, stderr: `Index out of bounds`).
+- smoke compile:
+  - `/tmp/stage2_rel_phase_diag /tmp/stage2_smoke_hello_phase_diag.cr -o /tmp/stage2_smoke_hello_phase_diag.bin`
+  - `rc=1`, stderr `error: Index out of bounds`.
+
+### Focused hardening attempt (`src/compiler/cli.cr`)
+- Replaced parse result carrier from raw tuple to typed struct:
+  - `ParsedUnit{arena, roots, path, source}`.
+  - Converted all `all_arenas` tuple-index reads (`entry[0..3]`) to named field access.
+- Added targeted verbose probe:
+  - `[hir-arena] idx=... size=... roots=... path=...` before HIR lowering.
+
+### Evidence from the probe build
+- stage1 (with hardening patch): `real 411.53` (`/tmp/stage1_rel_parsedunit`).
+- stage2 (with hardening patch): `real 288.86` (`/tmp/stage2_rel_parsedunit`).
+- stage2 repro status remains unchanged:
+  - macro repro: still `ExprId out of bounds: 1 (arena=:0, current=:0, sources=1, inline_arenas=0)`,
+  - puts repro: still `Index out of bounds`.
+- New diagnostic signal (`/tmp/stage2_rel_parsedunit_diag`, verbose macro mini-repro):
+  - parse stage reports `arena.size=2 exprs.size=1`,
+  - HIR setup logs `[hir-arena] idx=0 size=2 roots=1 ...`,
+  - but failure still reports `current=:0` at `lower_expr` boundary.
+  - This falsifies the simple hypothesis that `all_arenas` tuple reads alone are the root cause.
+
+### Regression safety
+- `regression_tests/run_all.sh /tmp/stage1_rel_parsedunit`
+  - `64 passed, 0 failed`.
+
+### Current verdict
+- Bootstrap timing requirement is satisfied (repeatable `--release` measurements recorded).
+- Stage2 remains unstable; `ParsedUnit` refactor + arena-map probe did not resolve root failure class.
+- Next branch should target `HIR::AstToHir` arena selection/invalidation path directly (`lower_main` -> `lower_expr` -> `arena_for_expr?`) using the new `hir-arena` evidence.
+
 ## 2026-03-03: Stage2 macro segfault -> deterministic ExprId OOB (partial stabilization)
 
 ### What changed in this iteration (`src/compiler/frontend/parser.cr`)
