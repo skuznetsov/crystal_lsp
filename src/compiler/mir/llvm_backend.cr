@@ -1107,6 +1107,52 @@ module Crystal::MIR
       reachable
     end
 
+    private def runtime_declared_extern_names : Array(String)
+      [
+        # C/stdio/memory/string
+        "malloc", "calloc", "realloc", "free", "printf", "puts", "exit", "abort",
+        "perror", "dprintf", "fwrite", "fflush", "fclose", "fopen", "fileno", "fdopen",
+        "strlen", "strcpy", "strcat", "sprintf", "strstr", "strchr", "strtod", "snprintf",
+        "strcmp", "memcmp", "qsort", "strerror", "memset", "memcpy", "memmove", "strncmp",
+        "strtol", "strtoull", "setjmp", "longjmp",
+        # file/syscalls
+        "write", "open", "lseek", "read", "close", "getcwd", "realpath",
+        "stat", "stat$INODE64", "lstat", "lstat$INODE64", "fstat", "fstat$INODE64",
+        "readdir", "opendir", "closedir", "mkdir", "rmdir", "unlink", "rename", "access",
+        "chmod", "chown", "getenv", "setenv", "unsetenv", "isatty", "ioctl", "fcntl",
+        "pipe", "dup2", "ttyname_r", "sysconf", "getrlimit", "setrlimit",
+        # process/spawn/signals/time
+        "posix_spawn", "posix_spawn_file_actions_init", "posix_spawn_file_actions_destroy",
+        "posix_spawn_file_actions_addclose", "posix_spawn_file_actions_adddup2",
+        "posix_spawn_file_actions_addopen", "posix_spawnattr_init", "posix_spawnattr_destroy",
+        "posix_spawnattr_setflags", "waitpid", "kill", "getpid",
+        "sigaction", "sigemptyset", "sigfillset", "sigaddset",
+        "time", "localtime_r", "gmtime_r", "mktime", "timegm", "tzset", "strftime",
+        "gettimeofday", "clock_gettime", "nanosleep",
+        # memory mapping, dl, threads, sockets
+        "mmap", "munmap", "mprotect", "kqueue", "kevent", "dlopen", "dlsym", "dlclose", "dlerror",
+        "pthread_create", "pthread_join", "pthread_self", "pthread_sigmask",
+        "pthread_attr_init", "pthread_attr_destroy", "pthread_attr_setstack", "pthread_attr_getstacksize",
+        "gethostname", "socket", "connect", "bind", "listen", "accept",
+        "setsockopt", "getsockopt", "send", "recv", "shutdown",
+        "getaddrinfo", "freeaddrinfo", "gai_strerror",
+        # GC and platform hooks
+        "GC_init", "GC_malloc", "GC_malloc_atomic", "GC_realloc",
+        "GC_set_handle_fork", "GC_set_start_callback", "GC_set_warn_proc",
+        "GC_get_push_other_roots", "GC_set_push_other_roots",
+        "GC_push_all_eager", "GC_get_my_stackbottom",
+        "_NSGetExecutablePath",
+        # PCRE2
+        "pcre2_compile_8", "pcre2_match_8", "pcre2_match_data_create_from_pattern_8",
+        "pcre2_jit_compile_8", "pcre2_get_ovector_pointer_8", "pcre2_get_ovector_count_8",
+        "pcre2_match_data_free_8",
+      ] of String
+    end
+
+    private def add_runtime_declared_extern_names(already_declared : Set(String))
+      runtime_declared_extern_names.each { |name| already_declared << name }
+    end
+
     private def emit_undefined_extern_declarations
       return if @undefined_externs.empty?
 
@@ -1145,6 +1191,10 @@ module Crystal::MIR
       already_declared << "pcre2_get_ovector_count_8" << "pcre2_match_data_free_8"
       # C stdlib functions already declared in emit_runtime_declarations
       already_declared << "getcwd" << "realpath"
+      # Declared with concrete signatures in emit_runtime_declarations.
+      # Avoid redeclaring in fallback passes.
+      already_declared << "ttyname_r" << "fcntl"
+      add_runtime_declared_extern_names(already_declared)
       # Skip any function starting with __crystal_v2_ (runtime functions)
       runtime_prefix = "__crystal_v2_"
 
@@ -1246,6 +1296,8 @@ module Crystal::MIR
       already_declared << "write" << "malloc" << "calloc" << "realloc" << "free" << "memcpy" << "memmove" << "memset"
       already_declared << "strlen" << "strcmp" << "strncmp" << "strstr" << "strerror" << "snprintf" << "exit" << "abort"
       already_declared << "puts" << "printf" << "fwrite" << "fflush"
+      already_declared << "ttyname_r" << "fcntl"
+      add_runtime_declared_extern_names(already_declared)
       missing = @called_crystal_functions.reject { |name, _| @emitted_functions.includes?(name) || @undefined_externs.has_key?(name) || already_declared.includes?(name) }
       return if missing.empty?
       emit_raw "\n; Forward declarations for Crystal functions called but not defined\n"
@@ -2863,44 +2915,8 @@ module Crystal::MIR
       STDERR.puts "  [RT_DECL] after large libc decl block" if runtime_decl_trace
       emit_raw "declare i32 @getrlimit(i32, ptr)\n"
       emit_raw "declare i32 @setrlimit(i32, ptr)\n"
-      # Mark C stdlib functions as emitted so emit_undefined_extern_declarations
-      # and emit_missing_crystal_function_stubs skip them (prevents duplicate declarations)
-      @emitted_functions << "strlen" << "strcpy" << "strcat" << "sprintf" << "strstr"
-      @emitted_functions << "write" << "open" << "lseek" << "read" << "close"
-      @emitted_functions << "getcwd" << "realpath"
-      @emitted_functions << "malloc" << "calloc" << "realloc" << "free"
-      @emitted_functions << "printf" << "puts" << "gets" << "fgets" << "fputs"
-      @emitted_functions << "exit" << "perror" << "dprintf"
-      @emitted_functions << "GC_init" << "GC_malloc" << "GC_malloc_atomic" << "GC_realloc"
-      @emitted_functions << "GC_set_handle_fork" << "GC_set_start_callback" << "GC_set_warn_proc"
-      @emitted_functions << "GC_get_push_other_roots" << "GC_set_push_other_roots"
-      @emitted_functions << "GC_push_all_eager" << "GC_get_my_stackbottom"
-      @emitted_functions << "_NSGetExecutablePath"
-      @emitted_functions << "stat" << "stat$INODE64" << "lstat" << "lstat$INODE64"
-      @emitted_functions << "fstat" << "fstat$INODE64"
-      @emitted_functions << "readdir" << "opendir" << "closedir"
-      @emitted_functions << "mkdir" << "rmdir" << "unlink" << "rename" << "access" << "chmod" << "chown"
-      @emitted_functions << "getenv" << "setenv" << "unsetenv"
-      @emitted_functions << "isatty" << "ioctl" << "fcntl" << "pipe" << "dup2" << "ttyname_r" << "sysconf"
-      @emitted_functions << "posix_spawn" << "posix_spawn_file_actions_init" << "posix_spawn_file_actions_destroy"
-      @emitted_functions << "posix_spawn_file_actions_addclose" << "posix_spawn_file_actions_adddup2"
-      @emitted_functions << "posix_spawn_file_actions_addopen"
-      @emitted_functions << "posix_spawnattr_init" << "posix_spawnattr_destroy" << "posix_spawnattr_setflags"
-      @emitted_functions << "waitpid" << "kill" << "getpid"
-      @emitted_functions << "sigaction" << "sigemptyset" << "sigfillset" << "sigaddset"
-      @emitted_functions << "time" << "localtime_r" << "gmtime_r" << "mktime" << "timegm" << "tzset"
-      @emitted_functions << "strftime" << "gettimeofday" << "clock_gettime" << "nanosleep"
-      @emitted_functions << "mmap" << "munmap" << "mprotect"
-      @emitted_functions << "kqueue" << "kevent"
-      @emitted_functions << "dlopen" << "dlsym" << "dlclose" << "dlerror"
-      @emitted_functions << "pthread_create" << "pthread_join" << "pthread_self" << "pthread_sigmask"
-      @emitted_functions << "pthread_attr_init" << "pthread_attr_destroy" << "pthread_attr_setstack" << "pthread_attr_getstacksize"
-      @emitted_functions << "gethostname" << "socket" << "connect" << "bind" << "listen" << "accept"
-      @emitted_functions << "setsockopt" << "getsockopt" << "send" << "recv" << "shutdown"
-      @emitted_functions << "getaddrinfo" << "freeaddrinfo" << "gai_strerror"
-      @emitted_functions << "strerror" << "memset" << "memcpy" << "memmove" << "strncmp"
-      @emitted_functions << "fwrite" << "fflush" << "fclose" << "fopen" << "fileno" << "fdopen"
-      @emitted_functions << "getrlimit" << "setrlimit"
+      # Keep declarations only. Duplicate suppression is handled by
+      # emit_undefined_extern_declarations / emit_missing_crystal_function_stubs.
       emit_raw "\n"
 
       # String#includes?(String) — compares byte data via strstr

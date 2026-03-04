@@ -46,6 +46,53 @@
 - `bash regression_tests/stage1_fcntl_redefinition_repro.sh /tmp/stage1_rel_latest`
   - reproduced (`invalid redefinition of function 'fcntl'`).
 
+## 2026-03-04: Runtime extern duplicate fix (`fcntl`/GC cascade) + fresh release pair
+
+### Root cause
+- After removing eager `@emitted_functions` bulk-marking in `emit_runtime_declarations`,
+  fallback passes started redeclaring runtime externs as generic varargs declarations.
+- This produced deterministic `opt` errors:
+  - first `invalid redefinition of function 'fcntl'`,
+  - then `invalid redefinition of function 'GC_set_handle_fork'` after the first local fix.
+
+### Implemented fix
+- `src/compiler/mir/llvm_backend.cr`
+  - Added a shared runtime extern allowlist (`runtime_declared_extern_names`).
+  - Reused that allowlist in both:
+    - `emit_undefined_extern_declarations`
+    - `emit_missing_crystal_function_stubs`
+  - Effect: fallback passes now skip all runtime-declared externs consistently.
+
+### Verification
+- Fast debug loop:
+  - `/usr/bin/time -p scripts/build_stage1_original_debug.sh /tmp/stage1_dbg_runtime_decl_allow --error-trace`
+  - `real 6.44`.
+- Deterministic duplicate oracles on fixed compiler:
+  - `bash regression_tests/stage1_fcntl_redefinition_repro.sh /tmp/stage1_rel_runtime_decl_allow` → not reproduced.
+  - `bash regression_tests/stage1_ttyname_r_redefinition_repro.sh /tmp/stage1_rel_runtime_decl_allow` → not reproduced.
+- Stage1 regression suite:
+  - `bash regression_tests/run_all.sh /tmp/stage1_rel_runtime_decl_allow`
+  - `64 passed, 0 failed`.
+
+### Fresh release bootstrap pair (current tree)
+- Stage1 (`--release`, original compiler):
+  - `/usr/bin/time -p scripts/build_stage1_original_release.sh /tmp/stage1_rel_runtime_decl_allow --error-trace`
+  - `real 410.09`.
+- Stage2 (`--release`, by fresh stage1, pipeline cache disabled):
+  - `CRYSTAL_V2_PIPELINE_CACHE=0 /usr/bin/time -p /tmp/stage1_rel_runtime_decl_allow src/crystal_v2.cr --release -o /tmp/stage2_rel_runtime_decl_allow`
+  - `real 388.68`.
+
+### Stage1 vs Stage2 speed delta (fresh pair)
+- Absolute: `21.41s` faster (`410.09 - 388.68`).
+- Relative: `5.22%` faster.
+- Speedup: `1.06x`.
+
+### Stage2 oracle status (still open)
+- `bash regression_tests/stage2_macro_parse_index_oob_repro.sh /tmp/stage2_rel_runtime_decl_allow`
+  - reproduced (`status=139`, segfault).
+- `bash regression_tests/stage2_exprid_arena_oob_repro.sh /tmp/stage2_rel_runtime_decl_allow`
+  - reproduced (`status=1`, `Index out of bounds`).
+
 ## 2026-03-04: Fresh baseline bootstrap after refuting local LLVM hash-light experiments
 
 ### Objective in this pass
