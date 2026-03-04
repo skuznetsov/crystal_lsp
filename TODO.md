@@ -79,6 +79,17 @@
 - Decision:
   - experiment rejected and reverted.
 
+- Tried rewriting `src/stdlib/crystal/system/unix/file.cr` `File.open` from
+  `case result = ... in Tuple ... in Errno` to explicit `as?`/`as` branching.
+  - stage1 rebuild with patch:
+    - `/usr/bin/time -p scripts/build_stage1_original_release.sh /tmp/stage1_rel_unix_open_if_fix --error-trace`
+    - `real 411.04`.
+  - runtime repro check:
+    - `bash regression_tests/stage1_file_open_write_segfault_repro.sh /tmp/stage1_rel_unix_open_if_fix`
+    - still reproduced (`run_status=139`).
+  - Decision:
+    - no stability gain; patch reverted.
+
 ### Additional consistency check
 - Clean worktree from pure `HEAD` (`025b7326`) currently fails stage1 build due
   constructor arity mismatch:
