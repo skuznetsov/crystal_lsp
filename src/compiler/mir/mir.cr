@@ -142,18 +142,6 @@ module Crystal::MIR
   # ═══════════════════════════════════════════════════════════════════════════
 
   class Type
-    @id : TypeId
-    @kind : TypeKind
-    @name : String
-    @size : UInt64
-    @alignment : UInt32
-    @fields : Array(Field)?
-    @variants : Array(Type)?
-    @element_types : Array(Type)?
-    @element_type : Type?
-    @parent_type_id : TypeId?
-    @is_closure : Bool
-
     getter id : TypeId
     getter kind : TypeKind
     getter name : String
@@ -164,24 +152,9 @@ module Crystal::MIR
     getter element_types : Array(Type)? # For tuples
     getter element_type : Type?         # For arrays/pointers
     getter parent_type_id : TypeId?
-    property is_closure : Bool
+    property is_closure : Bool = false
 
-    def initialize(
-      @id : TypeId,
-      @kind : TypeKind,
-      @name : String,
-      @size : UInt64,
-      @alignment : UInt32
-    )
-      trace_type_init = ENV.has_key?("CRYSTAL_V2_MIR_TYPE_REGISTRY_TRACE") || ENV.has_key?("CRYSTAL2_MIR_TYPE_REGISTRY_TRACE") || ENV.has_key?("CRYSTAL_V2_MIR_INIT_TRACE")
-      STDERR.puts "[MIR_TYPE_INIT] begin id=#{@id} name=#{@name} kind=#{@kind}" if trace_type_init
-      @fields = nil
-      @variants = nil
-      @element_types = nil
-      @element_type = nil
-      @parent_type_id = nil
-      @is_closure = false
-      STDERR.puts "[MIR_TYPE_INIT] done id=#{@id} kind=#{@kind}" if trace_type_init
+    def initialize(@id, @kind, @name, @size, @alignment)
     end
 
     def is_value_type? : Bool
@@ -220,14 +193,15 @@ module Crystal::MIR
 
   class TypeRegistry
     getter types : Array(Type)
+    @type_map : Hash(TypeId, Type)
+    @name_map : Hash(String, Type)
     @next_type_id : TypeId
 
     def initialize
-      trace_type_registry = ENV.has_key?("CRYSTAL_V2_MIR_TYPE_REGISTRY_TRACE") || ENV.has_key?("CRYSTAL2_MIR_TYPE_REGISTRY_TRACE") || ENV.has_key?("CRYSTAL_V2_MIR_INIT_TRACE")
-      STDERR.puts "[MIR_TYPE_REG] init enter" if trace_type_registry
       @types = [] of Type
+      @type_map = {} of TypeId => Type
+      @name_map = {} of String => Type
       @next_type_id = 100_u32  # Reserve 0-99 for primitive types
-      STDERR.puts "[MIR_TYPE_REG] containers ready" if trace_type_registry
 
       # Register primitive types
       register_primitive(TypeRef::VOID, TypeKind::Void, "Void", 0, 1)
@@ -249,17 +223,13 @@ module Crystal::MIR
       register_primitive(TypeRef::STRING, TypeKind::Reference, "String", TARGET_POINTER_BYTES_U64, TARGET_POINTER_ALIGN_U32)
       register_primitive(TypeRef::SYMBOL, TypeKind::Symbol, "Symbol", 4, 4)
       register_primitive(TypeRef::POINTER, TypeKind::Pointer, "Pointer", TARGET_POINTER_BYTES_U64, TARGET_POINTER_ALIGN_U32)
-      STDERR.puts "[MIR_TYPE_REG] init done count=#{@types.size}" if trace_type_registry
     end
 
     private def register_primitive(ref : TypeRef, kind : TypeKind, name : String, size : UInt64, alignment : UInt32)
-      trace_type_registry = ENV.has_key?("CRYSTAL_V2_MIR_TYPE_REGISTRY_TRACE") || ENV.has_key?("CRYSTAL2_MIR_TYPE_REGISTRY_TRACE") || ENV.has_key?("CRYSTAL_V2_MIR_INIT_TRACE")
-      STDERR.puts "[MIR_TYPE_REG] register #{name} begin id=#{ref.id}" if trace_type_registry
       type = Type.new(ref.id, kind, name, size, alignment)
-      STDERR.puts "[MIR_TYPE_REG] register #{name} after new" if trace_type_registry
       @types << type
-      STDERR.puts "[MIR_TYPE_REG] register #{name} after types<<" if trace_type_registry
-      STDERR.puts "[MIR_TYPE_REG] register #{name} done" if trace_type_registry
+      @type_map[ref.id] = type
+      @name_map[name] = type
     end
 
     def create_type(kind : TypeKind, name : String, size : UInt64, alignment : UInt32) : Type
@@ -267,6 +237,8 @@ module Crystal::MIR
       @next_type_id += 1
       type = Type.new(id, kind, name, size, alignment)
       @types << type
+      @type_map[id] = type
+      @name_map[name] = type
       type
     end
 
@@ -274,33 +246,26 @@ module Crystal::MIR
     # If type already exists, return existing type
     def create_type_with_id(id : TypeId, kind : TypeKind, name : String, size : UInt64, alignment : UInt32) : Type
       # Return existing type if already registered
-      if existing = get(id)
+      if existing = @type_map[id]?
         return existing
       end
       type = Type.new(id, kind, name, size, alignment)
       @types << type
+      @type_map[id] = type
+      @name_map[name] = type
       type
     end
 
     def get(id : TypeId) : Type?
-      @types.each do |type|
-        return type if type.id == id
-      end
-      nil
+      @type_map[id]?
     end
 
     def get(ref : TypeRef) : Type?
-      get(ref.id)
+      @type_map[ref.id]?
     end
 
     def get_by_name(name : String) : Type?
-      i = @types.size - 1
-      while i >= 0
-        type = @types.unsafe_fetch(i)
-        return type if type.name == name
-        i -= 1
-      end
-      nil
+      @name_map[name]?
     end
 
     # Human-readable layout snapshot for ABI sanity checks.
@@ -1899,19 +1864,13 @@ module Crystal::MIR
     @function_map : Hash(String, Function)
 
     def initialize(@name : String = "main")
-      trace_mod_init = ENV.has_key?("CRYSTAL_V2_MIR_MODULE_INIT_TRACE") || ENV.has_key?("CRYSTAL2_MIR_MODULE_INIT_TRACE") || ENV.has_key?("CRYSTAL_V2_MIR_INIT_TRACE")
-      STDERR.puts "[MIR_MODULE_INIT] enter name=#{@name.inspect}" if trace_mod_init
       @functions = [] of Function
-      STDERR.puts "[MIR_MODULE_INIT] functions array created" if trace_mod_init
       @function_map = {} of String => Function
-      STDERR.puts "[MIR_MODULE_INIT] function map created" if trace_mod_init
       @type_registry = TypeRegistry.new
-      STDERR.puts "[MIR_MODULE_INIT] type registry created" if trace_mod_init
       @globals = [] of GlobalVar
       @extern_globals = {} of String => TypeRef
       @union_descriptors = {} of TypeRef => UnionDescriptor
       @module_type_refs = Set(TypeRef).new
-      STDERR.puts "[MIR_MODULE_INIT] done" if trace_mod_init
     end
 
     # Register a union type with full descriptor for debug info

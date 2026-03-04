@@ -1,5 +1,47 @@
 # Crystal v2 — Active Work (codegen branch)
 
+## 2026-03-04: Stage1 stability rollback for MIR hardening commit + fresh release pair on stable baseline
+
+### Objective in this pass
+- Validate whether `0aae2a31` MIR hardening changed stage1 correctness.
+- Keep release bootstrap loop active (`stage1 --release` -> `stage2 --release`) and preserve timing evidence.
+
+### Deterministic regression split
+- Stage1 from current `HEAD` path (`/tmp/stage1_rel_postrevert`) is critically unstable:
+  - `bash regression_tests/run_all.sh /tmp/stage1_rel_postrevert`
+  - result: `1 passed, 63 failed` (mass `segfault 139`).
+- Stage1 from local rollback probe (`src/compiler/mir/mir.cr` + `src/compiler/mir/hir_to_mir.cr` restored to previous state) is stable:
+  - `bash regression_tests/run_all.sh /tmp/stage1_probe_mir2_revert`
+  - result: `64 passed, 0 failed`.
+
+### Rollback decision
+- Keep rollback of:
+  - `src/compiler/mir/mir.cr`
+  - `src/compiler/mir/hir_to_mir.cr`
+- Reason:
+  - this is the smallest proven change set that recovers stage1 regression safety.
+  - all aggressive MIR hardening changes from `0aae2a31` are treated as refuted for now.
+
+### Fresh release pair on the stable rollback baseline
+- Stage1 (original compiler, release):
+  - `/usr/bin/time -p crystal build src/crystal_v2.cr --release -o /tmp/stage1_probe_mir2_revert`
+  - `real 410.47`.
+- Stage2 (built by that stage1, release, pipeline cache disabled):
+  - `CRYSTAL_V2_PIPELINE_CACHE=0 /usr/bin/time -p /tmp/stage1_probe_mir2_revert src/crystal_v2.cr --release -o /tmp/stage2_rel_probe_mir2_revert`
+  - `real 276.18`.
+- Delta:
+  - `134.29s` faster (`32.71%`), speedup `1.49x`.
+
+### Stage2 stability state (still open)
+- `bash regression_tests/stage2_macro_parse_index_oob_repro.sh /tmp/stage2_rel_probe_mir2_revert`
+  - reproduced (`status=139`, segfault).
+- `bash regression_tests/stage2_exprid_arena_oob_repro.sh /tmp/stage2_rel_probe_mir2_revert`
+  - reproduced (`status=1`, `Index out of bounds`).
+
+### Current verdict
+- Stage1 baseline must stay on reverted MIR pair for correctness.
+- Stage2 instability remains unresolved and stays the active blocker.
+
 ## 2026-03-04: LLVM backend hardening branch refuted, rolled back; fresh release timing pair captured
 
 ### Objective in this pass
