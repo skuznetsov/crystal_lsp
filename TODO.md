@@ -1,5 +1,29 @@
 # Crystal v2 — Active Work (codegen branch)
 
+## 2026-03-04: Debug acceleration infra (warm-cache wrappers + deterministic ttyname_r oracle)
+
+### What was added
+- `scripts/build_stage1_original_cached.sh`
+  - unified builder for stage1 by original Crystal with split cache roots by mode:
+    - debug cache: `.cache/original-crystal-debug`
+    - release cache: `.cache/original-crystal-release`
+  - supports optional explicit output path; extra Crystal args can be passed directly.
+- `scripts/build_stage1_original_debug.sh`
+  - thin wrapper over cached builder in debug mode.
+- `scripts/build_stage1_original_release.sh`
+  - thin wrapper over cached builder in release mode.
+- `regression_tests/stage1_ttyname_r_redefinition_repro.sh`
+  - deterministic repro/oracle for LLVM duplicate declaration failure:
+    - signature: `invalid redefinition of function 'ttyname_r'`.
+
+### Quick usage
+- Warm stage1 debug from dedicated cache:
+  - `scripts/build_stage1_original_debug.sh`
+- Warm stage1 release from dedicated cache:
+  - `scripts/build_stage1_original_release.sh`
+- Repro/oracle check for `ttyname_r` duplicate declaration:
+  - `bash regression_tests/stage1_ttyname_r_redefinition_repro.sh <compiler>`
+
 ## 2026-03-04: Fresh baseline bootstrap after refuting local LLVM hash-light experiments
 
 ### Objective in this pass
