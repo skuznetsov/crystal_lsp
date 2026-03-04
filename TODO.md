@@ -102,6 +102,36 @@
 - No stage2 stabilization; branch rejected.
 - Local parser/lexer hardening edits were reverted (not committed).
 
+## 2026-03-04: Refuted CLI top-level invalid-ExprId guard (`collect_top_level_nodes`)
+
+### Hypothesis
+- Stage2 heredoc path sometimes ended in `ExprId out of bounds`, so skipping invalid top-level expr ids before HIR lowering might stabilize bootstrap.
+
+### Branch change (local only)
+- Added early guard in `collect_top_level_nodes`:
+  - skip expr ids when `expr_id.index < 0 || expr_id.index >= arena.size`.
+
+### Evidence
+- Stage1 release:
+  - `/usr/bin/time -p scripts/build_stage1_original_release.sh /tmp/stage1_rel_collect_guard --error-trace`
+  - `real 411.48`.
+- Stage1 regression:
+  - `bash regression_tests/run_all.sh /tmp/stage1_rel_collect_guard`
+  - `64 passed, 0 failed`.
+- Stage2 release:
+  - `CRYSTAL_V2_PIPELINE_CACHE=0 /usr/bin/time -p /tmp/stage1_rel_collect_guard src/crystal_v2.cr --release -o /tmp/stage2_rel_collect_guard`
+  - `real 410.66`.
+- Timing delta:
+  - `0.82s` faster (`~0.20%`, `~1.00x`), effectively neutral.
+- Stability:
+  - `stage2_macro_parse_index_oob_repro` -> reproduced (`status=139`).
+  - `stage2_exprid_arena_oob_repro` -> reproduced (`status=1`, `Index out of bounds`).
+  - `stage2_macro_record_heredoc_index_oob_repro` -> reproduced (`status=1`).
+
+### Decision
+- No stability gain; branch rejected.
+- Local CLI guard edit reverted (not committed).
+
 ## 2026-03-04: Debug acceleration infra (warm-cache wrappers + deterministic ttyname_r oracle)
 
 ### What was added
