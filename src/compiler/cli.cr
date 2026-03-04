@@ -736,6 +736,18 @@ module CrystalV2
         if options.stats
           timings["parse_user"] = (Time.instant - user_parse_start).total_milliseconds
           timings["parse_total"] = (Time.instant - parse_start).total_milliseconds
+          parse_details = [] of String
+          if options.verbose
+            if (prelude_ms = timings["parse_prelude"]?)
+              parse_details << "prelude=#{prelude_ms.round(1)}ms"
+            end
+            if (user_ms = timings["parse_user"]?)
+              parse_details << "user=#{user_ms.round(1)}ms"
+            end
+            parse_details << "files=#{all_arenas.size}"
+            parse_details << "loaded=#{loaded_files.size}"
+          end
+          emit_stage_timing(options, out_io, total_start, 1, "parse", timings["parse_total"]? || 0.0, parse_details)
         end
 
         if all_arenas.empty?
@@ -1277,6 +1289,15 @@ module CrystalV2
           timings["dbg_count_hir_reachable_names"] = reachable.size.to_f
           timings["dbg_count_hir_funcs_after_rta"] = hir_module.functions.size.to_f
         end
+        if options.stats
+          hir_details = [] of String
+          if options.verbose
+            hir_details << "funcs=#{(timings["hir_funcs"]? || 0.0).to_i}"
+            hir_details << "reachable=#{reachable.size}"
+            hir_details << "retained=#{hir_module.functions.size}"
+          end
+          emit_stage_timing(options, out_io, total_start, 2, "hir", timings["hir"]? || 0.0, hir_details)
+        end
 
         if options.emit_hir
           hir_file = options.output + ".hir"
@@ -1362,6 +1383,17 @@ module CrystalV2
           timings["mm_arc"] = total_ms_stats.arc_count.to_f
           timings["mm_atomic"] = total_ms_stats.atomic_arc_count.to_f
           timings["mm_gc"] = total_ms_stats.gc_count.to_f
+          escape_details = [] of String
+          if options.verbose
+            escape_details << "analyzed=#{total_funcs - ea_skipped}"
+            escape_details << "skipped=#{ea_skipped}"
+            escape_details << "mm_stack=#{total_ms_stats.stack_count}"
+            escape_details << "mm_slab=#{total_ms_stats.slab_count}"
+            escape_details << "mm_arc=#{total_ms_stats.arc_count}"
+            escape_details << "mm_atomic=#{total_ms_stats.atomic_arc_count}"
+            escape_details << "mm_gc=#{total_ms_stats.gc_count}"
+          end
+          emit_stage_timing(options, out_io, total_start, 3, "escape", timings["escape"]? || 0.0, escape_details)
         end
         if options.no_gc && total_gc > 0
           err_io.puts "error: --no-gc requested but #{total_gc} allocation(s) require GC"
@@ -1486,6 +1518,16 @@ module CrystalV2
           log(options, out_io, "  Skipping MIR optimizations (--no-mir-opt)")
           timings["mir_opt"] = 0.0 if options.stats
         end
+        if options.stats
+          mir_stage_ms = (timings["mir"]? || 0.0) + (timings["mir_opt"]? || 0.0)
+          mir_details = [] of String
+          if options.verbose
+            mir_details << "lower=#{(timings["mir"]? || 0.0).round(1)}ms"
+            mir_details << "opt=#{(timings["mir_opt"]? || 0.0).round(1)}ms"
+            mir_details << "funcs=#{(timings["mir_funcs"]? || 0.0).to_i}"
+          end
+          emit_stage_timing(options, out_io, total_start, 4, "mir", mir_stage_ms, mir_details)
+        end
 
         if options.emit_mir
           mir_file = options.output + ".mir"
@@ -1552,6 +1594,14 @@ module CrystalV2
         end
         timings["llvm"] = (Time.instant - llvm_start).total_milliseconds if options.stats
         timings["dbg_count_llvm_ir_bytes"] = llvm_ir_bytes.to_f if debug_profile
+        if options.stats
+          llvm_details = [] of String
+          if options.verbose
+            llvm_details << "bytes=#{llvm_ir_bytes}"
+            llvm_details << "emit=#{options.emit_llvm ? "stdout" : "file"}"
+          end
+          emit_stage_timing(options, out_io, total_start, 5, "llvm", timings["llvm"]? || 0.0, llvm_details)
+        end
 
         log(options, out_io, "  Wrote: #{ll_file}")
 
@@ -1577,6 +1627,21 @@ module CrystalV2
         compile_start = Time.instant
         result = compile_llvm_ir(ll_file, options, out_io, err_io, timings)
         timings["compile"] = (Time.instant - compile_start).total_milliseconds if options.stats
+        if options.stats
+          compile_details = [] of String
+          if options.verbose
+            if (opt_ms = timings["opt"]?)
+              compile_details << "opt=#{opt_ms.round(1)}ms"
+            end
+            if (llc_ms = timings["llc"]?)
+              compile_details << "llc=#{llc_ms.round(1)}ms"
+            end
+            if (link_ms = timings["link"]?)
+              compile_details << "link=#{link_ms.round(1)}ms"
+            end
+          end
+          emit_stage_timing(options, out_io, total_start, 6, "compile", timings["compile"]? || 0.0, compile_details)
+        end
         if result != 0
           emit_timings(options, out_io, timings, total_start)
           return result
@@ -3851,6 +3916,28 @@ module CrystalV2
 
       private def log(options : Options, out_io : IO, msg : String)
         out_io.puts msg if options.verbose
+      end
+
+      private def emit_stage_timing(
+        options : Options,
+        out_io : IO,
+        total_start : Time::Instant?,
+        stage_number : Int32,
+        stage_name : String,
+        stage_ms : Float64,
+        details : Array(String)
+      )
+        return unless options.stats
+
+        parts = ["Stage #{stage_number}/6 #{stage_name}", "#{stage_ms.round(1)}ms"]
+        if options.verbose
+          if total_start
+            elapsed_ms = (Time.instant - total_start).total_milliseconds
+            parts << "elapsed=#{elapsed_ms.round(1)}ms"
+          end
+          parts.concat(details) unless details.empty?
+        end
+        out_io.puts parts.join(" ")
       end
 
       private def emit_timings(options : Options, out_io : IO, timings : Hash(String, Float64)?, total_start : Time::Instant?)

@@ -1,5 +1,47 @@
 # Crystal v2 — Active Work (codegen branch)
 
+## 2026-03-04: Per-stage timing output for `--stats` with verbose expansion
+
+### Implemented
+- `src/compiler/cli.cr`
+  - Added `emit_stage_timing(...)` helper for immediate per-stage reporting.
+  - Emitted stage lines right after each pipeline stage:
+    - `Stage 1/6 parse`
+    - `Stage 2/6 hir`
+    - `Stage 3/6 escape`
+    - `Stage 4/6 mir` (aggregates lowering + MIR optimize time)
+    - `Stage 5/6 llvm`
+    - `Stage 6/6 compile`
+  - Output behavior:
+    - `-s/--stats`: concise per-stage `N/6` timing line + existing final `Timing (ms)` summary.
+    - `-s --verbose`: adds `elapsed=...` and stage-specific details (parse split/counts, HIR reachability, escape/MM counters, MIR lower/opt split, LLVM bytes, compile subphase timings).
+
+### New oracle script
+- `regression_tests/stage_stats_output_repro.sh`
+  - Compiles a tiny program twice (`-s` and `-s --verbose`, both with `--no-link`).
+  - Verifies:
+    - all `Stage 1/6`..`Stage 6/6` lines are present in both modes,
+    - non-verbose mode does not include verbose-only `elapsed=`,
+    - verbose mode includes stage detail markers (`elapsed=`, MIR `lower=`, compile `opt=`),
+    - final `Timing (ms):` summary remains present.
+
+### Verification
+- Stage1 debug build for smoke:
+  - `/usr/bin/time -p scripts/build_stage1_original_debug.sh /tmp/stage1_dbg_stage_stats --error-trace`
+  - `real 9.04`.
+- Stage-timing oracle script:
+  - `bash regression_tests/stage_stats_output_repro.sh /tmp/stage1_dbg_stage_stats`
+  - `ok: stage timing output is present for -s and expanded for --verbose`.
+- Manual smoke (`-s`):
+  - `/tmp/stage1_dbg_stage_stats /tmp/stage_stats_smoke.cr -s --no-link -o /tmp/stage_stats_smoke_noverb`
+  - `rc=0`, produced `Stage 1/6`..`Stage 6/6` + final `Timing (ms):`.
+- Manual smoke (`-s --verbose`):
+  - `/tmp/stage1_dbg_stage_stats /tmp/stage_stats_smoke.cr -s --verbose --no-link -o /tmp/stage_stats_smoke_verb`
+  - `rc=0`, produced detailed per-stage lines with `elapsed=` and subphase/detail fields.
+- Regression suite:
+  - `/usr/bin/time -p bash regression_tests/run_all.sh /tmp/stage1_dbg_stage_stats`
+  - `64 passed, 0 failed`, `real 668.98`.
+
 ## 2026-03-04: New MIR/LLVM boundary oracle + refuted macro-control progress guard
 
 ### New deterministic oracle added
