@@ -1,5 +1,59 @@
 # Crystal v2 — Active Work (codegen branch)
 
+## 2026-03-04: Refuted parser macro-definition recovery sync experiment
+
+### Hypothesis
+- Stage2 might be continuing parse from a corrupted token position after `parse_macro_definition` index failures.
+- Tried recovery in parser by catching `IndexError` in `parse_macro_definition` and fast-forwarding to matching `end`.
+
+### Evidence
+- Stage1 release (experiment binary already built in this branch):
+  - `/usr/bin/time -p scripts/build_stage1_original_release.sh /tmp/stage1_rel_macro_recover_sync --error-trace`
+  - `real 420.21`.
+- Stage1 regression suite:
+  - `/usr/bin/time -p bash regression_tests/run_all.sh /tmp/stage1_rel_macro_recover_sync`
+  - `64 passed, 0 failed`, `real 178.82`.
+- Stage2 release by that stage1:
+  - `CRYSTAL_V2_PIPELINE_CACHE=0 /usr/bin/time -p /tmp/stage1_rel_macro_recover_sync src/crystal_v2.cr --release -o /tmp/stage2_rel_macro_recover_sync`
+  - `real 397.41`.
+- Stage2 stability oracles (all still reproduced):
+  - `bash regression_tests/stage2_macro_parse_index_oob_repro.sh /tmp/stage2_rel_macro_recover_sync` -> reproduced (`status=139`, segfault).
+  - `bash regression_tests/stage2_exprid_arena_oob_repro.sh /tmp/stage2_rel_macro_recover_sync` -> reproduced (`status=1`, `Index out of bounds`).
+  - `bash regression_tests/stage2_macro_record_heredoc_index_oob_repro.sh /tmp/stage2_rel_macro_recover_sync` -> reproduced (`status=1`).
+- Stage1 extern-duplicate controls on same stage1 binary:
+  - `bash regression_tests/stage1_fcntl_redefinition_repro.sh /tmp/stage1_rel_macro_recover_sync` -> not reproduced.
+  - `bash regression_tests/stage1_ttyname_r_redefinition_repro.sh /tmp/stage1_rel_macro_recover_sync` -> not reproduced.
+
+### Decision
+- No stage2 stabilization gain; parser recovery branch rejected.
+- Local parser experiment reverted (not committed).
+
+## 2026-03-04: Added split-cache stage2 wrappers (debug/release) for faster loops
+
+### What was added
+- `scripts/build_stage2_cached.sh`
+  - unified stage2 builder:
+    - mode `debug` cache: `.cache/stage2-debug` (override via `CRYSTAL_CACHE_DIR_STAGE2_DEBUG`)
+    - mode `release` cache: `.cache/stage2-release` (override via `CRYSTAL_CACHE_DIR_STAGE2_RELEASE`)
+  - accepts explicit stage1 compiler path and optional output path.
+  - forwards `CRYSTAL_V2_PIPELINE_CACHE` (defaults to `0`).
+- `scripts/build_stage2_debug.sh`
+  - debug wrapper over `build_stage2_cached.sh`.
+- `scripts/build_stage2_release.sh`
+  - release wrapper over `build_stage2_cached.sh`.
+
+### Smoke verification
+- Wrapper argument-path check:
+  - `/usr/bin/time -p scripts/build_stage2_release.sh /tmp/stage1_rel_macro_recover_sync /tmp/stage2_rel_cached_wrapper --error-trace`
+  - expected failure (`unknown option: --error-trace`), confirms argument forwarding behavior.
+- Real wrapper build:
+  - `/usr/bin/time -p scripts/build_stage2_release.sh /tmp/stage1_rel_macro_recover_sync /tmp/stage2_rel_cached_wrapper`
+  - `real 385.88`.
+- Stability parity on wrapper-built stage2 (still failing, same signatures):
+  - `stage2_macro_parse_index_oob_repro` -> reproduced (`status=139`).
+  - `stage2_exprid_arena_oob_repro` -> reproduced (`status=1`).
+  - `stage2_macro_record_heredoc_index_oob_repro` -> reproduced (`status=1`).
+
 ## 2026-03-04: Heredoc lexer EOF guard + new stage2 heredoc oracle (stability still open)
 
 ### Why this branch
