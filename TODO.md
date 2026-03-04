@@ -1,5 +1,53 @@
 # Crystal v2 — Active Work (codegen branch)
 
+## 2026-03-04: Fresh baseline bootstrap after refuting local LLVM hash-light experiments
+
+### Objective in this pass
+- Re-validate a clean baseline after failed local LLVM backend hardening attempts.
+- Run a full requested bootstrap loop in release mode:
+  - stage1 by original compiler (`--release`)
+  - stage2 by fresh stage1 (`--release`)
+- Record current stage1/stage2 speed delta and stage2 oracle status.
+
+### What was tried and rejected in this pass
+- A local `llvm_backend.cr` experiment branch was re-attempted:
+  - removed large eager `@emitted_functions` insertion in runtime declarations,
+  - switched reachability/skip tracking to bool masks,
+  - moved `TypeRef` LLVM type cache away from hash lookups.
+- Safety gate result:
+  - stage1 built with the original compiler from that tree failed `run_all` hard:
+    - `bash regression_tests/run_all.sh /tmp/stage1_rel_typecachearray2`
+    - `0 passed, 64 failed` (mass `opt failed`).
+- Decision:
+  - fully rolled back local `src/compiler/mir/llvm_backend.cr` edits to `HEAD`.
+
+### Fresh baseline verification (clean tree)
+- Stage1 release build:
+  - `/usr/bin/time -p crystal build src/crystal_v2.cr --release -o /tmp/stage1_rel_head_baseline --error-trace`
+  - `real 412.06`.
+- Stage1 regression safety on that exact binary:
+  - `bash regression_tests/run_all.sh /tmp/stage1_rel_head_baseline`
+  - `64 passed, 0 failed`.
+- Stage2 release build by fresh stage1 (pipeline cache disabled):
+  - `CRYSTAL_V2_PIPELINE_CACHE=0 /usr/bin/time -p /tmp/stage1_rel_head_baseline src/crystal_v2.cr --release -o /tmp/stage2_rel_head_baseline`
+  - `real 383.80`.
+
+### Stage1 vs Stage2 speed delta (fresh pair)
+- Absolute: `28.26s` faster (`412.06 - 383.80`).
+- Relative: `6.86%` faster.
+- Speedup: `1.07x`.
+
+### Stage2 oracle snapshot (unchanged, still open)
+- `bash regression_tests/stage2_macro_parse_index_oob_repro.sh /tmp/stage2_rel_head_baseline`
+  - reproduced (`status=139`, segfault).
+- `bash regression_tests/stage2_exprid_arena_oob_repro.sh /tmp/stage2_rel_head_baseline`
+  - reproduced (`status=1`, `Index out of bounds`).
+
+### Current verdict
+- Clean baseline remains stable on stage1 (`64/64`).
+- Release bootstrap objective is satisfied with a fresh measured pair.
+- Stage2 instability remains the active blocker; local hash-light backend experiments in this pass are explicitly refuted and rolled back.
+
 ## 2026-03-04: Stage2 crash boundary pushed to LLVM runtime declarations (still open)
 
 ### Objective in this pass
