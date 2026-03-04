@@ -1,5 +1,48 @@
 # Crystal v2 — Active Work (codegen branch)
 
+## 2026-03-04: LLDB localization to heredoc scanner + refuted delimiter-slice workaround
+
+### New localization evidence (LLDB)
+- Built stage2 debug probe:
+  - `CRYSTAL_V2_PIPELINE_CACHE=0 /usr/bin/time -p scripts/build_stage2_debug.sh /tmp/stage1_rel_c5f5278f /tmp/stage2_dbg_c5f5278f`
+  - `real 383.06`.
+- Breakpoint-driven trace on failing self-host compile (`src/crystal_v2.cr --release --no-link`):
+  - `lldb --batch -o "breakpoint set -r IndexError" -o "run src/crystal_v2.cr --release --no-link -o /tmp/stage3_dbg_probe" -o "thread backtrace all" ... -- /tmp/stage2_dbg_c5f5278f`
+  - first throw stack:
+    - `Slice(UInt8)#[]`
+    - `Frontend::Rope#slice`
+    - `Frontend::Lexer#scan_heredoc`
+    - `Frontend::Lexer#lex_operator`
+    - `Frontend::Parser.new`
+    - `CLI#parse_file_recursive` -> `CLI#compile`.
+- Separate no-codegen crash path (`--no-codegen --no-prelude /tmp/stage2_local_probe.cr`) in debug stage2:
+  - LLDB points to:
+    - `Semantic::TypeContext#get_type`
+    - `Semantic::TypeInferenceEngine#infer_expression`
+    - `CLI#run_check`.
+
+### Refuted experiment
+- Local lexer workaround (not committed, reverted):
+  - changed `scan_heredoc` delimiter extraction to avoid `@rope.slice(...)` by assembling delimiter via `IO::Memory`.
+- Why tried:
+  - to bypass the observed `Rope#slice` index crash in heredoc path.
+- Evidence (worse outcomes on patched stage2):
+  - Stage2 build from stable stage1:
+    - `CRYSTAL_V2_PIPELINE_CACHE=0 /usr/bin/time -p scripts/build_stage2_release.sh /tmp/stage1_rel_c5f5278f /tmp/stage2_rel_heredoc_slicefix`
+    - `real 399.27`.
+  - Stability/oracles on `/tmp/stage2_rel_heredoc_slicefix`:
+    - `stage2_parse_prelude_nocodegen_crash_repro` -> reproduced (`status=139`).
+    - `stage2_macro_record_heredoc_index_oob_repro` -> reproduced (`status=139`).
+    - `stage2_macro_parse_index_oob_repro` -> reproduced (`status=139`).
+    - `stage2_exprid_arena_oob_repro` -> now reproduced as segfault (`status=139`, previously often `status=1`).
+    - `stage_stats_output_repro` -> both `-s` and `-s --verbose` runs segfault (`status=139`).
+  - Stage2 -> stage3 bootstrap:
+    - `CRYSTAL_V2_PIPELINE_CACHE=0 /usr/bin/time -p scripts/build_stage2_release.sh /tmp/stage2_rel_heredoc_slicefix /tmp/stage3_rel_from_heredoc_slicefix`
+    - immediate segfault (`status=139`, `real 0.04`).
+- Decision:
+  - workaround rejected and local lexer edit reverted.
+  - keep LLDB stack evidence; continue root-cause work in `scan_heredoc` and adjacent lexer state handling.
+
 ## 2026-03-04: Fresh bootstrap snapshot after per-stage stats feature (stage2 still unstable)
 
 ### Release bootstrap timings (current `HEAD` = `c5f5278f`)
