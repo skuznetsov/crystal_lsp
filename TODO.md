@@ -56,6 +56,16 @@
 - Verification:
   - `bash regression_tests/stage1_file_open_write_segfault_repro.sh /tmp/stage1_rel_025b7326` -> reproduced.
   - control with original Crystal compiler (`crystal build ... --release`) -> program runs and writes expected file (`done` + `ok`).
+- LLVM IR probe from stage1 for this tiny case (`--emit llvm-ir`) shows type/signature corruption in File-open path:
+  - call site in `__crystal_main`:
+    - `call ptr @File$Dnew_internal$$arity6(..., ptr @.str.50, i32 ..., ptr null, ...)`
+  - lowered callee:
+    - `define ptr @File$Dnew_internal$$String_Int32_String_Bool_Nil_Nil(...)`
+    - note `mode` lowered as `i32` and `perm` as `ptr` (swapped/invalid vs expected String/Permissions layout).
+  - downstream open call:
+    - `define void @Crystal$CCSystem$CCFile$Dopen$$String_Int32_String_Nil(...)`
+    - return type lowered to `void`, followed by tuple-like extraction from `inttoptr i64 0` in caller (`null` payload read path).
+  - This aligns with LLDB evidence (`open_flag` receiving invalid String pointer).
 
 ### Refuted local experiment (reverted)
 - Tried replacing `File.open(ll_file, "w") { ... }` with explicit
