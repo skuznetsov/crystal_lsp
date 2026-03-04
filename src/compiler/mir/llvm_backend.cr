@@ -1978,6 +1978,7 @@ module Crystal::MIR
         # No-prelude mode: C strings
         emit_raw "@.str.empty = private unnamed_addr constant [1 x i8] c\"\\00\", align 1\n"
         emit_raw "@.str.file_open_error = private unnamed_addr constant [26 x i8] c\"Error opening file (open)\\00\", align 1\n"
+        emit_raw "@.str.dbg_open_label = private unnamed_addr constant [5 x i8] c\"open\\00\", align 1\n"
       end
 
       return if @string_constants.empty?

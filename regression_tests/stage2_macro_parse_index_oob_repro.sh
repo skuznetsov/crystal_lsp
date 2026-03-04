@@ -19,7 +19,7 @@ end
 CR
 
 set +e
-"$COMPILER" "$SRC" --no-prelude -o "$BIN" >"$OUT" 2>"$ERR"
+"$COMPILER" "$SRC" --no-prelude --no-link -o "$BIN" >"$OUT" 2>"$ERR"
 status=$?
 set -e
 

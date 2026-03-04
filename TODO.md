@@ -93,6 +93,37 @@
 - `bash regression_tests/stage2_exprid_arena_oob_repro.sh /tmp/stage2_rel_runtime_decl_allow`
   - reproduced (`status=1`, `Index out of bounds`).
 
+## 2026-03-04: No-prelude oracle hardening + `@.str.dbg_open_label` fix
+
+### Problem
+- `--no-prelude` builds were hitting an unrelated backend failure:
+  - `opt: use of undefined value '@.str.dbg_open_label'`
+- This polluted macro crash oracle runs and obscured true stage2 failures.
+
+### Fix
+- `src/compiler/mir/llvm_backend.cr`
+  - `emit_string_constants` now emits `@.str.dbg_open_label` in no-prelude mode as well.
+- `regression_tests/stage2_macro_parse_index_oob_repro.sh`
+  - switched compile invocation to `--no-link` to avoid linker-only noise (pcre2 unresolved symbols) and focus on compiler crash behavior.
+
+### Verification
+- Stage1 debug smoke:
+  - `/usr/bin/time -p scripts/build_stage1_original_debug.sh /tmp/stage1_dbg_dbglabel_fix --error-trace`
+  - `real 6.22`.
+- Stage1 regression suite:
+  - `bash regression_tests/run_all.sh /tmp/stage1_dbg_dbglabel_fix`
+  - `64 passed, 0 failed`.
+- Oracle separation after hardening:
+  - `bash regression_tests/stage2_macro_parse_index_oob_repro.sh /tmp/stage1_dbg_dbglabel_fix` → not reproduced (`status=0`).
+  - `bash regression_tests/stage2_macro_parse_index_oob_repro.sh /tmp/stage2_rel_runtime_decl_allow` → reproduced (`status=139`, segfault).
+  - `bash regression_tests/stage2_exprid_arena_oob_repro.sh /tmp/stage1_dbg_dbglabel_fix` → not reproduced (`status=0`).
+  - `bash regression_tests/stage2_exprid_arena_oob_repro.sh /tmp/stage2_rel_runtime_decl_allow` → reproduced (`status=1`, `Index out of bounds`).
+
+### Rejected workaround (recorded)
+- Tried replacing named-arg call in `src/stdlib/file.cr` with positional call in `File.new_internal`.
+- Result: stage2 debug build regressed badly (`real 721.08`, manual abort after >12 min, ~3.5GB RSS).
+- Decision: reverted; keep source unchanged and continue root-cause work in HIR/lowering path.
+
 ## 2026-03-04: Fresh baseline bootstrap after refuting local LLVM hash-light experiments
 
 ### Objective in this pass
