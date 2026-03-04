@@ -67,6 +67,36 @@
 - Decision:
   - no stabilization gain; local `bytes_range` substitution reverted.
 
+### Refuted follow-up: delimiter index/byte compare rewrite in `scan_heredoc`
+- Attempted local rewrite (not committed, reverted):
+  - removed delimiter `String` matching path in `scan_heredoc`;
+  - tracked `delimiter_start/delimiter_end/delimiter_len` and matched bytes via
+    `@rope.bytes.unsafe_fetch(delimiter_start + i)` in a numeric loop.
+- Why tried:
+  - avoid both `Range`-based slice and `String#each_byte` on stage2 crash path.
+- Stage1 sanity:
+  - build:
+    - `/usr/bin/time -p scripts/build_stage1_original_debug.sh /tmp/stage1_dbg_heredoc_idxcmp_fix --error-trace`
+    - `real 6.27`.
+  - control oracle:
+    - `bash regression_tests/stage2_macro_record_heredoc_index_oob_repro.sh /tmp/stage1_dbg_heredoc_idxcmp_fix`
+    - not reproduced (`status=0`).
+- Stage2 evidence (`/tmp/stage2_rel_heredoc_idxcmp_fix`):
+  - build:
+    - `CRYSTAL_V2_PIPELINE_CACHE=0 /usr/bin/time -p scripts/build_stage2_release.sh /tmp/stage1_rel_c5f5278f /tmp/stage2_rel_heredoc_idxcmp_fix`
+    - `real 381.03`.
+  - stability:
+    - `stage2_parse_prelude_nocodegen_crash_repro` -> reproduced (`status=139`).
+    - `stage2_macro_record_heredoc_index_oob_repro` -> reproduced (`status=139`).
+    - `stage2_macro_parse_index_oob_repro` -> reproduced (`status=139`).
+    - `stage2_exprid_arena_oob_repro` -> reproduced (`status=139`).
+    - `stage_stats_output_repro` -> segfault in both `-s` and `-s --verbose` runs.
+  - stage2 -> stage3:
+    - `CRYSTAL_V2_PIPELINE_CACHE=0 /usr/bin/time -p scripts/build_stage2_release.sh /tmp/stage2_rel_heredoc_idxcmp_fix /tmp/stage3_rel_from_heredoc_idxcmp_fix`
+    - immediate segfault (`status=139`, `real 0.05`).
+- Decision:
+  - no stabilization gain; local delimiter index-compare rewrite reverted.
+
 ## 2026-03-04: Fresh bootstrap snapshot after per-stage stats feature (stage2 still unstable)
 
 ### Release bootstrap timings (current `HEAD` = `c5f5278f`)
