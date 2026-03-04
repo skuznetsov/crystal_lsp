@@ -15,6 +15,9 @@
 - `regression_tests/stage1_ttyname_r_redefinition_repro.sh`
   - deterministic repro/oracle for LLVM duplicate declaration failure:
     - signature: `invalid redefinition of function 'ttyname_r'`.
+- `regression_tests/stage1_fcntl_redefinition_repro.sh`
+  - deterministic repro/oracle for LLVM duplicate declaration failure:
+    - signature: `invalid redefinition of function 'fcntl'`.
 
 ### Quick usage
 - Warm stage1 debug from dedicated cache:
@@ -23,6 +26,25 @@
   - `scripts/build_stage1_original_release.sh`
 - Repro/oracle check for `ttyname_r` duplicate declaration:
   - `bash regression_tests/stage1_ttyname_r_redefinition_repro.sh <compiler>`
+- Repro/oracle check for `fcntl` duplicate declaration:
+  - `bash regression_tests/stage1_fcntl_redefinition_repro.sh <compiler>`
+
+## 2026-03-04: Fresh status snapshot (stage2 still unstable, new `fcntl` duplicate signature)
+
+### Fresh timings (current tree)
+- Stage1 release by original compiler (release cache):
+  - `/usr/bin/time -p scripts/build_stage1_original_release.sh /tmp/stage1_rel_latest --error-trace`
+  - `real 457.87`.
+- Stage2 release by fresh stage1 (pipeline cache disabled):
+  - `CRYSTAL_V2_PIPELINE_CACHE=0 /usr/bin/time -p /tmp/stage1_rel_latest src/crystal_v2.cr --release -o /tmp/stage2_rel_latest`
+  - failed in `real 359.87` with:
+    - `invalid redefinition of function 'fcntl'`.
+
+### Deterministic oracles on fresh stage1
+- `bash regression_tests/stage1_ttyname_r_redefinition_repro.sh /tmp/stage1_rel_latest`
+  - not reproduced (`ttyname_r` path now clean for this binary).
+- `bash regression_tests/stage1_fcntl_redefinition_repro.sh /tmp/stage1_rel_latest`
+  - reproduced (`invalid redefinition of function 'fcntl'`).
 
 ## 2026-03-04: Fresh baseline bootstrap after refuting local LLVM hash-light experiments
 
