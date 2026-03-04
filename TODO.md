@@ -68,6 +68,40 @@
 - No stability gain; branch rejected.
 - Local `parser.cr` experiment was reverted (not committed).
 
+## 2026-03-04: Refuted combined parser/lexer hardening branch (`scan_heredoc` rescue + postfix span guard)
+
+### Hypothesis
+- Stage2 failures looked centered around heredoc macro path (`<<-TXT`) and parser postfix modifier deref crashes.
+- Attempted to harden both:
+  - add `IndexError` recovery in `scan_heredoc`,
+  - add invalid/span guards in `parse_postfix_if_modifier`.
+
+### Fresh release pair on that branch
+- stage1:
+  - `/usr/bin/time -p scripts/build_stage1_original_release.sh /tmp/stage1_rel_heredoc_postfix_guard --error-trace`
+  - `real 436.85`.
+- stage2:
+  - `CRYSTAL_V2_PIPELINE_CACHE=0 /usr/bin/time -p /tmp/stage1_rel_heredoc_postfix_guard src/crystal_v2.cr --release -o /tmp/stage2_rel_heredoc_postfix_guard`
+  - `real 431.28`.
+- Delta: `5.57s` faster (`~1.27%`, `~1.01x`).
+
+### Stability snapshot
+- `bash regression_tests/stage2_macro_parse_index_oob_repro.sh /tmp/stage2_rel_heredoc_postfix_guard`
+  - reproduced (`status=139`, segfault).
+- `bash regression_tests/stage2_exprid_arena_oob_repro.sh /tmp/stage2_rel_heredoc_postfix_guard`
+  - reproduced (`status=139`, segfault).
+- `bash regression_tests/stage2_macro_record_heredoc_index_oob_repro.sh /tmp/stage2_rel_heredoc_postfix_guard`
+  - reproduced (`status=1`, index/exprid signature).
+
+### Extra evidence
+- `lldb` on minimal compile in this branch pointed to:
+  - `Parser#parse_postfix_if_modifier` (`EXC_BAD_ACCESS`, null deref-like access),
+  - then parser continued into `ExprId out of bounds` path on heredoc macro mini-repro.
+
+### Decision
+- No stage2 stabilization; branch rejected.
+- Local parser/lexer hardening edits were reverted (not committed).
+
 ## 2026-03-04: Debug acceleration infra (warm-cache wrappers + deterministic ttyname_r oracle)
 
 ### What was added
