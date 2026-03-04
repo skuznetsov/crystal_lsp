@@ -45,6 +45,18 @@
     - `File$Dnew_internal$arity6`
     - `CrystalV2::Compiler::CLI#compile`.
 
+### New stage1 runtime repro linked to same File-open path
+- Added `regression_tests/stage1_file_open_write_segfault_repro.sh`.
+  - It compiles a tiny program (via stage1 compiler) that does:
+    - `File.open(path, "w") { ... }`
+  - Then runs the produced binary through `scripts/run_safe.sh`.
+  - Reproduction condition:
+    - compile succeeds,
+    - runtime exits `139` with segfault marker.
+- Verification:
+  - `bash regression_tests/stage1_file_open_write_segfault_repro.sh /tmp/stage1_rel_025b7326` -> reproduced.
+  - control with original Crystal compiler (`crystal build ... --release`) -> program runs and writes expected file (`done` + `ok`).
+
 ### Refuted local experiment (reverted)
 - Tried replacing `File.open(ll_file, "w") { ... }` with explicit
   `File.new(...6 args...)` + `ensure close` in LLVM IO path.
