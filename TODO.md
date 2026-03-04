@@ -1,5 +1,48 @@
 # Crystal v2 — Active Work (codegen branch)
 
+## 2026-03-04: Refuted heredoc guard attempts (rescue fallback + safe compare)
+
+### Attempt A (local, reverted): delimiter rescue fallback in `scan_heredoc`
+- Change:
+  - wrapped delimiter `String.new(@rope.slice(...))` in `rescue IndexError`;
+  - fallback extracted bytes manually into a String.
+- Build:
+  - `CRYSTAL_V2_PIPELINE_CACHE=0 /usr/bin/time -p scripts/build_stage2_release.sh /tmp/stage1_rel_c5f5278f /tmp/stage2_rel_heredoc_rescue_fallback`
+  - `real 382.33`.
+- Stability on `/tmp/stage2_rel_heredoc_rescue_fallback`:
+  - `stage2_macro_record_heredoc_index_oob_repro` -> reproduced (`status=139`).
+  - `stage2_macro_parse_index_oob_repro` -> reproduced (`status=139`).
+  - `stage2_exprid_arena_oob_repro` -> reproduced (`status=139`).
+  - `stage2_parse_prelude_nocodegen_crash_repro` -> reproduced (`status=139`).
+  - `stage2_mir_setup_post_lowering_segfault_repro` -> reproduced (`status=139`, still reaches `lowering bodies done`).
+
+### Attempt B (local, reverted): safe byte compare in heredoc delimiter loop
+- Change:
+  - replaced `current_byte` read in delimiter-match loop with safe helper (`UInt8?`);
+  - kept normal parser flow otherwise.
+- Build:
+  - `CRYSTAL_V2_PIPELINE_CACHE=0 /usr/bin/time -p scripts/build_stage2_release.sh /tmp/stage1_rel_c5f5278f /tmp/stage2_rel_heredoc_current_byte_safe`
+  - `real 383.17`.
+- Stability on `/tmp/stage2_rel_heredoc_current_byte_safe`:
+  - same five oracles above all reproduced (`status=139`).
+
+### Additional evidence from diagnostics
+- Manual heredoc repro with tracing:
+  - `STAGE2_DEBUG=1 LEXER_DEBUG=1 /tmp/stage2_rel_heredoc_rescue_fallback <repro>`
+  - last lexer lines before crash:
+    - `[HEREDOC] scan_heredoc called, offset=63, size=229`
+    - `[HEREDOC] delimiter='TXT'`
+    - `[HEREDOC] checking delimiter match starting at offset 92`
+  - crash occurs immediately after this point.
+- Crash reports for this batch show multiple independent top frames:
+  - `Frontend::Lexer#scan_heredoc` (SIGSEGV / pointer-auth-like invalid address),
+  - `Semantic::TypeInferenceEngine#infer_expression`,
+  - `Crystal::System::File.open_flag`.
+
+### Decision
+- Both guard attempts rejected; lexer file reverted to baseline state.
+- Current hypothesis: heredoc crash is one symptom in a broader stage2 memory corruption set, not an isolated delimiter-slice bug.
+
 ## 2026-03-04: LLDB localization to heredoc scanner + refuted delimiter-slice workaround
 
 ### New localization evidence (LLDB)
