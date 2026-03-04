@@ -1,5 +1,114 @@
 # Crystal v2 — Active Work (codegen branch)
 
+## 2026-03-04: LLVM backend hardening branch refuted, rolled back; fresh release timing pair captured
+
+### Objective in this pass
+- Continue autonomous stage2 stabilization while preserving a working baseline.
+- Re-check release bootstrap timing pair (`stage1 --release` vs `stage2 --release`).
+- Keep oracle scripts as source of truth:
+  - `regression_tests/stage2_macro_parse_index_oob_repro.sh`
+  - `regression_tests/stage2_exprid_arena_oob_repro.sh`
+
+### What was tried (and rejected)
+- A dedicated `src/compiler/mir/llvm_backend.cr` hardening branch was explored:
+  - replacing several String-key `Set/Hash` usage patterns with array/mask-based alternatives,
+  - changing reachability skip/visited tracking to Bool-mask containers,
+  - reducing up-front lookup indexing work.
+- Result: this branch introduced severe regressions on stage1 regressions (`run_all` collapsed to compile/runtime crashes with `opt failed` / segfault signatures).
+- Decision: **fully rolled back `llvm_backend.cr` to baseline**. No experimental backend edits kept.
+
+### Baseline verification after rollback
+- Known-good stage1 baseline remains reproducible:
+  - `bash regression_tests/run_all.sh /tmp/stage1_rel_nohash_current`
+  - `64 passed, 0 failed`.
+
+### Fresh release timing evidence (cold, requested bootstrap mode)
+- Stage1 (original compiler, release):
+  - `/usr/bin/time -p crystal build src/crystal_v2.cr --release -o /tmp/stage1_rel_nohash_current`
+  - `real 438.09`.
+- Stage2 (built by fresh stage1, release, pipeline cache disabled):
+  - `CRYSTAL_V2_PIPELINE_CACHE=0 /usr/bin/time -p /tmp/stage1_rel_nohash_current src/crystal_v2.cr --release -o /tmp/stage2_rel_postrevert`
+  - `real 377.72`.
+
+### Stage1 vs Stage2 delta (same stage1 origin)
+- Absolute: `60.37s` faster (`438.09 - 377.72`).
+- Relative: `13.78%` faster.
+- Speedup factor: `1.16x`.
+
+### Stage2 stability snapshot (fresh `/tmp/stage2_rel_postrevert`)
+- `bash regression_tests/stage2_macro_parse_index_oob_repro.sh /tmp/stage2_rel_postrevert`
+  - reproduced (`status=139`, segfault).
+- `bash regression_tests/stage2_exprid_arena_oob_repro.sh /tmp/stage2_rel_postrevert`
+  - reproduced (`status=139`, segfault on minimal compile).
+
+### Current verdict
+- Release bootstrap timing objective is satisfied with a fresh pair and quantified delta.
+- Stage2 remains unstable on both deterministic oracles.
+- Backend hardening branch tested in this pass is explicitly refuted and rolled back; follow-up work should continue from the restored baseline.
+
+## 2026-03-04: Stage2 stabilization deep-dive (macro crash migrated from HIR OOB to late MIR/LLVM segfault, still open)
+
+### Objective in this pass
+- Continue autonomous stage2 stabilization after release bootstrap.
+- Keep deterministic repros as oracle:
+  - `regression_tests/stage2_macro_parse_index_oob_repro.sh`
+  - `regression_tests/stage2_exprid_arena_oob_repro.sh`
+- Push crash boundary forward with minimal, measurable changes and keep regression evidence.
+
+### Fresh bootstrap evidence (requested release baseline)
+- Stage1 rebuilt by original compiler:
+  - `/usr/bin/time -p crystal build src/crystal_v2.cr --release -o /tmp/stage1_rel_nohash_current`
+  - `real 438.09`.
+- Stage2 rebuilt by fresh stage1 (diagnostic no-cache run):
+  - `/usr/bin/time -p /tmp/stage1_rel_nohash_current src/crystal_v2.cr --no-ast-cache --no-llvm-cache -o /tmp/stage2_dbg_optempty_relstage1`
+  - `real 333.95`.
+- Later diagnostic rebuilds with extra traces were in the same range (`~331–369s`).
+
+### Key code changes attempted in this pass
+- `src/compiler/cli.cr`
+  - Added early `MacroDefNode` guard in top-level collection (`is_a?` check before `case`) to prevent macro defs leaking into `main_exprs`.
+  - Added MIR setup trace hooks (`CRYSTAL_V2_MIR_SETUP_TRACE`) and retained them env-gated.
+  - Added safe guard in MIR optimization loop: skip optimization for empty-body functions.
+- `src/compiler/hir/hir.cr`
+  - Removed default-proc Hash dependence in `reachable_function_names`; switched to explicit key checks/inserts.
+- `src/compiler/mir/mir.cr`
+  - Hardened `Type` initializer typing/field init.
+  - Hardened `TypeRegistry` by removing hash indexes (`@type_map/@name_map`) and using `@types`-based lookup (`get`/`get_by_name`) to avoid stage2 hash-insert crash path.
+  - Added env-gated MIR init/type-reg tracing (`CRYSTAL_V2_MIR_INIT_TRACE`).
+- `src/compiler/mir/hir_to_mir.cr`
+  - Reinitialized per-function lowering maps/sets instead of calling `clear` (stage2 showed unstable `Hash/Set#clear` behavior).
+  - Converted block map key path to `Int32` and avoided duplicate entry overwrite.
+  - Converted block-order visited set to `Set(Int32)`.
+  - Added env-gated lowering trace (`CRYSTAL_V2_MIR_LOWER_TRACE`) with step markers.
+
+### Repro evolution observed (important)
+- Macro minimal repro (`macro x; end`, `--no-prelude`) no longer dies at the earlier `type_map` insertion point after `TypeRegistry` no-hash rewrite.
+- Crash boundary moved progressively forward:
+  1. `TypeRegistry` first primitive insert (`@type_map[...]`) crash,
+  2. then `Hash/Set#clear` in `lower_function_body`,
+  3. then duplicate entry-block map overwrite,
+  4. then block-order visited set with block-id keys,
+  5. now reaches:
+     - full MIR init,
+     - MIR lowering for `__crystal_main`,
+     - MIR optimization loop (`__crystal_main -> skipped (empty body)`),
+     - starts `[5/6] Generating LLVM IR...`,
+     - then segfault (status 139) in late pipeline.
+- `puts 1` minimal stage2 oracle still reproduces (`Index out of bounds` / `ExprId out of bounds` depending on mode), so root stability issue is not solved yet.
+
+### Current regression snapshot (latest tested stage2: `/tmp/stage2_dbg_optempty_relstage1`)
+- `regression_tests/stage2_macro_parse_index_oob_repro.sh /tmp/stage2_dbg_optempty_relstage1`
+  - reproduced (`status=139`, segfault).
+- `regression_tests/stage2_exprid_arena_oob_repro.sh /tmp/stage2_dbg_optempty_relstage1`
+  - reproduced (`status=1`, `Index out of bounds`).
+
+### Working conclusion now
+- Stage2 crash handling improved materially in depth (from early HIR/TypeRegistry/hash crashes to late MIR/LLVM phase).
+- Stage2 is still unstable on minimal oracles; issue remains OPEN.
+- Next focused step:
+  - isolate late `[5/6] Generating LLVM IR` segfault on macro-only `__crystal_main` with targeted LLVM generator traces,
+  - and continue replacing unstable hash/set u32-key paths in MIR lowering/backend where needed.
+
 ## 2026-03-04: Release bootstrap repeated + `all_arenas` tuple hardening probe (still open)
 
 ### Goal in this pass

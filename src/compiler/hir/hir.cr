@@ -1666,22 +1666,37 @@ module Crystal::HIR
       end
 
       # Build class hierarchy (parent → children)
-      class_children = Hash(String, Array(String)).new { |h, k| h[k] = [] of String }
+      class_children = {} of String => Array(String)
       @class_parents.each do |name, parent|
         next unless parent
-        class_children[strip_generics.call(parent)] << strip_generics.call(name)
+        parent_name = strip_generics.call(parent)
+        child_name = strip_generics.call(name)
+        if children = class_children[parent_name]?
+          children << child_name
+        else
+          class_children[parent_name] = [child_name]
+        end
       end
 
       # Build owner+method index: "Owner|method" → [func_names]
-      owner_method_funcs = Hash(String, Array(String)).new { |h, k| h[k] = [] of String }
+      owner_method_funcs = {} of String => Array(String)
       # Also keep the old base-only index as fallback for unresolvable owners
-      base_to_funcs = Hash(String, Array(String)).new { |h, k| h[k] = [] of String }
+      base_to_funcs = {} of String => Array(String)
       @functions.each do |func|
         owner = owner_for.call(func.name)
         method_base = base_name_for.call(func.name)
         owner_base = strip_generics.call(owner)
-        owner_method_funcs["#{owner_base}|#{method_base}"] << func.name
-        base_to_funcs[method_base] << func.name
+        owner_key = "#{owner_base}|#{method_base}"
+        if funcs = owner_method_funcs[owner_key]?
+          funcs << func.name
+        else
+          owner_method_funcs[owner_key] = [func.name]
+        end
+        if funcs = base_to_funcs[method_base]?
+          funcs << func.name
+        else
+          base_to_funcs[method_base] = [func.name]
+        end
       end
 
       # BFS subclasses (cached), with optional RTA filter.
@@ -1716,12 +1731,16 @@ module Crystal::HIR
       end
 
       # Collect module includers by base name
-      module_includers_base = Hash(String, Array(String)).new { |h, k| h[k] = [] of String }
+      module_includers_base = {} of String => Array(String)
       @module_includers.each do |mod_name, includers|
         base = strip_generics.call(mod_name)
         includers.each do |inc|
           inc_base = strip_generics.call(inc)
-          module_includers_base[base] << inc_base unless module_includers_base[base].includes?(inc_base)
+          if existing = module_includers_base[base]?
+            existing << inc_base unless existing.includes?(inc_base)
+          else
+            module_includers_base[base] = [inc_base]
+          end
         end
       end
 
@@ -1806,10 +1825,12 @@ module Crystal::HIR
 
               if callee_owner.empty?
                 # No owner — fallback to base-name-only matching
-                base_to_funcs[method_base].each do |candidate|
-                  next if reachable.includes?(candidate)
-                  reachable << candidate
-                  worklist << candidate
+                if base_funcs = base_to_funcs[method_base]?
+                  base_funcs.each do |candidate|
+                    next if reachable.includes?(candidate)
+                    reachable << candidate
+                    worklist << candidate
+                  end
                 end
               else
                 # Type-aware: check owner + subclasses + module includers

@@ -109,6 +109,17 @@ module CrystalV2
         end
       end
 
+      private struct MacroEntry
+        getter node : Frontend::MacroDefNode
+        getter arena : Frontend::ArenaLike
+
+        def initialize(
+          @node : Frontend::MacroDefNode,
+          @arena : Frontend::ArenaLike
+        )
+        end
+      end
+
       def initialize(@args : Array(String))
       end
 
@@ -833,7 +844,7 @@ module CrystalV2
         class_nodes = [] of Tuple(Frontend::ClassNode, Frontend::ArenaLike)
         module_nodes = [] of Tuple(Frontend::ModuleNode, Frontend::ArenaLike)
         enum_nodes = [] of Tuple(Frontend::EnumNode, Frontend::ArenaLike)
-        macro_nodes = [] of Tuple(Frontend::MacroDefNode, Frontend::ArenaLike)
+        macro_nodes = [] of MacroEntry
         alias_nodes = [] of Tuple(Frontend::AliasNode, Frontend::ArenaLike)
         lib_nodes = [] of Tuple(Frontend::LibNode, Frontend::ArenaLike, Array(Tuple(Frontend::AnnotationNode, Frontend::ArenaLike)))
         constant_exprs = [] of Tuple(Frontend::ExprId, Frontend::ArenaLike)
@@ -1087,10 +1098,12 @@ module CrystalV2
         log(options, out_io, "    Macros: #{macro_nodes.size}")
         macro_count = macro_nodes.size
         stage2_debug("[STAGE2_DEBUG] macro register start count=#{macro_count}", err_io)
-        macro_nodes.each_with_index do |(n, a), i|
+        macro_nodes.each_with_index do |entry, i|
           if i < 3 || (i % 50 == 0) || i == macro_count - 1
             stage2_debug("[STAGE2_DEBUG] macro register idx=#{i + 1}/#{macro_count}", err_io)
           end
+          n = entry.node
+          a = entry.arena
           STDERR.print "\r    Registered macro #{i+1}/#{macro_nodes.size}" if options.progress
           hir_converter.arena = a
           hir_converter.register_macro(n)
@@ -1368,7 +1381,10 @@ module CrystalV2
         # Step 4: Lower to MIR
         log(options, out_io, "\n[4/6] Lowering to MIR...")
         mir_start = Time.instant
+        mir_setup_trace = ENV.has_key?("CRYSTAL_V2_MIR_SETUP_TRACE") || ENV.has_key?("CRYSTAL2_MIR_SETUP_TRACE")
+        STDERR.puts "[MIR_SETUP] before lowering.new" if mir_setup_trace
         mir_lowering = MIR::HIRToMIRLowering.new(hir_module, slab_frame: options.slab_frame)
+        STDERR.puts "[MIR_SETUP] lowering initialized" if mir_setup_trace
 
         # Register globals from class variables
         globals = [] of Tuple(String, HIR::TypeRef, Int64?)
@@ -1400,17 +1416,35 @@ module CrystalV2
           registered_globals.add(global_name)
         end
 
+        STDERR.puts "[MIR_SETUP] register_globals count=#{globals.size}" if mir_setup_trace
         mir_lowering.register_globals(globals)
+        STDERR.puts "[MIR_SETUP] register_globals done" if mir_setup_trace
+        STDERR.puts "[MIR_SETUP] register_extern_globals count=#{hir_module.extern_globals.size}" if mir_setup_trace
         mir_lowering.register_extern_globals(hir_module.extern_globals)
+        STDERR.puts "[MIR_SETUP] register_extern_globals done" if mir_setup_trace
+        STDERR.puts "[MIR_SETUP] register_union_types count=#{hir_converter.union_descriptors.size}" if mir_setup_trace
         mir_lowering.register_union_types(hir_converter.union_descriptors)
+        STDERR.puts "[MIR_SETUP] register_union_types done" if mir_setup_trace
+        STDERR.puts "[MIR_SETUP] register_union_type_aliases types=#{hir_module.types.size}" if mir_setup_trace
         mir_lowering.register_union_type_aliases(hir_module.types)
+        STDERR.puts "[MIR_SETUP] register_union_type_aliases done" if mir_setup_trace
+        STDERR.puts "[MIR_SETUP] register_class_types count=#{hir_converter.class_info.size}" if mir_setup_trace
         mir_lowering.register_class_types(hir_converter.class_info)
+        STDERR.puts "[MIR_SETUP] register_class_types done" if mir_setup_trace
+        STDERR.puts "[MIR_SETUP] register_enum_types enum_names=#{hir_converter.enum_names.size}" if mir_setup_trace
         mir_lowering.register_enum_types(hir_converter.enum_names, hir_module.types)
+        STDERR.puts "[MIR_SETUP] register_enum_types done" if mir_setup_trace
+        STDERR.puts "[MIR_SETUP] register_module_types types=#{hir_module.types.size}" if mir_setup_trace
         mir_lowering.register_module_types(hir_module.types)
+        STDERR.puts "[MIR_SETUP] register_module_types done" if mir_setup_trace
+        STDERR.puts "[MIR_SETUP] register_tuple_types types=#{hir_module.types.size}" if mir_setup_trace
         mir_lowering.register_tuple_types(hir_module.types)
+        STDERR.puts "[MIR_SETUP] register_tuple_types done" if mir_setup_trace
 
         STDERR.puts "  Lowering #{hir_module.functions.size} functions to MIR..." if options.progress
+        STDERR.puts "[MIR_SETUP] lowering bodies count=#{hir_module.functions.size}" if mir_setup_trace
         mir_module = mir_lowering.lower(options.progress)
+        STDERR.puts "[MIR_SETUP] lowering bodies done funcs=#{mir_module.functions.size}" if mir_setup_trace
         timings["dbg_count_mir_funcs"] = mir_module.functions.size.to_f if debug_profile
         log(options, out_io, "  Functions: #{mir_module.functions.size}")
         timings["mir"] = (Time.instant - mir_start).total_milliseconds if options.stats
@@ -1429,6 +1463,10 @@ module CrystalV2
           mir_module.functions.each_with_index do |func, idx|
             begin
               STDERR.puts "  Optimizing #{idx + 1}/#{mir_module.functions.size}: #{func.name}..." if options.progress
+              if func.blocks.all? { |block| block.instructions.empty? }
+                log(options, out_io, "    #{func.name} -> skipped (empty body)") if options.verbose
+                next
+              end
               if options.ltp_opt
                 stats, ltp_potential = func.optimize_with_potential
                 if options.verbose
@@ -2048,11 +2086,13 @@ module CrystalV2
           is_require = node.is_a?(Frontend::RequireNode)
           is_module = node.is_a?(Frontend::ModuleNode)
           is_macroif = node.is_a?(Frontend::MacroIfNode)
+          is_macrodef = node.is_a?(Frontend::MacroDefNode)
           is_node = node.is_a?(Frontend::Node)
           is_string = node.is_a?(Frontend::StringNode)
+          node_kind = Frontend.node_kind(node)
           # Read raw type_id from object header (first 4 bytes)
           raw_type_id = Pointer(Int32).new(node.as(Frontend::Node).object_id).value
-          log(options, out_io, "    [req] expr=#{expr_id.index} type_id=#{raw_type_id} node?=#{is_node} req?=#{is_require} mod?=#{is_module} macif?=#{is_macroif} str?=#{is_string}")
+          log(options, out_io, "    [req] expr=#{expr_id.index} type_id=#{raw_type_id} kind=#{node_kind} node?=#{is_node} req?=#{is_require} mod?=#{is_module} macif?=#{is_macroif} macrodef?=#{is_macrodef} str?=#{is_string}")
         end
         case node
         when Frontend::ModuleNode
@@ -2290,7 +2330,7 @@ module CrystalV2
         class_nodes : Array(Tuple(Frontend::ClassNode, Frontend::ArenaLike)),
         module_nodes : Array(Tuple(Frontend::ModuleNode, Frontend::ArenaLike)),
         enum_nodes : Array(Tuple(Frontend::EnumNode, Frontend::ArenaLike)),
-        macro_nodes : Array(Tuple(Frontend::MacroDefNode, Frontend::ArenaLike)),
+        macro_nodes : Array(MacroEntry),
         alias_nodes : Array(Tuple(Frontend::AliasNode, Frontend::ArenaLike)),
         lib_nodes : Array(Tuple(Frontend::LibNode, Frontend::ArenaLike, Array(Tuple(Frontend::AnnotationNode, Frontend::ArenaLike)))),
         constant_exprs : Array(Tuple(Frontend::ExprId, Frontend::ArenaLike)),
@@ -2305,6 +2345,16 @@ module CrystalV2
       ) : Nil
         return if depth > 4
         node = arena[expr_id]
+        if env_enabled?("CRYSTAL2_COLLECT_TRACE")
+          STDERR.puts "[COLLECT] depth=#{depth} expr=#{expr_id.index} kind=#{Frontend.node_kind(node)} macrodef=#{node.is_a?(Frontend::MacroDefNode)} arena_size=#{arena.size}"
+        end
+        # Stage2 has shown unstable case-dispatch on MacroDefNode in some builds.
+        # Guard with direct is_a? so macro definitions never leak into main_exprs.
+        if node.is_a?(Frontend::MacroDefNode)
+          macro_nodes << MacroEntry.new(node, arena)
+          pending_annotations.clear
+          return
+        end
         case node
         when Frontend::DefNode
           def_nodes << {node, arena}
@@ -2320,9 +2370,6 @@ module CrystalV2
           pending_annotations.clear
         when Frontend::EnumNode
           enum_nodes << {node, arena}
-          pending_annotations.clear
-        when Frontend::MacroDefNode
-          macro_nodes << {node, arena}
           pending_annotations.clear
         when Frontend::ConstantNode
           constant_exprs << {expr_id, arena}
@@ -2482,7 +2529,7 @@ module CrystalV2
         class_nodes : Array(Tuple(Frontend::ClassNode, Frontend::ArenaLike)),
         module_nodes : Array(Tuple(Frontend::ModuleNode, Frontend::ArenaLike)),
         enum_nodes : Array(Tuple(Frontend::EnumNode, Frontend::ArenaLike)),
-        macro_nodes : Array(Tuple(Frontend::MacroDefNode, Frontend::ArenaLike)),
+        macro_nodes : Array(MacroEntry),
         alias_nodes : Array(Tuple(Frontend::AliasNode, Frontend::ArenaLike)),
         lib_nodes : Array(Tuple(Frontend::LibNode, Frontend::ArenaLike, Array(Tuple(Frontend::AnnotationNode, Frontend::ArenaLike)))),
         constant_exprs : Array(Tuple(Frontend::ExprId, Frontend::ArenaLike)),
