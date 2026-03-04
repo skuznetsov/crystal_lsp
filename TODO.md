@@ -90,6 +90,18 @@
   - Decision:
     - no stability gain; patch reverted.
 
+- Tried rewriting `src/stdlib/file.cr` `File.new_internal` from
+  `new(filename, fd, mode, blocking, encoding, invalid)` to explicit
+  `allocate + initialize(...)`.
+  - stage1 rebuild with patch:
+    - `/usr/bin/time -p scripts/build_stage1_original_release.sh /tmp/stage1_rel_file_allocate_fix --error-trace`
+    - `real 5.47` (warm cache).
+  - runtime repro check:
+    - `bash regression_tests/stage1_file_open_write_segfault_repro.sh /tmp/stage1_rel_file_allocate_fix`
+    - still reproduced (`run_status=139`).
+  - Decision:
+    - no stability gain; patch reverted.
+
 ### Additional consistency check
 - Clean worktree from pure `HEAD` (`025b7326`) currently fails stage1 build due
   constructor arity mismatch:
