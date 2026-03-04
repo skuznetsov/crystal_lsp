@@ -1,6 +1,8 @@
 # Crystal cache
 .crystal-cache/
 .crystal_cache/
+.cache/original-crystal-debug/
+.cache/original-crystal-release/
 
 # Build artifacts
 bin/crystal
