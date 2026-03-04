@@ -2589,6 +2589,11 @@ module CrystalV2
 
           loop do
             debug "[HEREDOC] loop iteration, offset=#{@offset}"
+            if @offset >= @rope.size
+              debug "[HEREDOC] returning nil: reached EOF while scanning lines"
+              emit_diagnostic("Unterminated heredoc: can't find \"#{delimiter}\" anywhere before the end of file", Span.new(start_offset, @offset, start_line, start_column, @line, @column))
+              return nil
+            end
             line_start = @offset
 
             # Capture indentation (allowed to be zero with <<-)
@@ -2596,7 +2601,7 @@ module CrystalV2
               advance
             end
             indent = @offset - line_start
-            line_has_content = !(current_byte == '\n'.ord.to_u8 || current_byte == '\r'.ord.to_u8)
+            line_has_content = @offset < @rope.size && !(current_byte == '\n'.ord.to_u8 || current_byte == '\r'.ord.to_u8)
             min_indent_seen = indent if line_has_content && indent < min_indent_seen
 
             # Check if this line starts with delimiter (after whitespace)

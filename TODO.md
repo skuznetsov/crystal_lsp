@@ -1,5 +1,53 @@
 # Crystal v2 — Active Work (codegen branch)
 
+## 2026-03-04: Heredoc lexer EOF guard + new stage2 heredoc oracle (stability still open)
+
+### Why this branch
+- `stage2` still fails while loading `src/stdlib/macros.cr` with `error: Index out of bounds`.
+- `STAGE2_DEBUG=1` trace consistently stopped around `macro record` (`raise <<-TXT ...` area).
+- Existing oracles covered macro/exprid signatures, but not this concrete heredoc path.
+
+### Implemented changes
+- `src/compiler/frontend/lexer.cr`
+  - Hardened `scan_heredoc` loop against EOF:
+    - added explicit `@offset >= @rope.size` guard at loop head,
+    - made `line_has_content` check safe when cursor is at EOF.
+- `regression_tests/stage2_macro_record_heredoc_index_oob_repro.sh`
+  - Added deterministic repro/oracle for heredoc macro parse crash path:
+    - compiles a minimal `macro record` heredoc snippet with `--no-prelude --no-link`,
+    - treats `segfault`, `Index out of bounds`, and `ExprId out of bounds` as reproduced.
+
+### Verification
+- Stage1 debug build (with fix):
+  - `/usr/bin/time -p scripts/build_stage1_original_debug.sh /tmp/stage1_dbg_heredoc_guard --error-trace`
+  - `real 11.41`.
+- Stage1 release regression suite:
+  - `bash regression_tests/run_all.sh /tmp/stage1_rel_heredoc_guard`
+  - `64 passed, 0 failed`.
+- Fresh bootstrap pair (current tree):
+  - stage1 release:
+    - `/usr/bin/time -p scripts/build_stage1_original_release.sh /tmp/stage1_rel_heredoc_guard --error-trace`
+    - `real 470.55`.
+  - stage2 release:
+    - `CRYSTAL_V2_PIPELINE_CACHE=0 /usr/bin/time -p /tmp/stage1_rel_heredoc_guard src/crystal_v2.cr --release -o /tmp/stage2_rel_heredoc_guard`
+    - `real 419.90`.
+
+### Stage1 vs Stage2 timing (fresh pair)
+- Absolute: `50.65s` faster (`470.55 - 419.90`).
+- Relative: `10.76%` faster.
+- Speedup: `1.12x`.
+
+### Stage2 stability snapshot (still failing)
+- `bash regression_tests/stage2_macro_parse_index_oob_repro.sh /tmp/stage2_rel_heredoc_guard`
+  - reproduced (`status=139`, segfault).
+- `bash regression_tests/stage2_exprid_arena_oob_repro.sh /tmp/stage2_rel_heredoc_guard`
+  - reproduced (`status=1`, `Index out of bounds`).
+- `bash regression_tests/stage2_macro_record_heredoc_index_oob_repro.sh /tmp/stage2_rel_heredoc_guard`
+  - reproduced (`status=1`, `Index out of bounds`).
+- Control check on stage1:
+  - `bash regression_tests/stage2_macro_record_heredoc_index_oob_repro.sh /tmp/stage1_rel_heredoc_guard`
+  - not reproduced (`status=0`).
+
 ## 2026-03-04: Debug acceleration infra (warm-cache wrappers + deterministic ttyname_r oracle)
 
 ### What was added
