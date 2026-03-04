@@ -1,5 +1,45 @@
 # Crystal v2 — Active Work (codegen branch)
 
+## 2026-03-04: Fresh bootstrap snapshot after per-stage stats feature (stage2 still unstable)
+
+### Release bootstrap timings (current `HEAD` = `c5f5278f`)
+- Stage1 by original compiler (`--release`):
+  - `/usr/bin/time -p scripts/build_stage1_original_release.sh /tmp/stage1_rel_c5f5278f --error-trace`
+  - `real 446.67`.
+- Stage2 by fresh stage1 (`--release`):
+  - `CRYSTAL_V2_PIPELINE_CACHE=0 /usr/bin/time -p scripts/build_stage2_release.sh /tmp/stage1_rel_c5f5278f /tmp/stage2_rel_c5f5278f`
+  - `real 430.40`.
+- Stage1 vs Stage2 delta:
+  - absolute: `16.27s` faster (`446.67 - 430.40`),
+  - relative: `3.64%` faster,
+  - speedup: `1.04x`.
+
+### Second bootstrap attempt (stage2 -> stage3)
+- `CRYSTAL_V2_PIPELINE_CACHE=0 /usr/bin/time -p scripts/build_stage2_release.sh /tmp/stage2_rel_c5f5278f /tmp/stage3_rel_c5f5278f`
+  - failed in `real 0.82` with `error: Index out of bounds`.
+- Conclusion:
+  - stage2 remains non-self-host-stable on this snapshot.
+
+### Stage2 oracle/status snapshot on `/tmp/stage2_rel_c5f5278f`
+- Reproduced (still failing):
+  - `bash regression_tests/stage2_macro_parse_index_oob_repro.sh /tmp/stage2_rel_c5f5278f` -> reproduced (`status=139`, segfault).
+  - `bash regression_tests/stage2_exprid_arena_oob_repro.sh /tmp/stage2_rel_c5f5278f` -> reproduced (`status=1`, `Index out of bounds`).
+  - `bash regression_tests/stage2_macro_record_heredoc_index_oob_repro.sh /tmp/stage2_rel_c5f5278f` -> reproduced (`status=1`).
+- Boundary drift (decay signal):
+  - `bash regression_tests/stage2_mir_setup_post_lowering_segfault_repro.sh /tmp/stage2_rel_c5f5278f`
+  - still segfaults (`status=139`), but no longer reaches target marker
+    `[MIR_SETUP] lowering bodies done funcs=1`; current last setup marker is
+    `[MIR_SETUP] before lowering.new`.
+- Additional strong failure:
+  - `bash regression_tests/stage2_parse_prelude_nocodegen_repro.sh /tmp/stage2_rel_c5f5278f`
+  - segfaults (`status=139`) though it is expected to pass.
+- Stage1 control for that script:
+  - `bash regression_tests/stage2_parse_prelude_nocodegen_repro.sh /tmp/stage1_rel_c5f5278f` -> PASS.
+
+### Stage-stats feature check on release artifacts
+- `bash regression_tests/stage_stats_output_repro.sh /tmp/stage1_rel_c5f5278f` -> PASS.
+- `bash regression_tests/stage_stats_output_repro.sh /tmp/stage2_rel_c5f5278f` -> FAIL (compile error `Index out of bounds` / segfault in verbose run), consistent with stage2 instability.
+
 ## 2026-03-04: Per-stage timing output for `--stats` with verbose expansion
 
 ### Implemented
