@@ -48,6 +48,26 @@
   - `bash regression_tests/stage2_macro_record_heredoc_index_oob_repro.sh /tmp/stage1_rel_heredoc_guard`
   - not reproduced (`status=0`).
 
+## 2026-03-04: Refuted parser token-stream mutation experiment (`current_token` insert removal)
+
+### Hypothesis
+- `Parser#current_token` mutates `@tokens` via `insert` for synthetic `{`/`}` around macro expressions.
+- This looked suspicious for stage2 index drift, so a branch removed `insert` and kept only synthetic return tokens.
+
+### Result
+- Stage1 remained healthy:
+  - `/usr/bin/time -p scripts/build_stage1_original_release.sh /tmp/stage1_rel_no_macro_insert --error-trace` → `real 442.83`.
+  - `bash regression_tests/run_all.sh /tmp/stage1_rel_no_macro_insert` → `64 passed, 0 failed`.
+- Stage2 still unstable:
+  - `CRYSTAL_V2_PIPELINE_CACHE=0 /usr/bin/time -p /tmp/stage1_rel_no_macro_insert src/crystal_v2.cr --release -o /tmp/stage2_rel_no_macro_insert` → `real 422.47`.
+  - `bash regression_tests/stage2_macro_parse_index_oob_repro.sh /tmp/stage2_rel_no_macro_insert` → reproduced.
+  - `bash regression_tests/stage2_exprid_arena_oob_repro.sh /tmp/stage2_rel_no_macro_insert` → reproduced.
+  - `bash regression_tests/stage2_macro_record_heredoc_index_oob_repro.sh /tmp/stage2_rel_no_macro_insert` → reproduced.
+
+### Decision
+- No stability gain; branch rejected.
+- Local `parser.cr` experiment was reverted (not committed).
+
 ## 2026-03-04: Debug acceleration infra (warm-cache wrappers + deterministic ttyname_r oracle)
 
 ### What was added
