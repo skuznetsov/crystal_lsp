@@ -1,5 +1,69 @@
 # Crystal v2 — Active Work (codegen branch)
 
+## 2026-03-04: Fresh dirty-workspace baseline + LLVM pre-generate crash oracle
+
+### Bootstrap snapshot (dirty workspace, current local state)
+- Stage1 (`--release`, warm split cache):
+  - `/usr/bin/time -p scripts/build_stage1_original_release.sh /tmp/stage1_rel_025b7326 --error-trace`
+  - `real 6.20`.
+- Stage2 from that stage1:
+  - `/usr/bin/time -p scripts/build_stage2_release.sh /tmp/stage1_rel_025b7326 /tmp/stage2_rel_025b7326`
+  - `real 318.47`.
+  - LLVM counters: `total MIR functions: 63649`, `RTA kept: 30931`.
+- Stage2 -> stage3:
+  - `/usr/bin/time -p scripts/build_stage2_release.sh /tmp/stage2_rel_025b7326 /tmp/stage3_rel_from_stage2_025b7326`
+  - fails quickly with `error: Index out of bounds` (`real 0.78`).
+- Speed delta in this run setup:
+  - stage2 slower than stage1 warm by `312.27s` (expected with warm stage1 cache);
+  - this number is not comparable to cold-vs-cold historical runs.
+
+### New deterministic boundary oracle (added)
+- `regression_tests/stage2_llvm_setup_pre_generate_segfault_repro.sh`
+  - minimal repro: `macro x; end`
+  - runs compiler with:
+    - `STAGE2_DEBUG=1`
+    - `CRYSTAL_V2_MIR_SETUP_TRACE=1`
+    - `CRYSTAL_V2_LLVM_SETUP_TRACE=1`
+    - `--no-prelude --no-link`
+  - reproduction signature:
+    - exit `139`,
+    - stderr contains `[LLVM_SETUP] generator flags configured`,
+    - stderr does **not** contain `[LLVM_SETUP] generate(io) start`,
+    - stderr does **not** contain `[LLVM_SETUP] generate(string) start`.
+- Verification:
+  - stage2 (`/tmp/stage2_rel_025b7326`) -> reproduced.
+  - stage1 control (`/tmp/stage1_rel_025b7326`) -> not reproduced.
+
+### LLDB localization for this boundary
+- On `/tmp/stage2_rel_025b7326`:
+  - EXC_BAD_ACCESS observed with top frame in `Crystal::System::File.open_flag(String)` and invalid address (`0x12`).
+- On `/tmp/stage2_dbg_025b7326` with conditional breakpoint in
+  `Crystal$CCSystem$CCFile$Dopen_flag$$String` (`$x0 < 4096`):
+  - captured path includes:
+    - `File$Dnew_internal$$...`
+    - `File$Dnew$$...`
+    - `File$Dnew_internal$arity6`
+    - `CrystalV2::Compiler::CLI#compile`.
+
+### Refuted local experiment (reverted)
+- Tried replacing `File.open(ll_file, "w") { ... }` with explicit
+  `File.new(...6 args...)` + `ensure close` in LLVM IO path.
+- Outcome:
+  - no stability gain (`stage2 -> stage3` still fails `Index out of bounds`);
+  - major perf regression:
+    - stage1 rebuild: `real 424.88`,
+    - stage2 rebuild: `real 442.02` (vs previous `318.47` baseline),
+    - LLVM counters shifted to `total MIR functions: 63637`, `RTA kept: 33124`.
+- Decision:
+  - experiment rejected and reverted.
+
+### Additional consistency check
+- Clean worktree from pure `HEAD` (`025b7326`) currently fails stage1 build due
+  constructor arity mismatch:
+  - call site in `src/compiler/cli.cr` passes 5 args to `HIR::AstToHir.new`,
+  - clean `src/compiler/hir/ast_to_hir.cr` overload accepts up to 4 args.
+  - This confirms current working bootstrap relies on local dirty `ast_to_hir` layer.
+
 ## 2026-03-04: Clean-vs-dirty isolation + new macro-register oracle
 
 ### Clean worktree isolation (HEAD `77233c6a`, no local dirty edits)

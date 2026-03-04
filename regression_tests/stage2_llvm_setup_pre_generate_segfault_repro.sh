@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ $# -lt 1 ]]; then
+  echo "Usage: $0 <stage2_compiler>" >&2
+  exit 2
+fi
+
+COMPILER="$1"
+TMP_DIR="$(mktemp -d /tmp/stage2_llvm_setup_pre_generate.XXXXXX)"
+SRC="$TMP_DIR/repro.cr"
+BIN="$TMP_DIR/repro.bin"
+OUT="$TMP_DIR/out.txt"
+ERR="$TMP_DIR/err.txt"
+
+cat >"$SRC" <<'CR'
+macro x
+end
+CR
+
+set +e
+STAGE2_DEBUG=1 CRYSTAL_V2_MIR_SETUP_TRACE=1 CRYSTAL_V2_LLVM_SETUP_TRACE=1 \
+  "$COMPILER" "$SRC" --no-prelude --no-link -o "$BIN" >"$OUT" 2>"$ERR"
+status=$?
+set -e
+
+if [[ $status -eq 139 ]] && \
+   grep -q "\\[LLVM_SETUP\\] generator flags configured" "$ERR" && \
+   ! grep -q "\\[LLVM_SETUP\\] generate(io) start" "$ERR" && \
+   ! grep -q "\\[LLVM_SETUP\\] generate(string) start" "$ERR"; then
+  echo "reproduced: stage2 segfaults after LLVM setup and before IR generation"
+  echo "compiler: $COMPILER"
+  echo "status: $status"
+  echo "tmp_dir: $TMP_DIR"
+  exit 0
+fi
+
+echo "not reproduced"
+echo "compiler: $COMPILER"
+echo "status: $status"
+echo "tmp_dir: $TMP_DIR"
+echo "--- stderr ---"
+tail -n 200 "$ERR"
+echo "--- stdout ---"
+tail -n 120 "$OUT"
+exit 1
