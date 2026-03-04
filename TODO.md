@@ -43,6 +43,30 @@
   - workaround rejected and local lexer edit reverted.
   - keep LLDB stack evidence; continue root-cause work in `scan_heredoc` and adjacent lexer state handling.
 
+### Refuted follow-up: minimal `bytes_range` substitution in `scan_heredoc`
+- Attempted narrower patch (local only, reverted):
+  - replaced only
+    - `String.new(@rope.slice(delimiter_start...delimiter_end))`
+    - with `String.new(bytes_range(delimiter_start, delimiter_end))`
+  - in both quoted and unquoted delimiter branches.
+- Why tried:
+  - preserve lexer behavior while eliminating Range-based slice call highlighted by LLDB.
+- Evidence on `/tmp/stage2_rel_heredoc_bytesrange_fix`:
+  - build command:
+    - `CRYSTAL_V2_PIPELINE_CACHE=0 /usr/bin/time -p scripts/build_stage2_release.sh /tmp/stage1_rel_c5f5278f /tmp/stage2_rel_heredoc_bytesrange_fix`
+    - `real 382.28`.
+  - stability:
+    - `stage2_parse_prelude_nocodegen_crash_repro` -> reproduced (`status=139`).
+    - `stage2_macro_parse_index_oob_repro` -> reproduced (`status=139`).
+    - `stage2_macro_record_heredoc_index_oob_repro` -> reproduced (`status=1`).
+    - `stage2_exprid_arena_oob_repro` -> reproduced as segfault (`status=139`).
+    - `stage_stats_output_repro` -> segfault in both `-s` and `-s --verbose` runs.
+  - stage2 -> stage3:
+    - `CRYSTAL_V2_PIPELINE_CACHE=0 /usr/bin/time -p scripts/build_stage2_release.sh /tmp/stage2_rel_heredoc_bytesrange_fix /tmp/stage3_rel_from_heredoc_bytesrange_fix`
+    - immediate segfault (`status=139`, `real 0.05`).
+- Decision:
+  - no stabilization gain; local `bytes_range` substitution reverted.
+
 ## 2026-03-04: Fresh bootstrap snapshot after per-stage stats feature (stage2 still unstable)
 
 ### Release bootstrap timings (current `HEAD` = `c5f5278f`)
