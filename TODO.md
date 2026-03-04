@@ -1,5 +1,62 @@
 # Crystal v2 — Active Work (codegen branch)
 
+## 2026-03-04: Stage1 File.open runtime crash fixed (virtual return + File allocator override)
+
+### What was fixed
+- Root-cause chain for stage1 runtime segfault (`File.open(path, "w")`):
+  1. Virtual call return type for `Crystal::EventLoop#open(...)` stayed `Void` for abstract-base dispatch, so `case ... in Tuple ...` lowering in `Crystal::System::File.open` degraded to `Nil`/broken unions.
+  2. `File.new(path, fd, mode, ...)` could resolve to untyped wrapper `def self.new(...)` and then wrong `new_internal` path, reinterpreting `fd` as mode string (`open_flag` got invalid pointer).
+- Implemented in `src/compiler/hir/ast_to_hir.cr`:
+  - added virtual return-type fallback for class virtual dispatch:
+    - infer return from concrete subclass targets (`collect_subclasses_cached` + typed lookup),
+    - apply when `call_virtual` and inferred return was `Void`.
+  - allowed allocator overload generation for constructor-shaped `File.new(path, fd, ...)` calls:
+    - bypass untyped `def self.new(...)` wrapper in this shape,
+    - generate typed allocator path that calls `initialize(path, fd, ...)` directly.
+
+### Regression coverage added
+- Added `regression_tests/file_open_block_write.cr`:
+  - direct runtime check for `File.open(path, "w") { ... }`,
+  - marker: `file_open_block_ok`.
+
+### Verification
+- Stage1 debug build:
+  - `/usr/bin/time -p scripts/build_stage1_original_debug.sh /tmp/stage1_dbg_virtual_return_file_ctor_fix --error-trace`
+  - `real 8.28`.
+- Stage1 release build:
+  - `/usr/bin/time -p scripts/build_stage1_original_release.sh /tmp/stage1_rel_virtual_return_file_ctor_fix --error-trace`
+  - `real 412.04`.
+- Former crash oracle now does **not** reproduce:
+  - `bash regression_tests/stage1_file_open_write_segfault_repro.sh /tmp/stage1_rel_virtual_return_file_ctor_fix`
+  - compile `0`, runtime `0`, prints `done`.
+- Full stage1 regression suite (with new `.cr` test):
+  - `/usr/bin/time -p bash regression_tests/run_all.sh /tmp/stage1_rel_virtual_return_file_ctor_fix`
+  - `65 passed, 0 failed`, `real 57.25`.
+
+### Bootstrap snapshot after fix
+- Stage2 from fixed stage1:
+  - `CRYSTAL_V2_PIPELINE_CACHE=0 /usr/bin/time -p scripts/build_stage2_release.sh /tmp/stage1_rel_virtual_return_file_ctor_fix /tmp/stage2_rel_virtual_return_file_ctor_fix`
+  - `real 411.41`.
+  - LLVM counters: `total MIR functions: 63598`, `RTA kept: 30885`.
+- Stage2 -> stage3:
+  - `CRYSTAL_V2_PIPELINE_CACHE=0 /usr/bin/time -p scripts/build_stage2_release.sh /tmp/stage2_rel_virtual_return_file_ctor_fix /tmp/stage3_rel_from_stage2_virtual_return_file_ctor_fix`
+  - still fails fast: `error: Index out of bounds` (`real 0.75`).
+- Stage1 vs Stage2 delta for this run:
+  - stage2 faster by `0.63s` (`412.04 -> 411.41`, ~`1.00x`).
+
+### Stage2 stability status after fix (unchanged overall)
+- Reproduced:
+  - `stage2_macro_parse_index_oob_repro` (`status=139`),
+  - `stage2_exprid_arena_oob_repro` (`status=1`),
+  - `stage2_macro_record_heredoc_index_oob_repro` (`status=1`),
+  - `stage2_parse_prelude_nocodegen_crash_repro` (`status=139`),
+  - `stage2_parse_prelude_nocodegen_repro` (unexpected crash, `status=139`),
+  - `stage2_mir_setup_post_lowering_segfault_repro` (`status=139`),
+  - `stage_stats_output_repro` still fails on stage2.
+- Boundary drift:
+  - `stage2_llvm_setup_pre_generate_segfault_repro` is **not reproduced** with old marker set:
+    - now reaches `[LLVM_SETUP] generate(io) start` before segfault.
+
 ## 2026-03-04: Fresh dirty-workspace baseline + LLVM pre-generate crash oracle
 
 ### Bootstrap snapshot (dirty workspace, current local state)

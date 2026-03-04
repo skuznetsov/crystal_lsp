@@ -2435,6 +2435,8 @@ module Crystal::HIR
 
     # Source text per arena (used to reconstruct macro literal text from spans).
     @sources_by_arena : Hash(CrystalV2::Compiler::Frontend::ArenaLike, String)
+    # Stable arena order for packed main_expr refs (arena_index -> arena).
+    @main_arenas : Array(CrystalV2::Compiler::Frontend::ArenaLike)
     # Cached line counts per arena source (used for span validation).
     @line_counts_by_arena : Hash(CrystalV2::Compiler::Frontend::ArenaLike, Int32)
     # Source path per arena (used for diagnostics).
@@ -2467,6 +2469,7 @@ module Crystal::HIR
       module_name : String = "main",
       sources_by_arena : Hash(CrystalV2::Compiler::Frontend::ArenaLike, String)? = nil,
       paths_by_arena : Hash(CrystalV2::Compiler::Frontend::ArenaLike, String)? = nil,
+      main_arenas : Array(CrystalV2::Compiler::Frontend::ArenaLike)? = nil,
     )
       function_type_capacity : Int32 = ENV["CRYSTAL_V2_FUNCTION_TYPE_CAPACITY"]?.try(&.to_i?) || 131072
       function_type_capacity = 8192 if function_type_capacity < 8192
@@ -2658,6 +2661,11 @@ module Crystal::HIR
     @block_lowering_cache = {} of BlockLoweringKey => BlockId
     @block_lowering_in_progress = {} of BlockLoweringKey => BlockId
       @sources_by_arena = sources_by_arena || {} of CrystalV2::Compiler::Frontend::ArenaLike => String
+      @main_arenas = [] of CrystalV2::Compiler::Frontend::ArenaLike
+      if configured_main_arenas = main_arenas
+        configured_main_arenas.each { |arena| @main_arenas << arena }
+      end
+      @main_arenas << @arena if @main_arenas.empty?
       @line_counts_by_arena = {} of CrystalV2::Compiler::Frontend::ArenaLike => Int32
       @paths_by_arena = paths_by_arena || {} of CrystalV2::Compiler::Frontend::ArenaLike => String
       @extra_sources_by_arena = {} of CrystalV2::Compiler::Frontend::ArenaLike => Array(String)
@@ -3340,6 +3348,58 @@ module Crystal::HIR
     # Class hierarchy is fixed after registration, so results are stable.
     private def collect_subclasses_cached(parent : String) : Array(String)
       @subclasses_cache[parent] ||= collect_subclasses([parent])
+    end
+
+    # Virtual calls on abstract base classes can have no direct function signature
+    # entry (only concrete subclass implementations are registered). Infer a stable
+    # return type by inspecting concrete targets for the same method + arity.
+    private def infer_virtual_return_type_from_class_targets(
+      parent_name : String,
+      method_name : String,
+      arg_types : Array(TypeRef),
+      has_block_call : Bool,
+      has_splat : Bool,
+    ) : TypeRef
+      owners = [parent_name] + collect_subclasses_cached(parent_name)
+      candidates = [] of TypeRef
+
+      owners.each do |owner|
+        owner_base = "#{owner}##{method_name}"
+        resolved_name = if resolved = lookup_function_def_for_call(owner_base, arg_types.size, has_block_call, arg_types, has_splat)
+                          resolved[0]
+                        else
+                          mangle_function_name(owner_base, arg_types, has_block_call)
+                        end
+
+        candidate = get_function_return_type(resolved_name)
+        if candidate == TypeRef::VOID && resolved_name != owner_base
+          candidate = get_function_return_type(owner_base)
+        end
+
+        if candidate == TypeRef::VOID || candidate == TypeRef::NIL
+          owner_ref = type_ref_for_name(owner)
+          if inferred = resolve_return_type_from_def(resolved_name, owner_base, owner_ref == TypeRef::VOID ? nil : owner_ref)
+            if inferred != TypeRef::VOID && inferred != TypeRef::NIL
+              candidate = inferred
+            end
+          end
+        end
+
+        next if candidate == TypeRef::VOID || candidate == TypeRef::NIL
+        candidates << candidate
+      end
+
+      return TypeRef::VOID if candidates.empty?
+
+      unique_candidates = candidates.uniq
+      return unique_candidates.first if unique_candidates.size == 1
+
+      if union_ref = find_covering_union_type(unique_candidates)
+        return union_ref
+      end
+
+      union_name = unique_candidates.map { |t| get_type_name_from_ref(t) }.uniq.join(" | ")
+      create_union_type(union_name)
     end
 
     # Compute a fast hash of arg types for virtual dispatch dedup keys.
@@ -17695,6 +17755,23 @@ module Crystal::HIR
           end
         end
 
+        # File.new has broad untyped wrapper overloads that forward to
+        # File.new_internal(path, mode, ...). For constructor-shaped calls like
+        # File.new(path, fd, mode, ...) that wrapper is the wrong target and can
+        # reinterpret fd as a mode String. Allow allocator overload generation so
+        # we can call initialize(path, fd, mode, ...) directly.
+        if !allow_allocator_overload && class_name == "File" && base_name.ends_with?(".new")
+          non_void_call = call_arg_types.reject { |t| t == TypeRef::VOID }
+          if non_void_call.size >= 2 && non_void_call[0] == TypeRef::STRING
+            second = non_void_call[1]
+            second_desc = @module.get_type_descriptor(second)
+            second_name = second_desc ? second_desc.name : get_type_name_from_ref(second)
+            if second == TypeRef::INT32 || second_name == "File::FileDescriptor::Handle"
+              allow_allocator_overload = true
+            end
+          end
+        end
+
         return unless allow_allocator_overload
       end
 
@@ -26573,6 +26650,14 @@ module Crystal::HIR
         resolved = resolve_path_string_in_context(name)
         return resolved if constant_name_exists?(resolved)
         return name if constant_name_exists?(name)
+        if !name.starts_with?("Crystal::")
+          crystal_name = "Crystal::#{name}"
+          return crystal_name if constant_name_exists?(crystal_name)
+        end
+        if name.starts_with?("::")
+          root_name = name.size > 2 ? name[2..] : ""
+          return root_name if !root_name.empty? && constant_name_exists?(root_name)
+        end
         return nil
       end
 
@@ -31967,7 +32052,7 @@ module Crystal::HIR
 
     # Lower top-level expressions into a synthetic main function
     # Note: Named __crystal_main because stdlib's fun main calls LibCrystalMain.__crystal_main
-    def lower_main(main_exprs : Array(UInt64), main_arenas : Array(CrystalV2::Compiler::Frontend::ArenaLike)) : Crystal::HIR::Function
+    def lower_main(main_exprs : Array(UInt64)) : Crystal::HIR::Function
       # Create __crystal_main function with void return type
       # Signature: fun __crystal_main(argc : Int32, argv : UInt8**)
       func = @module.create_function("__crystal_main", TypeRef::VOID)
@@ -32140,11 +32225,24 @@ module Crystal::HIR
       if debug_main
         STDERR.puts "[MAIN] lower_main exprs=#{main_exprs.size}"
       end
+      ordered_arenas = @main_arenas
+      if ordered_arenas.empty?
+        ordered_arenas = [@arena] of CrystalV2::Compiler::Frontend::ArenaLike
+      end
       main_exprs.each_with_index do |packed_expr_ref, idx|
         arena_index = (packed_expr_ref >> 32).to_i32
         expr_index = (packed_expr_ref & 0xFFFF_FFFF_u64).to_i32
         expr_id = CrystalV2::Compiler::Frontend::ExprId.new(expr_index)
-        arena = main_arenas[arena_index]
+        arena = if arena_index >= 0 && arena_index < ordered_arenas.size
+                  ordered_arenas[arena_index]
+                else
+                  @arena
+                end
+        if expr_id.index < 0 || expr_id.index >= arena.size
+          if recovered = arena_for_expr?(expr_id)
+            arena = recovered
+          end
+        end
         # Switch arena context for this expression
         @arena = arena
         if debug_main && !slow_only
@@ -32991,7 +33089,8 @@ module Crystal::HIR
           STDERR.puts "[EXPR_OOB] expr=#{expr_id.index} arena=#{arena.class}:#{arena.size} func=#{ctx.function.name} current=#{@current_class || ""} method=#{@current_method || ""} inline=#{stack}#{block_debug}"
           caller.first(10).each { |line| STDERR.puts "  #{line}" }
         end
-        raise "ExprId out of bounds: #{expr_id.index} (arena=#{arena.class}:#{arena.size})"
+        inline_count = @inline_arenas.try(&.size) || 0
+        raise "ExprId out of bounds: #{expr_id.index} (arena=#{arena.class}:#{arena.size}, current=#{@arena.class}:#{@arena.size}, sources=#{@sources_by_arena.size}, inline_arenas=#{inline_count})"
       end
       if arena == @arena
         node = @arena[expr_id]
@@ -37296,7 +37395,7 @@ module Crystal::HIR
 
       # Fallback: treat as constant or module access (for future expansion)
       # For now, just return 0
-      if full_path.includes?("Kqueue") || full_path.includes?("EventLoop")
+      if env_has?("DEBUG_PATH_FALLBACK") && (full_path.includes?("Kqueue") || full_path.includes?("EventLoop"))
         STDERR.puts "[PATH_FALLBACK] full_path=#{full_path} raw_path=#{raw_path} exists=#{type_name_exists?(full_path)} class_info=#{@class_info.has_key?(full_path)} func=#{ctx.function.name} class=#{@current_class} method=#{@current_method}"
       end
       lit = Literal.new(ctx.next_id, TypeRef::INT32, 0_i64)
@@ -51276,6 +51375,78 @@ module Crystal::HIR
       # that can't resolve for generic Tuple types. This mirrors the IndexNode
       # handler at lower_index but for CallNode AST paths (e.g. macro-expanded
       # `self[0]` parsed as a method call).
+      #
+      # Slice element access in CallNode path:
+      # force Slice#[](Int32) for non-Range args to avoid misresolving to
+      # Slice#[](Range), which lowers `idx` via inttoptr and corrupts ABI
+      # (stage2 parser crash in `token_slice[0]`).
+      if receiver_id && method_name == "[]" && args.size == 1
+        slice_receiver_id = receiver_id
+        slice_receiver_type = ctx.type_of(slice_receiver_id)
+        slice_desc = @module.get_type_descriptor(slice_receiver_type)
+        if slice_desc && slice_desc.kind == TypeKind::Union
+          if unwrapped = lower_not_nil_intrinsic(ctx, slice_receiver_id, slice_receiver_type)
+            unwrapped_type = ctx.type_of(unwrapped)
+            if unwrapped_type != slice_receiver_type
+              slice_receiver_id = unwrapped
+              slice_receiver_type = unwrapped_type
+              slice_desc = @module.get_type_descriptor(slice_receiver_type)
+            end
+          end
+        end
+        slice_owner_name = slice_desc.try(&.name) || get_type_name_from_ref(slice_receiver_type)
+        if slice_owner_name == "Bytes"
+          slice_owner_name = "Slice(UInt8)"
+        end
+        if slice_owner_name.starts_with?("Slice(") || slice_owner_name == "Slice"
+          range_arg = false
+          if arg_expr_id = call_args.first?
+            arg_node = call_arena[arg_expr_id]
+            range_arg = arg_node.is_a?(CrystalV2::Compiler::Frontend::RangeNode)
+          end
+          unless range_arg
+            elem_name = "UInt8"
+            if slice_owner_name.starts_with?("Slice(")
+              inner = slice_owner_name[6, slice_owner_name.size - 7]
+              elem_name = inner unless inner.empty?
+            end
+            element_type = type_ref_for_name(elem_name)
+            element_type = TypeRef::UINT8 if element_type == TypeRef::VOID
+            slice_class = slice_owner_name.starts_with?("Slice(") ? slice_owner_name : "Slice(#{elem_name})"
+
+            index_arg_id = args[0]
+            index_arg_type = ctx.type_of(index_arg_id)
+            if index_arg_type != TypeRef::INT32
+              cast_index = Cast.new(ctx.next_id, TypeRef::INT32, index_arg_id, TypeRef::INT32)
+              ctx.emit(cast_index)
+              ctx.register_type(cast_index.id, TypeRef::INT32)
+              index_arg_id = cast_index.id
+            end
+
+            forced_arg_types = [TypeRef::INT32]
+            resolved_method = resolve_method_call(ctx, slice_receiver_id, "[]", forced_arg_types, false)
+            base_method_name = "#{slice_class}#[]"
+            primary_mangled_name = mangle_function_name(base_method_name, forced_arg_types)
+            remember_callsite_arg_types(primary_mangled_name, forced_arg_types)
+            if resolved_method != primary_mangled_name
+              remember_callsite_arg_types(resolved_method, forced_arg_types)
+            end
+            lower_function_if_needed(primary_mangled_name)
+            if resolved_method != primary_mangled_name
+              lower_function_if_needed(resolved_method)
+            end
+            call_target = prefer_primary_call_target(resolved_method, primary_mangled_name, forced_arg_types)
+            if call_target.ends_with?("$Range") || call_target.includes?("$Range$")
+              call_target = primary_mangled_name
+            end
+            call = Call.new(ctx.next_id, element_type, slice_receiver_id, call_target, [index_arg_id])
+            ctx.emit(call)
+            ctx.register_type(call.id, element_type)
+            return call.id
+          end
+        end
+      end
+
       if receiver_id && (method_name == "[]" || method_name == "at") && args.size == 1
         receiver_type = ctx.type_of(receiver_id)
         recv_type_desc = @module.get_type_descriptor(receiver_type)
@@ -52073,6 +52244,20 @@ module Crystal::HIR
                   lower_function_if_needed(base_name) unless candidate == base_name
                 end
               end
+            end
+          end
+        end
+      end
+
+      if return_type == TypeRef::VOID && call_virtual && receiver_id
+        if type_desc = @module.get_type_descriptor(ctx.type_of(receiver_id))
+          if type_desc.kind == TypeKind::Class
+            inferred_virtual_return = infer_virtual_return_type_from_class_targets(
+              type_desc.name, method_name, arg_types, has_block_call, has_splat
+            )
+            if inferred_virtual_return != TypeRef::VOID
+              return_type = inferred_virtual_return
+              set_function_type_entry(mangled_method_name, inferred_virtual_return)
             end
           end
         end
@@ -59769,6 +59954,10 @@ module Crystal::HIR
                        else
                          false
                        end
+      slice_owner_name = type_desc.try(&.name) || get_type_name_from_ref(object_type)
+      if slice_owner_name == "Bytes"
+        slice_owner_name = "Slice(UInt8)"
+      end
       named_tuple_object_id = object_id
       named_tuple_object_type = object_type
       named_tuple_desc = type_desc
@@ -59954,19 +60143,28 @@ module Crystal::HIR
         ctx.emit(ext_call)
         ctx.register_type(ext_call.id, TypeRef::STRING)
         return ext_call.id
-      elsif type_desc && (type_desc.name.starts_with?("Slice(") || type_desc.name == "Slice" ||
-            type_desc.name == "Bytes") && index_ids.size == 1 && !index_is_range
+      elsif (slice_owner_name.starts_with?("Slice(") || slice_owner_name == "Slice") && index_ids.size == 1 && !index_is_range
         # Slice element access: slice[i] → call Slice#[](Int32) explicitly
         # Without this, VOID arg types cause method resolution to pick the Range
         # overload, passing the raw integer as a Range pointer (stage2 crash).
         elem_name = "UInt8"
-        if type_desc.name.starts_with?("Slice(")
-          inner = type_desc.name[6, type_desc.name.size - 7]
+        if slice_owner_name.starts_with?("Slice(")
+          inner = slice_owner_name[6, slice_owner_name.size - 7]
           elem_name = inner unless inner.empty?
         end
         element_type = type_ref_for_name(elem_name)
         element_type = TypeRef::UINT8 if element_type == TypeRef::VOID
-        slice_class = type_desc.name.starts_with?("Slice(") ? type_desc.name : "Slice(#{elem_name})"
+        slice_class = slice_owner_name.starts_with?("Slice(") ? slice_owner_name : "Slice(#{elem_name})"
+        call_args = index_ids
+        index_arg_id = index_ids.first
+        index_arg_type = ctx.type_of(index_arg_id)
+        if index_arg_type != TypeRef::INT32
+          cast_index = Cast.new(ctx.next_id, TypeRef::INT32, index_arg_id, TypeRef::INT32)
+          ctx.emit(cast_index)
+          ctx.register_type(cast_index.id, TypeRef::INT32)
+          call_args = [cast_index.id]
+        end
+
         forced_arg_types = [TypeRef::INT32]
         method_name = resolve_method_call(ctx, object_id, "[]", forced_arg_types, false)
         base_method_name = "#{slice_class}#[]"
@@ -59980,8 +60178,11 @@ module Crystal::HIR
           lower_function_if_needed(method_name)
         end
         call_target = prefer_primary_call_target(method_name, primary_mangled_name, forced_arg_types)
+        if call_target.ends_with?("$Range") || call_target.includes?("$Range$")
+          call_target = primary_mangled_name
+        end
         return_type = element_type
-        call = Call.new(ctx.next_id, return_type, object_id, call_target, index_ids)
+        call = Call.new(ctx.next_id, return_type, object_id, call_target, call_args)
         ctx.emit(call)
         ctx.register_type(call.id, return_type)
         call.id
