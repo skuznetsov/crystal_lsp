@@ -1,5 +1,49 @@
 # Crystal v2 — Active Work (codegen branch)
 
+## 2026-03-04: Clean-vs-dirty isolation + new macro-register oracle
+
+### Clean worktree isolation (HEAD `77233c6a`, no local dirty edits)
+- Built clean stage2 from known stage1:
+  - `CRYSTAL_V2_PIPELINE_CACHE=0 /usr/bin/time -p scripts/build_stage2_release.sh /tmp/stage1_rel_c5f5278f /tmp/stage2_rel_clean_head_77233c6a`
+  - `real 300.89`.
+- Critical delta vs dirty workspace stage2 builds (`~382-383s`):
+  - clean LLVM count: `total MIR functions: 53559`, `RTA kept: 30613`,
+  - dirty LLVM count: `total MIR functions: ~63650`, `RTA kept: ~30932`.
+- Conclusion:
+  - local dirty edits materially alter pipeline shape/perf and crash profile;
+  - stage2 instability exists even on clean HEAD, but with different dominant signatures.
+
+### Clean-stage2 oracle snapshot (`/tmp/stage2_rel_clean_head_77233c6a`)
+- `stage2_macro_record_heredoc_index_oob_repro` -> reproduced (`status=1`, `Index out of bounds`).
+- `stage2_exprid_arena_oob_repro` -> reproduced (`status=1`, `Index out of bounds`).
+- `stage2_macro_parse_index_oob_repro` -> reproduced (`status=139`).
+- `stage2_parse_prelude_nocodegen_crash_repro` -> reproduced (`status=139`).
+- `stage2_mir_setup_post_lowering_segfault_repro` -> **not reproduced** for old marker:
+  - still segfaults, but now dies earlier at macro registration (before MIR setup trace markers).
+
+### New deterministic oracle added
+- `regression_tests/stage2_macro_register_segfault_repro.sh`
+  - minimal repro: `macro x; end`
+  - runs compiler with `STAGE2_DEBUG=1 --no-prelude --no-link`
+  - reproduction condition:
+    - exit `139`,
+    - stderr contains `[STAGE2_DEBUG] macro register idx=1/1`,
+    - stderr does **not** contain `[STAGE2_DEBUG] macro register done`.
+- Verification:
+  - stage2 clean (`/tmp/stage2_rel_clean_head_77233c6a`) -> reproduced.
+  - stage1 control (`/tmp/stage1_rel_c5f5278f`) -> not reproduced (`status=0`, reaches `macro register done` and LLVM).
+
+### Refuted clean experiments on macro storage path (not committed)
+- `Hash(String, {MacroDefNode, ArenaLike})` -> `Hash(String, MacroDefEntry)`:
+  - build `real 304.23`; no oracle improvement.
+  - crash top-frame remained in macro registration, now `Hash(String, MacroDefEntry)#upsert`.
+- Hash-free linear table for macro defs (`Array({String, MacroDefEntry})`):
+  - build `real 291.16`; no oracle improvement.
+  - crash moved to `set_macro_def_entry` (`SIGSEGV at 0x4`) and, with macro-def write skipped,
+    to `extract_macro_params` via hash lookup on arena-keyed source map.
+- Decision:
+  - both experiments rejected; no code from these branches carried into main workspace.
+
 ## 2026-03-04: Refuted heredoc guard attempts (rescue fallback + safe compare)
 
 ### Attempt A (local, reverted): delimiter rescue fallback in `scan_heredoc`
