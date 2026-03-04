@@ -1502,11 +1502,15 @@ module CrystalV2
         # Step 5: Generate LLVM IR
         log(options, out_io, "\n[5/6] Generating LLVM IR...")
         llvm_start = Time.instant
+        llvm_setup_trace = ENV.has_key?("CRYSTAL_V2_LLVM_SETUP_TRACE") || ENV.has_key?("CRYSTAL2_LLVM_SETUP_TRACE")
+        STDERR.puts "[LLVM_SETUP] before generator.new" if llvm_setup_trace
         llvm_gen = MIR::LLVMIRGenerator.new(mir_module)
+        STDERR.puts "[LLVM_SETUP] after generator.new" if llvm_setup_trace
         llvm_gen.emit_type_metadata = options.emit_type_metadata
         llvm_gen.progress = options.progress
         llvm_gen.reachability = true  # Only emit reachable functions from main
         llvm_gen.no_prelude = options.no_prelude
+        STDERR.puts "[LLVM_SETUP] generator flags configured" if llvm_setup_trace
 
         # Pass constant literal values for global initialization (e.g., Math::PI)
         const_init = {} of String => (Float64 | Int64)
@@ -1531,13 +1535,17 @@ module CrystalV2
         llvm_ir = ""
         llvm_ir_bytes = 0_i64
         if options.emit_llvm
+          STDERR.puts "[LLVM_SETUP] generate(string) start" if llvm_setup_trace
           llvm_ir = llvm_gen.generate
+          STDERR.puts "[LLVM_SETUP] generate(string) done bytes=#{llvm_ir.size}" if llvm_setup_trace
           llvm_ir_bytes = llvm_ir.size.to_i64
           log(options, out_io, "  LLVM IR size: #{llvm_ir_bytes} bytes")
           File.write(ll_file, llvm_ir)
         else
           File.open(ll_file, "w") do |io|
+            STDERR.puts "[LLVM_SETUP] generate(io) start" if llvm_setup_trace
             llvm_gen.generate(io)
+            STDERR.puts "[LLVM_SETUP] generate(io) done" if llvm_setup_trace
           end
           llvm_ir_bytes = File.size(ll_file)
           log(options, out_io, "  LLVM IR size: #{llvm_ir_bytes} bytes")

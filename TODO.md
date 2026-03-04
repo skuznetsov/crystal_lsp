@@ -1,5 +1,63 @@
 # Crystal v2 — Active Work (codegen branch)
 
+## 2026-03-04: Stage2 crash boundary pushed to LLVM runtime declarations (still open)
+
+### Objective in this pass
+- Continue stage2 stabilization after restoring stage1 correctness.
+- Keep deterministic oracles:
+  - `regression_tests/stage2_macro_parse_index_oob_repro.sh`
+  - `regression_tests/stage2_exprid_arena_oob_repro.sh`
+- Move crash point deeper with minimal, reversible changes.
+
+### Key compiler changes in this pass
+- `src/compiler/mir/mir.cr`
+  - `TypeRegistry`: removed hash-based `@type_map/@name_map` lookups, switched to `@types`-based lookup (`get`, `get_by_name`) to avoid stage2 `Hash(UInt32, Type)#upsert` crash path.
+  - `Function`: explicit ivar typing for core fields (`@entry_block`, etc.) + explicit init defaults for `@source_location/@slab_frame`.
+- `src/compiler/mir/hir_to_mir.cr`
+  - Per-function lowering cache reinit (replace `clear` mutators with fresh containers).
+  - Replaced block mapping hash with dense array map (`Array(BlockId?)`) to avoid stage2 hash path for block-id keys.
+  - Forced builder current block to known entry id (`0_u32`) in lowering setup.
+  - `order_blocks_for`: switched visited keying to `Int32`.
+  - Added env-gated MIR lowering trace (`CRYSTAL_V2_MIR_LOWER_TRACE`) with step checkpoints.
+- `src/compiler/cli.cr`
+  - Added env-gated LLVM setup trace (`CRYSTAL_V2_LLVM_SETUP_TRACE`) around `LLVMIRGenerator` init/generate calls.
+- `src/compiler/mir/llvm_backend.cr`
+  - Added env-gated checkpoints in `emit_runtime_declarations` (`CRYSTAL_V2_RUNTIME_DECL_TRACE`).
+  - Removed redundant pcre2 insertion into `@emitted_functions` at runtime-decl stage (allowlist already covers these names).
+
+### Evidence: correctness and timing
+- Stage1 regression safety on current tree:
+  - `bash regression_tests/run_all.sh /tmp/stage1_probe_current_iter`
+  - `64 passed, 0 failed`.
+- Release timing pair (current stabilization branch snapshot):
+  - Stage1: `/usr/bin/time -p crystal build src/crystal_v2.cr --release -o /tmp/stage1_rel_stage2pivot --error-trace` -> `real 411.09`.
+  - Stage2: `CRYSTAL_V2_PIPELINE_CACHE=0 /usr/bin/time -p /tmp/stage1_rel_stage2pivot src/crystal_v2.cr --release -o /tmp/stage2_rel_stage2pivot` -> `real 386.37`.
+  - Delta: `24.72s` faster (`~6.01%`, `~1.06x`).
+
+### Stage2 oracle status (still failing)
+- `bash regression_tests/stage2_macro_parse_index_oob_repro.sh /tmp/stage2_dbg_trace_rtdecl3`
+  - reproduced (`status=139`, segfault).
+- `bash regression_tests/stage2_exprid_arena_oob_repro.sh /tmp/stage2_dbg_trace_rtdecl3`
+  - reproduced (`status=1`, `Index out of bounds`).
+
+### New localization evidence (important)
+- With
+  - `CRYSTAL_V2_LLVM_SETUP_TRACE=1`
+  - `CRYSTAL_V2_RUNTIME_DECL_TRACE=1`
+  - `--emit llvm-ir --progress --verbose`
+- macro repro now consistently reaches:
+  - `[LLVM_SETUP] generate(string) start`
+  - `[LLVM] emit_header...`
+  - `[LLVM] emit_type_definitions...`
+  - `[LLVM] emit_runtime_declarations...`
+  - `[RT_DECL] ... after large libc decl block`
+- and then segfaults before returning from `emit_runtime_declarations`.
+
+### Current verdict
+- Stage1 baseline remains healthy (`64/64`).
+- Stage2 crash boundary has moved from early MIR state/hash instability to late `emit_runtime_declarations` path.
+- Stage2 remains unstable; next step is to bisect the remaining tail of `emit_runtime_declarations` and isolate the specific declaration/helper block causing the segfault.
+
 ## 2026-03-04: Stage1 stability rollback for MIR hardening commit + fresh release pair on stable baseline
 
 ### Objective in this pass

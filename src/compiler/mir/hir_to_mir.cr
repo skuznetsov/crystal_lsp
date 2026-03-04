@@ -31,7 +31,7 @@ module Crystal
     @hir_value_types : Hash(HIR::ValueId, HIR::TypeRef)
 
     # Mapping from HIR BlockId to MIR BlockId
-    @block_map : Hash(HIR::BlockId, BlockId)
+    @block_map : Array(BlockId?)
 
     # Pending phi nodes that need incoming resolution after all blocks are lowered
     @pending_phis : Array(Tuple(Phi, HIR::Phi))
@@ -81,7 +81,7 @@ module Crystal
       @mir_module = Crystal::MIR::Module.new(@hir_module.name)
       @value_map = {} of HIR::ValueId => ValueId
       @hir_value_types = {} of HIR::ValueId => HIR::TypeRef
-      @block_map = {} of HIR::BlockId => BlockId
+      @block_map = [] of BlockId?
       @pending_phis = [] of Tuple(Phi, HIR::Phi)
       @stack_slot_values = Set(ValueId).new
       @stack_slot_types = {} of ValueId => TypeRef
@@ -92,6 +92,11 @@ module Crystal
         next unless parent
         (@class_children[parent] ||= [] of String) << name
       end
+    end
+
+    @[AlwaysInline]
+    private def mir_lower_trace? : Bool
+      ENV.has_key?("CRYSTAL_V2_MIR_LOWER_TRACE") || ENV.has_key?("CRYSTAL2_MIR_LOWER_TRACE")
     end
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -579,6 +584,9 @@ module Crystal
     # ─────────────────────────────────────────────────────────────────────────
 
     private def lower_function_body(hir_func : HIR::Function)
+      if mir_lower_trace?
+        STDERR.puts "[MIR_LOWER] function=#{hir_func.name} blocks=#{hir_func.blocks.size} params=#{hir_func.params.size}"
+      end
       # Get the pre-created function stub
       mir_func = @mir_module.get_function(hir_func.name)
       if mir_func.nil?
@@ -592,20 +600,29 @@ module Crystal
       @current_block_param_id = function_contains_yield?(hir_func) ? infer_block_param_id(hir_func) : nil
       @current_slab_frame = should_use_slab_frame?(hir_func)
       mir_func.slab_frame = @current_slab_frame
-      @value_map.clear
-      @hir_value_types.clear
-      @block_map.clear
-      @pending_phis.clear
-      @stack_slot_values.clear
-      @stack_slot_types.clear
-      @inline_struct_ptrs.clear
+      STDERR.puts "[MIR_LOWER] setup context done block_param=#{@current_block_param_id.inspect} slab=#{@current_slab_frame}" if mir_lower_trace?
+      # Stage2 has shown unstable behavior for Hash/Set#clear in self-hosted mode.
+      # Reinitialize per-function lowering maps instead of mutating in place.
+      @value_map = {} of HIR::ValueId => ValueId
+      @hir_value_types = {} of HIR::ValueId => HIR::TypeRef
+      @block_map = [] of BlockId?
+      @pending_phis = [] of Tuple(Phi, HIR::Phi)
+      @stack_slot_values = Set(ValueId).new
+      @stack_slot_types = {} of ValueId => TypeRef
+      @inline_struct_ptrs = Set(HIR::ValueId).new
+      STDERR.puts "[MIR_LOWER] caches reinitialized" if mir_lower_trace?
       @builder = Builder.new(mir_func)
+      # In MIR::Function, entry block is created first and is always 0.
+      # Setting explicitly avoids stage2 instability on entry_block getter path.
+      @builder.not_nil!.current_block = 0_u32
+      STDERR.puts "[MIR_LOWER] builder ready entry=#{mir_func.entry_block}" if mir_lower_trace?
 
       # Map HIR params to MIR params (already added in stub)
       hir_func.params.each_with_index do |param, idx|
         # MIR params are value IDs starting from 0
         @value_map[param.id] = idx.to_u32
       end
+      STDERR.puts "[MIR_LOWER] params mapped count=#{hir_func.params.size}" if mir_lower_trace?
 
       # Record HIR value types for cast lowering
       hir_func.params.each do |param|
@@ -616,27 +633,37 @@ module Crystal
           @hir_value_types[inst.id] = inst.type
         end
       end
+      STDERR.puts "[MIR_LOWER] value types indexed blocks=#{hir_func.blocks.size}" if mir_lower_trace?
 
       # Create all blocks first (for forward references)
       hir_func.blocks.each do |hir_block|
         mir_block_id = mir_func.create_block
-        @block_map[hir_block.id] = mir_block_id
+        set_block_map(hir_block.id, mir_block_id)
       end
+      STDERR.puts "[MIR_LOWER] block map created size=#{@block_map.size}" if mir_lower_trace?
 
       # Fix entry block mapping
-      @block_map[hir_func.entry_block] = mir_func.entry_block
+      STDERR.puts "[MIR_LOWER] entry map before hir=#{hir_func.entry_block} mir=#{mir_func.entry_block} size=#{@block_map.size}" if mir_lower_trace?
+      set_block_map(hir_func.entry_block, 0_u32)
+      STDERR.puts "[MIR_LOWER] entry map after size=#{@block_map.size}" if mir_lower_trace?
+      STDERR.puts "[MIR_LOWER] entry mapped entry=#{hir_func.entry_block}=>#{mir_func.entry_block}" if mir_lower_trace?
 
       # Lower each block (phi incoming resolution is deferred)
       ordered_blocks = order_blocks_for(hir_func)
+      STDERR.puts "[MIR_LOWER] ordered blocks count=#{ordered_blocks.size}" if mir_lower_trace?
       ordered_blocks.each do |hir_block|
+        STDERR.puts "[MIR_LOWER] block=#{hir_block.id} insts=#{hir_block.instructions.size} term=#{hir_block.terminator.class}" if mir_lower_trace?
         lower_block(hir_block)
       end
 
       # Now resolve all phi incoming values (after all blocks are lowered)
+      STDERR.puts "[MIR_LOWER] resolving pending phis count=#{@pending_phis.size}" if mir_lower_trace?
       resolve_pending_phis
 
       # Compute predecessors for phi resolution
+      STDERR.puts "[MIR_LOWER] compute_predecessors start" if mir_lower_trace?
       mir_func.compute_predecessors
+      STDERR.puts "[MIR_LOWER] compute_predecessors done" if mir_lower_trace?
 
       @stats.functions_lowered += 1
       @current_block_param_id = nil
@@ -683,14 +710,15 @@ module Crystal
     end
 
     private def order_blocks_for(hir_func : HIR::Function) : Array(HIR::Block)
-      visited = Set(HIR::BlockId).new
+      visited = Set(Int32).new
       ordered = [] of HIR::Block
       stack = [] of HIR::BlockId
       stack << hir_func.entry_block
 
       while block_id = stack.pop?
-        next if visited.includes?(block_id)
-        visited.add(block_id)
+        block_key = block_id.to_i32
+        next if visited.includes?(block_key)
+        visited.add(block_key)
         block = hir_func.get_block(block_id)
         ordered << block
 
@@ -701,7 +729,7 @@ module Crystal
 
       # Append unreachable blocks to keep lowering deterministic.
       hir_func.blocks.each do |block|
-        next if visited.includes?(block.id)
+        next if visited.includes?(block.id.to_i32)
         ordered << block
       end
 
@@ -4046,14 +4074,14 @@ module Crystal
     # ─────────────────────────────────────────────────────────────────────────
 
     private def mir_block_for(hir_block_id : HIR::BlockId) : BlockId
-      if mapped = @block_map[hir_block_id]?
+      if mapped = get_block_map(hir_block_id)
         return mapped
       end
 
       mir_func = @current_mir_func.not_nil!
       builder = @builder.not_nil!
       synthetic = mir_func.create_block
-      @block_map[hir_block_id] = synthetic
+      set_block_map(hir_block_id, synthetic)
 
       if ::CrystalV2::Compiler::BootstrapEnv.get?("CRYSTAL2_STAGE2_DEBUG") == "1"
         STDERR.puts "[MIR_MISSING_BLOCK] func=#{@current_lowering_func_name} hir_block=#{hir_block_id} synthetic=#{synthetic}"
@@ -4065,6 +4093,22 @@ module Crystal
       builder.current_block = saved_block
 
       synthetic
+    end
+
+    @[AlwaysInline]
+    private def set_block_map(hir_block_id : HIR::BlockId, mir_block_id : BlockId) : Nil
+      idx = hir_block_id.to_i
+      while idx >= @block_map.size
+        @block_map << nil
+      end
+      @block_map[idx] = mir_block_id
+    end
+
+    @[AlwaysInline]
+    private def get_block_map(hir_block_id : HIR::BlockId) : BlockId?
+      idx = hir_block_id.to_i
+      return nil if idx < 0 || idx >= @block_map.size
+      @block_map.unsafe_fetch(idx)
     end
 
     private def get_value(hir_id : HIR::ValueId) : ValueId

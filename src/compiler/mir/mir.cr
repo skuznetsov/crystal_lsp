@@ -193,14 +193,10 @@ module Crystal::MIR
 
   class TypeRegistry
     getter types : Array(Type)
-    @type_map : Hash(TypeId, Type)
-    @name_map : Hash(String, Type)
     @next_type_id : TypeId
 
     def initialize
       @types = [] of Type
-      @type_map = {} of TypeId => Type
-      @name_map = {} of String => Type
       @next_type_id = 100_u32  # Reserve 0-99 for primitive types
 
       # Register primitive types
@@ -228,8 +224,6 @@ module Crystal::MIR
     private def register_primitive(ref : TypeRef, kind : TypeKind, name : String, size : UInt64, alignment : UInt32)
       type = Type.new(ref.id, kind, name, size, alignment)
       @types << type
-      @type_map[ref.id] = type
-      @name_map[name] = type
     end
 
     def create_type(kind : TypeKind, name : String, size : UInt64, alignment : UInt32) : Type
@@ -237,8 +231,6 @@ module Crystal::MIR
       @next_type_id += 1
       type = Type.new(id, kind, name, size, alignment)
       @types << type
-      @type_map[id] = type
-      @name_map[name] = type
       type
     end
 
@@ -246,26 +238,33 @@ module Crystal::MIR
     # If type already exists, return existing type
     def create_type_with_id(id : TypeId, kind : TypeKind, name : String, size : UInt64, alignment : UInt32) : Type
       # Return existing type if already registered
-      if existing = @type_map[id]?
+      if existing = get(id)
         return existing
       end
       type = Type.new(id, kind, name, size, alignment)
       @types << type
-      @type_map[id] = type
-      @name_map[name] = type
       type
     end
 
     def get(id : TypeId) : Type?
-      @type_map[id]?
+      @types.each do |type|
+        return type if type.id == id
+      end
+      nil
     end
 
     def get(ref : TypeRef) : Type?
-      @type_map[ref.id]?
+      get(ref.id)
     end
 
     def get_by_name(name : String) : Type?
-      @name_map[name]?
+      i = @types.size - 1
+      while i >= 0
+        type = @types.unsafe_fetch(i)
+        return type if type.name == name
+        i -= 1
+      end
+      nil
     end
 
     # Human-readable layout snapshot for ABI sanity checks.
@@ -1744,6 +1743,15 @@ module Crystal::MIR
   end
 
   class Function
+    @id : FunctionId
+    @name : String
+    @params : Array(Parameter)
+    @return_type : TypeRef
+    @blocks : Array(BasicBlock)
+    @entry_block : BlockId
+    @source_location : SourceLocation?
+    @slab_frame : Bool
+
     getter id : FunctionId
     getter name : String
     getter params : Array(Parameter)
@@ -1761,6 +1769,8 @@ module Crystal::MIR
       @params = [] of Parameter
       @blocks = [] of BasicBlock
       @block_map = {} of BlockId => BasicBlock
+      @source_location = nil
+      @slab_frame = false
 
       # Create entry block
       @entry_block = create_block

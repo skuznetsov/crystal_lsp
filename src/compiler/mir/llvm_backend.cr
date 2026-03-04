@@ -2347,6 +2347,8 @@ module Crystal::MIR
     end
 
     private def emit_runtime_declarations
+      runtime_decl_trace = ENV.has_key?("CRYSTAL_V2_RUNTIME_DECL_TRACE") || ENV.has_key?("CRYSTAL2_RUNTIME_DECL_TRACE")
+      STDERR.puts "  [RT_DECL] begin" if runtime_decl_trace
       # External C library functions
       emit_raw "declare ptr @malloc(i64)\n"
       emit_raw "declare ptr @calloc(i64, i64)\n"
@@ -2361,6 +2363,7 @@ module Crystal::MIR
       emit_raw "declare void @perror(ptr)\n"
       emit_raw "declare i32 @dprintf(i32, ptr, ...)\n"
       emit_raw "\n"
+      STDERR.puts "  [RT_DECL] after c decls" if runtime_decl_trace
 
       # PCRE2 library functions
       emit_raw "declare ptr @pcre2_compile_8(ptr, i64, i32, ptr, ptr, ptr)\n"
@@ -2370,12 +2373,10 @@ module Crystal::MIR
       emit_raw "declare ptr @pcre2_get_ovector_pointer_8(ptr)\n"
       emit_raw "declare i32 @pcre2_get_ovector_count_8(ptr)\n"
       emit_raw "declare void @pcre2_match_data_free_8(ptr)\n"
-      # Mark as emitted so emit_missing_crystal_function_stubs skips them
-      @emitted_functions << "pcre2_compile_8" << "pcre2_match_8"
-      @emitted_functions << "pcre2_match_data_create_from_pattern_8"
-      @emitted_functions << "pcre2_jit_compile_8" << "pcre2_get_ovector_pointer_8"
-      @emitted_functions << "pcre2_get_ovector_count_8" << "pcre2_match_data_free_8"
+      # Keep declarations only; missing-stub filtering already has these names
+      # in the built-in allowlist.
       emit_raw "\n"
+      STDERR.puts "  [RT_DECL] after pcre2 decls" if runtime_decl_trace
 
       # Format strings for printing
       emit_raw "@.int_fmt = private constant [4 x i8] c\"%d\\0A\\00\"\n"
@@ -2393,6 +2394,7 @@ module Crystal::MIR
         emit_raw "@.str.false = private constant { i32, i32, i32, [6 x i8] } { i32 #{@string_type_id}, i32 5, i32 5, [6 x i8] c\"false\\00\" }, align 8\n"
       end
       emit_raw "\n"
+      STDERR.puts "  [RT_DECL] after format constants" if runtime_decl_trace
       open_w = 1 | posix_open_flag_creat | posix_open_flag_trunc
       open_w_plus = 2 | posix_open_flag_creat | posix_open_flag_trunc
       open_a = 1 | posix_open_flag_creat | posix_open_flag_append
@@ -2433,6 +2435,7 @@ module Crystal::MIR
       emit_raw "  %ptr = call ptr %fn(i64 %size)\n"
       emit_raw "  ret ptr %ptr\n"
       emit_raw "}\n\n"
+      STDERR.puts "  [RT_DECL] after alloc wrappers" if runtime_decl_trace
 
       emit_raw "define ptr @__crystal_realloc64(ptr %ptr, i64 %size) noinline {\n"
       emit_raw "  %fn = load volatile ptr, ptr @__crystal_v2_realloc_fn\n"
@@ -2456,6 +2459,7 @@ module Crystal::MIR
       emit_raw "define void @__crystal_v2_rc_dec_atomic(ptr %ptr, ptr %destructor) {\n"
       emit_raw "  ret void\n"
       emit_raw "}\n\n"
+      STDERR.puts "  [RT_DECL] after rc stubs" if runtime_decl_trace
 
       # Slab allocator - use calloc for zero-init
       emit_raw "define ptr @__crystal_v2_slab_alloc(i32 %size_class) {\n"
@@ -2477,6 +2481,7 @@ module Crystal::MIR
       emit_raw "define void @__crystal_v2_slab_frame_pop() {\n"
       emit_raw "  ret void\n"
       emit_raw "}\n\n"
+      STDERR.puts "  [RT_DECL] after slab stubs" if runtime_decl_trace
 
       # Convert Crystal file mode string to POSIX open flags.
       # Supports: "r", "w", "a" and their '+' variants.
@@ -2510,6 +2515,7 @@ module Crystal::MIR
       emit_raw "ret_rdonly:\n"
       emit_raw "  ret i32 0\n"
       emit_raw "}\n\n"
+      STDERR.puts "  [RT_DECL] after mode_to_open_flags" if runtime_decl_trace
 
       # File.new(path, mode) helper — opens file via POSIX open(), returns ptr to {i32 fd, i1 blocking}
       # Takes plain ptr args (no union by-value) to avoid ARM64 ABI decomposition issues.
@@ -2531,6 +2537,7 @@ module Crystal::MIR
       emit_raw "  store i1 1, ptr %cof_ptr\n"
       emit_raw "  ret ptr %tup\n"
       emit_raw "}\n\n"
+      STDERR.puts "  [RT_DECL] after file_open helper" if runtime_decl_trace
 
       # IO functions - use printf
       emit_raw "define void @__crystal_v2_puts(ptr %str) {\n"
@@ -2557,6 +2564,7 @@ module Crystal::MIR
       emit_raw "  call i32 (ptr, ...) @printf(ptr @.long_fmt, i64 %val)\n"
       emit_raw "  ret void\n"
       emit_raw "}\n\n"
+      STDERR.puts "  [RT_DECL] after int print helpers" if runtime_decl_trace
 
       # Float print helper: finds shortest round-trip representation, handles -0.0
       # Uses write(2) syscall directly (like Crystal IO) to preserve output ordering.
@@ -2728,6 +2736,7 @@ module Crystal::MIR
       emit_raw "  call void @__crystal_v2_print_float_impl(double %ext, i1 1)\n"
       emit_raw "  ret void\n"
       emit_raw "}\n\n"
+      STDERR.puts "  [RT_DECL] after float print helpers" if runtime_decl_trace
 
 
       # String functions - implemented using C library
@@ -2851,6 +2860,7 @@ module Crystal::MIR
       emit_raw "declare ptr @fopen(ptr, ptr)\n"
       emit_raw "declare i32 @fileno(ptr)\n"
       emit_raw "declare ptr @fdopen(i32, ptr)\n"
+      STDERR.puts "  [RT_DECL] after large libc decl block" if runtime_decl_trace
       emit_raw "declare i32 @getrlimit(i32, ptr)\n"
       emit_raw "declare i32 @setrlimit(i32, ptr)\n"
       # Mark C stdlib functions as emitted so emit_undefined_extern_declarations
@@ -4653,6 +4663,7 @@ module Crystal::MIR
       emit_raw "  store i8 0, ptr %next_dest\n"
       emit_raw "  ret ptr %result\n"
       emit_raw "}\n\n"
+      STDERR.puts "  [RT_DECL] after string_repeat helper" if runtime_decl_trace
 
       # Thread Sanitizer (TSan) instrumentation
       if @emit_tsan
@@ -4699,6 +4710,7 @@ module Crystal::MIR
       emit_raw "define void @__crystal_v2_channel_close(ptr %chan) {\n"
       emit_raw "  ret void\n"
       emit_raw "}\n\n"
+      STDERR.puts "  [RT_DECL] end" if runtime_decl_trace
 
     end
 
