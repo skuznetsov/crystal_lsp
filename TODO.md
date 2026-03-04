@@ -21,10 +21,15 @@
   - stage2 remains non-self-host-stable on this snapshot.
 
 ### Stage2 oracle/status snapshot on `/tmp/stage2_rel_c5f5278f`
+- New deterministic crash oracle added:
+  - `regression_tests/stage2_parse_prelude_nocodegen_crash_repro.sh`
+  - target: `--no-codegen --no-prelude src/stdlib/prelude.cr`
+  - reproduction signature: `status=139` or index/exprid out-of-bounds text.
 - Reproduced (still failing):
   - `bash regression_tests/stage2_macro_parse_index_oob_repro.sh /tmp/stage2_rel_c5f5278f` -> reproduced (`status=139`, segfault).
   - `bash regression_tests/stage2_exprid_arena_oob_repro.sh /tmp/stage2_rel_c5f5278f` -> reproduced (`status=1`, `Index out of bounds`).
   - `bash regression_tests/stage2_macro_record_heredoc_index_oob_repro.sh /tmp/stage2_rel_c5f5278f` -> reproduced (`status=1`).
+  - `bash regression_tests/stage2_parse_prelude_nocodegen_crash_repro.sh /tmp/stage2_rel_c5f5278f` -> reproduced (`status=139`).
 - Boundary drift (decay signal):
   - `bash regression_tests/stage2_mir_setup_post_lowering_segfault_repro.sh /tmp/stage2_rel_c5f5278f`
   - still segfaults (`status=139`), but no longer reaches target marker
@@ -35,6 +40,8 @@
   - segfaults (`status=139`) though it is expected to pass.
 - Stage1 control for that script:
   - `bash regression_tests/stage2_parse_prelude_nocodegen_repro.sh /tmp/stage1_rel_c5f5278f` -> PASS.
+- Stage1 control for the new crash oracle:
+  - `bash regression_tests/stage2_parse_prelude_nocodegen_crash_repro.sh /tmp/stage1_rel_c5f5278f` -> not reproduced (`status=0`).
 
 ### Stage-stats feature check on release artifacts
 - `bash regression_tests/stage_stats_output_repro.sh /tmp/stage1_rel_c5f5278f` -> PASS.
