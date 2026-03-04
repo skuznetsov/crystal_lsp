@@ -122,7 +122,9 @@
 ### Rejected workaround (recorded)
 - Tried replacing named-arg call in `src/stdlib/file.cr` with positional call in `File.new_internal`.
 - Result: stage2 debug build regressed badly (`real 721.08`, manual abort after >12 min, ~3.5GB RSS).
-- Decision: reverted; keep source unchanged and continue root-cause work in HIR/lowering path.
+- Tried replacing bare `new(...)` with explicit `File.new(...)` in `File.new_internal`.
+- Result: same direction of regression (`real 535.30`, manual abort, no stability win).
+- Decision: reverted both workarounds; keep source unchanged and continue root-cause work in HIR/lowering path.
 
 ## 2026-03-04: Fresh baseline bootstrap after refuting local LLVM hash-light experiments
 
