@@ -17,10 +17,13 @@ Context: compiler/bootstrap/stage2-stability
 
 [LM-7|boundary]: with `LLVM_INIT` trace enabled, stage2 reaches `after generator.new` and `generate(io) start`, then crashes before `generate(io) done` on minimal macro repro {F/G/R: 0.9/0.7/0.9} [verified]
 
+[LM-8|boundary]: with `LLVM_GEN` trace enabled, stage2 reaches `emit_function start __crystal_main` and then crashes inside `reset_value_names` clear-sequence before `emit_function done` {F/G/R: 0.9/0.7/0.9} [verified]
+
 Contradiction ledger
 - [LM-C1|refute]: broad `reset_value_names` reinit experiment (replace many `clear` with fresh container allocations) did not produce robust stabilization; it shifted crash boundaries and was rejected.
 - [LM-C2|refute]: cache-only explanation is insufficient: fresh stage2 cache can change performance and some stack tops, but core stage2 failure signatures remain.
 - [LM-C3|refute]: `Set`-specific root-cause hypothesis is insufficient; stage2 fails equally on trivial/no-container and `Hash/Set` micro-repros.
+- [LM-C4|refute]: targeted `@alloc_types.clear -> reinit` workaround in `reset_value_names` was unstable and regressed crash boundary; rejected.
 
 Current hypothesis
-- Root-cause cluster is a broader stage2 self-host corruption class (monomorphization/lowering/runtime ABI interactions), with container paths acting as one of multiple triggers rather than the sole trigger.
+- Root-cause cluster is a broader stage2 self-host corruption class (monomorphization/lowering/runtime ABI interactions), now tightly localized to per-function reset/clear paths in LLVM emission (`reset_value_names`) during first function emission.

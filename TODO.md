@@ -73,6 +73,39 @@
     - `[LLVM_SETUP] generate(io) start`,
     - then segfault before `generate(io) done`.
 
+### Deep localization (2026-03-05 late): crash inside first `emit_function`
+- Added granular `[LLVM_GEN] ...` markers in `LLVMIRGenerator#generate` around:
+  - header/type/runtime/global metadata emission,
+  - unresolved filter,
+  - return-type precompute,
+  - per-function emit enter/exit.
+- Observed on `/tmp/stage2_dbg_llvm_emit_trace_current`:
+  - reaches `[LLVM_GEN] emit_function start __crystal_main`,
+  - then crashes before `[LLVM_GEN] emit_function done __crystal_main`.
+- LLDB backtrace on same binary:
+  - `LLVMIRGenerator#generate` -> `emit_function(__crystal_main)` ->
+    `reset_value_names` -> crash in `clear` path (`EXC_BAD_ACCESS`).
+  - frame chain includes:
+    - `Crystal$CCMIR$CCLLVMIRGenerator$Hreset_value_names...`
+    - `Crystal$CCMIR$CCLLVMIRGenerator$Hemit_function...`
+- LLDB disassembly for `reset_value_names` indicates crash during one of early
+  `clear` calls in the reset sequence (after several hash/array clears), with
+  call target drift seen in symbols for adjacent `clear` calls.
+- Refuted workaround:
+  - Tried replacing `@alloc_types.clear` with map reinitialization in
+    `reset_value_names` (`@alloc_types = {} of ValueId => TypeRef`).
+  - Result was unstable and regressed boundary (one run crashed as early as
+    `MIR::TypeRegistry#initialize`/malloc path under LLDB).
+  - Workaround reverted.
+- Additional timing snapshots:
+  - Stage1 rebuild after `/tmp` cleanup:
+    - `/usr/bin/time -p scripts/build_stage1_original_release.sh /tmp/stage1_rel_resume --error-trace`
+    - `real 439.68`.
+  - Stage2 debug builds from restored stage1:
+    - `/tmp/stage2_dbg_llvm_gen_trace_current` -> `real 373.49`.
+    - `/tmp/stage2_dbg_llvm_emit_trace_current` -> `real 364.03`.
+    - `/tmp/stage2_dbg_alloctypes_reinit_probe` (refuted branch) -> `real 413.74`.
+
 ## 2026-03-04: Stage1 File.open runtime crash fixed (virtual return + File allocator override)
 
 ### What was fixed
