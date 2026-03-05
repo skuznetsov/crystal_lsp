@@ -163,6 +163,41 @@
 - Conclusion:
   - this failure class is **not** only a stale/warm-cache artifact; clean-cache stage2 still shows the same `reset_value_names` call-target drift signature.
 
+### Bootstrap + boundary refresh (2026-03-05 late night, isolated cache pair)
+- Stage1 release (original compiler, isolated release cache):
+  - `CRYSTAL_CACHE_DIR_RELEASE=/tmp/crystal_cache_original_release_20260305_002400 /usr/bin/time -p scripts/build_stage1_original_release.sh /tmp/stage1_rel_status_20260305_002400 --error-trace`
+  - `real 432.29`.
+- Stage2 release from that stage1 (isolated stage2 release cache):
+  - `CRYSTAL_CACHE_DIR_STAGE2_RELEASE=/tmp/crystal_cache_stage2_release_20260305_002400 /usr/bin/time -p scripts/build_stage2_release.sh /tmp/stage1_rel_status_20260305_002400 /tmp/stage2_rel_status_20260305_002400`
+  - `real 236.14`.
+  - LLVM counters: `total MIR functions: 49696`, `RTA kept: 29375`.
+- Stage2 -> stage3 remains unstable:
+  - `CRYSTAL_CACHE_DIR_STAGE2_RELEASE=/tmp/crystal_cache_stage2_release_20260305_002400 /usr/bin/time -p scripts/build_stage2_release.sh /tmp/stage2_rel_status_20260305_002400 /tmp/stage3_rel_from_stage2_status_20260305_002400`
+  - fails fast with `error: Index out of bounds` (`real 0.67`).
+- Stage1 vs stage2 speed delta (this run):
+  - stage2 faster by `196.15s` (`432.29 -> 236.14`, about `1.83x`).
+
+### Stage2 crash signature update after ivar-decl retry/dedup fix
+- Existing broad setup oracle still reproduces on new stage2 release:
+  - `bash regression_tests/stage2_llvm_setup_pre_generate_segfault_repro.sh /tmp/stage2_rel_status_20260305_002400`
+  - reproduced (`status=139`).
+- Previous focused `FiberEvent#clear` oracle no longer reproduces on new stage2 release:
+  - `bash regression_tests/stage2_reset_value_names_fiberevent_clear_repro.sh /tmp/stage2_rel_status_20260305_002400`
+  - not reproduced (`status=139`, `fiber_clear_calls_in_reset_value_names=0`).
+- Built fresh stage2 debug for symbolized localization:
+  - `CRYSTAL_CACHE_DIR_STAGE2_DEBUG=/tmp/crystal_cache_stage2_debug_20260305_002400 /usr/bin/time -p scripts/build_stage2_debug.sh /tmp/stage1_rel_status_20260305_002400 /tmp/stage2_dbg_status_20260305_002400`
+  - `real 160.71`.
+- LLDB on minimal macro repro now shows:
+  - frame #0: `Hash(Crystal::MIR::BlockId, Nil)#clear_impl`
+  - frame #1: `Hash(Crystal::MIR::BlockId, Nil)#clear`
+  - frame #2: `Set(Crystal::HIR::BlockId)#clear`
+  - frame #3: `LLVMIRGenerator#emit_function`.
+- Added focused oracle for this updated boundary:
+  - `regression_tests/stage2_emit_function_blockid_clear_repro.sh`
+  - verification:
+    - `bash regression_tests/stage2_emit_function_blockid_clear_repro.sh /tmp/stage2_dbg_status_20260305_002400` -> reproduced.
+    - `bash regression_tests/stage2_emit_function_blockid_clear_repro.sh /tmp/stage1_rel_status_20260305_002400` -> not reproduced (`status=0`).
+
 ## 2026-03-04: Stage1 File.open runtime crash fixed (virtual return + File allocator override)
 
 ### What was fixed

@@ -8030,6 +8030,68 @@ module Crystal::HIR
       resolved
     end
 
+    private def resolve_explicit_ivar_annotation_type(type_name : String, owner_name : String) : TypeRef
+      resolved = annotation_type_ref(type_name, owner_name)
+      return resolved unless resolved == TypeRef::VOID
+      return resolved unless annotation_type_retry_candidate?(type_name)
+
+      # Explicit ivar annotations are layout-critical. If a stale VOID placeholder
+      # leaked into caches from an earlier speculative lookup, clear it and retry.
+      ann_key = {type_name, owner_name, @module_defs_cache_version, @resolved_type_name_cache_epoch}
+      @annotation_type_ref_cache.delete(ann_key)
+
+      candidate_names = [type_name] of String
+      normalized_decl = normalize_declared_type_name(type_name, owner_name)
+      candidate_names << normalized_decl unless candidate_names.includes?(normalized_decl)
+
+      resolved_decl = normalized_decl
+      unless resolved_decl.strip.starts_with?("::")
+        old_class = @current_class
+        old_override = @current_namespace_override
+        @current_class = owner_name
+        @current_namespace_override = nil
+        begin
+          resolved_decl = resolve_type_name_in_context(normalized_decl)
+        ensure
+          @current_class = old_class
+          @current_namespace_override = old_override
+        end
+      end
+      candidate_names << resolved_decl unless candidate_names.includes?(resolved_decl)
+
+      candidate_names.each do |candidate|
+        cache_key = type_cache_key(candidate)
+        if cached = @type_cache[cache_key]?
+          @type_cache.delete(cache_key) if cached == TypeRef::VOID
+        end
+        normalized = sanitize_type_name(candidate)
+        if normalized != candidate
+          normalized_cache_key = type_cache_key(normalized)
+          if cached = @type_cache[normalized_cache_key]?
+            @type_cache.delete(normalized_cache_key) if cached == TypeRef::VOID
+          end
+        end
+      end
+
+      retried = annotation_type_ref(type_name, owner_name)
+      if debug_filter = env_get("DEBUG_CLASS_IVAR_DECL_RETRY")
+        if debug_filter == "1" || owner_name.includes?(debug_filter)
+          STDERR.puts "[IVAR_DECL_RETRY] class=#{owner_name} type=#{type_name} first=Void retried=#{get_type_name_from_ref(retried)}"
+        end
+      end
+      retried
+    end
+
+    @[AlwaysInline]
+    private def annotation_type_retry_candidate?(type_name : String) : Bool
+      type_name.includes?('(') ||
+        type_name.includes?('{') ||
+        type_name.includes?('|') ||
+        type_name.includes?("::") ||
+        type_name.ends_with?('?') ||
+        type_name.ends_with?('*')
+    end
+
     private def register_module_instance_methods_for(
       class_name : String,
       include_node : CrystalV2::Compiler::Frontend::IncludeNode,
@@ -15462,7 +15524,8 @@ module Crystal::HIR
             when CrystalV2::Compiler::Frontend::InstanceVarDeclNode
               # Instance variable declaration: @value : Int32 = expr
               ivar_name = String.new(member.name)
-              ivar_type = type_ref_for_name(String.new(member.type))
+              ivar_decl = String.new(member.type)
+              ivar_type = resolve_explicit_ivar_annotation_type(ivar_decl, class_name)
               # Store default value expression if present
               default_expr_id : CrystalV2::Compiler::Frontend::ExprId? = nil
               default_arena : CrystalV2::Compiler::Frontend::ArenaLike? = nil
@@ -15473,11 +15536,46 @@ module Crystal::HIR
                   default_arena = @arena
                 end
               end
-              offset = align_offset(offset, type_alignment(ivar_type, is_c_struct))
-              ivars << IVarInfo.new(ivar_name, ivar_type, offset,
-                default_expr_id: default_expr_id,
-                default_arena: default_arena)
-              offset += field_storage_size(ivar_type, is_c_struct)
+              if existing_idx = ivars.index { |iv| iv.name == ivar_name }
+                existing = ivars[existing_idx]
+                resolved_type = existing.type
+                if existing.type == TypeRef::VOID && ivar_type != TypeRef::VOID
+                  resolved_type = ivar_type
+                end
+                resolved_default_expr = existing.default_expr_id || default_expr_id
+                resolved_default_arena = existing.default_arena || default_arena
+                if resolved_type != existing.type ||
+                   resolved_default_expr != existing.default_expr_id ||
+                   resolved_default_arena != existing.default_arena
+                  ivars[existing_idx] = IVarInfo.new(
+                    ivar_name,
+                    resolved_type,
+                    existing.offset,
+                    default_expr_id: resolved_default_expr,
+                    default_arena: resolved_default_arena
+                  )
+                end
+                if debug_filter = env_get("DEBUG_CLASS_IVAR_DECL")
+                  if debug_filter == "1" || class_name.includes?(debug_filter)
+                    STDERR.puts "[IVAR_DECL] class=#{class_name} ivar=#{ivar_name} decl=#{ivar_decl} resolved=#{get_type_name_from_ref(ivar_type)} existing=#{get_type_name_from_ref(existing.type)}"
+                  end
+                end
+              else
+                offset = align_offset(offset, type_alignment(ivar_type, is_c_struct))
+                ivars << IVarInfo.new(
+                  ivar_name,
+                  ivar_type,
+                  offset,
+                  default_expr_id: default_expr_id,
+                  default_arena: default_arena
+                )
+                offset += field_storage_size(ivar_type, is_c_struct)
+                if debug_filter = env_get("DEBUG_CLASS_IVAR_DECL")
+                  if debug_filter == "1" || class_name.includes?(debug_filter)
+                    STDERR.puts "[IVAR_DECL] class=#{class_name} ivar=#{ivar_name} decl=#{ivar_decl} resolved=#{get_type_name_from_ref(ivar_type)} existing=(new)"
+                  end
+                end
+              end
             when CrystalV2::Compiler::Frontend::TypeDeclarationNode
               # Lib struct field declaration or ivar type declaration from macro expansion:
               #   value : Type        (struct/lib field)
@@ -16124,8 +16222,15 @@ module Crystal::HIR
         STDERR.puts "[CLASS_PARENT] class=#{class_name} parent=#{parent_name || "nil"}"
       end
       @module.register_class_parent(class_name, parent_name)
-      if env_has?("DEBUG_CLASS_INFO") &&
-         (class_name == "Crystal::MachO" || class_name == "IO" || class_name.includes?("FileDescriptor") || class_name == "Thread" || class_name == "Crystal::Scheduler" || class_name == "String")
+      class_info_filter = env_get("DEBUG_CLASS_INFO_FILTER")
+      should_dump_class_info =
+        if class_info_filter
+          class_info_filter == "1" || class_name.includes?(class_info_filter)
+        else
+          env_has?("DEBUG_CLASS_INFO") &&
+            (class_name == "Crystal::MachO" || class_name == "IO" || class_name.includes?("FileDescriptor") || class_name == "Thread" || class_name == "Crystal::Scheduler" || class_name == "String")
+        end
+      if should_dump_class_info
         ivar_dump = ivars.map { |iv| "#{iv.name}:#{get_type_name_from_ref(iv.type)}@#{iv.offset}" }.join(", ")
         STDERR.puts "[CLASS_INFO] #{class_name} ivars=[#{ivar_dump}] size=#{offset}"
       end
