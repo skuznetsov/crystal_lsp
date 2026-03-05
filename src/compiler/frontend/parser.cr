@@ -139,8 +139,12 @@ module CrystalV2
               break if token.kind == Token::Kind::EOF
               break if macro_terminator_reached?(token) # Phase 103K: Stop at macro terminators
 
+              saved_index = @index
               expr = parse_statement
               body_ids_b << expr unless expr.invalid?
+              # Error recovery: if parse_statement returned without advancing
+              # the token position, skip one token to prevent infinite loop.
+              advance if @index == saved_index
               skip_statement_end
             end
           end
@@ -290,8 +294,12 @@ module CrystalV2
               next
             end
 
+            saved_index = @index
             expr = parse_statement
             roots_builder << expr unless expr.invalid?
+            # Error recovery: if parse_statement returned without advancing,
+            # skip one token to prevent infinite loop.
+            advance if @index == saved_index
             skip_statement_end
           end
           Program.new(@arena, roots_builder.to_a, @string_pool)
