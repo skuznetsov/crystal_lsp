@@ -13,6 +13,23 @@
   - `/tmp/stage1_rel_autonomous_20260305y` and `/tmp/stage2_rel_autonomous_20260305y` preserved,
   - large `.ll/.bc/.o` stage2 probe artifacts removed.
 
+## 2026-03-05: opt-collapse bisect oracle + refreshed hang signature
+
+- Added fast bisect oracle:
+  - `regression_tests/stage2_opt_tailrecurse_bisect.sh`
+  - finds first `-opt-bisect-limit` that reproduces `__crystal_main` + `main_user_code` collapse.
+- Verification on current stage2 IR:
+  - `bash regression_tests/stage2_opt_tailrecurse_bisect.sh /tmp/stage2_rel_status_20260305b.ll 495500 495700`
+  - `first_bad_limit: 495575`
+  - `last_running_pass: ... InlinerPass on (Crystal$Dmain_user_code$$Int32_Pointer$LPointer$LUInt8$R$R)`
+  - `first_skipped_pass: ... PostOrderFunctionAttrsPass on (Crystal$Dmain_user_code...)`.
+- Refreshed runtime hang signature (`stage2 -> stage3`):
+  - `scripts/timeout_sample_lldb.sh -t 90 ... -- /tmp/stage2_rel_status_20260305b src/crystal_v2.cr --release ...`
+  - `sample` + `lldb` both show PC in `Crystal$Dmain... + 268` with unconditional self-branch (`b 0x... -> same 0x...`).
+- Fresh timing/control snapshot:
+  - `stage1 -> stage2` (`/tmp/stage2_rel_status_20260305b`): `real 116.12` with `total MIR functions: 11582`, `RTA kept: 8792`.
+  - `stage2 -> stage3` under `scripts/run_safe.sh` still times out at `240s` (cache on/off).
+
 ## 2026-03-05: stage2->stage3 status refresh (self-loop signature)
 
 ### Bootstrap status snapshot
