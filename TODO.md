@@ -1,5 +1,30 @@
 # Crystal v2 — Active Work (codegen branch)
 
+## 2026-03-05: stage2->stage3 status refresh (self-loop signature)
+
+### Bootstrap status snapshot
+- `stage1 -> stage2` (release) succeeded on current branch:
+  - `/usr/bin/time -p scripts/build_stage1_original_release.sh /tmp/stage1_rel_autonomous_20260305y`
+  - `real 438.48`
+  - `/usr/bin/time -p scripts/build_stage2_release.sh /tmp/stage1_rel_autonomous_20260305y /tmp/stage2_rel_autonomous_20260305y`
+  - `real 117.26`
+- `stage2 -> stage3` is still unstable:
+  - long run from `/tmp/stage2_rel_autonomous_20260305y` never completed in expected window and stayed CPU-bound (`R`, ~100% CPU, observed >18 min before manual stop).
+
+### New deterministic repro added (fast)
+- Added `regression_tests/stage2_main_selfloop_repro.sh`.
+- Signature:
+  - launch stage2 compiler on `src/crystal_v2.cr --release`,
+  - after short probe window, LLDB shows frame #0 in `Crystal$Dmain...`,
+  - disassembly contains an unconditional branch to itself (`b 0x...` to same address).
+- Verification:
+  - `bash regression_tests/stage2_main_selfloop_repro.sh /tmp/stage2_rel_autonomous_20260305y 15` -> reproduced (`status=124`, `main_frame_hits=2`, `self_branch_hits=2`).
+  - `bash regression_tests/stage2_main_selfloop_repro.sh /tmp/stage1_rel_autonomous_20260305y 15` -> not reproduced (`status=124`, signature mismatch).
+
+### Current interpretation
+- Active stage2 instability class includes an early runtime self-loop in the stage2 compiler binary itself (not only `Index out of bounds` / container-clear crashes).
+- This gives a faster boundary oracle for stage2->stage3 investigations than waiting full bootstrap time.
+
 ## 2026-03-05: Stage2 generic container failure class (root-cause track)
 
 ### New deterministic repro added
