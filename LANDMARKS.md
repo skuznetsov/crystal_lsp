@@ -53,6 +53,10 @@ Context: compiler/bootstrap/stage2-stability
 
 [LM-25|root-cause]: parser bug, not HIR owner lookup, explains the `from_stdio` leak: a standalone `if` following a multiline assignment with RHS `if ... end` was being attached as a postfix modifier because `parse_postfix_if_modifier` used `previous_token` instead of the parsed statement span for same-line gating; verified both on a minimal parser-only repro and on `src/stdlib/crystal/system/unix/file_descriptor.cr`, where top-level leaked defs (`system_pipe`, `pread`, `from_stdio`, ...) disappear after the fix and remain nested under `Crystal::System::FileDescriptor` {F/G/R: 0.95/0.8/0.95} [verified]
 
+[LM-26|boundary]: after the parser fix is rebuilt in a clean worktree (`94598345`), the active stage2 blocker shifts from `from_stdio` leak to total post-`opt` collapse: raw stage2 `--release --no-link` IR still contains `main`, `__crystal_main`, and `main_user_code`, but `opt` reduces the module to near-empty bitcode (`1.4K`) and an empty-symbol object (`336B`) {F/G/R: 0.95/0.8/0.95} [verified]
+
+[LM-27|repro]: focused oracle `regression_tests/stage2_opt_empty_module_repro.sh` reproduces the new clean blocker directly from raw stage2 IR: both `O3` and `O0` `opt` runs erase `main`, `__crystal_main`, and `main_user_code`, leaving zero `define` lines in disassembled output and zero exported symbols in the object {F/G/R: 0.95/0.8/0.95} [verified]
+
 Contradiction ledger
 - [LM-C1|refute]: broad `reset_value_names` reinit experiment (replace many `clear` with fresh container allocations) did not produce robust stabilization; it shifted crash boundaries and was rejected.
 - [LM-C2|refute]: cache-only explanation is insufficient: fresh isolated stage2 debug cache (`CRYSTAL_CACHE_DIR_STAGE2_DEBUG=/tmp/crystal_cache_stage2_debug_reset_clean`) still reproduces `stage2_reset_value_names_fiberevent_clear_repro` with `status=139` and `FiberEvent$Hclear` drift.
@@ -64,6 +68,8 @@ Contradiction ledger
 - [LM-C8|refute]: isolated `CRYSTAL_CACHE_DIR_STAGE2_RELEASE` cleanup alone does not remove the `Crystal$Dmain` self-loop; collapse persists on fresh-cache rebuilds.
 - [LM-C9|refute]: fixing only `__crystal_main`/`main_user_code` opt-collapse is not sufficient for stage2 stability; after entry-guard mitigation the active self-loop shifted to `IO::FileDescriptor.from_stdio`.
 - [LM-C10|refute]: the `from_stdio` leak is not macro-specific; the same malformed AST is reproduced by a plain multiline `ret = if ... end` followed by a normal `if`, with no `{% ... %}` control nodes involved.
+- [LM-C11|refute]: the `_main` link failure after the parser fix is not explained by missing entry generation; clean raw stage2 `.ll` still contains `main`, `__crystal_main`, and `main_user_code` before optimization.
+- [LM-C12|refute]: the current clean post-parser-fix collapse is not limited to the earlier `tailrecurse` `O3` signature; the module also empties under `opt -O0`, so the new blocker is broader than a single aggressive optimization pass.
 
 Current hypothesis
-- Root-cause cluster remains broader than a single bug. The `IO::FileDescriptor.from_stdio` self-loop branch is now explained by the parser postfix-modifier bug ([LM-25]); after rebuilding stage1/stage2 with that fix, the next active blocker needs to be remeasured to distinguish remaining LLVM `opt` collapse from any additional parser/codegen issues.
+- Root-cause cluster remains broader than a single bug. The `IO::FileDescriptor.from_stdio` self-loop branch is explained by the parser postfix-modifier bug ([LM-25]), but clean rebuilds now show a stronger current blocker: once the fuller program reaches LLVM, `opt` empties the stage2 module even at low optimization settings ([LM-26], [LM-27]). The next useful work is to localize what in the raw IR or `opt` handoff makes the module disappear, not more parser/HIR symptom fixes.

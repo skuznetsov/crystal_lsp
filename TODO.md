@@ -1,5 +1,51 @@
 # Crystal v2 — Active Work (codegen branch)
 
+## 2026-03-05: clean rebuild after parser fix -> new active blocker
+
+- Built the parser-fix commit in a clean `git worktree` (`94598345`) to remove contamination from ongoing HIR/MIR experiments in the main worktree.
+- Clean timings / controls:
+  - `stage1 --release` in clean worktree:
+    - `/usr/bin/time -p scripts/build_stage1_original_release.sh /tmp/stage1_rel_parserfix_clean_20260305a`
+    - `real 454.42`
+  - dirty-tree `stage1 --release` on the same parser-fix commit path was effectively identical:
+    - `/tmp/stage1_rel_parserfix_20260305a`
+    - `real 453.72`
+- Clean `stage2 --release --no-link` from the new stage1:
+  - raw `.ll`: `/tmp/stage2_rel_parserfix_clean_20260305a_nolink.ll` (`1.9G`)
+  - post-`opt` bitcode: `/tmp/stage2_rel_parserfix_clean_20260305a_nolink.ll.opt.bc` (`1.4K`)
+  - object: `/tmp/stage2_rel_parserfix_clean_20260305a_nolink.o` (`336B`)
+- Verification on the clean raw `.ll`:
+  - file is text IR (`ASCII text, very long lines, no line terminators`), not binary garbage,
+  - raw IR still contains all expected entrypoints before optimization:
+    - `has_main=1`
+    - `has___crystal_main=1`
+    - `has_main_user_code=1`
+- Verification on post-`opt` artifacts:
+  - `llvm-dis /tmp/stage2_rel_parserfix_clean_20260305a_nolink.ll.opt.bc -o -` -> only module header remains,
+  - `nm -gU /tmp/stage2_rel_parserfix_clean_20260305a_nolink.o` -> no exported symbols,
+  - therefore the current clean active blocker is **total LLVM `opt` collapse** of the fuller stage2 IR, not missing entry generation.
+- Added a dedicated oracle for this new boundary:
+  - `regression_tests/stage2_opt_empty_module_repro.sh`
+  - verifies:
+    - raw stage2 IR already contains `main`, `__crystal_main`, and `main_user_code`,
+    - `opt` output loses all of them,
+    - resulting object has zero exported symbols.
+- Verification with the new oracle on clean raw IR:
+  - `bash regression_tests/stage2_opt_empty_module_repro.sh /tmp/stage2_rel_parserfix_clean_20260305a_nolink.ll O3` -> reproduced
+  - `bash regression_tests/stage2_opt_empty_module_repro.sh /tmp/stage2_rel_parserfix_clean_20260305a_nolink.ll O0` -> reproduced
+  - implication: the current failure is broader than the earlier `tailrecurse`-only `O3` signature; even low-opt/default `opt` handling empties the module.
+- Dirty-tree full link corroborates the same class:
+  - `/usr/bin/time -p scripts/build_stage2_release.sh /tmp/stage1_rel_parserfix_20260305a /tmp/stage2_rel_parserfix_20260305a`
+  - fails link with `_main` undefined after `real 146.25`,
+  - consistent with the empty post-`opt` object.
+- Updated interpretation:
+  - parser fix did remove the `from_stdio` top-level leak at the frontend level,
+  - but once that lost code is restored, stage2 now reaches a stronger LLVM `opt` failure where the optimized module becomes effectively empty.
+- Next steps:
+  - build a new fast oracle for "post-opt module unexpectedly empty" on stage2-generated raw `.ll`,
+  - bisect or localize the pass sequence on the clean raw IR,
+  - only after that return to `stage2 -> stage3` runtime stability timing.
+
 ## 2026-03-05: parser root-cause for `from_stdio` leak (verified)
 
 - Root cause for the post-entry-guard `IO::FileDescriptor.from_stdio` self-loop was narrowed above HIR:
