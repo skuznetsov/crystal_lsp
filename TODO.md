@@ -58,13 +58,20 @@
   - Updated `regression_tests/stage2_llvm_setup_pre_generate_segfault_repro.sh` to match current failure family:
     - requires `status=139`,
     - requires `[MIR_SETUP] before lowering.new`,
-    - requires absence of `[LLVM_SETUP] generate(io|string) start`.
+    - requires absence of `[LLVM_SETUP] generate(io|string) done`.
   - Verification:
-    - `bash regression_tests/stage2_llvm_setup_pre_generate_segfault_repro.sh /tmp/stage2_rel_flags_fix` -> reproduced.
-    - stage1 control (`/tmp/stage1_rel_flags_fix`) -> not reproduced.
+    - `bash regression_tests/stage2_llvm_setup_pre_generate_segfault_repro.sh /tmp/stage2_dbg_llvm_init_trace_current` -> reproduced.
+    - `bash regression_tests/stage2_llvm_setup_pre_generate_segfault_repro.sh crystal` -> not reproduced (`status=0`).
 - New timing snapshots from this localization cycle:
   - `/tmp/stage2_rel_mir_init_trace` build (`scripts/build_stage2_release.sh`) -> `real 595.59`.
   - `/tmp/stage2_dbg_cli_toset_hashprobe` build (`scripts/build_stage2_debug.sh`, diagnostic branch) -> `real 466.81`.
+  - `/tmp/stage2_dbg_llvm_init_trace_current` build (`scripts/build_stage2_debug.sh`) -> `real 365.45`.
+- Added LLVM-generator init localization trace:
+  - `src/compiler/mir/llvm_backend.cr` now emits `[LLVM_INIT] ...` markers under `CRYSTAL_V2_LLVM_SETUP_TRACE` / `CRYSTAL2_LLVM_SETUP_TRACE`.
+  - Latest trace (`/tmp/stage2_dbg_llvm_init_trace_current`) reaches:
+    - `[LLVM_SETUP] after generator.new`,
+    - `[LLVM_SETUP] generate(io) start`,
+    - then segfault before `generate(io) done`.
 
 ## 2026-03-04: Stage1 File.open runtime crash fixed (virtual return + File allocator override)
 

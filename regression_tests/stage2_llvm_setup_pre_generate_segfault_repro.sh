@@ -26,9 +26,9 @@ set -e
 
 if [[ $status -eq 139 ]] && \
    grep -q "\\[MIR_SETUP\\] before lowering.new" "$ERR" && \
-   ! grep -q "\\[LLVM_SETUP\\] generate(io) start" "$ERR" && \
-   ! grep -q "\\[LLVM_SETUP\\] generate(string) start" "$ERR"; then
-  echo "reproduced: stage2 segfaults during MIR/LLVM setup before IR generation"
+   ! grep -q "\\[LLVM_SETUP\\] generate(io) done" "$ERR" && \
+   ! grep -q "\\[LLVM_SETUP\\] generate(string) done" "$ERR"; then
+  echo "reproduced: stage2 segfaults during MIR/LLVM setup or early IR emission"
   echo "compiler: $COMPILER"
   echo "status: $status"
   echo "tmp_dir: $TMP_DIR"
