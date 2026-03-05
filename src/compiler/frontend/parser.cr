@@ -5605,8 +5605,8 @@ module CrystalV2
         private def parse_postfix_if_modifier(stmt : ExprId) : ExprId
           # Postfix modifiers must be on the SAME line as the statement
           # If there's a newline between them, the modifier is a separate statement
-          stmt_end_line = node_span(stmt).end_line
-
+          stmt_span = node_span(stmt)
+          stmt_end_line = stmt_span.end_line
           skip_trivia
           token = current_token
 
@@ -5625,7 +5625,6 @@ module CrystalV2
             return PREFIX_ERROR if condition.invalid?
 
             # Wrap statement in an if node
-            stmt_span = node_span(stmt)
             condition_span = node_span(condition)
             if_span = stmt_span.cover(condition_span)
 
@@ -5650,7 +5649,6 @@ module CrystalV2
             return PREFIX_ERROR if condition.invalid?
 
             # Wrap statement in an unless node
-            stmt_span = node_span(stmt)
             condition_span = node_span(condition)
             unless_span = stmt_span.cover(condition_span)
 
@@ -5672,7 +5670,6 @@ module CrystalV2
             condition = parse_op_assign
             return PREFIX_ERROR if condition.invalid?
 
-            stmt_span = node_span(stmt)
             condition_span = node_span(condition)
             while_span = stmt_span.cover(condition_span)
 
@@ -5693,7 +5690,6 @@ module CrystalV2
             condition = parse_op_assign
             return PREFIX_ERROR if condition.invalid?
 
-            stmt_span = node_span(stmt)
             condition_span = node_span(condition)
             until_span = stmt_span.cover(condition_span)
 

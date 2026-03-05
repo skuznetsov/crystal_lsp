@@ -1,5 +1,29 @@
 # Crystal v2 — Active Work (codegen branch)
 
+## 2026-03-05: parser root-cause for `from_stdio` leak (verified)
+
+- Root cause for the post-entry-guard `IO::FileDescriptor.from_stdio` self-loop was narrowed above HIR:
+  - parser was incorrectly attaching a following standalone `if` as a postfix modifier to a preceding multiline assignment whose RHS was `if ... end`,
+  - this truncated method bodies and leaked trailing `end`/subsequent defs to top level.
+- Minimal parser-only repro:
+  - `def f; ret = if x ... end; if ret != 0 ... end; end`
+  - before fix: method body became `IfNode(then: AssignNode(...))` plus stray top-level `IdentifierNode("end")`.
+- Real-source confirmation:
+  - parsing `src/stdlib/crystal/system/unix/file_descriptor.cr` previously produced top-level `DefNode`s for `system_pipe`, `pread`, `from_stdio`, ... after line 225,
+  - after fix: only expected roots remain (`require`, `require`, top-level `MacroIf`, outer `ModuleNode`), and `from_stdio` stays nested in `Crystal::System::FileDescriptor`.
+- Fix applied in `src/compiler/frontend/parser.cr`:
+  - `parse_postfix_if_modifier` now uses the parsed statement span (`node_span(stmt).end_line`) for same-line gating instead of `previous_token`, and restores span coverage based on statement/condition spans.
+- Fast verification oracles added:
+  - `spec/parser/parser_postfix_modifier_spec.cr`
+  - `regression_tests/parser_multiline_if_assign_repro.sh`
+- Verification:
+  - `crystal spec spec/parser/parser_postfix_modifier_spec.cr` -> `2 examples, 0 failures`
+  - `bash regression_tests/parser_multiline_if_assign_repro.sh` -> passes both minimal repro and real `file_descriptor.cr` nesting check.
+- Follow-up now needed:
+  - rebuild stage1/stage2 with this parser fix,
+  - rerun `regression_tests/stage2_from_stdio_selfloop_repro.sh`,
+  - then resume `stage2 -> stage3` bootstrap timing/stability check.
+
 ## 2026-03-05: `/tmp` hygiene automation + cleanup
 
 - Added `scripts/cleanup_tmp_stage_artifacts.sh`:

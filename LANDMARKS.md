@@ -51,6 +51,8 @@ Context: compiler/bootstrap/stage2-stability
 
 [LM-24|repro]: focused oracle `regression_tests/stage2_from_stdio_selfloop_repro.sh` reproduces the new stage2-only `IO::FileDescriptor.from_stdio` self-branch signature (`from_stdio_frame_hits>=1` + self `b` target) and does not reproduce on stage1 control {F/G/R: 0.9/0.8/0.9} [verified]
 
+[LM-25|root-cause]: parser bug, not HIR owner lookup, explains the `from_stdio` leak: a standalone `if` following a multiline assignment with RHS `if ... end` was being attached as a postfix modifier because `parse_postfix_if_modifier` used `previous_token` instead of the parsed statement span for same-line gating; verified both on a minimal parser-only repro and on `src/stdlib/crystal/system/unix/file_descriptor.cr`, where top-level leaked defs (`system_pipe`, `pread`, `from_stdio`, ...) disappear after the fix and remain nested under `Crystal::System::FileDescriptor` {F/G/R: 0.95/0.8/0.95} [verified]
+
 Contradiction ledger
 - [LM-C1|refute]: broad `reset_value_names` reinit experiment (replace many `clear` with fresh container allocations) did not produce robust stabilization; it shifted crash boundaries and was rejected.
 - [LM-C2|refute]: cache-only explanation is insufficient: fresh isolated stage2 debug cache (`CRYSTAL_CACHE_DIR_STAGE2_DEBUG=/tmp/crystal_cache_stage2_debug_reset_clean`) still reproduces `stage2_reset_value_names_fiberevent_clear_repro` with `status=139` and `FiberEvent$Hclear` drift.
@@ -61,6 +63,7 @@ Contradiction ledger
 - [LM-C7|refute]: current stage2 instability cannot be modeled as only `Index out of bounds` or only `emit_function` clear-path crashes; release stage2 also shows an early runtime self-loop in `Crystal$Dmain...` on stage3 bootstrap input.
 - [LM-C8|refute]: isolated `CRYSTAL_CACHE_DIR_STAGE2_RELEASE` cleanup alone does not remove the `Crystal$Dmain` self-loop; collapse persists on fresh-cache rebuilds.
 - [LM-C9|refute]: fixing only `__crystal_main`/`main_user_code` opt-collapse is not sufficient for stage2 stability; after entry-guard mitigation the active self-loop shifted to `IO::FileDescriptor.from_stdio`.
+- [LM-C10|refute]: the `from_stdio` leak is not macro-specific; the same malformed AST is reproduced by a plain multiline `ret = if ... end` followed by a normal `if`, with no `{% ... %}` control nodes involved.
 
 Current hypothesis
-- Root-cause cluster remains broader than a single bug, but the current `stage2 -> stage3` blocker is now localized to LLVM optimization of stage2-generated IR: `opt` can collapse key entry functions (`__crystal_main`, `main_user_code`) into infinite tailrecurse loops; separate BlockId clear-path crashes still exist in other debug/localization branches.
+- Root-cause cluster remains broader than a single bug. The `IO::FileDescriptor.from_stdio` self-loop branch is now explained by the parser postfix-modifier bug ([LM-25]); after rebuilding stage1/stage2 with that fix, the next active blocker needs to be remeasured to distinguish remaining LLVM `opt` collapse from any additional parser/codegen issues.
