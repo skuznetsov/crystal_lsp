@@ -39,6 +39,8 @@ Context: compiler/bootstrap/stage2-stability
 
 [LM-18|repro]: focused oracle `regression_tests/stage2_opt_tailrecurse_repro.sh` reproduces `opt`-stage collapse on stage2-generated IR (`O3` reproduces, `O0` does not) {F/G/R: 0.9/0.8/0.9} [verified]
 
+[LM-19|tooling]: `/tmp` hygiene utility `scripts/cleanup_tmp_stage_artifacts.sh` is available with dry-run default and explicit `--yes` deletion gate; validated by cleaning stage artifacts while preserving selected baseline binaries via `--keep` globs (`~0.94 GB` reclaimed in one run) {F/G/R: 0.9/0.7/0.9} [verified]
+
 Contradiction ledger
 - [LM-C1|refute]: broad `reset_value_names` reinit experiment (replace many `clear` with fresh container allocations) did not produce robust stabilization; it shifted crash boundaries and was rejected.
 - [LM-C2|refute]: cache-only explanation is insufficient: fresh isolated stage2 debug cache (`CRYSTAL_CACHE_DIR_STAGE2_DEBUG=/tmp/crystal_cache_stage2_debug_reset_clean`) still reproduces `stage2_reset_value_names_fiberevent_clear_repro` with `status=139` and `FiberEvent$Hclear` drift.

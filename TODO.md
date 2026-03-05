@@ -1,5 +1,18 @@
 # Crystal v2 — Active Work (codegen branch)
 
+## 2026-03-05: `/tmp` hygiene automation + cleanup
+
+- Added `scripts/cleanup_tmp_stage_artifacts.sh`:
+  - default mode is dry-run,
+  - requires explicit `--yes` for deletion,
+  - supports `--keep '<glob>'` and `--older-than-days N`.
+- Executed cleanup with preserved baseline binaries:
+  - `scripts/cleanup_tmp_stage_artifacts.sh --yes --tmpdir /tmp --keep 'stage1_rel_autonomous_*' --keep 'stage2_rel_autonomous_*'`
+  - removed `~0.94 GB` of stage/cached artifacts.
+- Post-cleanup snapshot:
+  - `/tmp/stage1_rel_autonomous_20260305y` and `/tmp/stage2_rel_autonomous_20260305y` preserved,
+  - large `.ll/.bc/.o` stage2 probe artifacts removed.
+
 ## 2026-03-05: stage2->stage3 status refresh (self-loop signature)
 
 ### Bootstrap status snapshot
@@ -40,6 +53,19 @@
     - `bash regression_tests/stage2_opt_tailrecurse_repro.sh /private/tmp/stage2_rel_selfloop_probe.ll O0` -> not reproduced.
 - Additional control:
   - Attempted stage2 release build with `--no-llvm-opt` avoids this specific `opt` transform path but currently fails link with unresolved symbols (`_fraction`, `_negative`, `_p`, `_register_to_matrix`, `_to_float`), so no direct no-opt workaround yet.
+
+### Mitigation experiments (in progress)
+- Added compiler-side experimental control:
+  - `src/compiler/cli.cr` now supports `CRYSTAL_V2_LLVM_OPT_BISECT_LIMIT` and includes it in LLVM cache tags.
+- Added extra unresolved-helper stubs in LLVM backend:
+  - `src/compiler/mir/llvm_backend.cr`: fallback stubs for unqualified helpers `fraction`, `negative`, `p`, `register_to_matrix`, `to_float` (same class as prior `ec` fallback), to allow lower-opt pipelines to link.
+- Rebuilt stage1 from updated sources:
+  - `/usr/bin/time -p scripts/build_stage1_original_release.sh /private/tmp/stage1_rel_optlimit_probe2 --error-trace`
+  - `real 418.51`.
+- Stage2 with lower `opt` limits now links, but remains unstable:
+  - `CRYSTAL_V2_LLVM_OPT_BISECT_LIMIT=150700` build: `real 123.40`; runtime loop signature shifted from `Crystal$Dmain` to `IO::FileDescriptor.from_stdio` self-loop.
+  - `CRYSTAL_V2_LLVM_OPT_BISECT_LIMIT=10000` build: `real 102.91`; process segfaults early (`status=139`) with recursive `IO::FileDescriptor.from_stdio` (`bl` to self), i.e., still an `opt`-collapse manifestation.
+- `stage2_opt_tailrecurse_repro` still reproduces on the new low-limit-generated IR (`O3`), so this mitigation is not sufficient yet.
 
 ## 2026-03-05: Stage2 generic container failure class (root-cause track)
 
