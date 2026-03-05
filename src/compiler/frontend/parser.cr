@@ -1352,7 +1352,9 @@ module CrystalV2
 
           # Parse optional arguments
           args_b = SmallVec(ExprId, 4).new
-          named_b = nil.as(SmallVec(NamedArgument, 2)?)
+          # Avoid nilable struct union (stage1 generates type_id=-1 for nil.as(SmallVec?),
+          # which breaks the nil check). Use a non-nilable SmallVec + empty check instead.
+          named_b = SmallVec(NamedArgument, 2).new
 
           if current_token.kind == Token::Kind::LParen
             advance # consume (
@@ -1368,7 +1370,6 @@ module CrystalV2
                 ensure_token(next_idx)
                 if next_idx < @tokens.size && @tokens[next_idx].kind == Token::Kind::Colon
                   # This is a named argument
-                  named_b ||= SmallVec(NamedArgument, 2).new
 
                   # Get identifier name (zero-copy slice)
                   name_token = current_token
@@ -1388,7 +1389,7 @@ module CrystalV2
 
                   value_span = @arena[value_expr].span
 
-                  named_b.not_nil! << NamedArgument.new(name_slice, value_expr, name_span, value_span)
+                  named_b << NamedArgument.new(name_slice, value_expr, name_span, value_span)
                 else
                   # Regular positional argument
                   args_b << parse_expression(0)
@@ -1430,7 +1431,7 @@ module CrystalV2
           # Create AnnotationNode
           span = start_token.span.cover(end_token.span)
           args = args_b.to_a
-          named_args = named_b && !named_b.empty? ? named_b.to_a : nil
+          named_args = named_b.empty? ? nil : named_b.to_a
           node = AnnotationNode.new(span, name_expr, args, named_args)
           @arena.add(node)
         end
@@ -5537,6 +5538,7 @@ module CrystalV2
 
         # Phase 10: Attach block to method call
         private def attach_block_to_call(call_expr : ExprId) : ExprId
+          return call_expr if call_expr.invalid?
           # Parse the block
           block_id = parse_block
           return PREFIX_ERROR if block_id.invalid?
@@ -5603,6 +5605,7 @@ module CrystalV2
         # Phase 6/26/27: Handle postfix modifiers on a statement.
         # Grammar: <stmt> if/unless/while/until <condition> (same line only)
         private def parse_postfix_if_modifier(stmt : ExprId) : ExprId
+          return stmt if stmt.invalid?
           # Postfix modifiers must be on the SAME line as the statement
           # If there's a newline between them, the modifier is a separate statement
           stmt_span = node_span(stmt)
@@ -10614,6 +10617,7 @@ module CrystalV2
         # Only calls and member accesses (and identifiers that can form calls)
         # are valid block receivers. Literals like Nil/Number/etc. are not.
         private def can_attach_block_to?(expr : ExprId, brace_block : Bool = false) : Bool
+          return false if expr.invalid?
           # When parsing no-parens call arguments, a trailing `do` should bind
           # to the outer call, not to the last argument expression.
           # Brace blocks `{}` always bind to the innermost call, so they are
@@ -10657,6 +10661,7 @@ module CrystalV2
         #   foo(1, y: 2)      → mixed (positional first, then named)
         # Phase 103: Updated to support multi-line arguments
         private def parse_parenthesized_call(callee : ExprId) : ExprId
+          return callee if callee.invalid?
           @parsing_call_args += 1
           begin
             lparen = current_token
@@ -11053,6 +11058,7 @@ module CrystalV2
         # This handles: {hash}[key], {tuple}[0], {named: tuple}[:key]
         # as well as member access like {tuple}.first and method calls {hash}.has_key?("a")
         private def parse_brace_literal_postfix(node : ExprId) : ExprId
+          return node if node.invalid?
           skip_trivia
           loop do
             case current_token.kind
@@ -11088,6 +11094,7 @@ module CrystalV2
 
         # Phase 103: Updated to support multi-line indexing and named arguments
         private def parse_index(target : ExprId) : ExprId
+          return target if target.invalid?
           lbracket = current_token
           advance
           @bracket_depth += 1 # Phase 103: entering brackets
@@ -11257,6 +11264,7 @@ current_token.kind == Token::Kind::Identifier &&
         # If the previous expression is an IndexNode and we see a '?', convert it
         # to a CallNode for method name "[]?" preserving positional args.
         private def handle_index_question_postfix(left : ExprId) : ExprId
+          return left if left.invalid?
           return left unless current_token.kind == Token::Kind::Question
           # Look ahead: if a ':' appears before a delimiter at depth 0 with content, this is ternary.
           # Track depth to handle nested brackets/parens correctly.
@@ -11311,6 +11319,7 @@ current_token.kind == Token::Kind::Identifier &&
         end
 
         private def parse_member_access(receiver : ExprId) : ExprId
+          return receiver if receiver.invalid?
           dot = current_token
           advance
           skip_trivia
@@ -14266,6 +14275,7 @@ current_token.kind == Token::Kind::Identifier &&
         # Phase 103: Inline hot path - frequently used for span calculations
         @[AlwaysInline]
         private def node_span(id : ExprId) : Span
+          return Span.new(0, 0, 0, 0, 0, 0) if id.invalid?
           @arena[id].span
         end
 

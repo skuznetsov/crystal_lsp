@@ -1280,7 +1280,7 @@ module Crystal::HIR
     @function_lookup_last_arg_count : Int32 = -1
     @function_lookup_last_args_hash : UInt64 = 0
     @function_lookup_last_flags : UInt8 = 0_u8
-    @function_lookup_last_result : Tuple(String, CrystalV2::Compiler::Frontend::DefNode)? = nil
+    @function_lookup_last_result = nil.as(Tuple(String, CrystalV2::Compiler::Frontend::DefNode)?)
     @function_lookup_last_result_valid : Bool = false
     @function_lookup_last_base_epoch : Int32 = 0
     @function_lookup_args_hash_owner : UInt64 = 0
@@ -1297,7 +1297,7 @@ module Crystal::HIR
     @allocator_init_def_key_cache_function_defs_size : Int32 = 0
     # Debug-only: lower node histogram (enabled via DEBUG_LOWER_HISTO)
     @lower_histo_counts : Hash(String, Int32) = {} of String => Int32
-    @lower_histo_last : Time::Instant? = nil
+    @lower_histo_last = nil.as(Time::Instant?)
     @lower_histo_since_check : Int32 = 0
     @lower_histo_total : Int64 = 0
 
@@ -2281,7 +2281,7 @@ module Crystal::HIR
 
     # Temporary arena switching context for cross-file yield inlining:
     # {caller_arena, callee_arena}
-    @inline_arenas : Array(CrystalV2::Compiler::Frontend::ArenaLike)? = nil
+    @inline_arenas = nil.as(Array(CrystalV2::Compiler::Frontend::ArenaLike)?)
 
     # While inlining yield-functions, we must preserve caller locals for the block body.
     # Otherwise callee locals (especially `self`) can leak into the caller and break ivar access.

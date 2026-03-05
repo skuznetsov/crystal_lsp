@@ -9,7 +9,7 @@ module CrystalV2
 
         class TimeoutError < Exception; end
 
-        @@deadline : Time::Instant? = nil
+        @@deadline = nil.as(Time::Instant?)
         @@message = "watchdog abort"
 
         def self.enable!(message = "watchdog abort", timeout : Time::Span = 30.seconds)

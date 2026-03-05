@@ -1018,63 +1018,67 @@ module CrystalV2
           len = @offset - from
           bytes = @rope.bytes
 
-          kind = nil.as(NumberKind?)
+          # Avoid nil.as(NumberKind?) — stage1 generates type_id=-1 for nilable
+          # struct unions, breaking nil checks. Use Int32 sentinel instead.
+          kind_ord = -1  # -1 = not set
           case len
           when 2
             if bytes[from] == 'i'.ord.to_u8
               case bytes[from + 1]
-              when '8'.ord.to_u8  then kind = NumberKind::I8
+              when '8'.ord.to_u8  then kind_ord = NumberKind::I8.value
               end
             elsif bytes[from] == 'u'.ord.to_u8
               case bytes[from + 1]
-              when '8'.ord.to_u8  then kind = NumberKind::U8
+              when '8'.ord.to_u8  then kind_ord = NumberKind::U8.value
               end
             end
           when 3
             if bytes[from] == 'i'.ord.to_u8
               # i16/i32/i64
               if bytes[from + 1] == '1'.ord.to_u8 && bytes[from + 2] == '6'.ord.to_u8
-                kind = NumberKind::I16
+                kind_ord = NumberKind::I16.value
               elsif bytes[from + 1] == '3'.ord.to_u8 && bytes[from + 2] == '2'.ord.to_u8
-                kind = NumberKind::I32
+                kind_ord = NumberKind::I32.value
               elsif bytes[from + 1] == '6'.ord.to_u8 && bytes[from + 2] == '4'.ord.to_u8
-                kind = NumberKind::I64
+                kind_ord = NumberKind::I64.value
               end
             elsif bytes[from] == 'u'.ord.to_u8
               # u16/u32/u64
               if bytes[from + 1] == '1'.ord.to_u8 && bytes[from + 2] == '6'.ord.to_u8
-                kind = NumberKind::U16
+                kind_ord = NumberKind::U16.value
               elsif bytes[from + 1] == '3'.ord.to_u8 && bytes[from + 2] == '2'.ord.to_u8
-                kind = NumberKind::U32
+                kind_ord = NumberKind::U32.value
               elsif bytes[from + 1] == '6'.ord.to_u8 && bytes[from + 2] == '4'.ord.to_u8
-                kind = NumberKind::U64
+                kind_ord = NumberKind::U64.value
               end
             elsif bytes[from] == 'f'.ord.to_u8
               # f32/f64
               if bytes[from + 1] == '3'.ord.to_u8 && bytes[from + 2] == '2'.ord.to_u8
-                kind = NumberKind::F32
+                kind_ord = NumberKind::F32.value
               elsif bytes[from + 1] == '6'.ord.to_u8 && bytes[from + 2] == '4'.ord.to_u8
-                kind = NumberKind::F64
+                kind_ord = NumberKind::F64.value
               end
             end
           when 4
             # i128/u128
             if bytes[from] == 'i'.ord.to_u8
               if bytes[from + 1] == '1'.ord.to_u8 && bytes[from + 2] == '2'.ord.to_u8 && bytes[from + 3] == '8'.ord.to_u8
-                kind = NumberKind::I128
+                kind_ord = NumberKind::I128.value
               end
             elsif bytes[from] == 'u'.ord.to_u8
               if bytes[from + 1] == '1'.ord.to_u8 && bytes[from + 2] == '2'.ord.to_u8 && bytes[from + 3] == '8'.ord.to_u8
-                kind = NumberKind::U128
+                kind_ord = NumberKind::U128.value
               end
             end
           end
 
-          unless kind
+          if kind_ord < 0
             # Unknown suffix - reset to before underscore and ignore
             @offset = suffix_start
+            nil
+          else
+            NumberKind.new(kind_ord)
           end
-          kind
         end
 
         private def lex_string
@@ -2551,7 +2555,7 @@ module CrystalV2
               return nil
             end
             delimiter_end = @offset
-            delimiter = String.new(@rope.slice(delimiter_start...delimiter_end))
+            delimiter = String.new(bytes_range(delimiter_start, delimiter_end))
             advance  # consume closing quote
           else
             unless is_identifier_start?(current_byte)
@@ -2565,7 +2569,7 @@ module CrystalV2
               advance
             end
             delimiter_end = @offset
-            delimiter = String.new(@rope.slice(delimiter_start...delimiter_end))
+            delimiter = String.new(bytes_range(delimiter_start, delimiter_end))
           end
           debug "[HEREDOC] delimiter='#{delimiter}'"
 
