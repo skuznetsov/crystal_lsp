@@ -25,6 +25,22 @@
 - Active stage2 instability class includes an early runtime self-loop in the stage2 compiler binary itself (not only `Index out of bounds` / container-clear crashes).
 - This gives a faster boundary oracle for stage2->stage3 investigations than waiting full bootstrap time.
 
+### Root-cause localization update (LLVM `opt` stage)
+- Rebuilt stage2 with a fresh isolated cache:
+  - `CRYSTAL_CACHE_DIR_STAGE2_RELEASE=/private/tmp/crystal_cache_stage2_release_selfloop_probe /usr/bin/time -p scripts/build_stage2_release.sh /private/tmp/stage1_rel_autonomous_20260305y /private/tmp/stage2_rel_selfloop_probe`
+  - `real 108.24`
+  - `stage2_main_selfloop_repro` still reproduces (`main_frame_hits=2`, `self_branch_hits=2`), so this is not a stale stage-cache artifact.
+- Differential backend experiment on the same generated IR (`/private/tmp/stage2_rel_selfloop_probe.ll`):
+  - `llc -O3` directly on `.ll` keeps a valid path through `Crystal$Dmain` (no unconditional self-branch target for the `setjmp == 0` path).
+  - `opt -O3` followed by `llc -O3` collapses both `__crystal_main` and `Crystal$Dmain_user_code...` to `tailrecurse` infinite-loop bodies, matching the runtime self-loop signature.
+- Added fast oracle:
+  - `regression_tests/stage2_opt_tailrecurse_repro.sh`
+  - verification:
+    - `bash regression_tests/stage2_opt_tailrecurse_repro.sh /private/tmp/stage2_rel_selfloop_probe.ll O3` -> reproduced.
+    - `bash regression_tests/stage2_opt_tailrecurse_repro.sh /private/tmp/stage2_rel_selfloop_probe.ll O0` -> not reproduced.
+- Additional control:
+  - Attempted stage2 release build with `--no-llvm-opt` avoids this specific `opt` transform path but currently fails link with unresolved symbols (`_fraction`, `_negative`, `_p`, `_register_to_matrix`, `_to_float`), so no direct no-opt workaround yet.
+
 ## 2026-03-05: Stage2 generic container failure class (root-cause track)
 
 ### New deterministic repro added
