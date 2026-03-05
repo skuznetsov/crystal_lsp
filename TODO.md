@@ -1,5 +1,47 @@
 # Crystal v2 — Active Work (codegen branch)
 
+## 2026-03-05: Stage2 generic container failure class (root-cause track)
+
+### New deterministic repro added
+- Added `regression_tests/stage2_container_clear_index_oob_repro.sh`.
+- Signature:
+  - stage2 compiler fails with `Index out of bounds` on a focused container-clear stress case,
+  - stage1 control compiler passes the same source.
+- Verification:
+  - `bash regression_tests/stage2_container_clear_index_oob_repro.sh /tmp/stage2_rel_typeref_cache_fix` -> reproduced (`status=1`, `Index out of bounds`).
+  - `bash regression_tests/stage2_container_clear_index_oob_repro.sh /tmp/stage1_rel_typeref_cache_fix` -> not reproduced (`status=0`).
+
+### Current stage2 localization snapshot
+- Stable boundary (most repeatable):
+  - minimal `macro x; end` with `--no-prelude --no-link` reaches LLVM setup/generate and then fails.
+- Representative LLDB top frames seen on recent builds:
+  - `Hash(UInt32, Nil)#upsert` via `compute_reachable_functions` (earlier boundary, now bypassed by array reachability).
+  - `Hash(TypeRef, String)#upsert` via `LLVMTypeMapper#llvm_type` in `precompute_function_return_types`.
+  - `LLVMIRGenerator#reset_value_names` (`EXC_BAD_ACCESS` at clear path).
+  - with one clean-cache binary variant, crash surfaced at `TypeRegistry#initialize` / malloc path (same overall failure class, different boundary).
+
+### Work done in code (in-progress, not yet declared stable)
+- `src/compiler/mir/llvm_backend.cr`:
+  - reachability traversal switched from `Set(FunctionId)` to `Array(Bool)` + worklist flags,
+  - `LLVMTypeMapper` `TypeRef -> llvm_type` cache switched from `Hash(TypeRef, String)` to `Array(String?)` indexed by `TypeRef.id`,
+  - module singleton map switched from `Hash(TypeRef, String)` to id-indexed storage.
+- Additional experiment in progress:
+  - `Set(ValueId)` trackers (`@void_values`, `@inttoptr_value_ids`) converted to `Array(Bool)` flags to probe generic container layout/lowering bug class.
+
+### Timing snapshots (release bootstrap)
+- `/tmp/stage1_rel_typeref_cache_fix` -> `real 445.18`
+- `/tmp/stage2_rel_typeref_cache_fix` -> `real 427.43`
+- `/tmp/stage1_rel_reset_reinit_fix` -> `real 448.50`
+- `/tmp/stage2_rel_reset_reinit_fix` -> `real 417.94`
+- `/tmp/stage1_rel_flags_fix` -> `real 439.48`
+- `/tmp/stage2_rel_flags_fix` -> `real 427.27`
+- `/tmp/stage2_rel_flags_fix_clean_cache` (fresh `CRYSTAL_CACHE_DIR_STAGE2_RELEASE`) -> `real 330.28`
+
+### Stage2 stability status (current)
+- `stage2 -> stage3` still not stable.
+- `stage_stats_output_repro.sh` remains failing on stage2 (`Index out of bounds`).
+- New container repro confirms stage2-only failure class independent of large bootstrap source.
+
 ## 2026-03-04: Stage1 File.open runtime crash fixed (virtual return + File allocator override)
 
 ### What was fixed
