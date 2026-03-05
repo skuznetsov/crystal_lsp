@@ -74,24 +74,40 @@ module Crystal
     # These need special FieldGet handling: GEP without load for struct-typed fields.
     @inline_struct_ptrs : Set(HIR::ValueId) = Set(HIR::ValueId).new
 
+    @[AlwaysInline]
+    private def mir_setup_trace? : Bool
+      ENV.has_key?("CRYSTAL_V2_MIR_SETUP_TRACE") || ENV.has_key?("CRYSTAL2_MIR_SETUP_TRACE")
+    end
+
     # Statistics
     getter stats : LoweringStats = LoweringStats.new
 
     def initialize(@hir_module : HIR::Module, *, slab_frame : Bool = false)
+      trace = mir_setup_trace?
+      STDERR.puts "[MIR_INIT] begin" if trace
       @mir_module = Crystal::MIR::Module.new(@hir_module.name)
+      STDERR.puts "[MIR_INIT] mir_module" if trace
       @value_map = {} of HIR::ValueId => ValueId
+      STDERR.puts "[MIR_INIT] value_map" if trace
       @hir_value_types = {} of HIR::ValueId => HIR::TypeRef
+      STDERR.puts "[MIR_INIT] hir_value_types" if trace
       @block_map = [] of BlockId?
+      STDERR.puts "[MIR_INIT] block_map" if trace
       @pending_phis = [] of Tuple(Phi, HIR::Phi)
+      STDERR.puts "[MIR_INIT] pending_phis" if trace
       @stack_slot_values = Set(ValueId).new
+      STDERR.puts "[MIR_INIT] stack_slot_values" if trace
       @stack_slot_types = {} of ValueId => TypeRef
+      STDERR.puts "[MIR_INIT] stack_slot_types" if trace
       @slab_frame_enabled = slab_frame
       @current_block_param_id = nil
       @class_children = {} of String => Array(String)
+      STDERR.puts "[MIR_INIT] class_children" if trace
       @hir_module.class_parents.each do |name, parent|
         next unless parent
         (@class_children[parent] ||= [] of String) << name
       end
+      STDERR.puts "[MIR_INIT] class_parents_indexed" if trace
     end
 
     @[AlwaysInline]

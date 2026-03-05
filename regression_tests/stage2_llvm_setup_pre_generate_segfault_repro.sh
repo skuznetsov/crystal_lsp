@@ -25,10 +25,10 @@ status=$?
 set -e
 
 if [[ $status -eq 139 ]] && \
-   grep -q "\\[LLVM_SETUP\\] generator flags configured" "$ERR" && \
+   grep -q "\\[MIR_SETUP\\] before lowering.new" "$ERR" && \
    ! grep -q "\\[LLVM_SETUP\\] generate(io) start" "$ERR" && \
    ! grep -q "\\[LLVM_SETUP\\] generate(string) start" "$ERR"; then
-  echo "reproduced: stage2 segfaults after LLVM setup and before IR generation"
+  echo "reproduced: stage2 segfaults during MIR/LLVM setup before IR generation"
   echo "compiler: $COMPILER"
   echo "status: $status"
   echo "tmp_dir: $TMP_DIR"

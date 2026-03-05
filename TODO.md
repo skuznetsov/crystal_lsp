@@ -42,6 +42,30 @@
 - `stage_stats_output_repro.sh` remains failing on stage2 (`Index out of bounds`).
 - New container repro confirms stage2-only failure class independent of large bootstrap source.
 
+### Follow-up (2026-03-05): `Set`-specific hypothesis check + boundary refresh
+- Quick control matrix on minimal sources:
+  - `stage1` (`/tmp/stage1_rel_flags_fix`, `/tmp/stage1_rel_typeref_cache_fix`) passes `trivial.cr`, `macro.cr`, `hash_clear.cr`, `set_clear.cr` (`status=0`).
+  - `stage2` (`/tmp/stage2_rel_flags_fix`, `/tmp/stage2_rel_typeref_cache_fix`) fails all those with `Index out of bounds` and/or segfault signatures.
+- Conclusion:
+  - `Set(ValueId) -> Array(Bool)` style substitutions can move crash boundaries, but current evidence does **not** support a `Set`-only monomorphization bug.
+  - Failure class is broader: stage2 breaks even on trivial/no-container inputs.
+- Added targeted init localization trace:
+  - `src/compiler/mir/hir_to_mir.cr` now emits `[MIR_INIT] ...` markers under `CRYSTAL_V2_MIR_SETUP_TRACE` / `CRYSTAL2_MIR_SETUP_TRACE`.
+  - Verified on `/tmp/stage2_rel_mir_init_trace`: crash happens after full MIR setup in one run (`[MIR_SETUP] lowering bodies done funcs=1`, then stage2 segfaults), while other trace configurations crash earlier; boundary remains unstable.
+- Refuted local branch:
+  - temporary `globals.map(...).to_set` -> hash-membership A/B in `src/compiler/cli.cr` shifted one boundary but did not remove core stage2 failures (`stage2_macro_parse_index_oob_repro`, `stage2_exprid_arena_oob_repro` still reproduced). Reverted.
+- Regression script hardening:
+  - Updated `regression_tests/stage2_llvm_setup_pre_generate_segfault_repro.sh` to match current failure family:
+    - requires `status=139`,
+    - requires `[MIR_SETUP] before lowering.new`,
+    - requires absence of `[LLVM_SETUP] generate(io|string) start`.
+  - Verification:
+    - `bash regression_tests/stage2_llvm_setup_pre_generate_segfault_repro.sh /tmp/stage2_rel_flags_fix` -> reproduced.
+    - stage1 control (`/tmp/stage1_rel_flags_fix`) -> not reproduced.
+- New timing snapshots from this localization cycle:
+  - `/tmp/stage2_rel_mir_init_trace` build (`scripts/build_stage2_release.sh`) -> `real 595.59`.
+  - `/tmp/stage2_dbg_cli_toset_hashprobe` build (`scripts/build_stage2_debug.sh`, diagnostic branch) -> `real 466.81`.
+
 ## 2026-03-04: Stage1 File.open runtime crash fixed (virtual return + File allocator override)
 
 ### What was fixed
