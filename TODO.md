@@ -5,7 +5,7 @@
 ### New deterministic repro added
 - Added `regression_tests/stage2_container_clear_index_oob_repro.sh`.
 - Signature:
-  - stage2 compiler fails with `Index out of bounds` on a focused container-clear stress case,
+  - stage2 compiler fails with `Index out of bounds` on a **minimal** case (`Hash(UInt32, String)` field + single `clear`),
   - stage1 control compiler passes the same source.
 - Verification:
   - `bash regression_tests/stage2_container_clear_index_oob_repro.sh /tmp/stage2_rel_typeref_cache_fix` -> reproduced (`status=1`, `Index out of bounds`).

@@ -14,56 +14,17 @@ OUT="$TMP_DIR/out.txt"
 ERR="$TMP_DIR/err.txt"
 
 cat >"$SRC" <<'CR'
-struct TR
-  getter id : UInt32
-  def initialize(@id : UInt32)
-  end
-end
-
 class Probe
   @h1 : Hash(UInt32, String) = {} of UInt32 => String
-  @h2 : Hash(UInt32, String) = {} of UInt32 => String
-  @h3 : Hash(UInt32, TR) = {} of UInt32 => TR
-  @s1 : Set(UInt32) = Set(UInt32).new
-  @h4 : Hash(UInt32, Int32) = {} of UInt32 => Int32
-  @arr : Array(Bool) = [] of Bool
-  @h5 : Hash(UInt32, {Int32, Int32}) = {} of UInt32 => {Int32, Int32}
-  @h6 : Hash(UInt32, Set(UInt32)) = {} of UInt32 => Set(UInt32)
-  @h7 : Hash(UInt32, {String, Int32, Int32}) = {} of UInt32 => {String, Int32, Int32}
 
-  def seed(n : Int32)
-    i = 0
-    while i < n
-      id = i.to_u32
-      @h1[id] = "a#{i}"
-      @h2[id] = "b#{i}"
-      @h3[id] = TR.new(id)
-      @s1 << id
-      @h4[id] = i
-      @arr << i.odd?
-      @h5[id] = {i, i + 1}
-      @h6[id] = Set(UInt32){id}
-      @h7[id] = {"x#{i}", i, i + 2}
-      i += 1
-    end
-  end
-
-  def reset
+  def run
+    @h1[1_u32] = "a"
     @h1.clear
-    @h2.clear
-    @h3.clear
-    @s1.clear
-    @h4.clear
-    @arr.clear
-    @h5.clear
-    @h6.clear
-    @h7.clear
   end
 end
 
 p = Probe.new
-p.seed(200)
-p.reset
+p.run
 puts "probe_ok"
 CR
 
