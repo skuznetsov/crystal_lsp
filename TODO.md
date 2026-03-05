@@ -1,5 +1,61 @@
 # Crystal v2 — Active Work (codegen branch)
 
+## 2026-03-05: entry-guard newline root cause fixed -> clean stage2 restored
+
+- Root cause for the clean post-`opt` empty-module blocker was **our own CLI rewrite path**, not LLVM `opt` itself:
+  - `apply_llvm_entry_opt_guard!` rewrote generated `.ll` via `File.each_line(ll_file)`,
+  - Crystal `File.each_line` defaults to `chomp = true`,
+  - so the rewrite dropped all line terminators and flattened the whole IR into one giant line starting with `; ModuleID = ...`,
+  - which made the rest of the file parse as a giant comment line and yielded the near-empty `opt` bitcode/object.
+- Fix applied in `src/compiler/cli.cr`:
+  - `File.each_line(ll_file, chomp: false)` in `apply_llvm_entry_opt_guard!`.
+- Added focused oracle:
+  - `regression_tests/stage1_llvm_entry_opt_guard_newline_repro.sh`
+  - verifies:
+    - rewritten `.ll` still contains newline bytes,
+    - entry guard still patches `noinline optnone`,
+    - `opt -O0` output keeps `main` and `__crystal_main`.
+- Verification in clean worktree (`60d4d2e8` + newline fix):
+  - clean `stage1 --release`:
+    - `/usr/bin/time -p scripts/build_stage1_original_release.sh /tmp/stage1_rel_entryguard_newlinefix_20260305a`
+    - `real 410.34`
+  - newline oracle:
+    - `regression_tests/stage1_llvm_entry_opt_guard_newline_repro.sh /tmp/stage1_rel_entryguard_newlinefix_20260305a`
+    - `not reproduced`
+  - clean `stage2 --release --no-link`:
+    - `/usr/bin/time -p /tmp/stage1_rel_entryguard_newlinefix_20260305a src/crystal_v2.cr --release --no-link -o /tmp/stage2_rel_entryguard_newlinefix_20260305a_nolink`
+    - `real 216.32`
+    - raw `.ll` now has `3352729` newline bytes and a trailing newline,
+    - post-`opt` bitcode is `95773408` bytes,
+    - object is `58567952` bytes,
+    - `nm -gU` shows many symbols again.
+  - old blocker oracle is gone:
+    - `bash regression_tests/stage2_opt_empty_module_repro.sh /tmp/stage2_rel_entryguard_newlinefix_20260305a_nolink.ll O0`
+    - `not reproduced`
+  - full linked `stage2 --release` now succeeds again:
+    - `/usr/bin/time -p scripts/build_stage2_release.sh /tmp/stage1_rel_entryguard_newlinefix_20260305a /tmp/stage2_rel_entryguard_newlinefix_20260305a`
+    - `real 216.97`
+    - resulting binary size: `54M`.
+- Updated performance snapshot on warm release caches:
+  - `stage1 --release`: `410.34s`
+  - `stage2 --release`: `216.97s`
+  - current observed speedup: `~1.89x`.
+- New active blocker after the fix:
+  - `stage2 -> stage3` no longer hangs in this branch; it now fails fast:
+    - `scripts/timeout_sample_lldb.sh ... -- /tmp/stage2_rel_entryguard_newlinefix_20260305a src/crystal_v2.cr --release -o /tmp/stage3_rel_entryguard_newlinefix_20260305a`
+    - exits in `real 1.26` with non-debug surface `error: Index out of bounds`.
+  - under `CRYSTAL2_STAGE2_DEBUG=1`, the same attempt segfaults (`rc=139`) instead of producing a managed error.
+  - existing focused repro still matches the current stage2:
+    - `bash regression_tests/stage2_container_clear_index_oob_repro.sh /tmp/stage2_rel_entryguard_newlinefix_20260305a`
+    - `reproduced`
+  - previous minimal BlockId-clear oracle drifted again:
+    - `bash regression_tests/stage2_emit_function_blockid_clear_repro.sh /tmp/stage2_rel_entryguard_newlinefix_20260305a`
+    - `not reproduced`
+    - but LLDB on its minimal no-prelude repro still shows a stage2-only crash inside `LLVMIRGenerator#generate` after `[LLVM] total MIR functions: 1`.
+- Next steps:
+  - add/refresh a focused oracle for the new `LLVMIRGenerator#generate` early-crash boundary,
+  - root-cause the fast `Index out of bounds` / `EXC_BAD_ACCESS` path now that the false empty-module blocker is removed.
+
 ## 2026-03-05: clean rebuild after parser fix -> new active blocker
 
 - Built the parser-fix commit in a clean `git worktree` (`94598345`) to remove contamination from ongoing HIR/MIR experiments in the main worktree.

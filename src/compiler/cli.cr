@@ -1869,7 +1869,7 @@ module CrystalV2
         patched = 0
 
         File.open(tmp, "w") do |io|
-          File.each_line(ll_file) do |line|
+          File.each_line(ll_file, chomp: false) do |line|
             if targets.any? { |prefix| line.starts_with?(prefix) } && !line.includes?("optnone")
               updated = line.sub(" {", " noinline optnone {")
               if updated != line

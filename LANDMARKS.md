@@ -57,6 +57,14 @@ Context: compiler/bootstrap/stage2-stability
 
 [LM-27|repro]: focused oracle `regression_tests/stage2_opt_empty_module_repro.sh` reproduces the new clean blocker directly from raw stage2 IR: both `O3` and `O0` `opt` runs erase `main`, `__crystal_main`, and `main_user_code`, leaving zero `define` lines in disassembled output and zero exported symbols in the object {F/G/R: 0.95/0.8/0.95} [verified]
 
+[LM-28|root-cause]: the clean post-`opt` empty-module blocker was introduced by CLI entry-guard rewriting, not LLVM `opt`: `apply_llvm_entry_opt_guard!` read `.ll` via `File.each_line(ll_file)` with default `chomp=true`, dropped all `\n`, and flattened the file into one giant comment line beginning with `; ModuleID = ...`; after changing it to `File.each_line(ll_file, chomp: false)`, raw stage2 IR again contains millions of newline bytes, `stage2_opt_empty_module_repro.sh` stops reproducing, and post-`opt` artifacts return to normal size/symbol counts {F/G/R: 0.98/0.85/0.98} [verified]
+
+[LM-29|perf]: on warm release caches after the entry-guard newline fix, clean rebuild timings are `stage1 --release = 410.34s` and `stage2 --release = 216.97s`, for a current observed `~1.89x` speedup of stage2 over stage1 on this host {F/G/R: 0.95/0.5/0.95} [verified]
+
+[LM-30|boundary]: after the newline fix removes the false empty-module blocker, `stage2 -> stage3` no longer hangs in the previous self-loop class; it now fails fast on `src/crystal_v2.cr --release` with non-debug surface `error: Index out of bounds` (`real 1.26`), while `CRYSTAL2_STAGE2_DEBUG=1` turns the same attempt into `rc=139` {F/G/R: 0.95/0.75/0.95} [verified]
+
+[LM-31|boundary]: the old minimal BlockId-clear signature drifted again on the new stage2: `stage2_emit_function_blockid_clear_repro.sh` no longer reproduces, but its LLDB trace still shows a stage2-only crash in `LLVMIRGenerator#generate` immediately after `[LLVM] total MIR functions: 1`, so the active minimal codegen crash boundary is now broader/earlier than the previous `Set(HIR::BlockId)#clear` path {F/G/R: 0.9/0.7/0.9} [verified]
+
 Contradiction ledger
 - [LM-C1|refute]: broad `reset_value_names` reinit experiment (replace many `clear` with fresh container allocations) did not produce robust stabilization; it shifted crash boundaries and was rejected.
 - [LM-C2|refute]: cache-only explanation is insufficient: fresh isolated stage2 debug cache (`CRYSTAL_CACHE_DIR_STAGE2_DEBUG=/tmp/crystal_cache_stage2_debug_reset_clean`) still reproduces `stage2_reset_value_names_fiberevent_clear_repro` with `status=139` and `FiberEvent$Hclear` drift.
@@ -70,6 +78,7 @@ Contradiction ledger
 - [LM-C10|refute]: the `from_stdio` leak is not macro-specific; the same malformed AST is reproduced by a plain multiline `ret = if ... end` followed by a normal `if`, with no `{% ... %}` control nodes involved.
 - [LM-C11|refute]: the `_main` link failure after the parser fix is not explained by missing entry generation; clean raw stage2 `.ll` still contains `main`, `__crystal_main`, and `main_user_code` before optimization.
 - [LM-C12|refute]: the current clean post-parser-fix collapse is not limited to the earlier `tailrecurse` `O3` signature; the module also empties under `opt -O0`, so the new blocker is broader than a single aggressive optimization pass.
+- [LM-C13|refute]: the clean empty-module blocker is not a pure LLVM-`opt` semantic collapse; the decisive trigger was our own entry-guard rewrite path flattening `.ll` by dropping line terminators during `File.each_line` rewrite.
 
 Current hypothesis
-- Root-cause cluster remains broader than a single bug. The `IO::FileDescriptor.from_stdio` self-loop branch is explained by the parser postfix-modifier bug ([LM-25]), but clean rebuilds now show a stronger current blocker: once the fuller program reaches LLVM, `opt` empties the stage2 module even at low optimization settings ([LM-26], [LM-27]). The next useful work is to localize what in the raw IR or `opt` handoff makes the module disappear, not more parser/HIR symptom fixes.
+- The false empty-module blocker is removed by the entry-guard newline fix ([LM-28]), so the active work returns to genuine stage2 runtime/codegen instability. Current evidence points to a still-broad stage2-only failure family: `stage2_container_clear_index_oob_repro.sh` still reproduces `Index out of bounds`, `stage2 -> stage3` now fails fast instead of hanging ([LM-30]), and the smallest current codegen repro crashes inside `LLVMIRGenerator#generate` before the older BlockId-clear path ([LM-31]). The next useful work is to build a new focused oracle for that earlier generate-path crash and then root-cause the shared invariant violation behind the fast `Index out of bounds` / `EXC_BAD_ACCESS` behavior.
