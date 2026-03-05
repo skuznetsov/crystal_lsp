@@ -30,6 +30,30 @@
   - `stage1 -> stage2` (`/tmp/stage2_rel_status_20260305b`): `real 116.12` with `total MIR functions: 11582`, `RTA kept: 8792`.
   - `stage2 -> stage3` under `scripts/run_safe.sh` still times out at `240s` (cache on/off).
 
+## 2026-03-05: entry opt-guard mitigation (partial)
+
+- Added LLVM entry guard in CLI (`src/compiler/cli.cr`):
+  - before running `opt`, patch generated `.ll` entry signatures with `noinline optnone` for:
+    - `__crystal_main`,
+    - `Crystal$Dmain...`,
+    - `Crystal$Dmain_user_code...`,
+  - controlled by `CRYSTAL_V2_LLVM_ENTRY_OPT_GUARD` (default enabled; `0/false/off` disables).
+- Full bootstrap with rebuilt toolchain:
+  - stage1 from original compiler: `/tmp/stage1_rel_entryguard_20260305a` (`real 436.68`),
+  - stage2 from new stage1: `/tmp/stage2_rel_entryguard_stage2_20260305a` (`real 105.02`),
+  - stage2 IR shows `noinline optnone` on `__crystal_main` and `main_user_code`.
+- Verification:
+  - `bash regression_tests/stage2_opt_tailrecurse_repro.sh /tmp/stage2_rel_entryguard_stage2_20260305a.ll O3` -> **not reproduced** (`collapsed=0/0`).
+  - `bash regression_tests/stage2_main_selfloop_repro.sh /tmp/stage2_rel_entryguard_stage2_20260305a 15` -> old `main` signature no longer matches (`main_frame_hits=0`).
+- New active failure signature:
+  - LLDB now shows self-loop in `IO$CCFileDescriptor$Dfrom_stdio$$Int32` (`b 0x... -> same 0x...`).
+  - Added fast oracle: `regression_tests/stage2_from_stdio_selfloop_repro.sh`.
+  - Verification:
+    - on stage2 (`/tmp/stage2_rel_entryguard_stage2_20260305a`): reproduced (`from_stdio_frame_hits=2`, `self_branch_hits=2`),
+    - on stage1 control (`/tmp/stage1_rel_entryguard_20260305a`): not reproduced (`0/0`).
+- `stage2 -> stage3` remains unstable after this mitigation:
+  - `scripts/run_safe.sh` still times out (`120s`) on stage2 compiler.
+
 ## 2026-03-05: stage2->stage3 status refresh (self-loop signature)
 
 ### Bootstrap status snapshot

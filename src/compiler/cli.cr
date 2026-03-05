@@ -92,9 +92,9 @@ module CrystalV2
       # Top-level macro variable assignments (e.g., {% nums = %w(Int8 ...) %})
       @macro_text_vars = {} of String => String
 
-      # Stage2 has shown fragility with tuple payload reads in self-hosted mode.
-      # Keep parsed-unit fields named and typed to avoid tuple index lowering paths.
-      private struct ParsedUnit
+      # Stage2 has shown fragility with value payload reads in self-hosted mode.
+      # Keep parsed units as a reference type to avoid value-copy/indexing paths.
+      private class ParsedUnit
         getter arena : Frontend::AstArena
         getter roots : Array(Frontend::ExprId)
         getter path : String
@@ -109,7 +109,7 @@ module CrystalV2
         end
       end
 
-      private struct MacroEntry
+      private class MacroEntry
         getter node : Frontend::MacroDefNode
         getter arena : Frontend::ArenaLike
 
@@ -629,7 +629,15 @@ module CrystalV2
       private def run_check(path : String, options : Options, out_io : IO, err_io : IO) : Int32
         source = File.read(path)
         lexer = Frontend::Lexer.new(source)
-        parser = Frontend::Parser.new(lexer)
+        parser = begin
+          Frontend::Parser.new(lexer)
+        rescue ex : IndexError
+          if env_enabled?("CRYSTAL_V2_PARSER_INDEX_TRACE") || env_enabled?("CRYSTAL2_PARSER_INDEX_TRACE")
+            bt = ex.backtrace?.try(&.first(30).join("\n")) || "(no backtrace)"
+            raise "Parser init index error while parsing #{path}\n#{ex.message}\n#{bt}"
+          end
+          raise ex
+        end
         stage2_debug("[STAGE2_DEBUG] parse_file_recursive parse start", out_io)
         program = parser.parse_program
         stage2_debug("[STAGE2_DEBUG] parse_file_recursive parse ok", out_io)
@@ -1509,7 +1517,7 @@ module CrystalV2
                 log(options, out_io, "    #{func.name} -> #{stats.total} changes (legacy)") if options.verbose
               end
             rescue ex : IndexError
-              raise "Index error in optimize for: #{func.name}\n#{ex.message}\n#{ex.backtrace.join("\n")}"
+              raise "Index error in optimize for: #{func.name}\n#{ex.message}"
             end
           end
           timings["mir_opt"] = (Time.instant - mir_opt_start).total_milliseconds if options.stats
@@ -1675,6 +1683,7 @@ module CrystalV2
         err_io : IO,
         timings : Hash(String, Float64)
       ) : Int32
+        apply_llvm_entry_opt_guard!(ll_file, options, out_io)
         obj_file = ll_file.gsub(/\.ll$/, ".o")
 
         opt_flag = case options.optimize
@@ -1683,6 +1692,15 @@ module CrystalV2
                    when 2 then "-O2"
                    else        "-O3"
                    end
+        opt_bisect_limit = (env_get("CRYSTAL_V2_LLVM_OPT_BISECT_LIMIT") || "").strip
+        opt_bisect_flag = ""
+        unless opt_bisect_limit.empty?
+          unless opt_bisect_limit.matches?(/\A-?\d+\z/)
+            err_io.puts "error: invalid CRYSTAL_V2_LLVM_OPT_BISECT_LIMIT (expected integer)"
+            return 1
+          end
+          opt_bisect_flag = " -opt-bisect-limit=#{opt_bisect_limit}"
+        end
 
         cache_dir = File.expand_path("tmp/llvm_cache", Dir.current)
         base_hash = ""
@@ -1691,7 +1709,8 @@ module CrystalV2
           base_hash = file_sha256(ll_file)
         end
 
-        opt_tag = options.llvm_opt ? "opt=#{opt_flag}" : "opt=none"
+        opt_mode_tag = options.llvm_opt ? "#{opt_flag}#{opt_bisect_flag}" : "none"
+        opt_tag = "opt=#{opt_mode_tag}"
         llc_tag = "llc=#{opt_flag}"
         opt_cache_file = options.llvm_cache ? path_join(cache_dir, "#{digest_string("#{base_hash}|#{opt_tag}")}.opt.bc") : ""
         obj_cache_file = options.llvm_cache ? path_join(cache_dir, "#{digest_string("#{base_hash}|#{opt_tag}|#{llc_tag}")}.o") : ""
@@ -1706,7 +1725,7 @@ module CrystalV2
           else
             # Keep optimized IR in bitcode form to avoid expensive text print/parse
             # in large stage2 bootstrap modules.
-            opt_cmd = "opt #{opt_flag} -o #{opt_ll_file} #{ll_file} 2>&1"
+            opt_cmd = "opt #{opt_flag}#{opt_bisect_flag} -o #{opt_ll_file} #{ll_file} 2>&1"
             log(options, out_io, "  $ #{opt_cmd}")
             opt_result = `#{opt_cmd}`
             unless $?.success?
@@ -1826,6 +1845,49 @@ module CrystalV2
           File.delete(opt_ll_file)
         end
         return 0
+      end
+
+      private def llvm_entry_opt_guard_enabled? : Bool
+        raw = (env_get("CRYSTAL_V2_LLVM_ENTRY_OPT_GUARD") || "").strip.downcase
+        return true if raw.empty?
+        !(raw == "0" || raw == "false" || raw == "off")
+      end
+
+      private def apply_llvm_entry_opt_guard!(ll_file : String, options : Options, out_io : IO) : Nil
+        return unless llvm_entry_opt_guard_enabled?
+        return unless File.exists?(ll_file)
+
+        targets = [
+          "define void @__crystal_main(",
+          "define void @Crystal$Dmain$$Int32_Pointer$LPointer$LUInt8$R$R(",
+          "define void @\"Crystal$Dmain$$Int32_Pointer$LPointer$LUInt8$R$R\"(",
+          "define void @Crystal$Dmain_user_code$$Int32_Pointer$LPointer$LUInt8$R$R(",
+          "define void @\"Crystal$Dmain_user_code$$Int32_Pointer$LPointer$LUInt8$R$R\"(",
+        ] of String
+
+        tmp = "#{ll_file}.entry_guard.tmp"
+        patched = 0
+
+        File.open(tmp, "w") do |io|
+          File.each_line(ll_file) do |line|
+            if targets.any? { |prefix| line.starts_with?(prefix) } && !line.includes?("optnone")
+              updated = line.sub(" {", " noinline optnone {")
+              if updated != line
+                line = updated
+                patched += 1
+              end
+            end
+            io << line
+          end
+        end
+
+        if patched > 0
+          File.delete(ll_file) if File.exists?(ll_file)
+          File.rename(tmp, ll_file)
+          log(options, out_io, "  [entry-opt-guard] patched=#{patched}") if options.verbose
+        else
+          File.delete(tmp) if File.exists?(tmp)
+        end
       end
 
       private def build_link_flags(options : Options, out_io : IO) : Array(String)
@@ -2044,7 +2106,15 @@ module CrystalV2
         stage2_debug("[STAGE2_DEBUG] parse_file_recursive lexer created, creating parser", out_io)
         parser = Frontend::Parser.new(lexer)
         stage2_debug("[STAGE2_DEBUG] parse_file_recursive parse start abs_path=#{abs_path}", out_io)
-        program = parser.parse_program
+        program = begin
+          parser.parse_program
+        rescue ex : IndexError
+          if env_enabled?("CRYSTAL_V2_PARSER_INDEX_TRACE") || env_enabled?("CRYSTAL2_PARSER_INDEX_TRACE")
+            bt = ex.backtrace?.try(&.first(30).join("\n")) || "(no backtrace)"
+            raise "Parser index error while parsing #{abs_path}\n#{ex.message}\n#{bt}"
+          end
+          raise ex
+        end
         stage2_debug("[STAGE2_DEBUG] parse_file_recursive parse ok abs_path=#{abs_path}", out_io)
         arena = program.arena.as(Frontend::AstArena)
         exprs = program.roots
@@ -2163,9 +2233,7 @@ module CrystalV2
           is_node = node.is_a?(Frontend::Node)
           is_string = node.is_a?(Frontend::StringNode)
           node_kind = Frontend.node_kind(node)
-          # Read raw type_id from object header (first 4 bytes)
-          raw_type_id = Pointer(Int32).new(node.as(Frontend::Node).object_id).value
-          log(options, out_io, "    [req] expr=#{expr_id.index} type_id=#{raw_type_id} kind=#{node_kind} node?=#{is_node} req?=#{is_require} mod?=#{is_module} macif?=#{is_macroif} macrodef?=#{is_macrodef} str?=#{is_string}")
+          log(options, out_io, "    [req] expr=#{expr_id.index} kind=#{node_kind} node?=#{is_node} req?=#{is_require} mod?=#{is_module} macif?=#{is_macroif} macrodef?=#{is_macrodef} str?=#{is_string}")
         end
         case node
         when Frontend::ModuleNode

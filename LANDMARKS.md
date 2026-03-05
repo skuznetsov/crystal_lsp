@@ -45,6 +45,12 @@ Context: compiler/bootstrap/stage2-stability
 
 [LM-21|boundary]: refreshed timeout diagnostics (`scripts/timeout_sample_lldb.sh`) on `stage2 -> stage3` show active hot loop in `Crystal$Dmain... + 268` with unconditional self-branch, matching run-safe 240s timeouts (cache on/off) {F/G/R: 0.9/0.8/0.9} [verified]
 
+[LM-22|mitigation]: CLI-level LLVM entry guard (`CRYSTAL_V2_LLVM_ENTRY_OPT_GUARD`, default on) patches generated `.ll` definitions for `__crystal_main` / `Crystal$Dmain...` / `main_user_code` with `noinline optnone` before `opt`; on rebuilt toolchain this removes `stage2_opt_tailrecurse_repro` collapse for `__crystal_main`+`main_user_code` (`collapsed=0/0`) {F/G/R: 0.9/0.7/0.9} [verified]
+
+[LM-23|boundary]: after entry guard, previous `Crystal$Dmain` self-loop signature is no longer primary (`stage2_main_selfloop_repro` becomes signature mismatch with `main_frame_hits=0`), but stage2 still hangs with a shifted self-loop at `IO$CCFileDescriptor$Dfrom_stdio$$Int32` {F/G/R: 0.9/0.8/0.9} [verified]
+
+[LM-24|repro]: focused oracle `regression_tests/stage2_from_stdio_selfloop_repro.sh` reproduces the new stage2-only `IO::FileDescriptor.from_stdio` self-branch signature (`from_stdio_frame_hits>=1` + self `b` target) and does not reproduce on stage1 control {F/G/R: 0.9/0.8/0.9} [verified]
+
 Contradiction ledger
 - [LM-C1|refute]: broad `reset_value_names` reinit experiment (replace many `clear` with fresh container allocations) did not produce robust stabilization; it shifted crash boundaries and was rejected.
 - [LM-C2|refute]: cache-only explanation is insufficient: fresh isolated stage2 debug cache (`CRYSTAL_CACHE_DIR_STAGE2_DEBUG=/tmp/crystal_cache_stage2_debug_reset_clean`) still reproduces `stage2_reset_value_names_fiberevent_clear_repro` with `status=139` and `FiberEvent$Hclear` drift.
@@ -54,6 +60,7 @@ Contradiction ledger
 - [LM-C6|refute]: `FiberEvent$Hclear` call-target drift in `reset_value_names` is no longer reproduced on current stage2 release/debug binaries; active crash shifted to BlockId hash/set clear path in `emit_function`.
 - [LM-C7|refute]: current stage2 instability cannot be modeled as only `Index out of bounds` or only `emit_function` clear-path crashes; release stage2 also shows an early runtime self-loop in `Crystal$Dmain...` on stage3 bootstrap input.
 - [LM-C8|refute]: isolated `CRYSTAL_CACHE_DIR_STAGE2_RELEASE` cleanup alone does not remove the `Crystal$Dmain` self-loop; collapse persists on fresh-cache rebuilds.
+- [LM-C9|refute]: fixing only `__crystal_main`/`main_user_code` opt-collapse is not sufficient for stage2 stability; after entry-guard mitigation the active self-loop shifted to `IO::FileDescriptor.from_stdio`.
 
 Current hypothesis
 - Root-cause cluster remains broader than a single bug, but the current `stage2 -> stage3` blocker is now localized to LLVM optimization of stage2-generated IR: `opt` can collapse key entry functions (`__crystal_main`, `main_user_code`) into infinite tailrecurse loops; separate BlockId clear-path crashes still exist in other debug/localization branches.
