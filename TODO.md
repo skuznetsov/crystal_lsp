@@ -153,6 +153,16 @@
   - stage2 faster by `39.49s` (`725.24 -> 685.75`, about `1.06x`),
   - stability unchanged (`stage2 -> stage3` still failing).
 
+### Cache-isolation check (2026-03-05 night)
+- Built stage2 debug with a **fresh isolated cache**:
+  - `CRYSTAL_CACHE_DIR_STAGE2_DEBUG=/tmp/crystal_cache_stage2_debug_reset_clean /usr/bin/time -p scripts/build_stage2_debug.sh /tmp/stage1_rel_resume /tmp/stage2_dbg_reset_probe_clean`
+  - `real 334.17`.
+- Ran focused oracle on clean-cache binary:
+  - `bash regression_tests/stage2_reset_value_names_fiberevent_clear_repro.sh /tmp/stage2_dbg_reset_probe_clean`
+  - still reproduced (`status=139`, `fiber_clear_calls_in_reset_value_names=2`).
+- Conclusion:
+  - this failure class is **not** only a stale/warm-cache artifact; clean-cache stage2 still shows the same `reset_value_names` call-target drift signature.
+
 ## 2026-03-04: Stage1 File.open runtime crash fixed (virtual return + File allocator override)
 
 ### What was fixed
