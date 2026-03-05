@@ -24,6 +24,7 @@ Contradiction ledger
 - [LM-C2|refute]: cache-only explanation is insufficient: fresh stage2 cache can change performance and some stack tops, but core stage2 failure signatures remain.
 - [LM-C3|refute]: `Set`-specific root-cause hypothesis is insufficient; stage2 fails equally on trivial/no-container and `Hash/Set` micro-repros.
 - [LM-C4|refute]: targeted `@alloc_types.clear -> reinit` workaround in `reset_value_names` was unstable and regressed crash boundary; rejected.
+- [LM-C5|refute]: converting `@alloc_types/@alloc_element_types` from Hash to array-indexed storage did not provide robust stage2 stabilization; boundary remained unstable and change was reverted.
 
 Current hypothesis
 - Root-cause cluster is a broader stage2 self-host corruption class (monomorphization/lowering/runtime ABI interactions), now tightly localized to per-function reset/clear paths in LLVM emission (`reset_value_names`) during first function emission.

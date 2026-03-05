@@ -97,6 +97,12 @@
   - Result was unstable and regressed boundary (one run crashed as early as
     `MIR::TypeRegistry#initialize`/malloc path under LLDB).
   - Workaround reverted.
+- Refuted structural variant:
+  - Tried converting `@alloc_types` / `@alloc_element_types` from
+    `Hash(ValueId, TypeRef)` to `ValueId`-indexed arrays to bypass hash clear path.
+  - No robust stabilization gain (non-LLDB boundary still at
+    `emit_function start __crystal_main` and LLDB boundary remained unstable).
+  - Variant reverted.
 - Additional timing snapshots:
   - Stage1 rebuild after `/tmp` cleanup:
     - `/usr/bin/time -p scripts/build_stage1_original_release.sh /tmp/stage1_rel_resume --error-trace`
