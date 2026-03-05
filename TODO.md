@@ -112,6 +112,47 @@
     - `/tmp/stage2_dbg_llvm_emit_trace_current` -> `real 364.03`.
     - `/tmp/stage2_dbg_alloctypes_reinit_probe` (refuted branch) -> `real 413.74`.
 
+### Follow-up (2026-03-05 night): reset_value_names call-target oracle
+- Rebuilt fresh stage2 debug from restored stage1:
+  - `/usr/bin/time -p scripts/build_stage2_debug.sh /tmp/stage1_rel_resume /tmp/stage2_dbg_reset_probe`
+  - `real 366.96`.
+- Fresh trace on minimal macro repro with `/tmp/stage2_dbg_reset_probe` confirms current boundary:
+  - reaches `[LLVM_SETUP] generate(io) start`,
+  - reaches `[LLVM_GEN] emit_function start __crystal_main`,
+  - segfaults before `emit_function done`.
+- LLDB backtrace on same run:
+  - frame #0: `Crystal::EventLoop::Polling::FiberEvent#clear`,
+  - frame #1: `LLVMIRGenerator#reset_value_names`,
+  - frame #2: `LLVMIRGenerator#emit_function`,
+  - frame #3: `LLVMIRGenerator#generate`.
+- LLDB disassembly of `reset_value_names` on `/tmp/stage2_dbg_reset_probe` shows call-target drift:
+  - clear sequence contains `Crystal$CCEventLoop$CCPolling$CCFiberEvent$Hclear` calls inside reset path (count=2),
+  - one call aligns with crash site (`+136`).
+- Added focused oracle:
+  - `regression_tests/stage2_reset_value_names_fiberevent_clear_repro.sh`
+  - signature:
+    - compile status `139` on minimal repro,
+    - stderr has `[MIR_SETUP] before lowering.new` and no `[LLVM_SETUP] generate(io) done`,
+    - disassembly of `reset_value_names` contains `FiberEvent$Hclear`.
+  - verification:
+    - `bash regression_tests/stage2_reset_value_names_fiberevent_clear_repro.sh /tmp/stage2_dbg_reset_probe` -> reproduced.
+    - `bash regression_tests/stage2_reset_value_names_fiberevent_clear_repro.sh /tmp/stage1_rel_resume` -> not reproduced (`status=0`, no symbol/target drift).
+
+### Bootstrap snapshot (2026-03-05 night, current working tree)
+- Stage1 release (original compiler, warm release cache):
+  - `/usr/bin/time -p scripts/build_stage1_original_release.sh /tmp/stage1_rel_current`
+  - `real 725.24`.
+- Stage2 release from that stage1:
+  - `/usr/bin/time -p scripts/build_stage2_release.sh /tmp/stage1_rel_current /tmp/stage2_rel_current`
+  - `real 685.75`.
+  - LLVM counters: `total MIR functions: 63397`, `RTA kept: 30823`.
+- Stage2 -> stage3 attempt:
+  - `/usr/bin/time -p scripts/build_stage2_release.sh /tmp/stage2_rel_current /tmp/stage3_rel_from_stage2_current`
+  - fails fast with `error: Index out of bounds` (`real 0.67`).
+- Stage1 vs stage2 speed delta for this run:
+  - stage2 faster by `39.49s` (`725.24 -> 685.75`, about `1.06x`),
+  - stability unchanged (`stage2 -> stage3` still failing).
+
 ## 2026-03-04: Stage1 File.open runtime crash fixed (virtual return + File allocator override)
 
 ### What was fixed
