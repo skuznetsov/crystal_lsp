@@ -5096,7 +5096,14 @@ module CrystalV2
             skip_trivia
 
             # Parse parameter list
+            block_param_prev_index = -1
             loop do
+              # Guard: break if no token progress
+              if block_param_prev_index == @index
+                break
+              end
+              block_param_prev_index = @index
+
               is_splat = false
               is_double_splat = false
 
@@ -8387,12 +8394,18 @@ module CrystalV2
           debug { "parse_expression(#{precedence}): after parse_prefix, left=#{left.invalid? ? "invalid" : "valid"}" }
           return PREFIX_ERROR if left.invalid?
 
+          postfix_prev_index = -1
           loop do
             if inside_delimiters?
               skip_whitespace_and_optional_newlines
             else
               skip_trivia
             end
+            # Guard: break if postfix loop made no token progress
+            if postfix_prev_index == @index
+              break
+            end
+            postfix_prev_index = @index
             token = current_token
             if token.kind == Token::Kind::Newline && !inside_delimiters?
               next_token = peek_next_non_space_or_comment
@@ -10682,9 +10695,15 @@ module CrystalV2
 
             # Empty call: foo()
             unless current_token.kind == Token::Kind::RParen
+              arg_loop_prev_index = -1
               loop do
                 skip_whitespace_and_optional_newlines
                 break if current_token.kind == Token::Kind::RParen
+                # Guard: break if no token progress to prevent infinite loops
+                if arg_loop_prev_index == @index
+                  break
+                end
+                arg_loop_prev_index = @index
 
                 # Phase 101: Check for block shorthand (&.method) or block capture (&block)
                 # This creates: { |__arg0| __arg0.method } or passes block argument
@@ -10927,9 +10946,12 @@ module CrystalV2
                   if arg_expr && !arg_expr.invalid? && !pushed
                     # If additional expression fragments remain (e.g., ternary tails),
                     # keep parsing until we hit the next argument delimiter.
+                    frag_prev_index = @index
                     loop do
                       skip_whitespace_and_optional_newlines
                       break if current_token.kind.in?(Token::Kind::Comma, Token::Kind::RParen, Token::Kind::Amp, Token::Kind::AmpDot, Token::Kind::EOF)
+                      break if frag_prev_index == @index # no progress guard
+                      frag_prev_index = @index
                       cont = with_pointer_suffix { parse_expression(0) }
                       break if cont.invalid?
                       arg_expr = cont

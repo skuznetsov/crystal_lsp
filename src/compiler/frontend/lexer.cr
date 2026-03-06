@@ -734,45 +734,45 @@ module CrystalV2
           end
 
           # Phase 103L: Allow integer suffix without underscore (e.g., 8u64, 1i32)
+          # NOTE: Uses inline byte comparisons instead of a lambda to avoid
+          # stage1 closure codegen bug (self captured as NULL in closures).
           if number_kind.nil? && @offset < @rope.size && ascii_letter?(current_byte)
             bytes = @rope.bytes
             b0 = bytes[@offset]
-            # Helper lambda to match a small string and advance
-            match = ->(s : String) do
-              n = s.bytesize
-              return false unless @offset + n <= @rope.size
-              i = 0
-              while i < n
-                break unless bytes[@offset + i] == s.to_unsafe[i]
-                i += 1
-              end
-              return false unless i == n
-              advance(n)
-              true
-            end
+            remaining = @rope.size - @offset
             if b0 == 'i'.ord.to_u8
-              if match.call("i8")
+              if remaining >= 2 && bytes[@offset + 1] == '8'.ord.to_u8
                 number_kind = NumberKind::I8
-              elsif match.call("i16")
+                advance(2)
+              elsif remaining >= 3 && bytes[@offset + 1] == '1'.ord.to_u8 && bytes[@offset + 2] == '6'.ord.to_u8
                 number_kind = NumberKind::I16
-              elsif match.call("i32")
+                advance(3)
+              elsif remaining >= 3 && bytes[@offset + 1] == '3'.ord.to_u8 && bytes[@offset + 2] == '2'.ord.to_u8
                 number_kind = NumberKind::I32
-              elsif match.call("i64")
+                advance(3)
+              elsif remaining >= 3 && bytes[@offset + 1] == '6'.ord.to_u8 && bytes[@offset + 2] == '4'.ord.to_u8
                 number_kind = NumberKind::I64
-              elsif match.call("i128")
+                advance(3)
+              elsif remaining >= 4 && bytes[@offset + 1] == '1'.ord.to_u8 && bytes[@offset + 2] == '2'.ord.to_u8 && bytes[@offset + 3] == '8'.ord.to_u8
                 number_kind = NumberKind::I128
+                advance(4)
               end
             elsif b0 == 'u'.ord.to_u8
-              if match.call("u8")
+              if remaining >= 2 && bytes[@offset + 1] == '8'.ord.to_u8
                 number_kind = NumberKind::U8
-              elsif match.call("u16")
+                advance(2)
+              elsif remaining >= 3 && bytes[@offset + 1] == '1'.ord.to_u8 && bytes[@offset + 2] == '6'.ord.to_u8
                 number_kind = NumberKind::U16
-              elsif match.call("u32")
+                advance(3)
+              elsif remaining >= 3 && bytes[@offset + 1] == '3'.ord.to_u8 && bytes[@offset + 2] == '2'.ord.to_u8
                 number_kind = NumberKind::U32
-              elsif match.call("u64")
+                advance(3)
+              elsif remaining >= 3 && bytes[@offset + 1] == '6'.ord.to_u8 && bytes[@offset + 2] == '4'.ord.to_u8
                 number_kind = NumberKind::U64
-              elsif match.call("u128")
+                advance(3)
+              elsif remaining >= 4 && bytes[@offset + 1] == '1'.ord.to_u8 && bytes[@offset + 2] == '2'.ord.to_u8 && bytes[@offset + 3] == '8'.ord.to_u8
                 number_kind = NumberKind::U128
+                advance(4)
               end
             end
           end
