@@ -29,6 +29,11 @@ quick_cases=(
   "complex/test_struct_value_semantics.cr"
   "complex/test_return_in_rescue.cr"
   "complex/test_super_call.cr"
+  "complex/test_vdispatch_struct_return.cr"
+  "complex/test_many_subclasses_struct_field.cr"
+  "complex/test_struct_in_abstract_hierarchy.cr"
+  "complex/test_large_arena_vdispatch.cr"
+  "complex/test_large_struct_fields.cr"
 )
 
 full_cases=(
@@ -62,6 +67,20 @@ full_cases=(
   "complex/test_nilable_proc.cr"
   "complex/test_nested_closure.cr"
   "complex/test_nilable_equality.cr"
+  "complex/test_vdispatch_struct_return.cr"
+  "complex/test_many_ivars_class.cr"
+  "complex/test_struct_ternary_selection.cr"
+  "complex/test_always_inline_struct.cr"
+  "complex/test_closure_self_capture.cr"
+  "complex/test_many_subclasses_struct_field.cr"
+  "complex/test_nilable_struct_union.cr"
+  "complex/test_while_break_value.cr"
+  "complex/test_struct_in_abstract_hierarchy.cr"
+  "complex/test_large_arena_vdispatch.cr"
+  "complex/test_ternary_operator.cr"
+  "complex/test_large_struct_fields.cr"
+  "complex/test_bitwise_operations.cr"
+  "complex/test_operator_overloading.cr"
 )
 
 if [ ! -x "$SAFE_RUN" ]; then
