@@ -1,5 +1,44 @@
 # Crystal v2 — Active Work (codegen branch)
 
+## 2026-03-06: regression test expansion + debug bootstrap validation
+
+### Research Log
+- Analyzed existing 65 simple + 44 complex regression tests for coverage gaps.
+- Critical gaps found: virtual dispatch returning structs, classes with 20+ ivars,
+  ternary on struct values, @[AlwaysInline] struct return, nilable struct unions,
+  struct fields at varying offsets in class hierarchy, lambda/closure self-capture,
+  large arena with many concrete subclasses.
+- Created 14 new complex regression tests targeting these patterns.
+- All 14 new tests pass. Total: 65/65 simple + 56/63 complex (7 pre-existing failures).
+
+### Stage1/Stage2 bootstrap validation (debug mode)
+- Restored committed parser state (HEAD = 5d8b17eb) with all invalid? guards.
+- Only uncommitted change: lexer inline byte comparisons (closure self-capture workaround).
+- **stage1 (debug)**: builds successfully, compiles test_puts42 → correct output.
+- **stage2 (debug)**: stage1 compiles stage2 successfully (49839 MIR functions, 29453 after RTA).
+- stage2 compiling test_puts42 — awaiting result.
+
+### Key finding: parser guards are essential, not band-aids
+- Previous session had REVERTED the invalid? guards from parse_postfix_if_modifier and node_span.
+- Stage2 (built WITHOUT guards) crashed in `parse_postfix_if_modifier → node_span → vdispatch(span)` with NULL receiver.
+- These guards are correct error propagation: parse sub-expressions can fail (returning PREFIX_ERROR = ExprId(-1)),
+  and callers MUST check before using the result to access arena nodes.
+- Restoring guards: stage2 builds and links cleanly.
+
+### Pre-existing complex test failures (7, all known V2 codegen bugs)
+- `test_super_call.cr` — missing file
+- `test_channel_receive_state` — compile error
+- `test_option_parser_to_s` — wrong output
+- `test_string_builder_block` — wrong output
+- `test_enum_methods` — wrong output (enum method dispatch)
+- `test_closure_escape` — wrong output (closure shared globals, known bug)
+- `test_nilable_proc` — wrong output (nilable proc handling)
+
+### Next steps
+- Verify stage2 can compile simple programs.
+- Build stage1/stage2 with `--release` and benchmark.
+- Build stage3 and verify.
+
 ## 2026-03-05: entry-guard newline root cause fixed -> clean stage2 restored
 
 - Root cause for the clean post-`opt` empty-module blocker was **our own CLI rewrite path**, not LLVM `opt` itself:
