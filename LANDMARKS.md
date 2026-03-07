@@ -1,6 +1,6 @@
 # LANDMARKS
 
-Updated: 2026-03-05
+Updated: 2026-03-07
 Context: compiler/bootstrap/stage2-stability
 
 [LM-1|goal]: `stage1 -> stage2` bootstrap is reproducibly buildable in `--release` on current branch (how: `scripts/build_stage1_original_release.sh` + `scripts/build_stage2_release.sh`) {F/G/R: 0.9/0.6/0.9} [verified]
@@ -65,6 +65,14 @@ Context: compiler/bootstrap/stage2-stability
 
 [LM-31|boundary]: the old minimal BlockId-clear signature drifted again on the new stage2: `stage2_emit_function_blockid_clear_repro.sh` no longer reproduces, but its LLDB trace still shows a stage2-only crash in `LLVMIRGenerator#generate` immediately after `[LLVM] total MIR functions: 1`, so the active minimal codegen crash boundary is now broader/earlier than the previous `Set(HIR::BlockId)#clear` path {F/G/R: 0.9/0.7/0.9} [verified]
 
+[LM-32|root-cause]: non-inline methods with `&block` value parameters are currently mislowered as block-overloads without a usable runtime proc value: tiny repro `regression_tests/proc_block_value_param_store_repro.sh` prints `before=false` / `after=false`, IR lowers `EventEmitter#on_event` into a getter returning `@on_event`, and standalone def lowering excludes block params from `param_infos` / `func.add_param` while inline lowering has a special `&block -> lower_block_to_proc` path {F/G/R: 0.95/0.75/0.95} [verified]
+
+[LM-33|root-cause]: capturing block->Proc materialization loses writes to outer locals: `regression_tests/proc_block_capture_write_repro.sh` prints an empty line while non-capturing control prints `ok`; IR shows `call ptr @__crystal_block_proc_0(ptr @.str.50)`, `define ptr @__crystal_block_proc_0(ptr %v) { ret ptr %v }`, and the caller later still prints the original empty-string constant, so `result = v` does not propagate back to outer state {F/G/R: 0.95/0.7/0.95} [verified]
+
+[LM-34|boundary]: `String.build` failure is broader than the earlier "missing block CFG setup" hypothesis: tiny repro prints `x=0` and empty result, and no-link IR emits only `String::Builder.new` + `to_s` with no block-body marker (`SBMARK`) or `x = 1` side effect at all, so the body disappears before/within intrinsic lowering {F/G/R: 0.9/0.7/0.95} [verified]
+
+[LM-35|root-cause]: enum instance-method failure is real, but the strongest current evidence does not support "registered on Int32" as the initial bug site: registration code passes `enum_name`, while tiny repro no-link IR still lowers the call site to `Int32$Htag` dead stub and emits no `OmniColor$Htag`, so enum identity is being lost later in resolution/lowering {F/G/R: 0.9/0.7/0.95} [verified]
+
 Contradiction ledger
 - [LM-C1|refute]: broad `reset_value_names` reinit experiment (replace many `clear` with fresh container allocations) did not produce robust stabilization; it shifted crash boundaries and was rejected.
 - [LM-C2|refute]: cache-only explanation is insufficient: fresh isolated stage2 debug cache (`CRYSTAL_CACHE_DIR_STAGE2_DEBUG=/tmp/crystal_cache_stage2_debug_reset_clean`) still reproduces `stage2_reset_value_names_fiberevent_clear_repro` with `status=139` and `FiberEvent$Hclear` drift.
@@ -79,6 +87,10 @@ Contradiction ledger
 - [LM-C11|refute]: the `_main` link failure after the parser fix is not explained by missing entry generation; clean raw stage2 `.ll` still contains `main`, `__crystal_main`, and `main_user_code` before optimization.
 - [LM-C12|refute]: the current clean post-parser-fix collapse is not limited to the earlier `tailrecurse` `O3` signature; the module also empties under `opt -O0`, so the new blocker is broader than a single aggressive optimization pass.
 - [LM-C13|refute]: the clean empty-module blocker is not a pure LLVM-`opt` semantic collapse; the decisive trigger was our own entry-guard rewrite path flattening `.ll` by dropping line terminators during `File.each_line` rewrite.
+- [LM-C14|refute]: broad `RC-2 = union Proc#call bypass` is insufficient; direct non-capturing `block.call` already works, while separate `&block` value-ABI and block-capture-write bugs still reproduce before union dispatch becomes relevant.
+- [LM-C15|refute]: the stronger `String.build` claim "only missing block CFG setup" is not yet verified; current IR evidence shows the block body vanishes entirely, which is broader than a single CFG bookkeeping omission.
+- [LM-C16|refute]: "enum methods are registered on Int32" is unsupported by the current registration code; loss of enum identity is observed later at call resolution/lowering.
 
 Current hypothesis
 - The false empty-module blocker is removed by the entry-guard newline fix ([LM-28]), so the active work returns to genuine stage2 runtime/codegen instability. Current evidence points to a still-broad stage2-only failure family: `stage2_container_clear_index_oob_repro.sh` still reproduces `Index out of bounds`, `stage2 -> stage3` now fails fast instead of hanging ([LM-30]), and the smallest current codegen repro crashes inside `LLVMIRGenerator#generate` before the older BlockId-clear path ([LM-31]). The next useful work is to build a new focused oracle for that earlier generate-path crash and then root-cause the shared invariant violation behind the fast `Index out of bounds` / `EXC_BAD_ACCESS` behavior.
+- Separate from the stage2 crash family, the proc/string/enum regression map is now narrower and more actionable: proc failures split into `&block` value-ABI mismatch ([LM-32]) and block-capture-write loss ([LM-33]); `String.build` still drops its block body but the earlier CFG-only explanation is not yet proven ([LM-34]); enum method dispatch still loses type identity, but later than initial enum-method registration ([LM-35]).

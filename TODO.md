@@ -1,5 +1,58 @@
 # Crystal v2 — Active Work (codegen branch)
 
+## 2026-03-07: Quadrumvirate Bootstrap Fix Plan
+
+### Root Cause Taxonomy (3 systemic roots → 12+ bugs)
+
+**Root A — Type Information Loss:** UnionIs dispatch, cross-block slot degradation,
+phi type loss, method heuristics, enum identity loss, spawn context loss.
+
+**Root B — V2 ABI Mismatch:** struct heap alloc, union payload sizing, `&block` value ABI,
+closure cells, Tuple ptr/value confusion.
+
+**Root C — Control Flow Context Loss:** String.build block, spawn block class methods.
+
+### Execution Plan
+
+- [ ] **Phase 0: MEASURE** — Profile stage1 self-compilation RSS/FD to find OOM cause
+- [ ] **Phase 1: FIX OOM** — Address whatever Phase 0 reveals
+- [ ] **Phase 2: FIX RC-2A** — non-inline `&block` value ABI (methods that store/return proc values)
+- [ ] **Phase 3: FIX RC-2B** — capturing block->Proc lowering loses outer writes
+- [ ] **Phase 4: FIX RC-4** — Enum method dispatch (preserve enum type identity)
+- [ ] **Phase 5: FIX RC-3** — String.build block lowering
+- [ ] **Phase 6: RE-ENABLE RTA + BOOTSTRAP** — stage0→stage1→stage2→stage3 + benchmark
+
+### Quadrumvirate Re-evaluation (2026-03-07)
+
+- `RC-2` as written below is too broad. Current evidence splits it into two verified bugs:
+  - `RC-2A`: non-inline methods with `&block` value params are mislowered. Tiny repro:
+    `regression_tests/proc_block_value_param_store_repro.sh` prints `before=false` / `after=false`.
+    IR for the same repro lowers `EventEmitter#on_event` into a getter that just returns `@on_event`.
+    Code evidence: standalone def lowering excludes block params from `param_infos` / `func.add_param`,
+    while inline lowering has a special `&block -> lower_block_to_proc` path.
+  - `RC-2B`: capturing block->Proc materialization loses writes to outer locals. Tiny repro:
+    `regression_tests/proc_block_capture_write_repro.sh` prints an empty line instead of `ok`.
+    IR shows `call ptr @__crystal_block_proc_0(ptr @.str.50)` and
+    `define ptr @__crystal_block_proc_0(ptr %v) { ret ptr %v }`, while the caller later still prints
+    the original empty string constant.
+- `RC-3` symptom is verified, but the exact mechanism below is still a hypothesis.
+  Tiny `String.build` repro emits only `String::Builder.new` + `to_s` in IR; block-body markers and
+  side effects (`x = 1`, `"SBMARK"`) are absent entirely. So "missing block CFG setup" is not yet proven.
+- `RC-4` symptom is verified, but "enum methods registered on Int32" is too strong.
+  `register_enum_methods(..., enum_name)` and `attach_enum_instance_methods(enum_name)` both pass the enum name.
+  Tiny repro still lowers the call site to `Int32$Htag` dead stub with no `OmniColor$Htag`, so enum identity is
+  being lost later in resolution/lowering rather than at initial registration.
+- Current branch state is debug-contaminated for benchmark conclusions:
+  `b33e1dce` forces `llvm_gen.reachability = false` and emits unconditional `[PARSE]/[REQSCAN]` traces.
+  Keep that only for debugging until it is reverted.
+
+### NOT fixing now (post-bootstrap)
+- RC-1 (closure escape) — HIGH difficulty, ABI redesign, doesn't block bootstrap
+- RC-5 (spawn blocks) — not in compiler critical path
+- opt self-loop — workaround with entry guard, root cause in LLVM passes
+
+---
+
 ## 2026-03-06: regression test expansion + debug bootstrap validation
 
 ### Research Log
@@ -49,35 +102,36 @@
 - **Impact**: Any code returning closures from functions (common functional patterns).
 - **Difficulty**: HIGH — requires closure ABI redesign.
 
-#### RC-2: Proc#call Bypass on Union Types (test_nilable_proc)
+#### RC-2: Proc#call Bypass on Union Types (test_nilable_proc) [STALE AS PRIMARY ROOT CAUSE]
 - **Symptom**: `result=` (empty) — callback never executes.
-- **Root cause**: Proc#call intercept at `ast_to_hir.cr:46805` checks
-  `proc_recv_desc.kind == TypeKind::Proc` — but for `Proc(String, Nil)?` the kind is
-  `TypeKind::Union`, not `TypeKind::Proc`. Intercept is bypassed. Falls through to
-  generic method resolution which fails for synthetic Proc types.
-- **Fix needed**: Before checking `kind == TypeKind::Proc`, check if the receiver is a
-  union containing a Proc variant, unwrap it, and emit the direct Proc#call instruction.
-- **Impact**: All `@callback : Proc(...)? ` patterns (event emitters, OptionParser, etc).
-- **Difficulty**: MEDIUM — conditional logic fix in two locations (line 46805 and 60762).
+- **Current status**: insufficient as the primary explanation.
+- **Why stale**:
+  - direct non-capturing `block.call("ok")` already works;
+  - `EventEmitter#on_event(&block)` currently fails earlier because the block value is never stored at all;
+  - capturing `&block` direct-call repro fails even without nilable unions.
+- **Replacement map**:
+  - `RC-2A`: non-inline `&block` value ABI mismatch
+  - `RC-2B`: capturing block->Proc writeback loss
+- **Open question**: union-aware `Proc#call` dispatch may still be a secondary bug, but it is no longer the best first fix target.
 
 #### RC-3: String.build Block Body Not Executing (test_string_builder_block, test_option_parser_to_s)
 - **Symptom**: `builder_bad: ` (empty string) / `option_parser_bad`.
-- **Root cause**: `lower_string_build_intrinsic` (ast_to_hir.cr:58279) lowers block body
-  but doesn't create a proper control flow block context. Unlike `lower_block_to_block_id`
-  which creates `ctx.create_block` and switches to it, the intrinsic skips this step.
-  Block body code is either dead or emitted in wrong context.
+- **Current best evidence**: block body disappears entirely before/within intrinsic lowering.
+- **Still hypothesis**: the missing `ctx.create_block` / block-context setup may be the reason,
+  but current IR evidence is stronger than that narrower claim:
+  tiny repro emits only builder construction and `to_s`, with no `"SBMARK"` constant and no `x = 1` side effect at all.
 - **Fix needed**: Align `lower_string_build_intrinsic` control flow setup with
-  `lower_block_to_block_id` — create a block, switch context, lower body, add terminator.
+  `lower_block_to_block_id`, but verify first why the body vanishes entirely.
 - **Impact**: `String.build { |io| ... }` pattern (used extensively in stdlib).
 - **Difficulty**: MEDIUM — follow existing pattern from `lower_block_to_block_id`.
 
 #### RC-4: Enum Instance Method Dispatch (test_enum_methods)
 - **Symptom**: `enum_methods_bad` — custom enum methods not called.
-- **Root cause**: Enum methods registered on base type (Int32) instead of enum type (Color).
-  LLVM IR shows `Int32$Hprimary$Q` stubs instead of `Color$Hprimary$Q` with custom bodies.
-  Method resolution at call site loses enum type identity and falls back to Int32.
-- **Fix needed**: Ensure `register_type_method_from_def` preserves enum type name through
-  method resolution. Ensure enum values carry proper type info (not just Int32).
+- **Verified part**: method resolution at call site loses enum identity and falls back to `Int32`.
+- **Rejected stronger wording**: initial registration is not obviously on `Int32`;
+  `register_enum_methods` and `attach_enum_instance_methods` both pass `enum_name`.
+- **Current best evidence**: tiny repro lowers call site to `Int32$Htag` dead stub and emits no `OmniColor$Htag`.
+- **Fix needed**: find the later step that degrades enum values to bare `Int32` during method resolution/lowering.
 - **Impact**: Any code defining custom methods on enums.
 - **Difficulty**: MEDIUM — type tracking through method resolution pipeline.
 
