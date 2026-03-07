@@ -45088,6 +45088,11 @@ module Crystal::HIR
                   break
                 end
               end
+              if func_def
+                # Primitive methods reused from abstract templates (Int/Float) must keep
+                # the template owner's lexical namespace for bare constant lookups.
+                store_function_namespace_override(name, base_name, template_owner)
+              end
             end
           end
         end
@@ -45212,6 +45217,9 @@ module Crystal::HIR
                   lookup_branch = "primitive_class_fallback_prefix"
                   break
                 end
+              end
+              if func_def
+                store_function_namespace_override(name, base_name, template_owner)
               end
             end
           end

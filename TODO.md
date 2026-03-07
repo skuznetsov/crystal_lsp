@@ -24,6 +24,62 @@ closure cells, Tuple ptr/value confusion.
 
 ### Current checkpoint (2026-03-07 late)
 
+- Added focused runtime oracle `regression_tests/primitive_template_digits_runtime_repro.sh`.
+  - Repro keeps the signal on positional `Int#to_s` variants only:
+    `puts 2`, `255.to_s(16)`, `255.to_s(16, 1, true)`, `35.to_s(36)`, `61.to_s(62)`.
+  - This avoids the separate named-arg noise (`upcase: true`) and directly exercises
+    `DIGITS_DOWNCASE`, `DIGITS_UPCASE`, and `DIGITS_BASE62`.
+- Compiler-only fix in current dirty worktree:
+  - primitive-template lazy fallback now stores the template owner's lexical namespace
+    override (`Int` / `Float`) when reusing abstract numeric method bodies for concrete
+    primitive receivers and class methods.
+  - This preserves bare constant lookup inside inherited template methods, so `Int32`
+    specializations of `Int#internal_to_s` resolve `DIGITS_*` through `Int::...` instead
+    of silently degrading them into `local "...": Void`.
+- Root cause verified:
+  - the runtime `puts 2` segfault was not an LLVM backend/global-load corruption in the
+    first instance; the real break starts in HIR.
+  - during primitive-template fallback (`Int32#...` reusing `Int#...`), we propagated the
+    type-substitution map but dropped the lexical namespace owner. `resolve_constant_name_in_context`
+    therefore saw `current=Int32 override=nil`, looked only for `Int32::DIGITS_*`, missed,
+    and let uppercase identifiers fall through to synthetic locals of type `Void`.
+  - after the fix, a fresh stage1 debug trace shows:
+    `name=DIGITS_BASE62 current=Int32 override=Int` and
+    `try=Int::DIGITS_BASE62 exists=true` (same for `DIGITS_UPCASE` / `DIGITS_DOWNCASE`).
+- Verification on fresh stage1 debug:
+  - `/usr/bin/time -p scripts/build_stage1_original_debug.sh /private/tmp/stage1_dbg_primitive_template_fix_20260307 --error-trace`
+    -> `real 8.18`
+  - `bash regression_tests/primitive_template_digits_runtime_repro.sh /private/tmp/stage1_dbg_primitive_template_fix_20260307`
+    -> `not reproduced` (`2`, `ff`, `FF`, `z`, `Z`)
+  - Adversary checks on the same debug binary:
+    - `bash regression_tests/contextual_builtin_generic_cache_repro.sh /private/tmp/stage1_dbg_primitive_template_fix_20260307`
+      -> `not reproduced`
+    - `bash regression_tests/member_getter_lowering_repro.sh /private/tmp/stage1_dbg_primitive_template_fix_20260307`
+      -> `not reproduced`
+    - `bash regression_tests/proc_block_value_param_store_repro.sh /private/tmp/stage1_dbg_primitive_template_fix_20260307`
+      -> `not reproduced`
+    - `bash regression_tests/proc_block_capture_write_repro.sh /private/tmp/stage1_dbg_primitive_template_fix_20260307`
+      -> `not reproduced`
+- Verification on fresh stage1 release:
+  - `/usr/bin/time -p scripts/build_stage1_original_release.sh /private/tmp/stage1_rel_primitive_template_fix_20260307 --error-trace`
+    -> `real 407.19`
+  - `bash regression_tests/primitive_template_digits_runtime_repro.sh /private/tmp/stage1_rel_primitive_template_fix_20260307`
+    -> `not reproduced`
+  - Adversary checks on the same release binary:
+    - `bash regression_tests/contextual_builtin_generic_cache_repro.sh /private/tmp/stage1_rel_primitive_template_fix_20260307`
+      -> `not reproduced`
+    - `bash regression_tests/member_getter_lowering_repro.sh /private/tmp/stage1_rel_primitive_template_fix_20260307`
+      -> `not reproduced`
+    - `bash regression_tests/proc_block_value_param_store_repro.sh /private/tmp/stage1_rel_primitive_template_fix_20260307`
+      -> `not reproduced`
+    - `bash regression_tests/proc_block_capture_write_repro.sh /private/tmp/stage1_rel_primitive_template_fix_20260307`
+      -> `not reproduced`
+- Scope note:
+  - this checkpoint removes the active stage1-generated runtime segfault on the minimal
+    integer-printing path and repairs the underlying owner-context loss for primitive
+    template methods.
+  - `stage2 --release` / `stage2 -> stage3` still need to be rerun on top of this fix;
+    the older invalid-IR blocker below is the last verified pre-fix stage2 status.
 - Added focused oracle `regression_tests/member_getter_lowering_repro.sh`.
   - Repro covers both direct zero-arg getter access and inline shorthand block lowering:
     `direct=#{ExprId.new(7).index}` and `items.max_of(&.index)`.
