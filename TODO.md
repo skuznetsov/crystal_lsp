@@ -80,6 +80,47 @@ closure cells, Tuple ptr/value confusion.
     template methods.
   - `stage2 --release` / `stage2 -> stage3` still need to be rerun on top of this fix;
     the older invalid-IR blocker below is the last verified pre-fix stage2 status.
+- Separate debug-stability checkpoint in the current dirty worktree:
+  - Added focused runtime oracle `regression_tests/named_tuple_literal_index_repro.sh`
+    for the minimal concrete-key case:
+    `nt = {base: "ok", args: "yy"}; puts nt[:base]; puts nt[:args]`.
+  - Root cause verified:
+    - two compiler paths were collapsing concrete named tuple literals to bare
+      `NamedTuple`: `lower_named_tuple_literal` and the
+      `NamedTupleLiteralNode` arm of `infer_type_from_class_ivar_assign`.
+    - that let stage1-generated code lose the concrete receiver shape needed by
+      `NamedTuple#fetch`, so `NamedTuple#[]` degenerated to its fallback block and
+      raised `KeyError` unconditionally.
+    - direct evidence:
+      - fresh stage1-generated runtime repro failed with
+        `Missing named tuple key:`
+      - no-link LLVM for the failing runtime repro emitted
+        `define ptr @NamedTuple$H$IDX$$String$_$OR$_Symbol(...)` as an unconditional
+        raise path with no `fetch` dispatch
+      - `DEBUG_NT_INDEX_FAST=1` on the failing compiler logged
+        `recv=NamedTuple key=base` / `recv=NamedTuple key=args`
+  - Compiler-only fix in the dirty worktree:
+    - `lower_named_tuple_literal` now allocates
+      `NamedTuple(key: ConcreteType, ...)` from the lowered element types
+    - `infer_type_from_class_ivar_assign` now preserves the same concrete
+      `NamedTuple(key: Type, ...)` signature instead of degrading to bare `NamedTuple`
+  - Verification:
+    - fresh stage1 debug rebuild:
+      `/usr/bin/time -p scripts/build_stage1_original_debug.sh /private/tmp/stage1_dbg_named_tuple_literal_fix_20260307 --error-trace`
+      -> `real 8.57`
+    - `bash regression_tests/named_tuple_literal_index_repro.sh /private/tmp/stage1_dbg_named_tuple_literal_fix_20260307`
+      -> `stdout: ok / yy`, `not reproduced`
+    - `DEBUG_NT_INDEX_FAST=1` on that fresh stage1 debug binary now logs
+      `recv=NamedTuple(base: String, args: String)` for both key lookups
+    - fresh stage2 debug self-host build now succeeds:
+      `/usr/bin/time -p scripts/build_stage2_debug.sh /private/tmp/stage1_dbg_named_tuple_literal_fix_20260307 /private/tmp/stage2_dbg_named_tuple_literal_fix_20260307`
+      -> `real 451.35`
+  - Remaining boundary:
+    - the produced stage2 debug binary is still not stable; tiny macro compile now
+      fails cleanly with `error: Missing named tuple key: :args`, so the broad bare
+      literal-collapse bug is fixed, but a narrower stage2-only named-tuple carrier
+      remains (likely one of the internal cached `base/args` helper shapes such as
+      `split_generic_base_and_args`).
 - Bootstrap status after this checkpoint:
   - `/usr/bin/time -p scripts/build_stage2_release.sh /private/tmp/stage1_rel_primitive_template_fix_20260307 /private/tmp/stage2_rel_primitive_template_fix_20260307`
     -> `real 153.38`

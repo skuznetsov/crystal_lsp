@@ -31257,7 +31257,14 @@ module Crystal::HIR
         end
         return type_ref_for_name("Hash(String, String)")
       when CrystalV2::Compiler::Frontend::NamedTupleLiteralNode
-        return type_ref_for_name("NamedTuple")
+        entries = [] of String
+        value_node.entries.each do |entry|
+          value_name = infer_type_from_expr(@arena[entry.value]) || "Unknown"
+          value_name = "Unknown" if value_name == "Void" || value_name == "Unknown"
+          key_name = normalize_named_tuple_key_name(String.new(entry.key))
+          entries << "#{key_name}: #{value_name}"
+        end
+        return type_ref_for_name("NamedTuple(#{entries.join(", ")})")
       when CrystalV2::Compiler::Frontend::UninitializedNode
         if type_str = stringify_type_expr(value_node.type)
           return type_ref_for_name(normalize_declared_type_name(type_str))
@@ -64966,14 +64973,15 @@ module Crystal::HIR
     end
 
     private def lower_named_tuple_literal(ctx : LoweringContext, node : CrystalV2::Compiler::Frontend::NamedTupleLiteralNode) : ValueId
-      # NamedTuple is like a Tuple but with named fields
-      # For now, we treat it similarly to a Tuple - lowering values in order
-      # The key names are available for type-level operations
       element_ids = node.entries.map { |entry| lower_expr(ctx, entry.value) }
-
-      # Create a NamedTuple type based on keys
-      # For simplicity, use NamedTuple as the type (real Crystal has specialized types)
-      named_tuple_type = ctx.get_type("NamedTuple")
+      entry_names = [] of String
+      node.entries.each_with_index do |entry, idx|
+        value_name = get_type_name_from_ref(ctx.type_of(element_ids[idx]))
+        value_name = "Unknown" if value_name == "Void" || value_name == "Unknown"
+        key_name = normalize_named_tuple_key_name(String.new(entry.key))
+        entry_names << "#{key_name}: #{value_name}"
+      end
+      named_tuple_type = type_ref_for_name("NamedTuple(#{entry_names.join(", ")})")
       alloc = Allocate.new(ctx.next_id, named_tuple_type, element_ids)
       ctx.emit(alloc)
       record_allocation_location(ctx, alloc.id, @arena, node)
