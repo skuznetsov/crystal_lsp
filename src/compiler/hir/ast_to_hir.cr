@@ -59027,21 +59027,13 @@ module Crystal::HIR
                   # Without this, methods that store blocks as Procs (e.g., OptionParser#on)
                   # would receive null instead of a valid function pointer.
                   block_arena_for_proc = @block_node_arenas[block.object_id]? || resolve_arena_for_block(block, caller_arena) || caller_arena
-                  # Keep lexical `self` from the caller while lowering block→proc.
-                  # Inline callee binds `self` to receiver_id for its own body, but
-                  # block literals passed at the callsite must capture caller `self`.
-                  saved_inline_self = ctx.lookup_local("self")
-                  saved_inline_self_type = saved_inline_self ? ctx.type_of(saved_inline_self) : TypeRef::VOID
-                  caller_self_for_block = caller_locals["self"]?
-                  if caller_self_for_block
-                    ctx.register_local("self", caller_self_for_block)
-                    ctx.register_type(caller_self_for_block, ctx.type_of(caller_self_for_block))
-                  end
+                  # Block literals capture the caller's lexical environment, not the
+                  # temporary inline callee locals. Restore the full caller snapshot
+                  # while materializing the Proc so capture detection sees outer writes.
+                  saved_inline_locals = ctx.save_locals
+                  ctx.restore_locals(caller_locals)
                   proc_id = lower_block_to_proc(ctx, block, block_param_types, block_arena_for_proc)
-                  if saved_inline_self
-                    ctx.register_local("self", saved_inline_self)
-                    ctx.register_type(saved_inline_self, saved_inline_self_type)
-                  end
+                  ctx.restore_locals(saved_inline_locals)
                   ctx.register_local(param_name, proc_id)
                   ctx.register_type(proc_id, ctx.type_of(proc_id))
                 elsif idx < call_args.size

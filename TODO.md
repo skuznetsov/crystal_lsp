@@ -17,7 +17,7 @@ closure cells, Tuple ptr/value confusion.
 - [ ] **Phase 0: MEASURE** — Profile stage1 self-compilation RSS/FD to find OOM cause
 - [ ] **Phase 1: FIX OOM** — Address whatever Phase 0 reveals
 - [x] **Phase 2: FIX RC-2A** — explicit block-call target must not be hijacked by synthetic ivar accessor fallback
-- [ ] **Phase 3: FIX RC-2B** — capturing block->Proc lowering loses outer writes
+- [x] **Phase 3: FIX RC-2B** — inline `&block` Proc materialization must capture caller locals, not stripped inline-callee locals
 - [ ] **Phase 4: FIX RC-4** — Enum method dispatch (preserve enum type identity)
 - [ ] **Phase 5: FIX RC-3** — String.build block lowering
 - [ ] **Phase 6: RE-ENABLE RTA + BOOTSTRAP** — stage0→stage1→stage2→stage3 + benchmark
@@ -49,11 +49,31 @@ closure cells, Tuple ptr/value confusion.
       - `real 775.91`
 - `RC-2` as written below is too broad. Current evidence splits it into two verified bugs:
   - `RC-2A`: explicit block-call target hijack into synthetic ivar accessor (fixed above).
-  - `RC-2B`: capturing block->Proc materialization loses writes to outer locals. Tiny repro:
-    `regression_tests/proc_block_capture_write_repro.sh` prints an empty line instead of `ok`.
-    IR shows `call ptr @__crystal_block_proc_0(ptr @.str.50)` and
-    `define ptr @__crystal_block_proc_0(ptr %v) { ret ptr %v }`, while the caller later still prints
-    the original empty string constant.
+  - `RC-2B`: capturing block->Proc materialization losing writes to outer locals (fixed below).
+- `RC-2B` is now verified and fixed.
+  - Actual root cause was narrower than "closure cells are broken":
+    `inline_yield_function` isolates the inlined callee by clearing `ctx` down to callee locals,
+    then binds `&block` params by calling `lower_block_to_proc`. That path only restored lexical
+    `self`, not the rest of `caller_locals`, so `lower_block_to_proc` could not see outer locals
+    like `result` in `ctx.save_locals`. The synthesized block proc treated `result = v` as a new
+    dead local assignment, which lowered to `ret ptr %v` with no closure-cell writeback.
+  - Fix: while materializing the Proc for an inline `&block` param, temporarily restore the full
+    caller local snapshot, run `lower_block_to_proc`, then restore the inline callee locals.
+  - Verification:
+    - `regression_tests/proc_block_capture_write_repro.sh ./bin/crystal_v2`
+      now prints `ok` and exits `not reproduced`.
+    - no-link LLVM for the tiny repro now shows:
+      caller `store ptr @.str.49, ptr @__closure__classvar____closure_cell_0`,
+      block proc `store ptr %v, ptr @__closure__classvar____closure_cell_0`,
+      and caller reload `load ptr, ptr @__closure__classvar____closure_cell_0`.
+    - Adversary checks:
+      - `regression_tests/proc_block_value_param_store_repro.sh ./bin/crystal_v2`
+        remains `before=false` / `after=true` (`not reproduced`).
+      - direct proc-literal control `proc = ->(v : String) { result = v }` still prints `ok`.
+    - Wider regression sweep:
+      - `/usr/bin/time -p regression_tests/run_all.sh ./bin/crystal_v2`
+      - `Results: 65 passed, 0 failed out of 65 tests`
+      - `real 746.29`
 - `RC-3` symptom is verified, but the exact mechanism below is still a hypothesis.
   Tiny `String.build` repro emits only `String::Builder.new` + `to_s` in IR; block-body markers and
   side effects (`x = 1`, `"SBMARK"`) are absent entirely. So "missing block CFG setup" is not yet proven.
