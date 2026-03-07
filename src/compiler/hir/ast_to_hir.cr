@@ -58693,6 +58693,23 @@ module Crystal::HIR
       nil
     end
 
+    private def lookup_assignment_local(ctx : LoweringContext, name : String) : ValueId?
+      if value_id = ctx.lookup_local(name)
+        return value_id
+      end
+
+      return nil unless @inline_yield_block_body_depth > 0
+
+      # Inline block bodies run in caller lexical scope. Reads already fall back to
+      # caller locals; assignments must do the same or they silently create shadow locals.
+      if value_id = inline_caller_local_id(name)
+        ctx.register_local(name, value_id)
+        return value_id
+      end
+
+      nil
+    end
+
     # Inline a yield-function call with block
     # Transforms: func(args) { |params| block_body }
     # Into: inline func body, replacing yield with block_body
@@ -59337,23 +59354,34 @@ module Crystal::HIR
         caller_locals_index = @inline_caller_locals_stack.size - 1
         resolved_by_fn = false
         if owner_fn_id
-          (@inline_caller_function_id_stack.size - 1).downto(0) do |idx|
-            next unless @inline_caller_function_id_stack[idx]? == owner_fn_id
-            if owner
-              owner_class = owner[:class_name]
-              stack_class = @inline_caller_class_stack[idx]?
-              if owner_class && stack_class && owner_class != stack_class
-                next
+          owner_class = owner ? owner[:class_name] : nil
+          owner_method = owner ? owner[:method_name] : nil
+          owner_has_lexical = (owner_class && !owner_class.empty?) || (owner_method && !owner_method.empty?)
+
+          if owner_has_lexical
+            (@inline_caller_function_id_stack.size - 1).downto(0) do |idx|
+              next unless @inline_caller_function_id_stack[idx]? == owner_fn_id
+              if owner
+                stack_class = @inline_caller_class_stack[idx]?
+                if owner_class && stack_class && owner_class != stack_class
+                  next
+                end
+                stack_method = @inline_caller_method_stack[idx]?
+                if owner_method && !owner_method.empty? && stack_method && stack_method != owner_method
+                  next
+                end
               end
-              owner_method = owner[:method_name]
-              stack_method = @inline_caller_method_stack[idx]?
-              if owner_method && !owner_method.empty? && stack_method && stack_method != owner_method
-                next
-              end
+              caller_locals_index = idx
+              resolved_by_fn = true
+              break
             end
-            caller_locals_index = idx
-            resolved_by_fn = true
-            break
+          else
+            @inline_caller_function_id_stack.each_with_index do |function_id, idx|
+              next unless function_id == owner_fn_id
+              caller_locals_index = idx
+              resolved_by_fn = true
+              break
+            end
           end
         end
         if owner && !resolved_by_fn
@@ -62561,7 +62589,7 @@ module Crystal::HIR
           type_name = value_type == TypeRef::VOID ? "Void" : get_type_name_from_ref(value_type)
           STDERR.puts "[ASSIGN] scope=#{@current_class || ""}##{@current_method || ""} name=value type=#{type_name}"
         end
-        if existing = ctx.lookup_local(name)
+        if existing = lookup_assignment_local(ctx, name)
           # Reassignment
           copy = Copy.new(ctx.next_id, value_type, value_id)
           ctx.emit(copy)
@@ -63189,7 +63217,7 @@ module Crystal::HIR
             STDERR.puts "[ASSIGN_VAR] scope=#{@current_class || ""}##{@current_method || ""} name=#{name} type=#{type_name}"
           end
         end
-        if existing = ctx.lookup_local(name)
+        if existing = lookup_assignment_local(ctx, name)
           copy = Copy.new(ctx.next_id, value_type, value_id)
           ctx.emit(copy)
           ctx.register_local(name, copy.id)

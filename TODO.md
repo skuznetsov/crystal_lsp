@@ -74,6 +74,50 @@ closure cells, Tuple ptr/value confusion.
       - `/usr/bin/time -p regression_tests/run_all.sh ./bin/crystal_v2`
       - `Results: 65 passed, 0 failed out of 65 tests`
       - `real 746.29`
+- Fresh nested-inline writeback bug is now verified and fixed for owner-less top-level blocks.
+  - Symptom:
+    a focused `MiniEnumerable#each_with_index` repro with top-level `drive(foo)` compiled
+    `@drive$$Foo` to `ret i32 -1` even though the inlined block body computed `10 + 0`,
+    `20 + 1`, `30 + 2`. First HIR root cause was shadow-local creation on `last = ...`;
+    after fixing that asymmetry, HIR still restored the seed value after the nested inline chain.
+  - Actual root cause:
+    two local bugs stacked in the same path:
+    - assignment lowering only gave inline caller-local fallback to reads, not writes, so
+      `last = ...` inside the inlined block created shadow locals instead of rebinding the
+      caller local;
+    - `inline_block_body` resolved `caller_locals_index` newest-first by `ctx.function.id`.
+      For owner-less blocks (`@block_owner == nil#nil`) in top-level methods, nested inline
+      frames share the same function id, so writeback landed in the inner `each_with_index`
+      frame instead of the user's outer caller frame.
+  - Fix:
+    - added `lookup_assignment_local(...)` so inline block-body assignments use the same
+      caller-local fallback path as identifier reads;
+    - when a block owner has no lexical class/method, `inline_block_body` now resolves
+      writeback to the oldest matching same-function caller frame instead of the newest one.
+  - Verification:
+    - `regression_tests/inline_ownerless_each_with_index_writeback_repro.sh ./bin/crystal_v2`
+      now prints `not reproduced`.
+    - HIR oracle:
+      `./bin/crystal_v2 build /tmp/custom_each_with_index_repro.cr --emit hir ...`
+      now returns `%45 = copy %40` from `drive$Foo`, not `%4`.
+    - LLVM oracle:
+      `./bin/crystal_v2 build /tmp/custom_each_with_index_repro.cr --emit llvm-ir --no-link ...`
+      now emits `define i32 @drive$$Foo(ptr %foo)` with `ret i32 32`.
+    - Existing regression stays green:
+      `./bin/crystal_v2 regression_tests/yield_nested_each_with_index.cr -o ... &&
+       scripts/run_safe.sh ...` prints `count=3 sum=3`, `yield_nested_each_with_index_ok`.
+    - Adversary checks:
+      - `regression_tests/proc_block_capture_write_repro.sh ./bin/crystal_v2`
+        remains `stdout: ok` (`not reproduced`).
+      - `regression_tests/proc_block_value_param_store_repro.sh ./bin/crystal_v2`
+        remains `before=false` / `after=true` (`not reproduced`).
+      - `bash regression_tests/run_mini_oracles.sh ./bin/crystal_v2`
+        now finishes `6 passed, 0 failed out of 6 tests`.
+    - Caveat:
+      current broad `/usr/bin/time -p regression_tests/run_all.sh ./bin/crystal_v2`
+      is not a clean confirmation layer on this tree because it still hits a general
+      runtime segfault on `basic_sanity` (`FAIL (crash/timeout): basic_sanity`,
+      `[CRASH] Segfault (exit 139)`), which is separate from this compile-stage fix.
 - Fresh stage2 `--release` invalid-IR blocker is now locally root-caused and fixed; bootstrap rerun is pending.
   - Symptom:
     fresh `stage2 --release` failed in `opt` with
