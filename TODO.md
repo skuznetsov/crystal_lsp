@@ -25,18 +25,85 @@
   and callers MUST check before using the result to access arena nodes.
 - Restoring guards: stage2 builds and links cleanly.
 
-### Pre-existing complex test failures (7, all known V2 codegen bugs)
-- `test_super_call.cr` — missing file
-- `test_channel_receive_state` — compile error
-- `test_option_parser_to_s` — wrong output
-- `test_string_builder_block` — wrong output
-- `test_enum_methods` — wrong output (enum method dispatch)
-- `test_closure_escape` — wrong output (closure shared globals, known bug)
-- `test_nilable_proc` — wrong output (nilable proc handling)
+### Allocator fix: struct-typed ivar defaults
+- **Root cause**: V2 heap-allocates structs, so `Literal(0, struct_type)` creates a null pointer.
+  Comment at line 17691 already said: "Our compiler heap-allocates structs, so zero-init
+  (null pointer) is wrong" — but fix was only applied for `.empty` pattern.
+- **Fix**: For all struct-typed ivars without defaults, use `Allocate` (heap zero-filled)
+  instead of `Literal(0)`. Applied to both `generate_allocator` and `generate_allocator_overload`.
+- **Defensive guard**: `node_span` now checks if @span pointer is null via
+  `Pointer(Int64).new(node.object_id &+ 4)` before calling getter.
+
+### Pre-existing complex test failures — Deep Root Cause Analysis
+
+**7 failures → 5 root cause categories → 3 codegen subsystems:**
+
+#### RC-1: Closure Escape Capture Isolation (test_closure_escape)
+- **Symptom**: `r1=13 r2=13 r3=110` — all closures share same captured value (last write wins).
+- **Root cause**: V2 uses global class-variable cells (`__closure::__closure_cell_N`)
+  instead of per-closure heap-allocated environment objects.
+  Code: `ast_to_hir.cr:64087` — `@closure_ref_cells[cap_name]` keyed by variable NAME,
+  not by closure instance. Second closure reuses same cell → overwrites first.
+- **Fix needed**: Per-closure environment structs (heap-allocated record with captured
+  values), OR unique cell names per closure instance (`__closure_cell_N_<unique_id>`).
+- **Impact**: Any code returning closures from functions (common functional patterns).
+- **Difficulty**: HIGH — requires closure ABI redesign.
+
+#### RC-2: Proc#call Bypass on Union Types (test_nilable_proc)
+- **Symptom**: `result=` (empty) — callback never executes.
+- **Root cause**: Proc#call intercept at `ast_to_hir.cr:46805` checks
+  `proc_recv_desc.kind == TypeKind::Proc` — but for `Proc(String, Nil)?` the kind is
+  `TypeKind::Union`, not `TypeKind::Proc`. Intercept is bypassed. Falls through to
+  generic method resolution which fails for synthetic Proc types.
+- **Fix needed**: Before checking `kind == TypeKind::Proc`, check if the receiver is a
+  union containing a Proc variant, unwrap it, and emit the direct Proc#call instruction.
+- **Impact**: All `@callback : Proc(...)? ` patterns (event emitters, OptionParser, etc).
+- **Difficulty**: MEDIUM — conditional logic fix in two locations (line 46805 and 60762).
+
+#### RC-3: String.build Block Body Not Executing (test_string_builder_block, test_option_parser_to_s)
+- **Symptom**: `builder_bad: ` (empty string) / `option_parser_bad`.
+- **Root cause**: `lower_string_build_intrinsic` (ast_to_hir.cr:58279) lowers block body
+  but doesn't create a proper control flow block context. Unlike `lower_block_to_block_id`
+  which creates `ctx.create_block` and switches to it, the intrinsic skips this step.
+  Block body code is either dead or emitted in wrong context.
+- **Fix needed**: Align `lower_string_build_intrinsic` control flow setup with
+  `lower_block_to_block_id` — create a block, switch context, lower body, add terminator.
+- **Impact**: `String.build { |io| ... }` pattern (used extensively in stdlib).
+- **Difficulty**: MEDIUM — follow existing pattern from `lower_block_to_block_id`.
+
+#### RC-4: Enum Instance Method Dispatch (test_enum_methods)
+- **Symptom**: `enum_methods_bad` — custom enum methods not called.
+- **Root cause**: Enum methods registered on base type (Int32) instead of enum type (Color).
+  LLVM IR shows `Int32$Hprimary$Q` stubs instead of `Color$Hprimary$Q` with custom bodies.
+  Method resolution at call site loses enum type identity and falls back to Int32.
+- **Fix needed**: Ensure `register_type_method_from_def` preserves enum type name through
+  method resolution. Ensure enum values carry proper type info (not just Int32).
+- **Impact**: Any code defining custom methods on enums.
+- **Difficulty**: MEDIUM — type tracking through method resolution pipeline.
+
+#### RC-5: Class Method Resolution in Spawn Blocks (test_channel_receive_state)
+- **Symptom**: Undefined symbol `_current` at link time.
+- **Root cause**: Inside spawn-generated blocks, `Thread.current` resolves as bare
+  symbol `_current` instead of properly mangled `Thread.current`. Class method resolution
+  fails in spawn block context → compiler emits unresolved extern.
+- **Fix needed**: Fix `lower_call` MemberAccessNode handling to properly resolve qualified
+  class methods inside generated spawn block functions.
+- **Impact**: Any spawn block calling class methods on Fiber/Thread/Crystal::System.
+- **Difficulty**: MEDIUM — method resolution context in generated functions.
+
+#### Missing test: test_super_call.cr
+- File doesn't exist in regression_tests/complex/. Need to create it.
+
+### Priority order for fixes (after bootstrap)
+1. **RC-2 (nilable Proc#call)** — small fix, high impact on stdlib patterns
+2. **RC-3 (String.build block)** — medium fix, unblocks String.build usage
+3. **RC-4 (enum methods)** — medium fix, needed for full enum support
+4. **RC-5 (spawn class methods)** — needed for concurrency/fiber support
+5. **RC-1 (closure escape)** — hard fix, requires ABI redesign
 
 ### Next steps
-- Verify stage2 can compile simple programs.
-- Build stage1/stage2 with `--release` and benchmark.
+- Test stage2 with allocator fix (can it compile test_puts42?).
+- If stage2 works → build stage1/stage2 with `--release` and benchmark.
 - Build stage3 and verify.
 
 ## 2026-03-05: entry-guard newline root cause fixed -> clean stage2 restored
