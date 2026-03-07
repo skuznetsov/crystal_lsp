@@ -65634,6 +65634,59 @@ module Crystal::HIR
       @current_namespace_override || @current_class
     end
 
+    private def type_name_cache_depends_on_context?(name : String) : Bool
+      normalized = normalize_missing_generic_parens(name.strip)
+      return false if normalized.empty?
+
+      if normalized.starts_with?("::")
+        normalized = normalized.size > 2 ? normalized[2..] : ""
+        return false if normalized.empty?
+      end
+
+      return true if normalized == "self"
+      return true if normalized.includes?("typeof(")
+
+      if normalized.includes?('|')
+        parts = split_union_type_name(normalized)
+        return parts.any? { |part| type_name_cache_depends_on_context?(part) } if parts.size > 1
+      end
+
+      if normalized.ends_with?('?')
+        base = normalized[0, normalized.size - 1]
+        return type_name_cache_depends_on_context?(base)
+      end
+
+      if normalized.ends_with?('*')
+        base = normalized
+        while base.ends_with?('*')
+          base = base[0...-1]
+        end
+        base = base.strip
+        return !base.empty? && type_name_cache_depends_on_context?(base)
+      end
+
+      if normalized.starts_with?('{') && normalized.ends_with?('}')
+        inner = normalized[1, normalized.size - 2].strip
+        return false if inner.empty?
+        return split_generic_type_args(inner).any? { |arg| type_name_cache_depends_on_context?(arg) }
+      end
+
+      if info = split_generic_base_and_args(normalized)
+        return true if type_name_cache_depends_on_context?(info[:base])
+        return split_generic_type_args(info[:args]).any? { |arg| type_name_cache_depends_on_context?(arg) }
+      end
+
+      return false if value_literal_name?(normalized)
+      return false if primitive_self_type(normalized)
+      return false if LIBC_TYPE_ALIASES.has_key?(normalized) || builtin_alias_target?(normalized)
+      return false if BUILTIN_TYPE_NAMES.includes?(normalized)
+      return false if @top_level_type_names.includes?(normalized) || @top_level_class_kinds.has_key?(normalized)
+      return false if known_type_name?(normalized) || type_name_exists?(normalized)
+      return false if normalized.includes?("::")
+
+      true
+    end
+
     private def type_cache_key(name : String) : String
       return name if name.empty?
       ns_idx = namespace_separator_index(name)
@@ -65644,7 +65697,9 @@ module Crystal::HIR
       return name if BUILTIN_TYPE_NAMES.includes?(name)
       if name.includes?('(')
         base = strip_generic_args(name)
-        return name if BUILTIN_GENERIC_BASES.includes?(base)
+        if BUILTIN_GENERIC_BASES.includes?(base)
+          return name unless type_name_cache_depends_on_context?(name)
+        end
       end
       context = type_cache_context
       return name if context.nil? || context.empty?
@@ -66501,7 +66556,7 @@ module Crystal::HIR
           should_resolve_in_context = nested_shadowed_type_name?(lookup_name)
         end
         if idx = lookup_ns_idx0
-          head = lookup_name[0, idx]
+          head = lookup_name[0, idx.not_nil!]
           anchored_namespace = head == "Crystal" ||
                                @top_level_type_names.includes?(head) ||
                                @top_level_class_kinds.has_key?(head) ||
@@ -66802,6 +66857,24 @@ module Crystal::HIR
           # Resolve type aliases (e.g., Crystal::System::FileDescriptor::Handle → Int32)
           alias_resolved = resolve_type_alias_chain(param)
           param = alias_resolved if alias_resolved != param
+          unless type_param_like?(param) && short_type_param_name?(param) && !@type_param_map.has_key?(param)
+            if !param.includes?("::")
+              if override = @current_namespace_override
+                if nested = nested_type_full_name_in_namespace_chain(override, param)
+                  param = nested
+                end
+              end
+              if !param.includes?("::")
+                if current = @current_class
+                  if nested = nested_type_full_name_in_namespace_chain(current, param)
+                    param = nested
+                  end
+                end
+              end
+            end
+            resolved_param = resolve_type_name_in_context(param)
+            param = resolved_param if resolved_param != param
+          end
           normalize_tuple_literal_type_name(param)
         end
 
@@ -66820,7 +66893,9 @@ module Crystal::HIR
         end
         if substituted_name != lookup_name
           # Types changed - recurse with new name
-          return type_ref_for_name(substituted_name)
+          result = type_ref_for_name(substituted_name)
+          store_type_cache(cache_key, result)
+          return result
         end
 
         named_tuple_entries : Array({String, String})? = nil
@@ -66974,6 +67049,17 @@ module Crystal::HIR
         type_params = params_for_type_resolution.map do |param|
           resolve_generic_param_type.call(param)
         end
+        canonical_generic_name = if named_tuple_entries
+                                   entry_names = named_tuple_entries.not_nil!.each_with_index.map do |entry, idx|
+                                     "#{entry[0]}: #{get_type_name_from_ref(type_params[idx.not_nil!])}"
+                                   end
+                                   "#{base_name}(#{entry_names.join(", ")})"
+                                 elsif BUILTIN_GENERIC_BASES.includes?(base_name)
+                                   param_names = type_params.map { |tp| get_type_name_from_ref(tp) }
+                                   "#{base_name}(#{param_names.join(", ")})"
+                                 else
+                                   substituted_name
+                                 end
         type_kind = case base_name
                     when "Array", "StaticArray" then TypeKind::Array
                     when "Hash"                 then TypeKind::Hash
@@ -66987,12 +67073,15 @@ module Crystal::HIR
                         TypeKind::Generic
                       end
                     end
-        result = @module.intern_type(TypeDescriptor.new(type_kind, substituted_name, type_params))
+        result = @module.intern_type(TypeDescriptor.new(type_kind, canonical_generic_name, type_params))
         if base_name == "StaticArray"
           desc = @module.get_type_descriptor(result)
           debug_hook("type.static_array.result", "name=#{desc ? desc.name : "?"} params=#{type_params.map { |t| get_type_name_from_ref(t) }.join(", ")}")
         end
         store_type_cache(cache_key, result)
+        if canonical_generic_name != substituted_name
+          store_type_cache(type_cache_key(canonical_generic_name), result)
+        end
 
         # Trigger monomorphization if this is a generic class/struct template
         # This ensures included module methods get registered for the specialized type

@@ -27,11 +27,25 @@ closure cells, Tuple ptr/value confusion.
 - Added focused oracle `regression_tests/member_getter_lowering_repro.sh`.
   - Repro covers both direct zero-arg getter access and inline shorthand block lowering:
     `direct=#{ExprId.new(7).index}` and `items.max_of(&.index)`.
+- Added focused frontend oracle `regression_tests/contextual_builtin_generic_cache_repro.sh`.
+  - Repro isolates the `CrystalV2::Compiler::Frontend::DefNode#body : Array(ExprId)?`
+    regression without depending on full bootstrap.
+  - It asks the compiler for the getter typing trace and fails if `DefNode#body`
+    does not resolve to `Nil | Array(CrystalV2::Compiler::Frontend::ExprId)`.
 - Compiler-only fix in current dirty worktree:
   - `lower_member_access` now materializes synthetic getters when the resolved target has
     no emitted body and there is no explicit `DefNode`-backed method to protect.
   - synthetic getter generators (`generate_getter_method_for_ivar` / lazy getter path)
     no longer treat an empty function stub as a completed method body.
+  - `type_ref_for_name` now stops treating contextual built-in generic names as globally
+    cacheable when any nested arg still depends on namespace/type-param context.
+  - When generic-param substitution changes a name (for example `Array(ExprId)` ->
+    `Array(CrystalV2::Compiler::Frontend::ExprId)`), the resolved `TypeRef` is now
+    written back under the original cache key instead of leaving a placeholder `VOID`
+    behind.
+  - Built-in generic descriptors are now interned under canonical resolved names derived
+    from the resolved param refs, so later lookups reuse the concrete `Array(...)` /
+    `NamedTuple(...)` identity instead of a stale short-name alias.
 - Verification on fresh stage1 debug:
   - `/usr/bin/time -p scripts/build_stage1_original_debug.sh /tmp/stage1_dbg_member_getter_probe --error-trace`
     -> `real 10.90`
@@ -49,6 +63,21 @@ closure cells, Tuple ptr/value confusion.
     -> `not reproduced`
   - `bash regression_tests/proc_block_capture_write_repro.sh /tmp/stage1_rel_member_getter_fix_20260307a`
     -> `not reproduced`
+- Verification on fresh stage1 release for the new frontend cache fix:
+  - `/usr/bin/time -p scripts/build_stage1_original_release.sh /private/tmp/stage1_rel_contextual_builtin_fix_20260307 --error-trace`
+    -> `real 412.52`
+  - `bash regression_tests/contextual_builtin_generic_cache_repro.sh /private/tmp/stage1_rel_contextual_builtin_fix_20260307`
+    -> `not reproduced`
+  - Adversary checks on the same release binary:
+    - `bash regression_tests/member_getter_lowering_repro.sh /private/tmp/stage1_rel_contextual_builtin_fix_20260307`
+      -> `not reproduced`
+    - `bash regression_tests/proc_block_value_param_store_repro.sh /private/tmp/stage1_rel_contextual_builtin_fix_20260307`
+      -> `not reproduced`
+- Scope correction:
+  - this checkpoint verifies the `DefNode#body -> Nil | Void` frontend regression and its
+    direct cause in contextual built-in generic cache poisoning.
+  - a broader custom cross-context short-generic probe still shows namespace alias bleed in
+    other shapes, so that wider class is **not** claimed fixed by this commit.
 - Important status correction:
   - the older note below that `proc_block_capture_write_repro.sh` still reproduced is now
     stale for the current dirty worktree; fresh debug+release stage1 binaries both print `ok`.
