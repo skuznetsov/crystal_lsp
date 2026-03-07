@@ -80,6 +80,20 @@ closure cells, Tuple ptr/value confusion.
     template methods.
   - `stage2 --release` / `stage2 -> stage3` still need to be rerun on top of this fix;
     the older invalid-IR blocker below is the last verified pre-fix stage2 status.
+- Bootstrap status after this checkpoint:
+  - `/usr/bin/time -p scripts/build_stage2_release.sh /private/tmp/stage1_rel_primitive_template_fix_20260307 /private/tmp/stage2_rel_primitive_template_fix_20260307`
+    -> `real 153.38`
+  - With the same warm release cache, current measured bootstrap delta is:
+    `stage1 --release = 407.19s` vs `stage2 --release = 153.38s`, or about `2.65x`.
+  - `stage2 -> stage3` no longer fails at the previous stage2 invalid-IR boundary; it now
+    progresses through deep stdlib + compiler parse/reqscan and is then killed by the OS:
+    `/usr/bin/time -p scripts/build_stage2_release.sh /private/tmp/stage2_rel_primitive_template_fix_20260307 /private/tmp/stage3_rel_primitive_template_fix_20260307`
+    -> `Killed: 9`, `real 112.73`
+  - Resource-profile rerun:
+    `/usr/bin/time -l scripts/build_stage2_release.sh /private/tmp/stage2_rel_primitive_template_fix_20260307 /private/tmp/stage3_rel_primitive_template_fix_rssprobe_20260307`
+    -> `Killed: 9`, `112.05 real`, `maximum resident set size = 49275731968`
+  - Current active bootstrap blocker is therefore no longer the old stage2 invalid IR below;
+    it is a stage3 memory blow-up / system kill during self-hosted release compilation.
 - Added focused oracle `regression_tests/member_getter_lowering_repro.sh`.
   - Repro covers both direct zero-arg getter access and inline shorthand block lowering:
     `direct=#{ExprId.new(7).index}` and `items.max_of(&.index)`.
