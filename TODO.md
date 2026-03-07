@@ -121,6 +121,23 @@ closure cells, Tuple ptr/value confusion.
       literal-collapse bug is fixed, but a narrower stage2-only named-tuple carrier
       remains (likely one of the internal cached `base/args` helper shapes such as
       `split_generic_base_and_args`).
+  - Narrower oracle added after that checkpoint:
+    - `regression_tests/stage2_no_prelude_pointer_args_key_repro.sh`
+      uses only `x : Pointer(UInt8) = Pointer(UInt8).null` under `--no-prelude --no-link`
+      and reproduces the same `error: Missing named tuple key: :args` on the
+      current stage2 debug trace binary, while stage1 debug control stays green.
+    - This removes macros from the minimal reproducer and proves the active branch is
+      a broader no-prelude generic/type-processing failure, not a macro-only issue.
+  - Localization update:
+    - on a trace binary with temporary `@[NoInline]` probes, LLDB breakpoints on
+      `split_generic_base_and_args`, `generic_owner_info`,
+      `normalize_declared_type_name`, `resolve_forall_type_params`, and
+      `specialize_bare_generic_annotation` still do not trigger before the
+      `:args` failure on the no-prelude Pointer oracle.
+    - Current best reading is therefore that the active stage2 debug `:args` branch
+      trips even earlier than those HIR generic helpers (or in code that their direct
+      symbol breakpoints do not model faithfully), so the next step is caller-line /
+      pre-HIR localization rather than more split-helper-only patching.
 - Bootstrap status after this checkpoint:
   - `/usr/bin/time -p scripts/build_stage2_release.sh /private/tmp/stage1_rel_primitive_template_fix_20260307 /private/tmp/stage2_rel_primitive_template_fix_20260307`
     -> `real 153.38`
