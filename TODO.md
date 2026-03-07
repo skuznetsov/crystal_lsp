@@ -74,6 +74,35 @@ closure cells, Tuple ptr/value confusion.
       - `/usr/bin/time -p regression_tests/run_all.sh ./bin/crystal_v2`
       - `Results: 65 passed, 0 failed out of 65 tests`
       - `real 746.29`
+- Fresh stage2 `--release` invalid-IR blocker is now locally root-caused and fixed; bootstrap rerun is pending.
+  - Symptom:
+    fresh `stage2 --release` failed in `opt` with
+    `defined with type 'double' but expected 'i32'` on
+    `%r433.payload_cmp = icmp ne i32 %r433.payload, %r430.fromslot.54`.
+  - Minimal repro:
+    `Float64?` captured into a proc and compared to `elapsed.total_milliseconds`
+    (`regression_tests/float64_nilable_proc_compare_repro.sh`) reproduced the same invalid IR
+    without full bootstrap.
+  - Actual root cause:
+    MIR already contained the correct ordered compare (`ge %Float64, %Nil|Float64`), but
+    `LLVMIRGenerator#emit_binary_op` nilable-union fast-path was written only for `==/!=`
+    and still executed for `< <= > >=`.
+    It:
+    - defaulted non-int/non-ptr payloads to `i32`,
+    - mapped every non-`eq` compare to `icmp ne`,
+    - always compared `payload` on the left, losing operand order.
+  - Fix:
+    keep the nilable-union fast-path, but emit op-correct typed compares:
+    float payloads use `fcmp`, integer payloads use signed/unsigned `icmp`,
+    operand order follows the original MIR left/right order, and only `eq/ne`
+    keep special nil-branch truth tables.
+  - Verification:
+    - `regression_tests/float64_nilable_proc_compare_repro.sh ./bin/crystal_v2`
+      now prints `not reproduced`.
+    - Tiny direct oracle from the same source shape now emits
+      `payload_cmp = fcmp oge double ...` and `opt -O0` succeeds.
+    - Adversary check:
+      reversed ordering (`slow_ms <= elapsed`) also compiles and `opt -O0` succeeds.
 - `RC-3` symptom is verified, but the exact mechanism below is still a hypothesis.
   Tiny `String.build` repro emits only `String::Builder.new` + `to_s` in IR; block-body markers and
   side effects (`x = 1`, `"SBMARK"`) are absent entirely. So "missing block CFG setup" is not yet proven.

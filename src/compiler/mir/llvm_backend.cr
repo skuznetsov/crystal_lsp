@@ -9976,39 +9976,77 @@ module Crystal::MIR
             concrete_is_nil = concrete_val == "null" || concrete_type_ref == TypeRef::NIL
 
             if concrete_is_nil
-              # nil == union or union == nil: result is whether union is nil
+              # nil == union or union == nil: result is whether union is nil.
+              # Ordered comparisons against nil are unsupported in Crystal and
+              # only survive here due to incomplete earlier narrowing; treat the
+              # nil branch as false instead of fabricating a bogus compare.
               if inst.op.eq?
                 emit "#{name} = icmp eq i32 %#{base_name}.type_id, #{nil_vid}"
-              else
+              elsif inst.op.ne?
                 emit "#{name} = icmp ne i32 %#{base_name}.type_id, #{nil_vid}"
+              else
+                emit "#{name} = add i1 0, 0"
               end
             else
               # Concrete non-nil vs nilable union: extract payload and compare
               emit "%#{base_name}.payload_ptr = getelementptr #{union_type_str}, ptr %#{base_name}.union_ptr, i32 0, i32 1"
 
               # Determine comparison type from concrete side
-              cmp_type = if concrete_type_str.starts_with?('i') && !concrete_type_str.includes?('.')
+              cmp_type = if concrete_type_str == "float" || concrete_type_str == "double"
+                           concrete_type_str
+                         elsif concrete_type_str.starts_with?('i') && !concrete_type_str.includes?('.')
                            concrete_type_str
                          elsif concrete_type_str == "ptr"
-                           "i64"
+                           pointer_sized_int_llvm_type
                          else
-                           "i32"
+                           "ptr"
                          end
 
               emit "%#{base_name}.payload = load #{cmp_type}, ptr %#{base_name}.payload_ptr, align 4"
 
-              # Coerce concrete value if ptr
+              # Coerce concrete value if comparing via integerized pointers.
               cmp_concrete = concrete_val
               if concrete_type_str == "ptr"
                 emit "%#{base_name}.concrete_int = ptrtoint ptr #{concrete_val} to #{cmp_type}"
                 cmp_concrete = "%#{base_name}.concrete_int"
               end
 
-              cmp_op = inst.op.eq? ? "eq" : "ne"
-              emit "%#{base_name}.payload_cmp = icmp #{cmp_op} #{cmp_type} %#{base_name}.payload, #{cmp_concrete}"
+              left_cmp = left_is_union ? "%#{base_name}.payload" : cmp_concrete
+              right_cmp = left_is_union ? cmp_concrete : "%#{base_name}.payload"
 
-              # If union is nil: eq→false, ne→true. Otherwise use payload comparison.
-              nil_result = inst.op.eq? ? "0" : "1"
+              cmp_op = if cmp_type == "float" || cmp_type == "double"
+                         case inst.op
+                         when .eq? then "fcmp oeq"
+                         when .ne? then "fcmp une"
+                         when .lt? then "fcmp olt"
+                         when .le? then "fcmp ole"
+                         when .gt? then "fcmp ogt"
+                         when .ge? then "fcmp oge"
+                         else           "fcmp oeq"
+                         end
+                       else
+                         cmp_signed = concrete_type_ref ? !unsigned_type_ref?(concrete_type_ref) : true
+                         case inst.op
+                         when .eq? then "icmp eq"
+                         when .ne? then "icmp ne"
+                         when .lt? then cmp_signed ? "icmp slt" : "icmp ult"
+                         when .le? then cmp_signed ? "icmp sle" : "icmp ule"
+                         when .gt? then cmp_signed ? "icmp sgt" : "icmp ugt"
+                         when .ge? then cmp_signed ? "icmp sge" : "icmp uge"
+                         else           "icmp eq"
+                         end
+                       end
+
+              emit "%#{base_name}.payload_cmp = #{cmp_op} #{cmp_type} #{left_cmp}, #{right_cmp}"
+
+              # If union is nil: eq→false, ne→true, ordered comparisons→false.
+              nil_result = if inst.op.eq?
+                             "0"
+                           elsif inst.op.ne?
+                             "1"
+                           else
+                             "0"
+                           end
               emit "#{name} = select i1 %#{base_name}.is_nil, i1 #{nil_result}, i1 %#{base_name}.payload_cmp"
             end
 
