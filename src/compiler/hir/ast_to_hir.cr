@@ -17727,6 +17727,18 @@ module Crystal::HIR
           # Fall through for lazy getters: zero/nil the field below
         end
 
+        # V2 heap-allocates structs, so Literal(0) creates a null pointer.
+        # Allocate a zero-filled struct instead to prevent null dereferences.
+        is_struct_type = type_desc && type_desc.kind == TypeKind::Struct
+        if is_struct_type
+          struct_alloc = Allocate.new(ctx.next_id, ivar.type, [] of ValueId, true)
+          ctx.emit(struct_alloc)
+          ctx.register_type(struct_alloc.id, ivar.type)
+          ivar_store = FieldSet.new(ctx.next_id, ivar.type, alloc.id, ivar.name, struct_alloc.id, ivar.offset)
+          ctx.emit(ivar_store)
+          next
+        end
+
         # Use nil for pointer types, 0 for others
         is_pointer = ivar.type == TypeRef::POINTER ||
                      (type_desc && type_desc.kind == TypeKind::Pointer) ||
@@ -18057,6 +18069,18 @@ module Crystal::HIR
             end
             next
           end
+        end
+
+        # V2 heap-allocates structs, so Literal(0) creates a null pointer.
+        # Allocate a zero-filled struct instead to prevent null dereferences.
+        is_struct_type = type_desc && type_desc.kind == TypeKind::Struct
+        if is_struct_type
+          struct_alloc = Allocate.new(ctx.next_id, ivar.type, [] of ValueId, true)
+          ctx.emit(struct_alloc)
+          ctx.register_type(struct_alloc.id, ivar.type)
+          ivar_store = FieldSet.new(ctx.next_id, ivar.type, alloc.id, ivar.name, struct_alloc.id, ivar.offset)
+          ctx.emit(ivar_store)
+          next
         end
 
         is_pointer = ivar.type == TypeRef::POINTER ||
@@ -24198,6 +24222,8 @@ module Crystal::HIR
         8
       when TypeRef::INT128, TypeRef::UINT128
         16
+      when TypeRef::VOID, TypeRef::NIL
+        1 # Zero-sized types have minimal alignment
       else
         pointer_word_bytes_i32 # Pointer/reference types align to pointer size
       end
@@ -38794,7 +38820,7 @@ module Crystal::HIR
       if is_union_type?(value_type)
         variant_id = get_union_variant_id(value_type, check_type)
         if variant_id >= 0
-          union_is = UnionIs.new(ctx.next_id, value_id, variant_id)
+          union_is = UnionIs.new(ctx.next_id, value_id, variant_id, value_type)
           ctx.emit(union_is)
           ctx.register_type(union_is.id, TypeRef::BOOL)
           return union_is.id
@@ -41412,7 +41438,7 @@ module Crystal::HIR
           if is_union_type?(subject_type)
             variant_id = get_union_variant_id(subject_type, check_type)
             if variant_id >= 0
-              union_is = UnionIs.new(ctx.next_id, subject_id, variant_id)
+              union_is = UnionIs.new(ctx.next_id, subject_id, variant_id, subject_type)
               ctx.emit(union_is)
               return union_is.id
             end
@@ -41503,7 +41529,7 @@ module Crystal::HIR
           if is_union_type?(subject_type)
             variant_id = get_union_variant_id(subject_type, check_type)
             if variant_id >= 0
-              union_is = UnionIs.new(ctx.next_id, subject_id, variant_id)
+              union_is = UnionIs.new(ctx.next_id, subject_id, variant_id, subject_type)
               ctx.emit(union_is)
               return union_is.id
             end
@@ -41806,7 +41832,7 @@ module Crystal::HIR
           if is_union_type?(subject_type)
             variant_id = get_union_variant_id(subject_type, check_type)
             if variant_id >= 0
-              union_is = UnionIs.new(ctx.next_id, subject_id, variant_id)
+              union_is = UnionIs.new(ctx.next_id, subject_id, variant_id, subject_type)
               ctx.emit(union_is)
               return union_is.id
             end
@@ -67011,6 +67037,23 @@ module Crystal::HIR
 
         vsize = type_size(vref)
         valign = type_alignment(vref)
+        # V2 ABI: non-primitive structs are heap-allocated and stored as pointers
+        # in union payloads (not inline). Their payload slot must be pointer-sized.
+        # Exception: tuples are stored inline by value.
+        vname = resolved_variant_names[idx]
+        if vsize > 0 && vsize < pointer_word_bytes_i32 && vref.id >= TypeRef::FIRST_USER_TYPE &&
+           !vname.starts_with?("Tuple(")
+          is_struct_variant = false
+          if info = @class_info_by_type_id[vref.id]?
+            is_struct_variant = info.is_struct
+          elsif info2 = @class_info[vname]?
+            is_struct_variant = info2.is_struct
+          end
+          if is_struct_variant
+            vsize = pointer_word_bytes_i32
+            valign = pointer_word_bytes_i32
+          end
+        end
         max_size = {max_size, vsize}.max
         max_align = {max_align, valign}.max
 
@@ -67023,6 +67066,14 @@ module Crystal::HIR
           field_offsets: nil
         )
       end
+
+      # Ensure payload is at least pointer-sized (8 bytes) so that codegen can
+      # safely use `store ptr` for any variant without overflowing the payload.
+      # Multiple codegen paths (union-to-union conversion, phi wrapping, return
+      # wrapping, slot stores) unconditionally use `store ptr` (8 bytes) as a
+      # generic copy strategy. Without this floor, unions like Nil|Char with
+      # 4-byte payloads get 4-byte stack buffer overflows.
+      max_size = {max_size, pointer_word_bytes_i32}.max
 
       # Total size: header (4 bytes for type_id) + padding + max payload
       payload_offset = ((4 + max_align - 1) // max_align) * max_align

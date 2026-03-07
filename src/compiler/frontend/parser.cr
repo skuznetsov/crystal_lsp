@@ -14305,8 +14305,16 @@ current_token.kind == Token::Kind::Identifier &&
         # Phase 103: Inline hot path - frequently used for span calculations
         @[AlwaysInline]
         private def node_span(id : ExprId) : Span
-          return Span.new(0, 0, 0, 0, 0, 0) if id.invalid?
-          @arena[id].span
+          return Span.zero if id.invalid?
+          node = @arena[id]
+          # V2 defensive guard: struct fields may be null pointers because V2
+          # heap-allocates structs.  The @span field (first ivar) sits at object+8
+          # due to 4-byte type_id header + 4-byte alignment padding for 8-byte pointer.
+          # Read the 8-byte pointer value at that offset; if null, return a zero span.
+          # Under Crystal v1 (inline structs) this reads start/end offsets — harmless.
+          span_ptr = Pointer(UInt64).new(node.object_id &+ 8).value
+          return Span.zero if span_ptr == 0_u64
+          node.span
         end
 
         private def cover_optional_spans(a : Span?, b : Span?, c : Span?) : Span

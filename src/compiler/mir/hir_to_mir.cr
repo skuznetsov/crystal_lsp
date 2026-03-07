@@ -231,6 +231,9 @@ module Crystal
 
         # Calculate union size and alignment
         max_variant_size = descriptor.variants.map(&.size).max? || 0
+        # Ensure payload is at least pointer-sized (8 bytes) to match LLVM type
+        # emission and prevent overflow from `store ptr` codegen patterns.
+        max_variant_size = {max_variant_size, 8}.max
         alignment = descriptor.alignment.to_u32
 
         # Total size: 4 bytes for type_id + padding + max payload
@@ -3713,11 +3716,19 @@ module Crystal
       builder = @builder.not_nil!
       union_value = get_value(is.union_value)
 
+      # Convert union type from HIR to MIR
+      mir_union_type = if is.union_type != HIR::TypeRef::VOID
+                         convert_type(is.union_type)
+                       else
+                         MIR::TypeRef::VOID
+                       end
+
       # Create MIR UnionIs instruction (type is hardcoded to BOOL)
       mir_is = MIR::UnionIs.new(
         builder.next_id,
         union_value,
-        is.variant_type_id
+        is.variant_type_id,
+        mir_union_type
       )
       builder.emit(mir_is)
     end

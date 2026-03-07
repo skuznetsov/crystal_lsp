@@ -535,6 +535,10 @@ module Crystal::MIR
     @in_phi_block : Bool = false  # When true, we're emitting phi instructions (defer cross-block stores)
     @deferred_phi_stores : Array(String) = [] of String  # Stores to emit after all phis
     @deferred_phi_store_ops : Array({ValueId, String, String}) = [] of {ValueId, String, String}  # {inst_id, value_name, slot_name}
+    # Phi-shared slot optimization: when a phi has many incoming cross-block values,
+    # share a single alloca instead of one per incoming value (prevents massive stack frames
+    # in vdispatch functions with hundreds of type cases).
+    @phi_slot_redirect : Hash(ValueId, ValueId) = {} of ValueId => ValueId  # incoming val → phi id
 
     # Phi-related type conversions: ExternCall values that need zext for phi compatibility
     # Maps value_id -> (from_bits, to_bits) where we need zext from iN to iM
@@ -571,6 +575,11 @@ module Crystal::MIR
 
     # Track emitted union type definitions to avoid duplicates and ensure forward declarations
     @emitted_union_type_names : Set(String) = Set(String).new
+
+    # Global zero-filled struct sentinels for struct-typed cross-block alloca slots.
+    # V2 heap-allocates structs as pointers; null init causes SIGSEGV on unexecuted paths.
+    @zero_struct_globals : Set(String) = Set(String).new
+    @zero_struct_global_decls : IO::Memory = IO::Memory.new
 
     # Type metadata for debug DX
     @type_info_entries : Array(TypeInfoEntry)
@@ -895,6 +904,12 @@ module Crystal::MIR
       end
 
       emit_entrypoint_if_needed(functions_to_emit)
+
+      # Emit zero-filled struct globals for cross-block alloca initialization
+      if @zero_struct_global_decls.pos > 0
+        emit_raw "\n; Zero-filled struct sentinels for cross-block alloca slots\n"
+        emit_raw @zero_struct_global_decls.to_s
+      end
 
       # Emit string constants at end (LLVM allows globals anywhere)
       STDERR.puts "  [LLVM] emit_string_constants..." if @progress
@@ -2389,11 +2404,26 @@ module Crystal::MIR
       # decomposing the payload into individual byte arguments when passed by value.
       # With [N x i8], a 24-byte union gets decomposed into 20 separate i8 register
       # args, corrupting pointer values. With [N x i32], it stays as a few i32 args.
-      if type.size > 4
-        payload_bytes = type.size - 4
-      else
-        payload_bytes = payload_size || type.variants.try(&.map(&.size).max) || 8_u64
+      #
+      # Use variant sizes directly — the LLVM type { i32, [N x i32] } has no
+      # alignment padding between discriminator and payload, so we can't derive
+      # payload size from type.size which may include alignment padding.
+      payload_bytes = payload_size || type.variants.try(&.map(&.size).max) || 8_u64
+      # V2 ABI: non-primitive structs are heap-allocated and stored as pointers
+      # in union payloads. If any variant's LLVM type is "ptr" (8 bytes), ensure
+      # the payload can hold it, even if the MIR variant size is smaller.
+      if variants = type.variants
+        variants.each do |v|
+          next if v.kind.primitive? || v.name == "Nil" || v.name == "Void"
+          llvm_t = @type_mapper.llvm_type(v)
+          if llvm_t == "ptr" && payload_bytes < 8_u64
+            payload_bytes = 8_u64
+          end
+        end
       end
+      # Ensure minimum pointer-sized payload (8 bytes) so all store ptr
+      # patterns are safe (union-to-union copies, phi wraps, etc.)
+      payload_bytes = {payload_bytes, 8_u64}.max
       # Round up to multiple of 4 bytes for i32 element array
       payload_i32s = (payload_bytes + 3) // 4
       emit_raw "%#{name}.union = type { i32, [#{payload_i32s} x i32] }\n"
@@ -4749,6 +4779,19 @@ module Crystal::MIR
       emit_raw "  ret ptr null\n"
       emit_raw "}\n\n"
 
+      # Null function pointer guard (debug aid for PC=0 crash hunting)
+      emit_raw "; Null function pointer guard\n"
+      emit_raw "define void @__crystal_v2_null_fn_guard(ptr %fn) {\n"
+      emit_raw "  %is_null = icmp eq ptr %fn, null\n"
+      emit_raw "  br i1 %is_null, label %trap, label %ok\n"
+      emit_raw "trap:\n"
+      emit_raw "  call void @llvm.debugtrap()\n"
+      emit_raw "  call void @abort()\n"
+      emit_raw "  unreachable\n"
+      emit_raw "ok:\n"
+      emit_raw "  ret void\n"
+      emit_raw "}\n\n"
+
       # Exception handling runtime functions using setjmp/longjmp
       emit_raw "; Exception handling runtime functions\n"
       emit_raw "declare void @abort()\n"
@@ -6785,6 +6828,7 @@ module Crystal::MIR
       @cross_block_slots.clear
       @cross_block_slot_types.clear
       @cross_block_slot_type_refs.clear
+      @phi_slot_redirect.clear
       @phi_predecessor_loads.clear
       @phi_union_to_ptr_extracts.clear
       @phi_union_to_union_converts.clear
@@ -6806,6 +6850,10 @@ module Crystal::MIR
 
       # Pre-pass: detect cross-block values that need alloca slots for dominance
       prepass_detect_cross_block_values(func)
+
+      # Pre-pass: detect phi nodes with many incoming cross-block values
+      # and redirect them to share a single alloca (prevents 398KB+ stack frames)
+      prepass_detect_phi_shared_slots(func)
 
       # Pre-pass: infer binary op result types (for widening detection in phi nodes)
       prepass_infer_binary_op_types(func)
@@ -7187,7 +7235,52 @@ module Crystal::MIR
       end
 
       # Create alloca slots for cross-block values to fix dominance issues
+      # Track which phi-shared slots have already been created
+      phi_shared_created = Set(ValueId).new
       @cross_block_values.each do |val_id|
+        # Phi-shared slot optimization: redirect many incoming values to one alloca
+        if phi_id = @phi_slot_redirect[val_id]?
+          unless phi_shared_created.includes?(phi_id)
+            # Create ONE shared alloca for this phi node using the phi's type
+            phi_shared_created << phi_id
+            phi_inst = find_def_inst(phi_id)
+            phi_type = if phi_inst
+                         @value_types[phi_id]? || phi_inst.type
+                       else
+                         @value_types[phi_id]? || TypeRef::POINTER
+                       end
+            phi_llvm_type = @type_mapper.llvm_type(phi_type)
+            phi_llvm_type = "i64" if phi_llvm_type == "void"
+            shared_slot = "%r#{phi_id}.phi_slot"
+            emit_raw "  #{shared_slot} = alloca #{phi_llvm_type}, align 8\n"
+            # Zero-initialize the shared slot
+            if phi_llvm_type == "ptr"
+              emit_raw "  store ptr null, ptr #{shared_slot}\n"
+            else
+              init_val = case phi_llvm_type
+                         when "float", "double" then "0.0"
+                         when .starts_with?('i') then "0"
+                         when .includes?(".union") then "zeroinitializer"
+                         else "0"
+                         end
+              emit_raw "  store #{phi_llvm_type} #{init_val}, ptr #{shared_slot}\n"
+            end
+          end
+          # Map this value to the shared slot
+          phi_inst = find_def_inst(phi_id)
+          phi_type = if phi_inst
+                       @value_types[phi_id]? || phi_inst.type
+                     else
+                       @value_types[phi_id]? || TypeRef::POINTER
+                     end
+          phi_llvm_type = @type_mapper.llvm_type(phi_type)
+          phi_llvm_type = "i64" if phi_llvm_type == "void"
+          @cross_block_slots[val_id] = "r#{phi_id}.phi_slot"
+          @cross_block_slot_types[val_id] = phi_llvm_type
+          @cross_block_slot_type_refs[val_id] = phi_type
+          next
+        end
+
         val_type = @value_types[val_id]?
         # Prefer the defining instruction type when it is a union.
         # @value_types can be polluted by later ABI/type adaptation, which may
@@ -7216,15 +7309,31 @@ module Crystal::MIR
         @cross_block_slot_types[val_id] = llvm_type  # Record allocation type for consistent loads
         @cross_block_slot_type_refs[val_id] = val_type
         emit_raw "  #{slot_name} = alloca #{llvm_type}, align 8\n"
-        # Initialize to zero/null to avoid undef on unexecuted paths
-        init_val = case llvm_type
-                   when "ptr" then "null"
-                   when "float", "double" then "0.0"
-                   when .starts_with?('i') then "0"
-                   when .includes?(".union") then "zeroinitializer"
-                   else "0"
-                   end
-        emit_raw "  store #{llvm_type} #{init_val}, ptr #{slot_name}\n"
+        # Initialize to zero/null to avoid undef on unexecuted paths.
+        # For struct-typed pointers, use a global zero-filled sentinel so the slot
+        # is never null (V2 heap-allocates structs as pointers — null = crash).
+        if llvm_type == "ptr"
+          mir_type = @module.type_registry.get(val_type)
+          if mir_type && mir_type.kind.struct? && mir_type.size > 0
+            mangled = @type_mapper.mangle_name(mir_type.name)
+            global_name = "@__zero.#{mangled}"
+            unless @zero_struct_globals.includes?(mangled)
+              @zero_struct_globals << mangled
+              @zero_struct_global_decls << "#{global_name} = internal global %#{mangled} zeroinitializer\n"
+            end
+            emit_raw "  store ptr #{global_name}, ptr #{slot_name}\n"
+          else
+            emit_raw "  store ptr null, ptr #{slot_name}\n"
+          end
+        else
+          init_val = case llvm_type
+                     when "float", "double" then "0.0"
+                     when .starts_with?('i') then "0"
+                     when .includes?(".union") then "zeroinitializer"
+                     else "0"
+                     end
+          emit_raw "  store #{llvm_type} #{init_val}, ptr #{slot_name}\n"
+        end
       end
     end
 
@@ -8190,6 +8299,30 @@ module Crystal::MIR
       end
     end
 
+    # Pre-pass: Detect phi nodes with many cross-block incoming values.
+    # When a phi has N cross-block incoming values (e.g., 592 in a vdispatch
+    # switch), each gets its own alloca of the full return union type, creating
+    # massive stack frames (398KB+). Since only one switch case executes, all
+    # incoming values can safely share a single alloca.
+    private def prepass_detect_phi_shared_slots(func : Function)
+      func.blocks.each do |block|
+        block.instructions.each do |inst|
+          next unless inst.is_a?(Phi)
+          # Count how many incoming values are cross-block
+          cross_block_incoming = [] of ValueId
+          inst.incoming.each do |(_, val_id)|
+            cross_block_incoming << val_id if @cross_block_values.includes?(val_id)
+          end
+          # Only share when there are enough to matter (threshold: 4+)
+          next if cross_block_incoming.size < 4
+          # Redirect all cross-block incoming values to use the phi's ID as canonical slot
+          cross_block_incoming.each do |val_id|
+            @phi_slot_redirect[val_id] = inst.id
+          end
+        end
+      end
+    end
+
     # Pre-pass: Infer binary operation result types considering type widening
     # This is needed for phi nodes that reference binary ops in later blocks
     private def prepass_infer_binary_op_types(func : Function)
@@ -8520,6 +8653,9 @@ module Crystal::MIR
         end
 
         emit "%#{base_name}.ptr = alloca #{union_type}, align 8"
+        # Zero-init the alloca to prevent reading uninitialized payload bytes
+        # and to safely handle Nil values without overflow
+        emit "store #{union_type} zeroinitializer, ptr %#{base_name}.ptr"
         emit "%#{base_name}.type_id_ptr = getelementptr #{union_type}, ptr %#{base_name}.ptr, i32 0, i32 0"
         # Use globally unique type_ref.id as discriminator
         phi_global_vid = variant_global_id(union_type_ref, variant_type_id)
@@ -8539,8 +8675,12 @@ module Crystal::MIR
           check_ref = val_ref
           check_ref = "null" if check_ref == "0"
           if check_ref == "null"
-            # Known null at compile time → Nil discriminator
-            emit "store i32 0, ptr %#{base_name}.type_id_ptr"
+            # Known null at compile time → Nil discriminator (already 0 from zeroinit)
+            # Skip payload store — zeroinitializer already zeroed everything.
+            # Storing ptr null (8 bytes) would overflow small payloads like Nil|Char
+            # where payload is [1 x i32] = 4 bytes.
+            emit "%#{wrap_name} = load #{union_type}, ptr %#{base_name}.ptr"
+            next
           else
             # Runtime null check → select between Nil and variant discriminator
             emit "%#{base_name}.nil_check = icmp eq ptr #{check_ref}, null"
@@ -8552,28 +8692,34 @@ module Crystal::MIR
         end
         emit "%#{base_name}.payload_ptr = getelementptr #{union_type}, ptr %#{base_name}.ptr, i32 0, i32 1"
         if val_llvm_type == "void"
-          emit "store i8 0, ptr %#{base_name}.payload_ptr, align 4"
+          # void → no payload to store (zeroinitializer already zeroed)
         else
           val_ref = "null" if val_llvm_type == "ptr" && val_ref == "0"
-          # For tuple types (stack-allocated value types), copy data instead of storing pointer
-          phi_variant_vt = false
-          phi_variant_size = 0_u64
-          if val_llvm_type == "ptr" && val_ref != "null"
-            union_mir = @module.type_registry.get(union_type_ref)
-            if union_mir && (uvars = union_mir.variants)
-              if variant_type_id >= 0 && variant_type_id < uvars.size
-                vtype = uvars[variant_type_id]
-                if vtype.name.starts_with?("Tuple(") && vtype.is_value_type? && vtype.size > 0
-                  phi_variant_vt = true
-                  phi_variant_size = vtype.size
+          if val_ref == "null"
+            # Nil: skip payload store — zeroinitializer already zeroed everything.
+            # Storing ptr null (8 bytes) would overflow small payloads like Nil|Char
+            # where payload is [1 x i32] = 4 bytes.
+          else
+            # For tuple types (stack-allocated value types), copy data instead of storing pointer
+            phi_variant_vt = false
+            phi_variant_size = 0_u64
+            if val_llvm_type == "ptr"
+              union_mir = @module.type_registry.get(union_type_ref)
+              if union_mir && (uvars = union_mir.variants)
+                if variant_type_id >= 0 && variant_type_id < uvars.size
+                  vtype = uvars[variant_type_id]
+                  if vtype.name.starts_with?("Tuple(") && vtype.is_value_type? && vtype.size > 0
+                    phi_variant_vt = true
+                    phi_variant_size = vtype.size
+                  end
                 end
               end
             end
-          end
-          if phi_variant_vt
-            emit "call void @llvm.memcpy.p0.p0.i64(ptr %#{base_name}.payload_ptr, ptr #{val_ref}, i64 #{phi_variant_size}, i1 false)"
-          else
-            emit "store #{val_llvm_type} #{val_ref}, ptr %#{base_name}.payload_ptr, align 4"
+            if phi_variant_vt
+              emit "call void @llvm.memcpy.p0.p0.i64(ptr %#{base_name}.payload_ptr, ptr #{val_ref}, i64 #{phi_variant_size}, i1 false)"
+            else
+              emit "store #{val_llvm_type} #{val_ref}, ptr %#{base_name}.payload_ptr, align 4"
+            end
           end
         end
         emit "%#{wrap_name} = load #{union_type}, ptr %#{base_name}.ptr"
@@ -8975,6 +9121,18 @@ module Crystal::MIR
               end
             end
           end
+          # Optimization: for phi-shared slots, write type_id + payload directly to the
+          # slot memory using GEP, avoiding a temp alloca per case block. This prevents
+          # LLVM from creating hundreds of union-sized allocas in vdispatch functions.
+          if @phi_slot_redirect.has_key?(inst_id)
+            emit "store #{slot_llvm_type} zeroinitializer, ptr %#{slot_name}"
+            emit "%#{base}.phi_tid = getelementptr #{slot_llvm_type}, ptr %#{slot_name}, i32 0, i32 0"
+            emit "store i32 #{slot_wrap_tid}, ptr %#{base}.phi_tid"
+            emit "%#{base}.phi_pay = getelementptr #{slot_llvm_type}, ptr %#{slot_name}, i32 0, i32 1"
+            emit "store #{llvm_type} #{name}, ptr %#{base}.phi_pay, align 4"
+            # Already written to the slot — skip the final store
+            return
+          end
           emit "%#{base}.slot_wrap_ptr = alloca #{slot_llvm_type}, align 8"
           emit "store #{slot_llvm_type} zeroinitializer, ptr %#{base}.slot_wrap_ptr"
           emit "%#{base}.slot_wrap_tid = getelementptr #{slot_llvm_type}, ptr %#{base}.slot_wrap_ptr, i32 0, i32 0"
@@ -9107,9 +9265,8 @@ module Crystal::MIR
         # Union types can't use add instruction - create zeroinit union
         base_name = name.lstrip('%')
         emit "%#{base_name}.ptr = alloca #{type}, align 8"
-        # Zero-initialize by setting type_id to 0 (nil variant)
-        emit "%#{base_name}.type_id_ptr = getelementptr #{type}, ptr %#{base_name}.ptr, i32 0, i32 0"
-        emit "store i32 0, ptr %#{base_name}.type_id_ptr"
+        # Zero-initialize entire union (type_id=0 for nil, payload zeroed)
+        emit "store #{type} zeroinitializer, ptr %#{base_name}.ptr"
         emit "#{name} = load #{type}, ptr %#{base_name}.ptr"
         @value_types[inst.id] = inst.type
       elsif (type == "void" || value == "null" || type == "ptr") &&
@@ -13052,6 +13209,12 @@ module Crystal::MIR
         end
       end
       args = arg_strs.join(", ")
+
+      # --- Null function pointer guard (debug: catch PC=0 crashes) ---
+      # Uses a single call (no branching) to avoid splitting blocks and breaking PHI nodes
+      emit "call void @__crystal_v2_null_fn_guard(ptr #{callee})"
+      # --- End null function pointer guard ---
+
       if return_type == "void"
         emit "call void #{callee}(#{args})"
         # Mark as void so value_ref returns a safe default for downstream uses
@@ -14168,6 +14331,9 @@ module Crystal::MIR
         return
       end
       emit "%#{base_name}.ptr = alloca #{union_type}, align 8"
+      # Zero-init the alloca to prevent overflow when storing Nil (ptr null = 8 bytes)
+      # into small union payloads (e.g. [1 x i32] = 4 bytes).
+      emit "store #{union_type} zeroinitializer, ptr %#{base_name}.ptr"
 
       # Resolve value early so we can check for null before storing type_id
       val_type = @value_types[inst.value]? || TypeRef::POINTER
@@ -14283,7 +14449,11 @@ module Crystal::MIR
             end
           end
         end
-        if variant_is_value_type
+        if val == "null"
+          # Nil: skip payload store — zeroinitializer already zeroed everything.
+          # Storing `ptr null` (8 bytes) into a small payload (e.g. [1 x i32] = 4 bytes)
+          # would overflow the stack buffer.
+        elsif variant_is_value_type
           emit "call void @llvm.memcpy.p0.p0.i64(ptr %#{base_name}.payload_ptr, ptr #{val}, i64 #{variant_size}, i1 false)"
         else
           emit "store #{val_type_str} #{val}, ptr %#{base_name}.payload_ptr, align 4"
@@ -14684,8 +14854,20 @@ module Crystal::MIR
         # read the type_id from the object header and compare against the
         # expected global type_ref.id — not just a null check.
         all_ref_handled = false
-        if @type_mapper.is_all_ref_union?(union_type_ref)
-          if union_desc = @module.get_union_descriptor(union_type_ref)
+        # Try inst.union_type first (explicitly tracked), then union_type_ref,
+        # then def_union_type_ref as final fallback (for all-ref unions whose
+        # cross-block slot type degrades to ptr).
+        effective_union_ref = if inst.union_type != TypeRef::VOID && inst.union_type != TypeRef::POINTER
+                                inst.union_type
+                              elsif union_type_ref != TypeRef::POINTER
+                                union_type_ref
+                              elsif def_union_type_ref && def_union_type_ref != TypeRef::POINTER
+                                def_union_type_ref
+                              else
+                                TypeRef::POINTER
+                              end
+        if @type_mapper.is_all_ref_union?(effective_union_ref)
+          if union_desc = @module.get_union_descriptor(effective_union_ref)
             variant = union_desc.variants.find { |v| v.type_id == inst.variant_type_id }
             if variant
               if variant.type_ref == TypeRef::NIL || variant.type_ref == TypeRef::VOID
@@ -16507,8 +16689,7 @@ module Crystal::MIR
             c = @cond_counter
             @cond_counter += 1
             emit "%ret_nil_union.#{c}.ptr = alloca #{@current_return_type}, align 8"
-            emit "%ret_nil_union.#{c}.type_id_ptr = getelementptr #{@current_return_type}, ptr %ret_nil_union.#{c}.ptr, i32 0, i32 0"
-            emit "store i32 0, ptr %ret_nil_union.#{c}.type_id_ptr"
+            emit "store #{@current_return_type} zeroinitializer, ptr %ret_nil_union.#{c}.ptr"
             emit "%ret_nil_union.#{c}.val = load #{@current_return_type}, ptr %ret_nil_union.#{c}.ptr"
             emit "ret #{@current_return_type} %ret_nil_union.#{c}.val"
           elsif @current_return_type == "double" || @current_return_type == "float"

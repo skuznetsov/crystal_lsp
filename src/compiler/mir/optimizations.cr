@@ -351,7 +351,7 @@ module Crystal::MIR
 
     private def has_side_effects?(inst : Value) : Bool
       case inst
-      when Store, GlobalStore, Free, RCDecrement, ArraySet, ArraySetSize, ArrayNew, MemCopy
+      when Store, GlobalStore, Free, RCIncrement, RCDecrement, ArraySet, ArraySetSize, ArrayNew, MemCopy
         true
       when Call, IndirectCall, ExternCall
         # Calls always have potential side effects
@@ -1475,7 +1475,7 @@ module Crystal::MIR
       when UnionIs
         val = resolve(inst.union_value, replacements, block_id, inst_index, def_blocks, def_index, dominance_info)
         return inst if val == inst.union_value
-        UnionIs.new(inst.id, val, inst.variant_type_id)
+        UnionIs.new(inst.id, val, inst.variant_type_id, inst.union_type)
       when ArrayLiteral
         new_elements = inst.elements.map { |e| resolve(e, replacements, block_id, inst_index, def_blocks, def_index, dominance_info) }
         return inst if new_elements == inst.elements

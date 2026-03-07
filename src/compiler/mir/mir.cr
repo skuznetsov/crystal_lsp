@@ -1228,8 +1228,9 @@ module Crystal::MIR
   class UnionIs < Value
     getter union_value : ValueId
     getter variant_type_id : Int32
+    getter union_type : TypeRef
 
-    def initialize(id : ValueId, @union_value : ValueId, @variant_type_id : Int32)
+    def initialize(id : ValueId, @union_value : ValueId, @variant_type_id : Int32, @union_type : TypeRef = TypeRef::VOID)
       super(id, TypeRef::BOOL)
     end
 
