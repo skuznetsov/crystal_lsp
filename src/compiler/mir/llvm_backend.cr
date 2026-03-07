@@ -14232,6 +14232,8 @@ module Crystal::MIR
           @cond_counter += 1
           emit "%global_inttoptr.#{c} = inttoptr i64 #{val} to ptr"
           val = "%global_inttoptr.#{c}"
+          actual_val_type = "ptr"
+          record_emitted_type(val, "ptr")
         end
       end
       mangled_global = @type_mapper.mangle_name(inst.global_name)

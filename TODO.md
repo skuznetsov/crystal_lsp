@@ -103,6 +103,31 @@ closure cells, Tuple ptr/value confusion.
       `payload_cmp = fcmp oge double ...` and `opt -O0` succeeds.
     - Adversary check:
       reversed ordering (`slow_ms <= elapsed`) also compiles and `opt -O0` succeeds.
+- Fresh stage2 `--release` then exposed and confirmed a second, later LLVM invalid-IR blocker in `emit_global_store`.
+  - Symptom:
+    after the Float64 nilable-compare fix, guarded `stage2 --release` progressed past the
+    old `double` vs `i32` stop and instead failed in `opt` with
+    `%global_inttoptr.2 = inttoptr i1 %global_inttoptr.1 to ptr`.
+  - Actual root cause:
+    in `LLVMIRGenerator#emit_global_store`, the constant `int -> ptr` branch
+    (`%global_inttoptr = inttoptr i64 <const> to ptr`) updated `val` but did not update
+    `actual_val_type` or `@emitted_value_types`.
+    The final type-safety net therefore still believed the SSA value was integer-typed and
+    emitted a second `inttoptr` over the already-pointer result.
+  - Fix:
+    after constant `int -> ptr` coercion, immediately mark the rewritten SSA value as `ptr`
+    in local state and in `@emitted_value_types`.
+  - Verification:
+    - `/usr/bin/time -p scripts/build_stage1_original_release.sh /tmp/stage1_rel_global_inttoptr_fix --error-trace`
+      -> `real 410.33`
+    - guarded `stage2 --release` from that stage1 no longer fails at the old
+      `%global_inttoptr.2 = inttoptr i1 %global_inttoptr.1 to ptr` site.
+    - new downstream blocker is later and different:
+      `opt: /tmp/stage2_rel_global_inttoptr_fix.ll:2121214:13: error: '%r3' defined with type
+      '%Nil$_$OR$_Int32.union' but expected 'i32'`
+      on `store i32 %r3, ptr @__closure__classvar____closure_cell_3497`.
+    - timing to failure moved from `real 155.71` / `~133s` compiler time to
+      `real 170.70` / `~146s` compiler time.
 - `RC-3` symptom is verified, but the exact mechanism below is still a hypothesis.
   Tiny `String.build` repro emits only `String::Builder.new` + `to_s` in IR; block-body markers and
   side effects (`x = 1`, `"SBMARK"`) are absent entirely. So "missing block CFG setup" is not yet proven.
