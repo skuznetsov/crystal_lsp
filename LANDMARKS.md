@@ -73,6 +73,12 @@ Context: compiler/bootstrap/stage2-stability
 
 [LM-35|root-cause]: enum instance-method failure is real, but the strongest current evidence does not support "registered on Int32" as the initial bug site: registration code passes `enum_name`, while tiny repro no-link IR still lowers the call site to `Int32$Htag` dead stub and emits no `OmniColor$Htag`, so enum identity is being lost later in resolution/lowering {F/G/R: 0.9/0.7/0.95} [verified]
 
+[LM-36|root-cause]: `RC-2A` was not a def-lowering ABI omission; the explicit block target already resolved to `EventEmitter#on_event$block`, but `lower_call` ran `ensure_accessor_method` before lazy lowering and treated "body not emitted yet" as "method missing", hijacking the call into a synthetic ivar getter `EventEmitter#on_event` because the receiver also had `@on_event` {F/G/R: 0.95/0.8/0.95} [verified]
+
+[LM-37|fix]: guarding synthetic accessor fallback on `missing_impl` with explicit-target presence (`@function_defs/@function_types` for `primary_mangled_name` / `mangled_method_name`) removes the `RC-2A` hijack without regressing accessor-backed calls {F/G/R: 0.9/0.7/0.9} [verified]
+
+[LM-38|verify]: after the accessor-guard fix, `regression_tests/proc_block_value_param_store_repro.sh ./bin/crystal_v2` no longer reproduces (`before=false`, `after=true`), `regression_tests/complex/test_nilable_proc.cr` prints `nilable_proc_ok`, `regression_tests/proc_block_capture_write_repro.sh ./bin/crystal_v2` still reproduces `RC-2B`, a `Range#begin` accessor probe still prints `1`, and `regression_tests/run_all.sh ./bin/crystal_v2` finishes `65 passed, 0 failed` in `775.91s` {F/G/R: 0.95/0.6/0.95} [verified]
+
 Contradiction ledger
 - [LM-C1|refute]: broad `reset_value_names` reinit experiment (replace many `clear` with fresh container allocations) did not produce robust stabilization; it shifted crash boundaries and was rejected.
 - [LM-C2|refute]: cache-only explanation is insufficient: fresh isolated stage2 debug cache (`CRYSTAL_CACHE_DIR_STAGE2_DEBUG=/tmp/crystal_cache_stage2_debug_reset_clean`) still reproduces `stage2_reset_value_names_fiberevent_clear_repro` with `status=139` and `FiberEvent$Hclear` drift.
@@ -90,6 +96,7 @@ Contradiction ledger
 - [LM-C14|refute]: broad `RC-2 = union Proc#call bypass` is insufficient; direct non-capturing `block.call` already works, while separate `&block` value-ABI and block-capture-write bugs still reproduce before union dispatch becomes relevant.
 - [LM-C15|refute]: the stronger `String.build` claim "only missing block CFG setup" is not yet verified; current IR evidence shows the block body vanishes entirely, which is broader than a single CFG bookkeeping omission.
 - [LM-C16|refute]: "enum methods are registered on Int32" is unsupported by the current registration code; loss of enum identity is observed later at call resolution/lowering.
+- [LM-C17|refute]: the earlier `RC-2A` wording "non-inline `&block` params are omitted from def lowering / runtime ABI" is false on the current branch; the explicit block target is registered and lowered, but call lowering was switching to a synthetic accessor before the explicit target body was emitted.
 
 Current hypothesis
 - The false empty-module blocker is removed by the entry-guard newline fix ([LM-28]), so the active work returns to genuine stage2 runtime/codegen instability. Current evidence points to a still-broad stage2-only failure family: `stage2_container_clear_index_oob_repro.sh` still reproduces `Index out of bounds`, `stage2 -> stage3` now fails fast instead of hanging ([LM-30]), and the smallest current codegen repro crashes inside `LLVMIRGenerator#generate` before the older BlockId-clear path ([LM-31]). The next useful work is to build a new focused oracle for that earlier generate-path crash and then root-cause the shared invariant violation behind the fast `Index out of bounds` / `EXC_BAD_ACCESS` behavior.

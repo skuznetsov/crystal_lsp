@@ -16,7 +16,7 @@ closure cells, Tuple ptr/value confusion.
 
 - [ ] **Phase 0: MEASURE** — Profile stage1 self-compilation RSS/FD to find OOM cause
 - [ ] **Phase 1: FIX OOM** — Address whatever Phase 0 reveals
-- [ ] **Phase 2: FIX RC-2A** — non-inline `&block` value ABI (methods that store/return proc values)
+- [x] **Phase 2: FIX RC-2A** — explicit block-call target must not be hijacked by synthetic ivar accessor fallback
 - [ ] **Phase 3: FIX RC-2B** — capturing block->Proc lowering loses outer writes
 - [ ] **Phase 4: FIX RC-4** — Enum method dispatch (preserve enum type identity)
 - [ ] **Phase 5: FIX RC-3** — String.build block lowering
@@ -24,12 +24,31 @@ closure cells, Tuple ptr/value confusion.
 
 ### Quadrumvirate Re-evaluation (2026-03-07)
 
+- `RC-2A` is now verified and fixed.
+  - Actual root cause was narrower than the earlier ABI formulation:
+    block calls like `emitter.on_event { ... }` resolved correctly to `EventEmitter#on_event$block`,
+    but `lower_call` ran `ensure_accessor_method` *before* lazy lowering and treated
+    "function body not emitted yet" as "method missing". Because the receiver also had
+    `@on_event`, the call was hijacked into a synthetic getter `EventEmitter#on_event`,
+    so the block proc argument was discarded and the ivar was never stored.
+  - Fix: only allow the synthetic accessor fallback on `missing_impl` when there is no
+    explicit target already known in `@function_defs/@function_types` for the current
+    call target (`primary_mangled_name` / `mangled_method_name`).
+  - Verification:
+    - `regression_tests/proc_block_value_param_store_repro.sh ./bin/crystal_v2`
+      now prints `before=false` / `after=true` and exits `not reproduced`.
+    - `./bin/crystal_v2 regression_tests/complex/test_nilable_proc.cr -o ... && scripts/run_safe.sh ...`
+      now prints `nilable_proc_ok`.
+    - Adversary checks:
+      - `regression_tests/proc_block_capture_write_repro.sh ./bin/crystal_v2`
+        still reproduces, so `RC-2B` remains separate and unfixed.
+      - synthetic accessor path still works on a small `Range#begin` probe (`stdout: 1`).
+    - Wider regression sweep:
+      - `/usr/bin/time -p regression_tests/run_all.sh ./bin/crystal_v2`
+      - `Results: 65 passed, 0 failed out of 65 tests`
+      - `real 775.91`
 - `RC-2` as written below is too broad. Current evidence splits it into two verified bugs:
-  - `RC-2A`: non-inline methods with `&block` value params are mislowered. Tiny repro:
-    `regression_tests/proc_block_value_param_store_repro.sh` prints `before=false` / `after=false`.
-    IR for the same repro lowers `EventEmitter#on_event` into a getter that just returns `@on_event`.
-    Code evidence: standalone def lowering excludes block params from `param_infos` / `func.add_param`,
-    while inline lowering has a special `&block -> lower_block_to_proc` path.
+  - `RC-2A`: explicit block-call target hijack into synthetic ivar accessor (fixed above).
   - `RC-2B`: capturing block->Proc materialization loses writes to outer locals. Tiny repro:
     `regression_tests/proc_block_capture_write_repro.sh` prints an empty line instead of `ok`.
     IR shows `call ptr @__crystal_block_proc_0(ptr @.str.50)` and

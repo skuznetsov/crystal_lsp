@@ -50975,7 +50975,15 @@ module Crystal::HIR
                        else
                          true
                        end
-        if return_type == TypeRef::VOID || missing_impl
+        explicit_call_target_known = false
+        {primary_mangled_name, mangled_method_name}.each do |name|
+          next if name.empty?
+          if @function_defs.has_key?(name) || @function_types.has_key?(name)
+            explicit_call_target_known = true
+            break
+          end
+        end
+        if return_type == TypeRef::VOID || (missing_impl && !explicit_call_target_known)
           if accessor = ensure_accessor_method(ctx, receiver_id, method_name)
             return_type = accessor[0]
             mangled_method_name = accessor[1]
