@@ -1558,7 +1558,7 @@ module CrystalV2
         STDERR.puts "[LLVM_SETUP] after generator.new" if llvm_setup_trace
         llvm_gen.emit_type_metadata = options.emit_type_metadata
         llvm_gen.progress = options.progress
-        llvm_gen.reachability = true  # Only emit reachable functions from main
+        llvm_gen.reachability = false  # DISABLED for debugging PC=0 crash
         llvm_gen.no_prelude = options.no_prelude
         STDERR.puts "[LLVM_SETUP] generator flags configured" if llvm_setup_trace
 
@@ -2106,8 +2106,13 @@ module CrystalV2
         stage2_debug("[STAGE2_DEBUG] parse_file_recursive lexer created, creating parser", out_io)
         parser = Frontend::Parser.new(lexer)
         stage2_debug("[STAGE2_DEBUG] parse_file_recursive parse start abs_path=#{abs_path}", out_io)
+        STDERR.puts "[PARSE] #{abs_path}"
+        STDERR.flush
         program = begin
-          parser.parse_program
+          res = parser.parse_program
+          STDERR.puts "[PARSE_OK] #{abs_path}"
+          STDERR.flush
+          res
         rescue ex : IndexError
           if env_enabled?("CRYSTAL_V2_PARSER_INDEX_TRACE") || env_enabled?("CRYSTAL2_PARSER_INDEX_TRACE")
             bt = ex.backtrace?.try(&.first(30).join("\n")) || "(no backtrace)"
@@ -2118,6 +2123,8 @@ module CrystalV2
         stage2_debug("[STAGE2_DEBUG] parse_file_recursive parse ok abs_path=#{abs_path}", out_io)
         arena = program.arena.as(Frontend::AstArena)
         exprs = program.roots
+        STDERR.puts "[REQSCAN] #{abs_path} exprs=#{exprs.size}"
+        STDERR.flush
 
         # Bootstrap debug: always log arena/expr stats for diagnosis
         if options.verbose
@@ -2136,6 +2143,8 @@ module CrystalV2
             end
           end
         end
+        STDERR.puts "[REQSCAN_DONE] #{abs_path} reqs=#{requires.size}"
+        STDERR.flush
         needs_source_fallback = requires.empty? || requires.any? { |req| !loaded.includes?(File.expand_path(req)) }
         if needs_source_fallback
           if options.verbose && !requires.empty?
