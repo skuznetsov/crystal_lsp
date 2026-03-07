@@ -55,6 +55,7 @@ cv2*
 *.mir
 *.out
 *.o
+*.bc
 bin/
 logs/
 tools/lldb/__pycache__/

@@ -2324,6 +2324,9 @@ module Crystal::HIR
     @inline_yield_block_body_depth : Int32 = 0
     # Track when we are lowering proc literal bodies (returns should not escape).
     @inline_yield_proc_depth : Int32 = 0
+    # Standalone proc/block bodies may still contain `yield`, which must target the
+    # enclosing method callback instead of guessing from the proc's own params.
+    @explicit_yield_target_stack : Array(ValueId) = [] of ValueId
     # Counter for generating unique proc function names
     @proc_function_counter : Int32 = 0
     # Track captured values for proc closures: FuncPointer ValueId → Array of parent ValueIds
@@ -18297,9 +18300,9 @@ module Crystal::HIR
       base_name = "#{class_name}##{accessor_name}"
       func_name = mangle_function_name(base_name, [] of TypeRef)
       register_function_type(func_name, ivar_type)
-      return if @module.has_function?(func_name)
+      return if @module.has_function_with_body?(func_name)
 
-      func = @module.create_function(func_name, ivar_type)
+      func = @module.function_by_name(func_name) || @module.create_function(func_name, ivar_type)
       ctx = LoweringContext.new(func, @module, @arena)
 
       self_type_ref = class_info.type_ref
@@ -18385,7 +18388,7 @@ module Crystal::HIR
       base_name = "#{class_name}##{accessor_name}"
       func_name = mangle_function_name(base_name, [] of TypeRef)
       register_function_type(func_name, ivar_type)
-      return if @module.has_function?(func_name)
+      return if @module.has_function_with_body?(func_name)
 
       # If this ivar has a default expression (lazy getter), generate lazy init
       if (default_expr = ivar_info.default_expr_id) && (default_arena = ivar_info.default_arena)
@@ -18396,7 +18399,7 @@ module Crystal::HIR
         return
       end
 
-      func = @module.create_function(func_name, ivar_type)
+      func = @module.function_by_name(func_name) || @module.create_function(func_name, ivar_type)
       ctx = LoweringContext.new(func, @module, @arena)
 
       self_type_ref ||= class_info.type_ref
@@ -29919,6 +29922,8 @@ module Crystal::HIR
       base_method_name : String,
       receiver_type : TypeRef?,
     ) : Array(TypeRef)?
+      debug_trace_each = env_get("DEBUG_TRACE_EACH_WITH_INDEX") &&
+                         (mangled_method_name.includes?("each_with_index") || base_method_name.includes?("each_with_index"))
       resolved_base = base_method_name
       resolved_mangled = mangled_method_name
       func_def = @function_defs[resolved_mangled]? || @function_defs[resolved_base]?
@@ -29931,11 +29936,59 @@ module Crystal::HIR
           func_def = @function_defs[resolved_mangled]? || @function_defs[resolved_base]?
         end
       end
+      call_arg_types_for_infer = nil.as(Array(TypeRef)?)
+      if suffix = method_suffix(resolved_mangled)
+        stripped_suffix = strip_mangled_suffix_flags(suffix)
+        unless stripped_suffix.empty?
+          parsed_suffix_types = parse_types_from_suffix(stripped_suffix)
+          call_arg_types_for_infer = parsed_suffix_types unless parsed_suffix_types.empty?
+        end
+      end
+      arg_count_for_infer = call_arg_types_for_infer ? call_arg_types_for_infer.not_nil!.size : 0
+      receiver_is_non_module = false
+      if receiver_type && receiver_type != TypeRef::VOID
+        if recv_desc = @module.get_type_descriptor(receiver_type)
+          receiver_is_non_module = recv_desc.kind != TypeKind::Module
+        end
+      end
+      callsite_outside_stdlib = true
+      if path = source_path_for(@arena)
+        callsite_outside_stdlib = !path.includes?("/src/stdlib/")
+      end
+      if func_def.nil? && receiver_is_non_module && callsite_outside_stdlib
+        if entry = lookup_function_def_for_call(resolved_base, arg_count_for_infer, true, call_arg_types_for_infer, false, false)
+          resolved_mangled = entry[0]
+          resolved_base = strip_type_suffix(resolved_mangled)
+          func_def = entry[1]
+          if debug_trace_each
+            STDERR.puts "[TRACE_EWI] resolved_via_call_lookup base=#{resolved_base} mangled=#{resolved_mangled}"
+          end
+        end
+      end
+      if func_def.nil? && receiver_type && receiver_type != TypeRef::VOID
+        receiver_base = yield_receiver_base_name(receiver_type)
+        if entry = lookup_block_function_def_for_call(resolved_base, arg_count_for_infer, call_arg_types_for_infer, receiver_base)
+          entry_owner = method_owner_from_name(entry[0])
+          entry_owner_base = entry_owner ? strip_generic_args(entry_owner) : nil
+          if receiver_base && entry_owner_base && entry_owner_base != receiver_base
+            resolved_mangled = entry[0]
+            resolved_base = strip_type_suffix(resolved_mangled)
+            func_def = entry[1]
+            if debug_trace_each
+              STDERR.puts "[TRACE_EWI] resolved_via_block_lookup base=#{resolved_base} mangled=#{resolved_mangled} owner=#{entry_owner_base}"
+            end
+          end
+        end
+      end
       debug_block_params = env_get("DEBUG_BLOCK_PARAMS") &&
                            (mangled_method_name.includes?("min_by") || base_method_name.includes?("min_by") ||
                             mangled_method_name.includes?("each_with_index") || base_method_name.includes?("each_with_index"))
       if debug_block_params
         STDERR.puts "[BLOCK_PARAMS] lookup base=#{resolved_base} mangled=#{resolved_mangled} func_def=#{!func_def.nil?}"
+      end
+      if debug_trace_each
+        recv_name = receiver_type && receiver_type != TypeRef::VOID ? get_type_name_from_ref(receiver_type) : "nil"
+        STDERR.puts "[TRACE_EWI] block_param_types_for_call enter base=#{resolved_base} mangled=#{resolved_mangled} recv=#{recv_name} func_def=#{!func_def.nil?}"
       end
 
       # String.new { |buffer| ... } yields a Pointer(UInt8)
@@ -29982,6 +30035,10 @@ module Crystal::HIR
       if debug_block_params
         STDERR.puts "[BLOCK_PARAMS] block_param=#{!block_param.nil?}"
       end
+      if debug_trace_each
+        type_slice_dbg = block_param.try(&.type_annotation).try { |ts| String.new(ts) } || "nil"
+        STDERR.puts "[TRACE_EWI] block_param type=#{type_slice_dbg} block_param=#{!block_param.nil?}"
+      end
       return fallback_block_param_types(base_method_name, receiver_type) unless block_param
 
       param_map = function_type_param_map_for(resolved_mangled, resolved_base)
@@ -29989,15 +30046,6 @@ module Crystal::HIR
         param_map = param_map.dup
       else
         param_map = nil
-      end
-
-      call_arg_types_for_infer = nil.as(Array(TypeRef)?)
-      if suffix = method_suffix(resolved_mangled)
-        stripped_suffix = strip_mangled_suffix_flags(suffix)
-        unless stripped_suffix.empty?
-          parsed_suffix_types = parse_types_from_suffix(stripped_suffix)
-          call_arg_types_for_infer = parsed_suffix_types unless parsed_suffix_types.empty?
-        end
       end
 
       receiver_map = type_param_map_for_receiver_name(resolved_base)
@@ -30038,7 +30086,16 @@ module Crystal::HIR
              param_map,
              call_arg_types_for_infer
            )
+          if debug_trace_each
+            inferred_dbg = inferred.map { |t| get_type_name_from_ref(t) }.join(",")
+            STDERR.puts "[TRACE_EWI] inferred_from_body=#{inferred_dbg}"
+          end
           return inferred
+        end
+        if debug_trace_each
+          fallback = fallback_block_param_types(resolved_base, receiver_type)
+          fallback_dbg = fallback ? fallback.map { |t| get_type_name_from_ref(t) }.join(",") : "nil"
+          STDERR.puts "[TRACE_EWI] inferred_from_body=nil fallback=#{fallback_dbg}"
         end
         return fallback_block_param_types(resolved_base, receiver_type)
       end
@@ -30056,7 +30113,16 @@ module Crystal::HIR
              param_map,
              call_arg_types_for_infer
            )
+          if debug_trace_each
+            inferred_dbg = inferred.map { |t| get_type_name_from_ref(t) }.join(",")
+            STDERR.puts "[TRACE_EWI] empty_inputs inferred_from_body=#{inferred_dbg}"
+          end
           return inferred
+        end
+        if debug_trace_each
+          fallback = fallback_block_param_types(resolved_base, receiver_type)
+          fallback_dbg = fallback ? fallback.map { |t| get_type_name_from_ref(t) }.join(",") : "nil"
+          STDERR.puts "[TRACE_EWI] empty_inputs fallback=#{fallback_dbg}"
         end
         return fallback_block_param_types(resolved_base, receiver_type)
       end
@@ -30111,6 +30177,10 @@ module Crystal::HIR
         map_str = param_map ? param_map.not_nil!.map { |k, v| "#{k}=#{v}" }.join(",") : ""
         STDERR.puts "[BLOCK_PARAMS] resolved=#{resolved_names.join(",")} map=#{map_str}"
       end
+      if debug_trace_each
+        map_str = param_map ? param_map.not_nil!.map { |k, v| "#{k}=#{v}" }.join(",") : ""
+        STDERR.puts "[TRACE_EWI] resolved_names=#{resolved_names.join(",")} map=#{map_str}"
+      end
 
       if debug_hook_filter_match?(base_method_name, mangled_method_name)
         map_str = param_map ? param_map.not_nil!.map { |k, v| "#{k}=#{v}" }.join(",") : ""
@@ -30131,6 +30201,8 @@ module Crystal::HIR
       param_map : Hash(String, String)?,
       call_arg_types : Array(TypeRef)? = nil,
     ) : Array(TypeRef)?
+      debug_trace_each = env_get("DEBUG_TRACE_EACH_WITH_INDEX") &&
+                         (func_name.includes?("each_with_index") || base_method_name.includes?("each_with_index"))
       body = func_def.body
       return nil unless body && !body.empty?
 
@@ -30184,6 +30256,11 @@ module Crystal::HIR
       begin
         lists = [] of Array(ExprId)
         collect_yield_arg_lists(body, lists)
+        if debug_trace_each
+          recv_name = receiver_type && receiver_type != TypeRef::VOID ? get_type_name_from_ref(receiver_type) : "nil"
+          call_args_dbg = call_arg_types ? call_arg_types.map { |t| get_type_name_from_ref(t) }.join(",") : "nil"
+          STDERR.puts "[TRACE_EWI] infer_yield_param_types func=#{func_name} base=#{base_method_name} recv=#{recv_name} yields=#{lists.size} call_args=#{call_args_dbg}"
+        end
         return nil if lists.empty?
 
         if lists.all?(&.empty?)
@@ -30207,6 +30284,9 @@ module Crystal::HIR
               next if inferred == TypeRef::VOID
               local_map[name] = inferred
               name_map[name] = get_type_name_from_ref(inferred)
+              if debug_trace_each
+                STDERR.puts "[TRACE_EWI] preinfer_local name=#{name} type=#{get_type_name_from_ref(inferred)}"
+              end
             end
           end
         end
@@ -30217,6 +30297,19 @@ module Crystal::HIR
             next if args.empty?
             inferred = args.map do |arg|
               infer_type_from_expr(arg, self_type_name) || TypeRef::VOID
+            end
+            if debug_trace_each
+              arg_nodes = args.map do |arg|
+                arg_node = node_for_expr(arg)
+                case arg_node
+                when CrystalV2::Compiler::Frontend::IdentifierNode
+                  String.new(arg_node.name)
+                else
+                  arg_node.class.name.split("::").last
+                end
+              end
+              inferred_dbg = inferred.map { |t| get_type_name_from_ref(t) }.join(",")
+              STDERR.puts "[TRACE_EWI] yield_args=#{arg_nodes.join(",")} inferred=#{inferred_dbg}"
             end
             next if inferred.all? { |t| t == TypeRef::VOID }
             if merged_types.nil?
@@ -30232,6 +30325,10 @@ module Crystal::HIR
                 end
               end
             end
+          end
+          if debug_trace_each && merged_types
+            merged_dbg = merged_types.map { |t| get_type_name_from_ref(t) }.join(",")
+            STDERR.puts "[TRACE_EWI] merged_types=#{merged_dbg}"
           end
           merged_types
         end
@@ -42455,7 +42552,11 @@ module Crystal::HIR
              end
 
       return_type = infer_yield_return_type(ctx) || TypeRef::VOID
-      y = Yield.new(ctx.next_id, return_type, args)
+      yield_target = @explicit_yield_target_stack.last?
+      if yield_target && env_get("DEBUG_EXPLICIT_YIELD_TARGET")
+        STDERR.puts "[EXPLICIT_YIELD_TARGET] emit_yield func=#{ctx.function.name} target=%#{yield_target} args=#{args.size} return=#{get_type_name_from_ref(return_type)}"
+      end
+      y = Yield.new(ctx.next_id, return_type, args, yield_target)
       ctx.emit(y)
       y.id
     end
@@ -62127,6 +62228,30 @@ module Crystal::HIR
         end
       end
 
+      missing_impl = !@module.has_function_with_body?(actual_name)
+      explicit_member_target_known = false
+      {actual_name, base_method_name, resolved_method_name}.each do |name|
+        next unless name
+        next if name.empty?
+        if @function_defs.has_key?(name)
+          explicit_member_target_known = true
+          break
+        end
+        stripped_name = strip_type_suffix(name)
+        if stripped_name != name && @function_defs.has_key?(stripped_name)
+          explicit_member_target_known = true
+          break
+        end
+      end
+      if missing_impl && !explicit_member_target_known
+        if accessor = ensure_accessor_method(ctx, object_id, member_name)
+          return_type = accessor[0]
+          actual_name = accessor[1]
+          base_method_name = strip_type_suffix(actual_name)
+          resolved_method_name = base_method_name
+        end
+      end
+
       # Special handling for Tuple#size - return compile-time constant based on type parameters
       if member_name == "size"
         if type_desc = @module.get_type_descriptor(receiver_type)
@@ -64041,6 +64166,48 @@ module Crystal::HIR
       end
     end
 
+    private def yield_callback_type?(type_ref : TypeRef) : Bool
+      return true if type_ref == TypeRef::POINTER
+      if desc = @module.get_type_descriptor(type_ref)
+        return desc.kind == TypeKind::Proc
+      end
+      false
+    end
+
+    private def find_enclosing_yield_target(
+      ctx : LoweringContext,
+      parent_locals : Hash(String, ValueId),
+    ) : {String, ValueId, TypeRef}?
+      if local_id = parent_locals["_"]?
+        local_type = ctx.type_of(local_id)
+        return {"_", local_id, local_type} if yield_callback_type?(local_type)
+      end
+
+      ctx.function.params.reverse_each do |param|
+        next if param.name == "self"
+        next unless yield_callback_type?(param.type)
+        value_id = parent_locals[param.name]? || param.id
+        return {param.name, value_id, param.type}
+      end
+
+      nil
+    end
+
+    private def bind_captured_yield_target(
+      proc_ctx : LoweringContext,
+      capture : {String, ValueId, TypeRef}?,
+    ) : ValueId?
+      return nil unless capture
+      cap_name, _, cap_type = capture
+      return nil unless ref_cell = @closure_ref_cells[cap_name]?
+      cell_class, cell_name, cell_type = ref_cell
+      effective_type = cell_type == TypeRef::VOID ? cap_type : cell_type
+      get = ClassVarGet.new(proc_ctx.next_id, effective_type, cell_class, cell_name)
+      proc_ctx.emit(get)
+      proc_ctx.register_type(get.id, effective_type)
+      get.id
+    end
+
     private def lower_proc_literal(
       ctx : LoweringContext,
       node : CrystalV2::Compiler::Frontend::ProcLiteralNode,
@@ -64098,6 +64265,19 @@ module Crystal::HIR
           parent_type = ctx.type_of(parent_value_id)
           next if parent_type == TypeRef::VOID
           captures << {name, parent_value_id, parent_type}
+        end
+      end
+
+      explicit_yield_target = nil.as({String, ValueId, TypeRef}?)
+      if contains_yield?(node.body, @arena)
+        if candidate = find_enclosing_yield_target(ctx, parent_locals)
+          explicit_yield_target = candidate
+          if env_get("DEBUG_EXPLICIT_YIELD_TARGET")
+            STDERR.puts "[EXPLICIT_YIELD_TARGET] proc_literal parent=#{ctx.function.name} capture=#{candidate[0]} vid=#{candidate[1]} type=#{get_type_name_from_ref(candidate[2])}"
+          end
+          unless captures.any? { |name, _, _| name == candidate[0] }
+            captures << candidate
+          end
         end
       end
 
@@ -64191,6 +64371,15 @@ module Crystal::HIR
       @loop_break_value_stack = [] of Array({BlockId, ValueId})
 
       @inline_yield_proc_depth += 1
+      explicit_yield_target_id = bind_captured_yield_target(proc_ctx, explicit_yield_target)
+      pushed_explicit_yield_target = false
+      if explicit_yield_target_id
+        if env_get("DEBUG_EXPLICIT_YIELD_TARGET")
+          STDERR.puts "[EXPLICIT_YIELD_TARGET] proc_literal bind=#{proc_func.name} target=%#{explicit_yield_target_id} type=#{get_type_name_from_ref(proc_ctx.type_of(explicit_yield_target_id))}"
+        end
+        @explicit_yield_target_stack << explicit_yield_target_id
+        pushed_explicit_yield_target = true
+      end
       last_value = begin
         lower_body(proc_ctx, node.body)
       ensure
@@ -64211,6 +64400,7 @@ module Crystal::HIR
             end
           end
         end
+        @explicit_yield_target_stack.pop? if pushed_explicit_yield_target
         @inline_yield_proc_depth -= 1
         @inline_yield_return_stack = saved_return_stack_pl
         @inline_yield_return_override_stack = saved_override_stack_pl
@@ -64263,6 +64453,8 @@ module Crystal::HIR
       param_types : Array(TypeRef)?,
       block_arena : CrystalV2::Compiler::Frontend::ArenaLike,
     ) : ValueId
+      debug_trace_each = env_get("DEBUG_TRACE_EACH_WITH_INDEX") &&
+                         ctx.function.name.includes?("each_with_index")
       proc_func_name = "__crystal_block_proc_#{@proc_function_counter}"
       @proc_function_counter += 1
 
@@ -64283,6 +64475,11 @@ module Crystal::HIR
         end
       elsif param_types
         proc_param_types = param_types.dup
+      end
+      if debug_trace_each
+        param_dbg = proc_param_types.map { |t| get_type_name_from_ref(t) }.join(",")
+        param_names = block_node.params.try(&.map { |param| param.name ? String.new(param.name.not_nil!) : "?" }.join(",")) || ""
+        STDERR.puts "[TRACE_EWI] lower_block_to_proc parent=#{ctx.function.name} proc=#{proc_func_name} params=#{param_names} types=#{param_dbg}"
       end
 
       proc_return_type = TypeRef::VOID
@@ -64362,6 +64559,22 @@ module Crystal::HIR
         end
       end
 
+      explicit_yield_target = nil.as({String, ValueId, TypeRef}?)
+      saved_yield_arena = @arena
+      @arena = block_arena
+      if contains_yield?(block_node.body, block_arena)
+        if candidate = find_enclosing_yield_target(ctx, parent_locals)
+          explicit_yield_target = candidate
+          if env_get("DEBUG_EXPLICIT_YIELD_TARGET")
+            STDERR.puts "[EXPLICIT_YIELD_TARGET] block_proc parent=#{ctx.function.name} capture=#{candidate[0]} vid=#{candidate[1]} type=#{get_type_name_from_ref(candidate[2])}"
+          end
+          unless captures.any? { |name, _, _| name == candidate[0] }
+            captures << candidate
+          end
+        end
+      end
+      @arena = saved_yield_arena
+
       # Blocks keep lexical `self` even when it isn't referenced explicitly as an
       # identifier. Without capturing it, implicit receiver calls inside block procs
       # can degrade into unresolved bare calls during later lowering/codegen.
@@ -64416,6 +64629,11 @@ module Crystal::HIR
           proc_ctx.register_type(self_get.id, cell_type)
           proc_ctx.register_local("self", self_get.id)
         end
+      end
+
+      explicit_yield_target_id = bind_captured_yield_target(proc_ctx, explicit_yield_target)
+      if explicit_yield_target_id && env_get("DEBUG_EXPLICIT_YIELD_TARGET")
+        STDERR.puts "[EXPLICIT_YIELD_TARGET] block_proc bind=#{proc_func.name} target=%#{explicit_yield_target_id} type=#{get_type_name_from_ref(proc_ctx.type_of(explicit_yield_target_id))}"
       end
 
       # Add parameters to the standalone function
@@ -64476,6 +64694,11 @@ module Crystal::HIR
       saved_arena_outer = @arena
       @arena = block_arena
       @inline_yield_proc_depth += 1
+      pushed_explicit_yield_target = false
+      if explicit_yield_target_id
+        @explicit_yield_target_stack << explicit_yield_target_id
+        pushed_explicit_yield_target = true
+      end
       last_value = begin
         lower_body(proc_ctx, block_node.body)
       ensure
@@ -64494,6 +64717,7 @@ module Crystal::HIR
             end
           end
         end
+        @explicit_yield_target_stack.pop? if pushed_explicit_yield_target
         @inline_yield_proc_depth -= 1
         @arena = saved_arena_outer
         @inline_yield_return_stack = saved_return_stack

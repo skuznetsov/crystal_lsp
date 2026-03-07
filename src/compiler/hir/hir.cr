@@ -625,13 +625,17 @@ module Crystal::HIR
   # Yield to block
   class Yield < Value
     getter args : Array(ValueId)
+    getter target : ValueId?
 
-    def initialize(id : ValueId, type : TypeRef, @args : Array(ValueId) = [] of ValueId)
+    def initialize(id : ValueId, type : TypeRef, @args : Array(ValueId) = [] of ValueId, @target : ValueId? = nil)
       super(id, type)
     end
 
     def to_s(io : IO) : Nil
       io << "%" << @id << " = yield"
+      if target = @target
+        io << " via %" << target
+      end
       unless @args.empty?
         io << " "
         @args.join(io, ", ") { |arg, o| o << "%" << arg }

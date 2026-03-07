@@ -22,6 +22,51 @@ closure cells, Tuple ptr/value confusion.
 - [ ] **Phase 5: FIX RC-3** — String.build block lowering
 - [ ] **Phase 6: RE-ENABLE RTA + BOOTSTRAP** — stage0→stage1→stage2→stage3 + benchmark
 
+### Current checkpoint (2026-03-07 late)
+
+- Added focused oracle `regression_tests/member_getter_lowering_repro.sh`.
+  - Repro covers both direct zero-arg getter access and inline shorthand block lowering:
+    `direct=#{ExprId.new(7).index}` and `items.max_of(&.index)`.
+- Compiler-only fix in current dirty worktree:
+  - `lower_member_access` now materializes synthetic getters when the resolved target has
+    no emitted body and there is no explicit `DefNode`-backed method to protect.
+  - synthetic getter generators (`generate_getter_method_for_ivar` / lazy getter path)
+    no longer treat an empty function stub as a completed method body.
+- Verification on fresh stage1 debug:
+  - `/usr/bin/time -p scripts/build_stage1_original_debug.sh /tmp/stage1_dbg_member_getter_probe --error-trace`
+    -> `real 10.90`
+  - `bash regression_tests/member_getter_lowering_repro.sh /tmp/stage1_dbg_member_getter_probe`
+    -> `not reproduced` (`direct=7`, `max=7`)
+  - HIR for the same repro now lowers the shorthand body to:
+    `field_get ... @@index : Int32` and compares via
+    `Array(ExprId)#compare_or_raise$Int32_Int32`, not `...$ExprId`.
+- Verification on fresh stage1 release:
+  - `/usr/bin/time -p scripts/build_stage1_original_release.sh /tmp/stage1_rel_member_getter_fix_20260307a --error-trace`
+    -> `real 453.51`
+  - `bash regression_tests/member_getter_lowering_repro.sh /tmp/stage1_rel_member_getter_fix_20260307a`
+    -> `not reproduced`
+  - `bash regression_tests/proc_block_value_param_store_repro.sh /tmp/stage1_rel_member_getter_fix_20260307a`
+    -> `not reproduced`
+  - `bash regression_tests/proc_block_capture_write_repro.sh /tmp/stage1_rel_member_getter_fix_20260307a`
+    -> `not reproduced`
+- Important status correction:
+  - the older note below that `proc_block_capture_write_repro.sh` still reproduced is now
+    stale for the current dirty worktree; fresh debug+release stage1 binaries both print `ok`.
+- Current active stage2 blocker after this checkpoint:
+  - `/usr/bin/time -p scripts/build_stage2_release.sh /tmp/stage1_rel_member_getter_fix_20260307a /tmp/stage2_rel_member_getter_fix_20260307a`
+    fails after `real 170.59`
+  - stage2 reaches `[LLVM] total MIR functions: 49871`, then `opt` stops at:
+    `opt: /tmp/stage2_rel_member_getter_fix_20260307a.ll:2088477:13: error:
+     '%r3' defined with type '%Nil$_$OR$_Int32.union' but expected 'i32'`
+  - failing function context:
+    `define i1 @__crystal_block_proc_2093(ptr %elem, ptr %i)`
+    with `call %Nil$_$OR$_Int32.union @Enumerable$Hindex$$block(ptr %elem, ptr null)`
+    followed by `store i32 %r3, ptr @__closure__classvar____closure_cell_3758`
+  - strongest current hypothesis:
+    nested `yield` inside the `Enumerable#index` / `each_with_index` lowering path is
+    rebinding to the outer `Enumerable$Hindex$$block` method instead of the hidden callback arg,
+    so the predicate result becomes `Nil | Int32` and corrupts the closure accumulator slot.
+
 ### Quadrumvirate Re-evaluation (2026-03-07)
 
 - `RC-2A` is now verified and fixed.

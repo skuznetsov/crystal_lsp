@@ -3501,7 +3501,10 @@ module Crystal
 
     private def lower_yield(yld : HIR::Yield) : ValueId
       builder = @builder.not_nil!
-      block_param_id = @current_block_param_id
+      block_param_id = yld.target || @current_block_param_id
+      if ENV.has_key?("DEBUG_EXPLICIT_YIELD_TARGET")
+        STDERR.puts "[EXPLICIT_YIELD_TARGET] mir func=#{@current_lowering_func_name} target=#{block_param_id.inspect} explicit=#{yld.target.inspect} fallback=#{@current_block_param_id.inspect}"
+      end
       unless block_param_id
         return builder.const_nil
       end
