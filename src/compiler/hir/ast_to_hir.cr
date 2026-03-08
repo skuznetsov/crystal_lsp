@@ -10530,6 +10530,9 @@ module Crystal::HIR
             end
           end
           # Binary operator return type inference (used for lightweight return-type discovery).
+          if member_name == "<=>"
+            return TypeRef::INT32
+          end
           if binary_op_for_method(member_name)
             # Comparisons and boolean operators always return Bool.
             if member_name == "==" || member_name == "!=" || member_name == "<" || member_name == "<=" ||
@@ -10802,6 +10805,9 @@ module Crystal::HIR
         end
         if op == "==" || op == "!=" || op == "<" || op == "<=" || op == ">" || op == ">="
           return TypeRef::BOOL
+        end
+        if op == "<=>"
+          return TypeRef::INT32
         end
         left_type = infer_type_from_expr(expr_node.left, self_type_name)
         right_type = infer_type_from_expr(expr_node.right, self_type_name)
@@ -19465,7 +19471,14 @@ module Crystal::HIR
       else
         # For primitive types (Int32, Bool, etc.), use primitive TypeRef so LLVM passes by value
         # For structs with fields, use class_info.type_ref (passed as pointer)
-        self_type = primitive_self_type(class_name) || class_info.type_ref
+        self_type = primitive_self_type(class_name)
+        if self_type.nil? && class_name == "Tuple"
+          if tuple_list = extra_type_params["T__tuple"]? || @type_param_map["T__tuple"]?
+            specialized_tuple = type_ref_for_name("Tuple(#{tuple_list})")
+            self_type = specialized_tuple unless specialized_tuple == TypeRef::VOID
+          end
+        end
+        self_type ||= class_info.type_ref
         self_param = func.add_param("self", self_type)
         ctx.register_local("self", self_param.id)
         ctx.register_type(self_param.id, self_type)
@@ -39384,6 +39397,14 @@ module Crystal::HIR
       if method_name != primary_mangled_name
         remember_callsite_arg_types(method_name, [right_type])
       end
+      receiver_map = type_param_map_for_receiver_type(left_type)
+      unless receiver_map.empty?
+        record_pending_type_param_map(primary_mangled_name, receiver_map)
+        record_pending_type_param_map(base_method_name, receiver_map) unless base_method_name.empty?
+        if method_name != primary_mangled_name
+          record_pending_type_param_map(method_name, receiver_map)
+        end
+      end
       call_target_name = prefer_primary_call_target(method_name, primary_mangled_name, [right_type])
       lower_function_if_needed(primary_mangled_name)
       if method_name != primary_mangled_name && call_target_name == method_name
@@ -44507,6 +44528,19 @@ module Crystal::HIR
       # WORK QUEUE: If we're already inside lowering, defer this function
       # to prevent stack overflow from deep recursive lowering chains.
       if inside_lowering?
+        if !@type_param_map.empty? && @current_class
+          current = @current_class.not_nil!
+          current_base = strip_generic_args(current)
+          defer_base_name = strip_type_suffix(name)
+          if defer_base_name.starts_with?("#{current}#") ||
+             defer_base_name.starts_with?("#{current}.") ||
+             defer_base_name.starts_with?("#{current_base}#") ||
+             defer_base_name.starts_with?("#{current_base}.") ||
+             defer_base_name.starts_with?("#{current_base}::")
+            record_pending_type_param_map(name, @type_param_map)
+            record_pending_type_param_map(defer_base_name, @type_param_map)
+          end
+        end
         unless function_state(name).pending?
           @function_lowering_states[name] = FunctionLoweringState::Pending
           @pending_function_queue << name
@@ -44601,6 +44635,30 @@ module Crystal::HIR
       end
       if debug_lookup_name && name.includes?(debug_lookup_name) && func_def
         STDERR.puts "[DEBUG_LOOKUP_NAME] hit name=#{name} branch=#{lookup_branch} target=#{target_name}"
+      end
+      unless func_def
+        if sep = name_parts.separator
+          owner = name_parts.owner
+          method_part = name_parts.method
+          if method_part && !owner.includes?('(') && (template = @generic_templates[owner]?)
+            if found = find_method_in_generic_template(template, method_part, lookup_expected_param_count, lookup_expect_block)
+              func_def = found[0]
+              arena = found[1]
+              target_name = mangled_template_target_name(name, base_name, found[0], found[1], lookup_expected_param_count)
+              lookup_branch = "generic_template_bare_owner"
+            elsif reopenings = @generic_reopenings[owner]?
+              reopenings.each do |reopen_template|
+                found_in_reopen = find_method_in_generic_template(reopen_template, method_part, lookup_expected_param_count, lookup_expect_block)
+                next unless found_in_reopen
+                func_def = found_in_reopen[0]
+                arena = found_in_reopen[1]
+                target_name = mangled_template_target_name(name, base_name, found_in_reopen[0], found_in_reopen[1], lookup_expected_param_count)
+                lookup_branch = "generic_reopen_bare_owner"
+                break
+              end
+            end
+          end
+        end
       end
       if func_def
         if sep = name_parts.separator
@@ -46026,22 +46084,44 @@ module Crystal::HIR
         current_base = strip_generic_args(current)
         if base_target_name.starts_with?("#{current}#") ||
            base_target_name.starts_with?("#{current}.") ||
+           base_target_name.starts_with?("#{current_base}#") ||
+           base_target_name.starts_with?("#{current_base}.") ||
            base_target_name.starts_with?("#{current_base}::")
           extra_type_params = extra_type_params ? @type_param_map.merge(extra_type_params) : @type_param_map.dup
         end
       end
 
       # For Tuple specializations, derive T/T__tuple directly from the owner name
-      # so macro loops like 0...T.size can expand without relying on callsite maps.
+      # or from a concrete tuple-typed suffix arg. This keeps macro loops such as
+      # 0...T.size working even when the lowered target owner stays as plain Tuple.
       if target_parts.separator
+        tuple_type_name : String? = nil
         if target_parts.owner.starts_with?("Tuple(")
-          if info = split_generic_base_and_args(target_parts.owner)
-            args = split_generic_type_args(info[:args]).map(&.strip).reject(&.empty?)
-            unless args.empty?
-              extra_type_params = (extra_type_params || {} of String => String)
-              extra_type_params["T"] = args.join(" | ")
-              extra_type_params["T__tuple"] = args.join(", ")
+          tuple_type_name = target_parts.owner
+        elsif (base_target_name.starts_with?("Tuple#") || base_target_name.starts_with?("Tuple.")) &&
+              (suffix = target_parts.suffix)
+          stripped_suffix = strip_mangled_suffix_flags(suffix)
+          unless stripped_suffix.empty?
+            parse_types_from_suffix(stripped_suffix).each do |param_type|
+              param_name = get_type_name_from_ref(param_type)
+              if param_name.starts_with?("Tuple(")
+                tuple_type_name = param_name
+                break
+              end
             end
+          end
+        end
+        if tuple_type_name && (info = split_generic_base_and_args(tuple_type_name))
+          raw_args = info[:args]
+          args = if raw_args.is_a?(Array)
+                   raw_args.map(&.strip).reject(&.empty?)
+                 else
+                   split_generic_type_args(raw_args).map(&.strip).reject(&.empty?)
+                 end
+          unless args.empty?
+            extra_type_params = (extra_type_params || {} of String => String)
+            extra_type_params["T"] = args.join(" | ")
+            extra_type_params["T__tuple"] = args.join(", ")
           end
         end
       end
@@ -46095,6 +46175,18 @@ module Crystal::HIR
         with_arena(arena || @arena) do
           if resolved_parts.is_instance
             owner = resolved_owner || resolved_parts.owner
+            if owner == "Tuple"
+              if tuple_list = extra_type_params.try(&.["T__tuple"]?) || @type_param_map["T__tuple"]?
+                specialized_owner = "Tuple(#{tuple_list})"
+                if !@class_info.has_key?(specialized_owner) && !@monomorphized.includes?(specialized_owner)
+                  tuple_args = split_generic_type_args(tuple_list).map(&.strip).reject(&.empty?)
+                  unless tuple_args.empty?
+                    monomorphize_generic_class("Tuple", tuple_args, specialized_owner)
+                  end
+                end
+                owner = specialized_owner if @class_info.has_key?(specialized_owner)
+              end
+            end
             if env_has?("DEBUG_YIELD_SKIP") && target_name.includes?("byte_range")
               STDERR.puts "[BYTE_RANGE_LOWER] owner=#{owner} target=#{target_name} has_class_info=#{@class_info.has_key?(owner)} deferred=#{deferred_lookup_used}"
             end

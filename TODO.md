@@ -22,6 +22,62 @@ closure cells, Tuple ptr/value confusion.
 - [ ] **Phase 5: FIX RC-3** — String.build block lowering
 - [ ] **Phase 6: RE-ENABLE RTA + BOOTSTRAP** — stage0→stage1→stage2→stage3 + benchmark
 
+### Current checkpoint (2026-03-08 tuple compare deferred-map propagation)
+
+- Verified another real stage1/runtime sub-root-cause behind the broader
+  `sort_by!` / tuple-key / early stage2->stage3 crash family:
+  - focused oracle:
+    - `bash regression_tests/tuple_compare_runtime_repro.sh /private/tmp/stage1_dbg_tuple_cleanfix_20260308`
+      -> `run_status: 0`, `not reproduced`
+    - `bash regression_tests/tuple_compare_runtime_repro.sh /private/tmp/stage1_rel_tuple_defermap_fix_20260308`
+      -> `run_status: 0`, `not reproduced`
+    - `bash regression_tests/bare_collection_tuple_size_repro.sh /private/tmp/stage1_rel_tuple_defermap_fix_20260308`
+      -> `stdout: 2 / 3`, `not reproduced`
+- Root cause on the stale compiler was not tuple indexing itself:
+  - direct tuple indexing stayed green, but direct tuple `<=>` produced stale
+    output and `sort_by!` on tuple keys still crashed;
+  - emitted LLVM on the stale binary showed both generic and specialized tuple
+    compare bodies calling plain `@Tuple$Hsize`;
+  - the lowered `Tuple$Hsize` body returned `0`, which explains the stale
+    compare result path.
+- Final fix in `src/compiler/hir/ast_to_hir.cr`:
+  - teach lightweight return-type inference that `<=>` returns `Int32`;
+  - preserve concrete tuple `self`/owner context when lowering tuple methods
+    from generic or bare-owner paths;
+  - record receiver-side pending type-param maps for binary operator lowering;
+  - when nested lowering is deferred by `inside_lowering?`, serialize the
+    current generic map onto the deferred target names so a later pass does not
+    re-lower `Tuple#size` as plain broad `Tuple`;
+  - keep generic-template bare-owner lookup working for tuple-family methods
+    that re-enter through unresolved `Tuple#...` names.
+- Direct evidence after the fix:
+  - targeted no-link tracing now shows
+    `[TUPLE_MAP_STORE] name=Tuple#size ... T__tuple=UInt32, UInt32` and a later
+    matching `[TUPLE_MAP_USE]`;
+  - fresh emitted LLVM shows `define i32 @Tuple$Hsize(ptr %self) { ... ret i32 2 }`
+    instead of the old `ret i32 0`.
+- Fresh verification:
+  - `stage1 --release`:
+    - `/usr/bin/time -p scripts/build_stage1_original_release.sh /private/tmp/stage1_rel_tuple_defermap_fix_20260308`
+      -> `real 425.37`
+  - broad release regression:
+    - `/usr/bin/time -p regression_tests/run_all.sh /private/tmp/stage1_rel_tuple_defermap_fix_20260308`
+      -> `67 passed, 0 failed`, `real 288.57`
+  - `stage2 --release`:
+    - `/usr/bin/time -p scripts/timeout_sample_lldb.sh -t 900 -m 24576 --no-series --no-lldb -o /tmp/stage2_rel_tuple_defermap_probe_20260308 -- scripts/build_stage2_release.sh /private/tmp/stage1_rel_tuple_defermap_fix_20260308 /private/tmp/stage2_rel_tuple_defermap_fix_20260308`
+      -> `status 0`, `real 195.85`
+  - current measured speedup:
+    - `stage1/stage2 ~= 2.17x`
+- Boundary / remaining blocker:
+  - `stage1 -> stage2` is green on the fresh release pair;
+  - `stage2 -> stage3` remains red:
+    - `/usr/bin/time -p scripts/timeout_sample_lldb.sh -t 600 -m 24576 --no-series --no-lldb -o /tmp/stage3_rel_tuple_defermap_probe_20260308 -- scripts/build_stage2_release.sh /private/tmp/stage2_rel_tuple_defermap_fix_20260308 /private/tmp/stage3_rel_tuple_defermap_fix_20260308`
+      -> `status 139`, `real 1.07`
+    - the command log still stops just after `prelude.cr` / `lib_c.cr`;
+  - the same fresh stage2 release still cannot compile the tiny tuple compare
+    oracle, because it crashes in the existing early self-hosted startup path
+    before reaching user code.
+
 ### Current checkpoint (2026-03-08 bare collection callsite specialization)
 
 - Verified a separate stage1/runtime root cause behind the broader `sort_by!` tuple-key family:
