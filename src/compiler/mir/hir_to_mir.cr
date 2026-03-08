@@ -404,6 +404,71 @@ module Crystal
       end
     end
 
+    # Register generic container types that need stable MIR TypeRegistry entries.
+    # Without this, codegen can't recover runtime type ids for Array(T)/Pointer(T)
+    # specializations and falls back to 0, which breaks dynamic dispatch on values
+    # returned from unions/calls (for example Hash#[] -> Array(Tuple(...))#size).
+    def register_container_types(type_descriptors : Array(Crystal::HIR::TypeDescriptor))
+      type_descriptors.each_with_index do |desc, idx|
+        mir_kind = canonical_container_kind_for_descriptor(desc)
+        next unless mir_kind
+
+        hir_ref = Crystal::HIR::TypeRef.new(Crystal::HIR::TypeRef::FIRST_USER_TYPE + idx.to_u32)
+        mir_ref = convert_type(hir_ref)
+        existing_mir_type = @mir_module.type_registry.get(mir_ref)
+        if ENV["DEBUG_CONTAINER_REGISTER"]? && (desc.name.includes?("Array(") || desc.name.includes?("Pointer("))
+          existing = existing_mir_type ? "#{existing_mir_type.name}:#{existing_mir_type.kind}" : "nil"
+          STDERR.puts "[CONTAINER_REG] kind=#{desc.kind} name=#{desc.name} hir=#{hir_ref.id} mir=#{mir_ref.id} existing=#{existing} params=#{desc.type_params.map(&.id).join(",")}"
+        end
+
+        size, align = container_layout_for_descriptor(desc)
+
+        mir_type = if existing_mir_type
+                     # Earlier passes can reserve this TypeRef with an alias-shaped
+                     # name/kind (for example Array(Tuple(Int32, ArenaLike)):Reference).
+                     # Canonicalize the slot here so later Array(T) runtime type-id
+                     # lookups and vdispatch agree on the same metadata.
+                     existing_mir_type.kind = mir_kind
+                     existing_mir_type.name = desc.name
+                     existing_mir_type.size = size
+                     existing_mir_type.alignment = align
+                     existing_mir_type
+                   else
+                     @mir_module.type_registry.create_type_with_id(
+                       mir_ref.id,
+                       mir_kind,
+                       desc.name,
+                       size,
+                       align
+                     )
+                   end
+
+        if elem_hir_ref = desc.type_params.first?
+          elem_mir_ref = convert_type(elem_hir_ref)
+          elem_type = @mir_module.type_registry.get(elem_mir_ref) || @mir_module.type_registry.get(TypeRef::POINTER)
+          mir_type.set_element_type(elem_type) if elem_type
+          if ENV["DEBUG_CONTAINER_REGISTER"]? && desc.name.includes?("Array(")
+            STDERR.puts "[CONTAINER_REG] element name=#{desc.name} elem_hir=#{elem_hir_ref.id} elem_mir=#{elem_mir_ref.id} elem_type=#{elem_type.try(&.name) || "nil"}"
+          end
+        end
+      end
+    end
+
+    private def canonical_container_kind_for_descriptor(desc : Crystal::HIR::TypeDescriptor) : TypeKind?
+      case desc.kind
+      when Crystal::HIR::TypeKind::Pointer
+        if desc.name == "Pointer" || desc.name.starts_with?("Pointer(")
+          TypeKind::Pointer
+        end
+      when Crystal::HIR::TypeKind::Array
+        if desc.name.starts_with?("Array(")
+          TypeKind::Array
+        end
+      else
+        nil
+      end
+    end
+
     # Register tuple/named tuple types from HIR descriptors.
     # This enables tuple element access to lower as struct GEPs instead of array layout.
     def register_tuple_types(type_descriptors : Array(Crystal::HIR::TypeDescriptor))
@@ -479,6 +544,25 @@ module Crystal
       ((value + a - 1) // a) * a
     end
 
+    private def container_layout_for_descriptor(desc : Crystal::HIR::TypeDescriptor) : {UInt64, UInt32}
+      case desc.kind
+      when Crystal::HIR::TypeKind::Pointer
+        {pointer_word_bytes_u64, pointer_word_align_u32}
+      when Crystal::HIR::TypeKind::Array
+        if desc.name.starts_with?("StaticArray(")
+          elem_type = desc.type_params.first?.try { |ref| @mir_module.type_registry.get(convert_type(ref)) }
+          elem_size = container_elem_storage_size_u64(elem_type)
+          elem_align = container_elem_alignment_u32(elem_type)
+          count = static_array_count_from_name(desc.name)
+          {elem_size * count, elem_align}
+        else
+          {24_u64, pointer_word_align_u32}
+        end
+      else
+        {pointer_word_bytes_u64, pointer_word_align_u32}
+      end
+    end
+
     @[AlwaysInline]
     private def pointer_word_bytes_u64 : UInt64
       {% if flag?(:i386) || flag?(:arm) || flag?(:wasm32) %}
@@ -521,6 +605,28 @@ module Crystal
 
       # Classes/structs/non-inline values are represented as pointers in containers.
       pointer_word_bytes_u64
+    end
+
+    private def container_elem_alignment_u32(elem_type : Type?) : UInt32
+      return pointer_word_align_u32 unless elem_type
+
+      is_inline = elem_type.kind.primitive? || elem_type.kind.enum?
+      if is_inline && elem_type.alignment > 0
+        return elem_type.alignment
+      end
+
+      if elem_type.kind.union? && elem_type.alignment > 0
+        return elem_type.alignment
+      end
+
+      pointer_word_align_u32
+    end
+
+    private def static_array_count_from_name(type_name : String) : UInt64
+      if match = type_name.match(/StaticArray\(.+,\s*(\d+)\)/)
+        return match[1].to_u64
+      end
+      0_u64
     end
 
     # Create function stub with params and return type (no body)

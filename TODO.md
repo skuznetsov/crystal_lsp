@@ -215,6 +215,46 @@ closure cells, Tuple ptr/value confusion.
       - this is not yet a proven root cause for the fresh stage2
         `@module_defs` crash, but it is the closest current small model of the
         same `Hash(String, Array(Tuple(...)))#set_entry` family.
+  - current verified root cause and fix for that small model:
+    - the corruption is not tuple payload overwrite: `arr.size` and
+      `h["x"][0][0]` stay correct while only dynamic dispatch on `h["x"].size`
+      goes wrong.
+    - raw IR on the stale compiler shows the stored array object header gets
+      `type_id = 0`, and later vdispatch compares that header against the
+      canonical `Array(Tuple(Int32, Int32 | Int64))` type id (`1159` on the
+      traced build). Because the header stays zero, dispatch falls through to
+      `String#size`, which reads the array capacity field (`4`) as if it were
+      string length.
+    - root cause: the MIR `TypeRegistry` slot for that `TypeRef` was already
+      reserved earlier with alias-shaped metadata
+      (`Array(Tuple(Int32, ArenaLike)):Reference`), so
+      `array_runtime_type_id_for_element(...)` missed the canonical
+      `Array(Tuple(Int32, Int32 | Int64))` name even though the numeric
+      `TypeRef` was the same.
+    - fix on the current dirty worktree:
+      - added `register_container_types(...)` to canonicalize plain
+        `Array(...)` / `Pointer(...)` MIR slots by `TypeRef`
+      - made MIR `Type.name` / `Type.kind` mutable so stale alias slots can be
+        rewritten in place without reallocating ids
+    - verification:
+      - stale bracket:
+        `bash regression_tests/hash_array_tuple_union_array_tid_repro.sh /private/tmp/stage1_dbg_case_type_fix_20260307`
+        -> `[ARRAY_TID] miss array_name=Array(Tuple(Int32, Int32 | Int64))`,
+        `reproduced`
+      - fixed bracket:
+        `bash regression_tests/hash_array_tuple_union_array_tid_repro.sh /private/tmp/stage1_dbg_container_canonicalize_20260308`
+        -> `[ARRAY_TID] hit ... array_id=1159`,
+        `store i32 1159, ptr %...tid_ptr`,
+        `not reproduced`
+      - adjacent guard:
+        `bash regression_tests/stage2_no_prelude_pointer_args_key_repro.sh /private/tmp/stage1_dbg_container_canonicalize_20260308`
+        -> `status: 0`, `not reproduced`
+    - note:
+      - the old runtime oracle is currently masked on the fixed compiler by a
+        separate full-prelude invalid-IR stopper
+        (`@Exception$CCCallStack__classvar__skip = global [0 x ptr] 0` during
+        `opt`), so the compile-time oracle above is the reliable fast guard for
+        this branch until that unrelated blocker is fixed.
 
 ### Current checkpoint (2026-03-07 late)
 

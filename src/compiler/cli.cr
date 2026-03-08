@@ -1477,6 +1477,9 @@ module CrystalV2
         STDERR.puts "[MIR_SETUP] register_module_types types=#{hir_module.types.size}" if mir_setup_trace
         mir_lowering.register_module_types(hir_module.types)
         STDERR.puts "[MIR_SETUP] register_module_types done" if mir_setup_trace
+        STDERR.puts "[MIR_SETUP] register_container_types types=#{hir_module.types.size}" if mir_setup_trace
+        mir_lowering.register_container_types(hir_module.types)
+        STDERR.puts "[MIR_SETUP] register_container_types done" if mir_setup_trace
         STDERR.puts "[MIR_SETUP] register_tuple_types types=#{hir_module.types.size}" if mir_setup_trace
         mir_lowering.register_tuple_types(hir_module.types)
         STDERR.puts "[MIR_SETUP] register_tuple_types done" if mir_setup_trace

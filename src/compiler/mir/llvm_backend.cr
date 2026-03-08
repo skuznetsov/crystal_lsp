@@ -14984,10 +14984,17 @@ module Crystal::MIR
           io << ')'
         end
         if array_type = @module.type_registry.get_by_name(array_name)
+          if ENV["DEBUG_ARRAY_TID_VERBOSE"]?
+            STDERR.puts "[ARRAY_TID] hit array_name=#{array_name} elem_ref=#{element_type_ref.id} elem=#{elem_type.name} array_id=#{array_type.id}"
+          end
           return array_type.id.to_i32
         end
         if ENV["DEBUG_ARRAY_TID"]?
           STDERR.puts "[ARRAY_TID] miss array_name=#{array_name} elem_ref=#{element_type_ref.id} elem=#{elem_type.name}"
+          if ENV["DEBUG_ARRAY_TID_VERBOSE"]?
+            candidates = @module.type_registry.types.select { |type| type.kind.array? && type.name.includes?("Array(") && (type.name.includes?(elem_type.name) || type.name.includes?("ArenaLike") || type.name.includes?("Int32 | Int64")) }
+            STDERR.puts "[ARRAY_TID] nearby #{candidates.map { |type| "#{type.name}(#{type.id})" }.join(" | ")}"
+          end
         end
       elsif ENV["DEBUG_ARRAY_TID"]?
         STDERR.puts "[ARRAY_TID] no_elem_type elem_ref=#{element_type_ref.id}"

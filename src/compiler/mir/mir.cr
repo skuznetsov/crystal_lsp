@@ -143,8 +143,8 @@ module Crystal::MIR
 
   class Type
     getter id : TypeId
-    getter kind : TypeKind
-    getter name : String
+    property kind : TypeKind
+    property name : String
     property size : UInt64
     property alignment : UInt32
     getter fields : Array(Field)?
