@@ -245,7 +245,11 @@ module Crystal::MIR
         end
       when .proc?                       then "%__crystal_proc"  # { ptr, ptr }
       when .tuple?                      then "ptr"  # Tuple values are represented by pointer in current ABI
-      when .array?                      then compute_array_type(type)
+      when .array?
+        # Runtime Array(T) values are heap objects passed/stored by pointer.
+        # Treating them as `[0 x elem]` only works for synthetic buffer math and
+        # breaks globals/signatures such as `@@skip = [] of String`.
+        "ptr"
       when .enum?                       then "i32"
       else                                   "ptr"
       end

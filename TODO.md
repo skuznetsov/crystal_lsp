@@ -256,6 +256,63 @@ closure cells, Tuple ptr/value confusion.
         `opt`), so the compile-time oracle above is the reliable fast guard for
         this branch until that unrelated blocker is fixed.
 
+### Current checkpoint (2026-03-08 release bootstrap refresh)
+
+- The full-prelude `opt` stopper after the container-slot fix is now root-caused
+  and fixed on the current worktree.
+  - Symptom:
+    - `stage1 --release` built successfully, but `stage2 --release` stopped in
+      `opt` with invalid IR:
+      `@Exception$CCCallStack__classvar__skip = global [0 x ptr] 0`
+    - the same broken shape also appeared in loads/stores against that global:
+      `load [0 x ptr], ptr @Exception$CCCallStack__classvar__skip`
+  - Root cause:
+    - `LLVMTypeMapper#compute_llvm_type_for_type` still mapped runtime
+      `Array(T)` values to inline `[0 x elem]` storage via
+      `compute_array_type(type)`.
+    - that helper is only correct for synthetic raw-buffer math; actual
+      `Array(T)` values in the current ABI are heap objects passed/stored by
+      pointer, just like tuples are already treated as `ptr`.
+    - once `register_container_types(...)` started canonicalizing real
+      `Array(...)` MIR slots, this older mapper bug surfaced on globals and
+      signatures such as `@@skip = [] of String`.
+  - Fix:
+    - `LLVMTypeMapper#compute_llvm_type_for_type` now maps `.array?` to `ptr`
+      and leaves `[0 x elem]` only to explicit raw-buffer helpers.
+  - Verification:
+    - fresh stage1 debug with the fix:
+      `/usr/bin/time -p scripts/build_stage1_original_cached.sh debug /private/tmp/stage1_dbg_array_ptr_mapping_20260308 --error-trace`
+      -> `real 6.93`
+    - focused no-prelude guard still stays green:
+      `bash regression_tests/hash_array_tuple_union_array_tid_repro.sh /private/tmp/stage1_dbg_array_ptr_mapping_20260308`
+      -> `[ARRAY_TID] hit ... array_id=1159`, `not reproduced`
+    - tiny classvar `.ll` check now emits the correct global shape:
+      `@Foo__classvar__skip = global ptr null`
+    - fresh release bootstrap pair on the same worktree:
+      - `/usr/bin/time -p scripts/build_stage1_original_cached.sh release /private/tmp/stage1_rel_array_ptr_mapping_20260308`
+        -> `real 436.64`
+      - `/usr/bin/time -p scripts/build_stage2_cached.sh /private/tmp/stage1_rel_array_ptr_mapping_20260308 release /private/tmp/stage2_rel_array_ptr_mapping_20260308`
+        -> `real 176.49`
+  - Boundary shift after the fix:
+    - `stage1 -> stage2` release bootstrap is healthy again on the current
+      worktree, with observed speedup `436.64s -> 176.49s` (~`2.47x`).
+    - guarded `stage2 -> stage3` is still unstable, but the failure class is no
+      longer invalid IR:
+      - `scripts/timeout_sample_lldb.sh --timeout 900 --memory-limit 32768 --memory-prewarn-pct 85 --memory-prewarn-sample-secs 3 --memory-check-sec 2 --sample 5 --lldb-timeout 12 --top 8 --out /tmp/stage3_rel_timeout_array_ptr_mapping_20260308 -- scripts/build_stage2_cached.sh /private/tmp/stage2_rel_array_ptr_mapping_20260308 release /private/tmp/stage3_rel_array_ptr_mapping_20260308`
+        -> wrapper `status 137`, underlying compiler `Killed: 9`
+    - sample output on that guarded run shows the active hotspot in CLI
+      source-require fallback work, not LLVM backend:
+      - hottest frames include
+        `CrystalV2::Compiler::CLI#parse_require_literal_line(String)` and
+        `CrystalV2::Compiler::CLI#extract_require_literals_from_source(String)`
+      - sampled physical footprint was about `100.9G`
+  - Reading:
+    - the old `@Exception$CCCallStack__classvar__skip = global [0 x ptr] 0`
+      blocker was a local LLVM type-mapping bug, not a deeper bootstrap-only
+      mystery.
+    - the active frontier has now moved cleanly to stage3 memory growth during
+      require scanning / fallback resolution.
+
 ### Current checkpoint (2026-03-07 late)
 
 - 2026-03-07 late-night TypedNode union branch was explored and rejected as a
