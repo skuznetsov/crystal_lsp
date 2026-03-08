@@ -290,6 +290,60 @@ closure cells, Tuple ptr/value confusion.
     early-stage3 crash, so the next branch should keep using the stage2 focused
     repros rather than revisiting this resolved stride mismatch.
 
+### Current checkpoint (2026-03-08 no-prelude env-cache blocker)
+
+- New verified reduction:
+  - the active self-hosted no-prelude crash no longer needs `require "./dep"`
+    baggage. A one-line source is enough:
+    ```crystal
+    X = 1
+    ```
+    under `--no-prelude --no-link --verbose`.
+  - stage1 controls pass on both the previous fixed release and the fresh env-cache
+    patch builds, while old stage2 release still dies before escape analysis/MIR.
+- Root-cause slice removed on the current worktree:
+  - LLDB on the old stage2 release localizes the one-line oracle to
+    `Hash(String, String?)#upsert -> AstToHir#type_ref_for_name`.
+  - source inspection shows `type_ref_for_name(...)` eagerly calls
+    `env_get("DEBUG_TUPLE_PAREN")`, `env_get("DEBUG_TYPE_PATH")`, and
+    `env_get("DEBUG_WUINT128")` even on normal builds.
+  - the old `env_get` cached absent vars in
+    `@env_cache : Hash(String, String?)`, so hot no-debug paths still exercised a
+    union-valued hash upsert; that is exactly the old crash surface.
+  - fix in `src/compiler/hir/ast_to_hir.cr`:
+    - convert `@env_cache` to positive-only `Hash(String, String)`,
+    - stop caching missing env vars as `nil`.
+- Focused verification:
+  - new oracle:
+    - `bash regression_tests/stage2_no_prelude_const_assign_hir_env_cache_repro.sh /private/tmp/stage2_rel_all_ref_union_layout_fix2_20260308`
+      -> `reproduced: stage2 dies on the old no-prelude const-assign HIR env-cache blocker`
+    - `bash regression_tests/stage2_no_prelude_const_assign_hir_env_cache_repro.sh /private/tmp/stage2_rel_env_cache_fix_20260308`
+      -> `not reproduced: old HIR env-cache blocker removed, later MIR crash remains`
+  - fresh debug timings on the patch:
+    - `/usr/bin/time -p scripts/build_stage1_original_debug.sh /private/tmp/stage1_dbg_env_cache_fix_20260308`
+      -> `real 8.80`
+    - `/usr/bin/time -p scripts/build_stage2_debug.sh /private/tmp/stage1_dbg_env_cache_fix_20260308 /private/tmp/stage2_dbg_env_cache_fix_20260308`
+      -> `real 546.98`
+  - fresh release timings on the patch:
+    - `/usr/bin/time -p scripts/build_stage1_original_release.sh /private/tmp/stage1_rel_env_cache_fix_20260308`
+      -> `real 443.75`
+    - `/usr/bin/time -p scripts/build_stage2_release.sh /private/tmp/stage1_rel_env_cache_fix_20260308 /private/tmp/stage2_rel_env_cache_fix_20260308`
+      -> `real 192.73`
+    - current measured speedup:
+      - `stage1/stage2 ~= 2.30x`
+- Boundary shift / remaining blocker:
+  - the env-cache patch is real, but not sufficient for full stage2 stability.
+  - LLDB on the fresh patched one-line oracle no longer stops in
+    `Hash(String, String?)#upsert`; it now reaches a later MIR-lowering crash:
+    - release:
+      `__vdispatch__Object#hash -> Hash(HIR::ValueId, TypeRef)#upsert -> MIR::HIRToMIRLowering#lower_function_body`
+    - debug:
+      the same family, with the vdispatch frame symbolized more fully.
+  - the older `stage2_require_literal_hir_lowering_crash_repro.sh` remains red on
+    the fresh patched stage2, but it is no longer the best primary oracle for
+    this branch; the one-line no-prelude oracle is faster and isolates the
+    removed HIR/env-cache blocker directly.
+
 - Verified dispatch asymmetry that explains misleading helper signals:
   - tiny standalone probe on the current compiler with
     `node = NumberNode.new.as(Node)` shows:

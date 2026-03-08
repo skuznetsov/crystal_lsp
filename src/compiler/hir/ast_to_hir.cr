@@ -1246,19 +1246,8 @@ module Crystal::HIR
     @split_union_last_input : String? = nil
     @split_union_last_output : Array(String)? = nil
 
-    # Cached ENV lookups — avoid repeated C library getenv() calls.
-    @env_cache : Hash(String, String?) = {} of String => String?
-    # Prefix-gated ENV presence checks to skip hash/cache lookups when whole
-    # categories are absent (common for perf runs that set only CRYSTAL_V2_*).
-    @any_debug_like_env_set : Bool = ENV.keys.any? do |k|
-      k.starts_with?("DEBUG_") || k.starts_with?("DBG_") || k == "HIR_DEBUG" || k.starts_with?("INLINE_YIELD_")
-    end
-    @any_crystal_v2_env_set : Bool = ENV.keys.any? { |k| k.starts_with?("CRYSTAL_V2_") }
-    # Fast-path: if no debug-like/crystal-v2 vars are set, env_has? is always false.
-    @any_debug_env_set : Bool = ENV.keys.any? do |k|
-      k.starts_with?("DEBUG_") || k.starts_with?("DBG_") || k == "HIR_DEBUG" ||
-        k.starts_with?("INLINE_YIELD_") || k.starts_with?("CRYSTAL_V2_")
-    end
+    # Cached positive ENV lookups — avoid storing nil unions in hot hash paths.
+    @env_cache : Hash(String, String) = {} of String => String
     # Cache block function def lookup by callsite shape.
     @block_lookup_cache : Hash(BlockLookupKey, Tuple(String, CrystalV2::Compiler::Frontend::DefNode)?) = {} of BlockLookupKey => Tuple(String, CrystalV2::Compiler::Frontend::DefNode)?
     @block_lookup_cache_size : Int32 = 0
@@ -2702,24 +2691,22 @@ module Crystal::HIR
     # ENV values never change during compilation, so caching is safe.
     @[AlwaysInline]
     private def env_get(key : String) : String?
-      if key.starts_with?("CRYSTAL_V2_")
-        return nil unless @any_crystal_v2_env_set
-      elsif key.starts_with?("DEBUG_") || key.starts_with?("DBG_") || key == "HIR_DEBUG" || key.starts_with?("INLINE_YIELD_")
-        return nil unless @any_debug_like_env_set
+      if cached = @env_cache[key]?
+        return cached
       end
-      @env_cache.fetch(key) do
-        val = ENV[key]?
+
+      if val = ENV[key]?
         @env_cache[key] = val
-        val
+        return val
       end
+
+      nil
     end
 
     @[AlwaysInline]
     private def env_has?(key : String) : Bool
-      return false unless @any_debug_env_set
       !env_get(key).nil?
     end
-
     # Lazy RTA is enabled by default and can be disabled with:
     #   CRYSTAL_V2_LAZY_RTA=0
     #   CRYSTAL_V2_LAZY_RTA=false
