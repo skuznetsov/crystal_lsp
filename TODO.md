@@ -115,8 +115,19 @@ closure cells, Tuple ptr/value confusion.
       `/private/tmp/stage1_rel_slice_ctxlocal_fix_20260308`
 - Boundary / remaining frontier:
   - this fix clears the remaining `Slice.new(ptr, ...)` owner mismatch, but it
-    does not yet re-measure the broader `sort_by!` / stage2 self-hosted /
-    `stage2 -> stage3` frontier;
+    does not clear the broader `sort_by!` / stage2 self-hosted frontier;
+  - fresh release bootstrap refresh on commit `52bc9c46`:
+    - `stage1 --release`:
+      - `/usr/bin/time -p scripts/build_stage1_original_release.sh /private/tmp/stage1_rel_slice_ctxlocal_fix_20260308`
+      - `real 423.65`
+    - `stage2 --release`:
+      - `scripts/run_safe.sh /private/tmp/run_stage2_rel_slice_ctxlocal_fix_20260308.sh 900 24576`
+      - `real 182.83`, safe exit `0`
+      - current speedup `stage2/stage1 ~= 2.32x`
+    - guarded `stage2 -> stage3`:
+      - `scripts/run_safe.sh /private/tmp/run_stage3_rel_slice_ctxlocal_fix_20260308.sh 900 24576`
+      - still fast `139` after parsing `prelude.cr` and `lib_c.cr`
+      - `/usr/bin/time -p` inside the wrapper: `real 0.39`
   - next useful step is to resume bootstrap/timing work from this cleaner
     baseline rather than keep debugging stale slice-family symptoms.
 
