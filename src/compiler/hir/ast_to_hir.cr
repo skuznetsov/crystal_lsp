@@ -31477,11 +31477,14 @@ module Crystal::HIR
     private def pointer_like_type?(type_ref : TypeRef) : Bool
       return true if type_ref == TypeRef::POINTER || type_ref == TypeRef::STRING
       if desc = @module.get_type_descriptor(type_ref)
-        # Class, Struct, Pointer all stored as ptr in LLVM.
+        # Runtime Array/Hash values are also heap objects stored as ptr in LLVM.
+        # StaticArray remains inline and must not be treated as pointer-like here.
         # Module can appear when a value is typed by its enclosing module context
         # (e.g., @@current_thread in Crystal::System::Thread typed as Thread).
         return desc.kind == TypeKind::Struct || desc.kind == TypeKind::Class ||
-          desc.kind == TypeKind::Pointer || desc.kind == TypeKind::Module
+          desc.kind == TypeKind::Pointer || desc.kind == TypeKind::Module ||
+          (desc.kind == TypeKind::Array && (desc.name == "Array" || desc.name.starts_with?("Array("))) ||
+          (desc.kind == TypeKind::Hash && (desc.name == "Hash" || desc.name.starts_with?("Hash(")))
       end
       # Types without descriptors that are not primitives are likely reference types
       return true if type_ref.id >= TypeRef::FIRST_USER_TYPE

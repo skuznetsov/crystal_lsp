@@ -132,11 +132,7 @@ module Crystal::MIR
       return false unless desc
       desc.variants.all? do |variant|
         next true if variant.type_ref == TypeRef::NIL || variant.type_ref == TypeRef::VOID
-        if vtype = @type_registry.get(variant.type_ref)
-          vtype.kind.reference?
-        else
-          false
-        end
+        runtime_pointer_backed_union_variant?(@type_registry.get(variant.type_ref))
       end
     end
 
@@ -265,11 +261,7 @@ module Crystal::MIR
           next unless desc.name == name
           return desc.variants.all? do |variant|
             next true if variant.type_ref == TypeRef::NIL || variant.type_ref == TypeRef::VOID
-            if vtype = @type_registry.get(variant.type_ref)
-              vtype.kind.reference?
-            else
-              false
-            end
+            runtime_pointer_backed_union_variant?(@type_registry.get(variant.type_ref))
           end
         end
       end
@@ -278,11 +270,16 @@ module Crystal::MIR
         stripped = part.strip
         next true if stripped == "Nil" || stripped == "Void"
         if found = @type_registry.get_by_name(stripped)
-          found.kind.reference?
+          runtime_pointer_backed_union_variant?(found)
         else
           false  # Unknown type — assume not all-ref to be safe
         end
       end
+    end
+
+    private def runtime_pointer_backed_union_variant?(type : Type?) : Bool
+      return false unless type
+      type.kind.reference? || type.kind.array?
     end
 
     private def compute_tuple_type(type : Type) : String
@@ -14408,7 +14405,7 @@ module Crystal::MIR
           ref_variants = union_desc.variants.select do |v|
             next false if v.type_ref == TypeRef::NIL || v.type_ref == TypeRef::VOID
             if v_type = @module.type_registry.get(v.type_ref)
-              v_type.kind.reference? || v_type.kind.struct?
+              v_type.kind.reference? || v_type.kind.array? || v_type.kind.struct?
             else
               false
             end

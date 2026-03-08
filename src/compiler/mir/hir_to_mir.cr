@@ -3082,7 +3082,19 @@ module Crystal
     private def reference_like_mir_type?(type : TypeRef) : Bool
       return true if type == TypeRef::POINTER
       return true if type.reference?
+      if desc = @mir_module.type_registry.get(type)
+        return true if desc.kind.array?
+      end
       false
+    end
+
+    private def runtime_pointer_like_union_variant?(variant_type : Type?) : Bool
+      return false unless variant_type
+      variant_type.kind == TypeKind::Reference ||
+        variant_type.kind == TypeKind::Struct ||
+        variant_type.kind == TypeKind::Tuple ||
+        variant_type.kind == TypeKind::Proc ||
+        variant_type.kind == TypeKind::Array
     end
 
     # Coerce call arguments to match function parameter types
@@ -3169,14 +3181,7 @@ module Crystal
               next false if variant.type_ref == TypeRef::NIL || variant.type_ref == TypeRef::VOID
               next true if variant.type_ref == TypeRef::POINTER || variant.type_ref == TypeRef::STRING
 
-              if variant_type = @mir_module.type_registry.get(variant.type_ref)
-                variant_type.kind == TypeKind::Reference ||
-                  variant_type.kind == TypeKind::Struct ||
-                  variant_type.kind == TypeKind::Tuple ||
-                  variant_type.kind == TypeKind::Proc
-              else
-                false
-              end
+              runtime_pointer_like_union_variant?(@mir_module.type_registry.get(variant.type_ref))
             end
 
             if pointer_like.size == 1
@@ -3738,14 +3743,7 @@ module Crystal
             next false if variant.type_ref == TypeRef::NIL || variant.type_ref == TypeRef::VOID
             next true if variant.type_ref == TypeRef::POINTER || variant.type_ref == TypeRef::STRING
 
-            if variant_type = @mir_module.type_registry.get(variant.type_ref)
-              variant_type.kind == TypeKind::Reference ||
-                variant_type.kind == TypeKind::Struct ||
-                variant_type.kind == TypeKind::Tuple ||
-                variant_type.kind == TypeKind::Proc
-            else
-              false
-            end
+            runtime_pointer_like_union_variant?(@mir_module.type_registry.get(variant.type_ref))
           end
 
           if pointer_like.size == 1

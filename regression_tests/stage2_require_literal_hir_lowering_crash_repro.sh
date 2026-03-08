@@ -7,7 +7,7 @@ if [[ $# -lt 1 ]]; then
 fi
 
 COMPILER="$1"
-TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/stage2_require_literal.XXXXXX")"
+TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/stage2_require_lowering.XXXXXX")"
 SRC="$TMP_DIR/main.cr"
 DEP="$TMP_DIR/dep.cr"
 OUT="$TMP_DIR/repro.o"
@@ -44,32 +44,22 @@ if [[ -n "$main_reqscan" ]]; then
   echo "main_reqscan: $main_reqscan"
 fi
 
-empty_req_path_line="$(grep -E '^[[:space:]]*\[req-path\][[:space:]]*$' "$COMBINED_LOG" | head -n 1 || true)"
-if [[ -n "$empty_req_path_line" ]]; then
-  echo "empty_req_path: present"
-fi
-
 fallback_line="$(grep -F 'Source require fallback entries=' "$COMBINED_LOG" | head -n 1 || true)"
 if [[ -n "$fallback_line" ]]; then
   echo "fallback_line: $fallback_line"
 fi
 
-if grep -Fq '[REQSCAN_DONE]' "$COMBINED_LOG" && grep -Fq 'main.cr reqs=1' "$COMBINED_LOG" && ! grep -Fq 'Source require fallback entries=' "$COMBINED_LOG" && [[ -z "$empty_req_path_line" ]]; then
-  if [[ $compile_status -eq 0 ]]; then
-    echo "not reproduced"
-  else
-    echo "not reproduced: old require corruption gone; later crash remains"
-  fi
+if [[ $compile_status -eq 0 ]] && grep -Fq 'main.cr reqs=1' "$COMBINED_LOG" && ! grep -Fq 'Source require fallback entries=' "$COMBINED_LOG"; then
+  echo "not reproduced"
   exit 1
 fi
 
-if [[ -n "$empty_req_path_line" ]] && grep -Fq 'Source require fallback entries=1' "$COMBINED_LOG"; then
-  echo "reproduced: self-hosted require literal path degraded to empty string and fell back to source scan"
-  exit 0
-fi
-
-if [[ $compile_status -eq 139 ]] && grep -Fq 'main.cr reqs=0' "$COMBINED_LOG" && grep -Fq 'Source require fallback entries=1' "$COMBINED_LOG"; then
-  echo "reproduced: self-hosted require literal fell back to source scan before segfault"
+if [[ $compile_status -eq 139 ]] &&
+   grep -Fq 'main.cr reqs=1' "$COMBINED_LOG" &&
+   ! grep -Fq 'Source require fallback entries=' "$COMBINED_LOG" &&
+   grep -Fq '[2/6] Lowering to HIR...' "$COMBINED_LOG" &&
+   grep -Fq '[hir-arena] idx=1 size=4 roots=3' "$COMBINED_LOG"; then
+  echo "reproduced: later self-hosted require compile survives scan and crashes in HIR lowering"
   exit 0
 fi
 

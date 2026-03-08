@@ -190,6 +190,57 @@ closure cells, Tuple ptr/value confusion.
     - the branch was still reverted, but the "wrapper ruled out" conclusion is
       downgraded.
 
+### Current checkpoint (2026-03-08 array-union ABI)
+
+- Verified root-cause slice fixed on the current worktree:
+  - old self-hosted `require "./dep"` corruption was not a broken literal string;
+    `DEBUG_REQ_PATH_SHAPE` had already shown `req=./dep`, and the dep file was
+    loaded, but `REQSCAN_DONE ... main.cr reqs=0` still dropped the append.
+  - disassembly of self-hosted `CLI#process_require_node(...)` showed the append
+    path was emitted inline (`check_needs_resize`, payload store, `size += 1`),
+    so the real bug sat earlier on the ABI boundary: `Nil | Array(String)` still
+    used stale non-ref union handling, meaning the callee mutated the wrong
+    array payload/header.
+  - fix:
+    - HIR pointer-like union helpers now treat runtime `Array(...)` / `Hash(...)`
+      as pointer-backed while keeping `StaticArray(...)` on the inline path;
+    - MIR pointer-like union variant selection/wrap now treats
+      `TypeKind::Array` as pointer-backed;
+    - LLVM all-ref-union detection now includes pointer-backed array variants.
+- Focused verification:
+  - fresh requested release rebuilds:
+    - `/usr/bin/time -p scripts/build_stage1_original_release.sh /private/tmp/stage1_rel_array_union_fix_20260308`
+      -> `real 436.24`
+    - `/usr/bin/time -p scripts/build_stage2_release.sh /private/tmp/stage1_rel_array_union_fix_20260308 /private/tmp/stage2_rel_array_union_fix_20260308`
+      -> `real 183.70`
+    - current measured speedup:
+      - `stage1/stage2 ~= 2.37x`
+  - adjacent guards still green:
+    - `bash regression_tests/string_new_ptr_size_local_repro.sh /private/tmp/stage1_rel_array_union_fix_20260308`
+      -> `not reproduced`
+    - `bash regression_tests/stage1_time_span_bare_new_ctor_repro.sh /private/tmp/stage1_rel_array_union_fix_20260308`
+      -> `not reproduced`
+  - old focused require-corruption oracle changed signature materially:
+    - `bash regression_tests/stage2_require_literal_empty_path_repro.sh /private/tmp/stage2_rel_array_union_fix_20260308`
+      no longer sees `main.cr reqs=0`, empty `[req-path]`, or source fallback;
+      it now reports `main.cr reqs=1` and reaches `[2/6] Lowering to HIR...`
+      before segfaulting.
+  - new frontier oracle:
+    - `bash regression_tests/stage2_require_literal_hir_lowering_crash_repro.sh /private/tmp/stage2_rel_array_union_fix_20260308`
+      -> reproduces `main.cr reqs=1`, no fallback, then later HIR-lowering crash.
+- Boundary shift / remaining blocker:
+  - `stage1 -> stage2` release bootstrap remains healthy on the new fix.
+  - guarded `stage2 -> stage3` still fails fast:
+    - `scripts/timeout_sample_lldb.sh -t 420 -m 32768 -s 8 -n 10 -o /tmp/stage3_rel_array_union_fix_probe -- bash -lc '/usr/bin/time -p scripts/build_stage2_release.sh /private/tmp/stage2_rel_array_union_fix_20260308 /private/tmp/stage3_rel_array_union_fix_20260308'`
+      -> immediate `status=139`; the log now reaches `/src/stdlib/lib_c.cr`
+      before the crash and still produces no `stage3` binary.
+- Current reading:
+  - the old require-path corruption family (`reqs=0` + fallback from an already
+    parsed literal require) was a real array-union ABI bug and is now removed;
+  - the active frontier has moved deeper to a later self-hosted HIR-lowering /
+    early-stage3 crash, so the next branch should debug that new crash directly
+    instead of continuing to chase empty require paths.
+
 - Verified dispatch asymmetry that explains misleading helper signals:
   - tiny standalone probe on the current compiler with
     `node = NumberNode.new.as(Node)` shows:
