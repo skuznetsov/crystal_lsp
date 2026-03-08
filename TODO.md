@@ -313,6 +313,68 @@ closure cells, Tuple ptr/value confusion.
     - the active frontier has now moved cleanly to stage3 memory growth during
       require scanning / fallback resolution.
 
+### Current checkpoint (2026-03-08 require-fallback mitigation)
+
+- Added a focused compiler-only mitigation for the stage3 require-scan hotspot.
+  - Verified symptom before the fix:
+    - even a tiny `puts 1` under `--no-prelude --no-link --verbose` paid the
+      full source fallback path after AST require scan:
+      `Source require fallback entries=0`
+    - fresh focused oracle:
+      `bash regression_tests/require_source_fallback_empty_file_repro.sh /private/tmp/stage1_rel_array_ptr_mapping_20260308`
+      -> `reproduced`
+  - Fix:
+    - `parse_file_recursive` now runs source fallback only when there are
+      unresolved AST requires or when the source text actually contains
+      `require`.
+    - `extract_require_literals_from_source(...)` /
+      `source_has_glob_require?(...)` no longer allocate one temporary string
+      per line via `each_line + lstrip`; they now scan the source bytes
+      directly and allocate only for matched require paths.
+  - Verification:
+    - fresh stage1 debug:
+      `/usr/bin/time -p scripts/build_stage1_original_cached.sh debug /private/tmp/stage1_dbg_require_fallback_fix_20260308 --error-trace`
+      -> `real 9.12`
+    - fresh stage1 release:
+      `/usr/bin/time -p scripts/build_stage1_original_cached.sh release /private/tmp/stage1_rel_require_fallback_fix_20260308`
+      -> `real 434.03`
+    - focused empty-file oracle on the new binaries:
+      - `bash regression_tests/require_source_fallback_empty_file_repro.sh /private/tmp/stage1_dbg_require_fallback_fix_20260308`
+        -> `not reproduced`
+      - `bash regression_tests/require_source_fallback_empty_file_repro.sh /private/tmp/stage1_rel_require_fallback_fix_20260308`
+        -> `not reproduced`
+    - adjacent guard:
+      a tiny `require "./dep"` compile on the same fresh stage1 release still
+      reports `main.cr reqs=1` and compiles successfully under
+      `--no-prelude --no-link --verbose`.
+  - Release bootstrap after the mitigation:
+    - `/usr/bin/time -p scripts/build_stage2_cached.sh /private/tmp/stage1_rel_require_fallback_fix_20260308 release /private/tmp/stage2_rel_require_fallback_fix_20260308`
+      -> `real 178.01`
+    - current measured pair on the same warm caches:
+      `stage1 --release = 434.03s`, `stage2 --release = 178.01s`
+      (~`2.44x` speedup).
+  - Important negative result:
+    - this is a mitigation, not the deeper self-hosted parser/arena fix.
+    - new focused oracle:
+      `bash regression_tests/stage2_require_literal_empty_path_repro.sh /private/tmp/stage2_rel_require_fallback_fix_20260308`
+      still reproduces:
+      `main.cr reqs=0`, empty `[req-path]`, `Source require fallback entries=1`,
+      then later `status: 139`.
+    - matching stage1 release control stays green:
+      `bash regression_tests/stage2_require_literal_empty_path_repro.sh /private/tmp/stage1_rel_require_fallback_fix_20260308`
+      -> `not reproduced`
+  - Boundary shift on full bootstrap:
+    - guarded stage3 no longer ends in the earlier memory-pressure/OOM kill on
+      this branch; it now fails fast with `status 139`:
+      `scripts/timeout_sample_lldb.sh ... --out /tmp/stage3_rel_timeout_require_fallback_fix_20260308 -- scripts/build_stage2_cached.sh /private/tmp/stage2_rel_require_fallback_fix_20260308 release /private/tmp/stage3_rel_require_fallback_fix_20260308`
+    - LLDB on the same compiler localizes the new frontier to:
+      `EXC_BAD_ACCESS` in
+      `__vdispatch__CrystalV2::Compiler::Frontend::VirtualArena#[] (ExprId)`
+    - command-log signal before that crash:
+      many compiler files still parse with `REQSCAN_DONE ... reqs=0`, so the
+      deeper self-hosted require/AST corruption remains active even though the
+      fallback path is now cheaper.
+
 ### Current checkpoint (2026-03-07 late)
 
 - 2026-03-07 late-night TypedNode union branch was explored and rejected as a

@@ -2043,7 +2043,7 @@ module CrystalV2
                   end
                 end
               end
-              needs_source_fallback = requires.empty? || requires.any? { |req| !loaded.includes?(File.expand_path(req)) }
+              needs_source_fallback = source_requires_fallback?(source, requires, loaded)
               if needs_source_fallback
                 if options.verbose && !requires.empty?
                   missing = 0
@@ -2148,7 +2148,7 @@ module CrystalV2
         end
         STDERR.puts "[REQSCAN_DONE] #{abs_path} reqs=#{requires.size}"
         STDERR.flush
-        needs_source_fallback = requires.empty? || requires.any? { |req| !loaded.includes?(File.expand_path(req)) }
+        needs_source_fallback = source_requires_fallback?(source, requires, loaded)
         if needs_source_fallback
           if options.verbose && !requires.empty?
             missing = 0
@@ -2215,6 +2215,16 @@ module CrystalV2
           end
         end
         {% end %}
+      end
+
+      private def source_requires_fallback?(source : String, requires : Array(String), loaded : Set(String)) : Bool
+        unresolved_requires = requires.any? { |req| !loaded.includes?(File.expand_path(req)) }
+        return true if unresolved_requires
+        requires.empty? && source_might_contain_require?(source)
+      end
+
+      private def source_might_contain_require?(source : String) : Bool
+        source.includes?("require")
       end
 
       # Process a node for require statements (recursively handles macro bodies)
@@ -2329,55 +2339,98 @@ module CrystalV2
       end
 
       private def source_has_glob_require?(source : String) : Bool
-        source.each_line do |line|
-          if req_path = parse_require_literal_line(line)
-            return true if req_path.includes?('*') || req_path.includes?('?') || req_path.includes?('[')
-          end
+        return false unless source_might_contain_require?(source)
+        scan_source_require_literals(source) do |req_path|
+          return true if req_path.includes?('*') || req_path.includes?('?') || req_path.includes?('[')
         end
         false
       end
 
-      private def parse_require_literal_line(line : String) : String?
-        stripped = line.lstrip
-        return nil if stripped.empty? || stripped.starts_with?('#')
+      private def source_matches_require_keyword?(source : String, idx : Int32, size : Int32) : Bool
+        return false if idx + 7 >= size
+        return false unless source.byte_at(idx) == 'r'.ord.to_u8
+        return false unless source.byte_at(idx + 1) == 'e'.ord.to_u8
+        return false unless source.byte_at(idx + 2) == 'q'.ord.to_u8
+        return false unless source.byte_at(idx + 3) == 'u'.ord.to_u8
+        return false unless source.byte_at(idx + 4) == 'i'.ord.to_u8
+        return false unless source.byte_at(idx + 5) == 'r'.ord.to_u8
+        return false unless source.byte_at(idx + 6) == 'e'.ord.to_u8
 
-        kw = "require"
-        return nil unless stripped.starts_with?(kw)
-        return nil if stripped.bytesize == kw.bytesize
+        next_ch = source.byte_at(idx + 7)
+        next_ch == ' '.ord.to_u8 || next_ch == '\t'.ord.to_u8
+      end
 
-        i = kw.bytesize
-        next_ch = stripped.byte_at(i)
-        return nil unless next_ch == ' '.ord.to_u8 || next_ch == '\t'.ord.to_u8
-
-        while i < stripped.bytesize
-          ch = stripped.byte_at(i)
-          break unless ch == ' '.ord.to_u8 || ch == '\t'.ord.to_u8
+      private def advance_source_line(source : String, idx : Int32, size : Int32) : Int32
+        i = idx
+        while i < size
+          ch = source.byte_at(i)
           i += 1
+          break if ch == '\n'.ord.to_u8
+          if ch == '\r'.ord.to_u8
+            if i < size && source.byte_at(i) == '\n'.ord.to_u8
+              i += 1
+            end
+            break
+          end
         end
-        return nil if i >= stripped.bytesize
+        i
+      end
 
-        quote = stripped.byte_at(i)
-        return nil unless quote == '"'.ord.to_u8 || quote == '\''.ord.to_u8
-        i += 1
-        start = i
+      private def scan_source_require_literals(source : String, & : String ->)
+        size = source.bytesize
+        i = 0
+        while i < size
+          while i < size
+            ch = source.byte_at(i)
+            break unless ch == ' '.ord.to_u8 || ch == '\t'.ord.to_u8
+            i += 1
+          end
 
-        while i < stripped.bytesize
-          break if stripped.byte_at(i) == quote
-          i += 1
+          if i < size
+            ch = source.byte_at(i)
+            if ch != '#'.ord.to_u8 && source_matches_require_keyword?(source, i, size)
+              j = i + 7
+              while j < size
+                ch = source.byte_at(j)
+                break unless ch == ' '.ord.to_u8 || ch == '\t'.ord.to_u8
+                j += 1
+              end
+
+              if j < size
+                quote = source.byte_at(j)
+                if quote == '"'.ord.to_u8 || quote == '\''.ord.to_u8
+                  j += 1
+                  start = j
+                  while j < size
+                    ch = source.byte_at(j)
+                    break if ch == quote
+                    if ch == '\n'.ord.to_u8 || ch == '\r'.ord.to_u8
+                      start = -1
+                      break
+                    end
+                    j += 1
+                  end
+
+                  if start >= 0 && j > start && j < size
+                    if value = source.byte_slice(start, j - start)
+                      yield value.dup
+                    end
+                  end
+                end
+              end
+            end
+          end
+
+          i = advance_source_line(source, i, size)
         end
-        return nil if i <= start || i >= stripped.bytesize
-
-        value = stripped.byte_slice(start, i - start)
-        return nil unless value
-        value.dup
       end
 
       private def extract_require_literals_from_source(source : String) : Array(String)
         requires = [] of String
-        source.each_line do |line|
-          if req_path = parse_require_literal_line(line)
-            requires << req_path
-          end
+        return requires unless source_might_contain_require?(source)
+
+        scan_source_require_literals(source) do |req_path|
+          requires << req_path
         end
         requires.uniq
       end
