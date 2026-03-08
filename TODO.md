@@ -22,6 +22,52 @@ closure cells, Tuple ptr/value confusion.
 - [ ] **Phase 5: FIX RC-3** — String.build block lowering
 - [ ] **Phase 6: RE-ENABLE RTA + BOOTSTRAP** — stage0→stage1→stage2→stage3 + benchmark
 
+### Current checkpoint (2026-03-08 lazy lexer debug / heredoc self-host crash)
+
+- Verified a real self-hosted stage2 root cause behind the old
+  `Lexer#scan_heredoc` startup frontier:
+  - focused oracle:
+    - `bash regression_tests/stage2_heredoc_eager_debug_segfault_repro.sh /private/tmp/stage2_rel_slice_ctxlocal_fix_20260308`
+      -> `status: 139`, `reproduced: stage2 heredoc parsing still segfaults`
+    - stage1 control:
+      - `bash regression_tests/stage2_heredoc_eager_debug_segfault_repro.sh /private/tmp/stage1_rel_slice_ctxlocal_fix_20260308`
+        -> `status: 0`, `not reproduced: no segfault on heredoc parse`
+- Root cause was narrower than "monolithic heredoc scanner is fundamentally broken":
+  - unlike parser's lazy `debug { ... }`, lexer still used `debug(message : String)`;
+  - every `debug "[HEREDOC] ... #{...}"` call inside `scan_heredoc` eagerly built
+    its interpolated string even when `LEXER_DEBUG` was unset;
+  - LLDB on the stale self-hosted stage2 localized the crash to
+    `Lexer#scan_heredoc`, with a raw byte-like value (`x24 = 0x6d`) being used
+    as if it were an object/string header during that eager formatting path.
+- Final fix in `src/compiler/frontend/lexer.cr`:
+  - switch lexer `debug` to parser-style lazy block form,
+  - convert lexer debug callsites to `debug { ... }` so interpolation is skipped
+    entirely when `LEXER_DEBUG` is off.
+- Fresh verification:
+  - `stage1 --release`:
+    - `/usr/bin/time -p scripts/build_stage1_original_release.sh /private/tmp/stage1_rel_lexer_lazy_debug_20260308`
+      -> `real 425.51`
+  - `stage2 --release`:
+    - `/usr/bin/time -p scripts/build_stage2_cached.sh /private/tmp/stage1_rel_lexer_lazy_debug_20260308 release /private/tmp/stage2_rel_lexer_lazy_debug_20260308`
+      -> `real 181.90`
+  - focused oracle on the fresh self-hosted stage2:
+    - `bash regression_tests/stage2_heredoc_eager_debug_segfault_repro.sh /private/tmp/stage2_rel_lexer_lazy_debug_20260308`
+      -> `status: 1`, `not reproduced: no segfault on heredoc parse`
+- Boundary / new frontier:
+  - guarded `stage2 -> stage3` on `/private/tmp/stage2_rel_lexer_lazy_debug_20260308`
+    no longer dies right after `prelude.cr` / `lib_c.cr`;
+  - it now parses and req-scans through:
+    - `macros.cr`
+    - `object.cr`
+    - `crystal/once.cr`
+    - `comparable.cr`
+    - `exception.cr`
+    - `exception/call_stack.cr`
+    before the next fast `status 139`;
+  - so the old immediate heredoc frontier is removed, and the surviving blocker
+    is now later in self-hosted startup around the `exception/call_stack.cr`
+    corridor, not in lexer heredoc debug formatting.
+
 ### Current checkpoint (2026-03-08 `Slice[...]` macro owner-context split)
 
 - Verified a real stage1/runtime sub-root-cause in the broader tuple/sort family:

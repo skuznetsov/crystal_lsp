@@ -33,10 +33,11 @@ module CrystalV2
           @diagnostics = diagnostics
         end
 
-        private def debug(message : String)
-          if ::CrystalV2::Compiler::BootstrapEnv.enabled?("LEXER_DEBUG")
-            STDERR.puts message
-          end
+        # Keep lexer debug formatting lazy. Eager string interpolation here can
+        # execute broken self-hosted runtime paths even when LEXER_DEBUG is off.
+        private def debug(& : -> String)
+          return unless ::CrystalV2::Compiler::BootstrapEnv.enabled?("LEXER_DEBUG")
+          STDERR.puts yield
         end
 
         private def emit_diagnostic(message : String, span : Span)
@@ -2314,7 +2315,7 @@ module CrystalV2
               elsif interpolation_depth > 0
                 if byte == '<'.ord.to_u8 && @offset + 2 < @rope.size && @rope.bytes[@offset + 1] == '<'.ord.to_u8 && @rope.bytes[@offset + 2] == '-'.ord.to_u8
                   heredoc_inside_interpolation = true
-                  debug("heredoc in percent literal interpolation detected")
+                  debug { "heredoc in percent literal interpolation detected" }
                 end
                 interpolation_depth += 1 if byte == LEFT_BRACE
                 interpolation_depth -= 1 if byte == RIGHT_BRACE
@@ -2531,12 +2532,12 @@ module CrystalV2
         private def scan_heredoc(start_offset : Int32, start_line : Int32, start_column : Int32) : Token?
           # At this point we've consumed <<-
           # Next should be identifier (delimiter)
-          debug "[HEREDOC] scan_heredoc called, offset=#{@offset}, size=#{@rope.size}"
+          debug { "[HEREDOC] scan_heredoc called, offset=#{@offset}, size=#{@rope.size}" }
           if @offset >= @rope.size
-            debug "[HEREDOC] returning nil: offset >= size"
+            debug { "[HEREDOC] returning nil: offset >= size" }
             return nil
           end
-          debug "[HEREDOC] current_byte=#{current_byte} (#{current_byte.chr})"
+          debug { "[HEREDOC] current_byte=#{current_byte} (#{current_byte.chr})" }
           delimiter : String
           # Heredoc inside interpolation is not allowed
           if @macro_expr_depth > 0
@@ -2551,7 +2552,7 @@ module CrystalV2
               advance
             end
             if @offset >= @rope.size
-              debug "[HEREDOC] returning nil: unterminated quoted delimiter"
+              debug { "[HEREDOC] returning nil: unterminated quoted delimiter" }
               return nil
             end
             delimiter_end = @offset
@@ -2559,7 +2560,7 @@ module CrystalV2
             advance  # consume closing quote
           else
             unless is_identifier_start?(current_byte)
-              debug "[HEREDOC] returning nil: not identifier start"
+              debug { "[HEREDOC] returning nil: not identifier start" }
               return nil
             end
 
@@ -2571,19 +2572,19 @@ module CrystalV2
             delimiter_end = @offset
             delimiter = String.new(bytes_range(delimiter_start, delimiter_end))
           end
-          debug "[HEREDOC] delimiter='#{delimiter}'"
+          debug { "[HEREDOC] delimiter='#{delimiter}'" }
 
           # Skip to end of line (heredoc content starts on NEXT line)
           while @offset < @rope.size && current_byte != '\n'.ord.to_u8
             advance
           end
           if @offset >= @rope.size
-            debug "[HEREDOC] returning nil: EOF before newline after delimiter"
+            debug { "[HEREDOC] returning nil: EOF before newline after delimiter" }
             emit_diagnostic("Unterminated heredoc", Span.new(start_offset, @offset, start_line, start_column, @line, @column))
             return nil
           end
           advance  # consume newline
-          debug "[HEREDOC] starting content scan at offset #{@offset}"
+          debug { "[HEREDOC] starting content scan at offset #{@offset}" }
 
           # Accumulate content until we find delimiter on its own line
           content = IO::Memory.new
@@ -2592,9 +2593,9 @@ module CrystalV2
           closing_indent = 0
 
           loop do
-            debug "[HEREDOC] loop iteration, offset=#{@offset}"
+            debug { "[HEREDOC] loop iteration, offset=#{@offset}" }
             if @offset >= @rope.size
-              debug "[HEREDOC] returning nil: reached EOF while scanning lines"
+              debug { "[HEREDOC] returning nil: reached EOF while scanning lines" }
               emit_diagnostic("Unterminated heredoc: can't find \"#{delimiter}\" anywhere before the end of file", Span.new(start_offset, @offset, start_line, start_column, @line, @column))
               return nil
             end
@@ -2610,21 +2611,21 @@ module CrystalV2
 
             # Check if this line starts with delimiter (after whitespace)
             matches_delimiter = true
-            debug "[HEREDOC] checking delimiter match starting at offset #{@offset}"
+            debug { "[HEREDOC] checking delimiter match starting at offset #{@offset}" }
             delimiter.each_byte do |byte|
               if @offset >= @rope.size || current_byte != byte
                 matches_delimiter = false
-                debug "[HEREDOC] delimiter mismatch at offset #{@offset}, expected #{byte}, got #{@offset >= @rope.size ? "EOF" : current_byte}"
+                debug { "[HEREDOC] delimiter mismatch at offset #{@offset}, expected #{byte}, got #{@offset >= @rope.size ? "EOF" : current_byte}" }
                 break
               end
               advance
             end
 
             if matches_delimiter
-              debug "[HEREDOC] found matching delimiter at #{@offset}, checking termination"
+              debug { "[HEREDOC] found matching delimiter at #{@offset}, checking termination" }
               # Check that delimiter is followed by newline or EOF
               if @offset >= @rope.size || current_byte == '\n'.ord.to_u8 || current_byte == '\r'.ord.to_u8
-                debug "[HEREDOC] delimiter properly terminated, breaking"
+                debug { "[HEREDOC] delimiter properly terminated, breaking" }
                 closing_indent = indent
                 # Found end delimiter, consume newline if present
                 if @offset < @rope.size && (current_byte == '\n'.ord.to_u8 || current_byte == '\r'.ord.to_u8)
@@ -2635,11 +2636,11 @@ module CrystalV2
                 end
                 break  # Done with heredoc
               end
-              debug "[HEREDOC] delimiter not terminated (followed by #{current_byte.chr})"
+              debug { "[HEREDOC] delimiter not terminated (followed by #{current_byte.chr})" }
             end
 
             # Not end delimiter, rewind to line start and consume the line
-            debug "[HEREDOC] rewinding to line_start=#{line_start}"
+            debug { "[HEREDOC] rewinding to line_start=#{line_start}" }
             @offset = line_start
             while @offset < @rope.size && current_byte != '\n'.ord.to_u8
               content.write_byte(current_byte)
@@ -2647,13 +2648,13 @@ module CrystalV2
             end
 
             if @offset >= @rope.size
-              debug "[HEREDOC] returning nil: unterminated heredoc (EOF before delimiter)"
+              debug { "[HEREDOC] returning nil: unterminated heredoc (EOF before delimiter)" }
               emit_diagnostic("Unterminated heredoc: can't find \"#{delimiter}\" anywhere before the end of file", Span.new(start_offset, @offset, start_line, start_column, @line, @column))
               return nil  # Unterminated heredoc
             end
 
             # Consume newline
-            debug "[HEREDOC] consumed line, adding newline"
+            debug { "[HEREDOC] consumed line, adding newline" }
             content.write_byte('\n'.ord.to_u8)
             advance
             @line += 1
@@ -2667,11 +2668,11 @@ module CrystalV2
 
           # Create string token
           # Token expects (kind, slice, span)
-          debug "[HEREDOC] creating token, content.size=#{content.size}"
+          debug { "[HEREDOC] creating token, content.size=#{content.size}" }
           content_slice = Slice(UInt8).new(content.size)
           content.to_slice.copy_to(content_slice)
 
-          debug "[HEREDOC] returning String token"
+          debug { "[HEREDOC] returning String token" }
           Token.new(
             Token::Kind::String,
             content_slice,
