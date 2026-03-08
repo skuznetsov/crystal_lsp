@@ -360,6 +360,69 @@ closure cells, Tuple ptr/value confusion.
       evidence for what `case node` or fallback helpers will do on the same
       self-hosted value.
 
+### Current checkpoint (2026-03-08 alias-hash delegate bootstrap unblock)
+
+- Root-cause slice removed on the current worktree:
+  - the post-env-cache stage2 self-hosted MIR crash was not a broad "`Object#hash`
+    is always broken for compiler ids" statement; the hot failure sat in
+    alias-specific `Hash(HIR::ValueId, TypeRef)` bodies.
+  - binary proof on `/private/tmp/stage2_rel_env_cache_fix_20260308` showed:
+    - alias `Hash(HIR::ValueId, TypeRef)#upsert(HIR::ValueId, TypeRef)` and
+      alias `#find_entry_with_index(HIR::ValueId)` were still executing their
+      own `HIR::ValueId`-specialized bodies;
+    - those bodies inlined the bad `__vdispatch__Object#hash` path on raw
+      compiler-id aliases;
+    - sibling `$$UInt32` specializations in the same hash family already used
+      the correct integer path.
+  - fix in `src/compiler/mir/llvm_backend.cr`:
+    - emit compiler-id alias delegate wrappers for
+      `Hash(...).upsert/find_entry/find_entry_with_index` to the canonical
+      `UInt32` specializations;
+    - align wrapper param ABI with normal function emission (`Nil` params lower
+      as `ptr`, not illegal `void` parameters), which was required for
+      `Hash(HIR::ValueId, Nil)#upsert`.
+- Focused verification:
+  - fresh release rebuilds:
+    - `/usr/bin/time -p scripts/build_stage1_original_release.sh /private/tmp/stage1_rel_alias_hash_delegate_fix4_20260308`
+      -> `real 494.91`
+    - `/usr/bin/time -p scripts/run_safe.sh /private/tmp/run_stage2_rel_alias_hash_delegate_fix4_20260308.sh 420 16384`
+      -> `[EXIT: 0] after ~180s`, `real 216.14`
+  - binary proof on the fresh stage2 release:
+    - `nm /private/tmp/stage2_rel_alias_hash_delegate_fix4_20260308 | rg 'Hash\\$LHIR\\$CCValueId\\$C\\$_Crystal\\$CCHIR\\$CCTypeRef\\$R\\$H(upsert|find_entry_with_index|key_hash)'`
+      still shows both alias and `UInt32` siblings.
+    - `llvm-objdump -d --start-address=0x10040864c --stop-address=0x100408710 /private/tmp/stage2_rel_alias_hash_delegate_fix4_20260308`
+      shows alias `upsert` is now a direct branch to
+      `_Hash$LUInt32$C$_Crystal$CCHIR$CCTypeRef$R$Hupsert$$UInt32_Crystal$CCHIR$CCTypeRef`.
+    - `llvm-objdump -d --start-address=0x1006e71e8 --stop-address=0x1006e72a8 /private/tmp/stage2_rel_alias_hash_delegate_fix4_20260308`
+      shows alias `find_entry_with_index` is now a direct branch to the
+      matching `$$UInt32` specialization.
+  - adversary / boundary check:
+    - `bash regression_tests/stage2_no_prelude_const_assign_hir_env_cache_repro.sh /private/tmp/stage2_rel_alias_hash_delegate_fix4_20260308`
+      -> `not reproduced: old HIR env-cache blocker removed, later MIR crash remains`
+    - important caveat:
+      alias `Hash(... )#key_hash(HIR::ValueId)` still disassembles to the old
+      `__vdispatch__Object#hash` path, so this fix is a hot-path bootstrap
+      unblock, not a proof that every alias-hash symbol is now canonical.
+- Boundary shift / remaining blocker:
+  - full `stage1 -> stage2` release bootstrap is healthy again on this branch,
+    but `stage2 -> stage3` still fails.
+  - the failure class has shifted again:
+    - guarded stage3:
+      `/usr/bin/time -p scripts/run_safe.sh /private/tmp/run_stage3_rel_alias_hash_delegate_fix4_20260308.sh 600 24576`
+      -> `status 139`, `real 0.61`
+    - it now dies almost immediately, after parsing `prelude.cr` and
+      `lib_c.cr`, before any previous late-stage MIR/LLVM/OOM frontier.
+  - LLDB on the fresh stage2 release localizes the new frontier to the lexer:
+    - `Frontend::Lexer#scan_heredoc`
+    - `Frontend::Lexer#lex_operator`
+    - `Frontend::Lexer#next_token`
+    - `Frontend::Parser#initialize`
+    - `CLI#parse_file_recursive`
+  - reading:
+    - this branch is ready for a standalone commit because it removes the active
+      stage2 release bootstrap blocker without solving the new stage3 lexer
+      crash.
+
 - New verified stage2 boundary after bypassing the broken debug gate:
   - direct-`ENV` diagnostic hook:
     - stage1 control rebuild:

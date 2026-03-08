@@ -5715,17 +5715,67 @@ module Crystal::MIR
         return true
       end
 
-      # Hash#key_hash for primitive Int32 keys — bypass broken Object#hash vdispatch.
-      # Primitives get inttoptr'd to ptr but vdispatch tries to load type_id from the raw address → crash.
-      # Fix: compute hash directly using Crystal::Hasher.permute(sext(key, i64)).result.
-      # Enum keys hit the same broken path in generic key_hash lowering (via Object#hash on inttoptr(enum_value)).
-      # Handle enum keys here as integer-like values using direct hasher permute.
+      if emit_compiler_u32_alias_hash_delegate_override(func, mangled)
+        return true
+      end
+
+      # Hash#key_hash for integer-like scalar keys — bypass broken Object#hash vdispatch.
+      # Generic lowering still instantiates alias-specific symbol names (e.g. HIR::ValueId)
+      # that miss the old suffix-only overrides and fall back to Object#hash on raw ints.
       if mangled.includes?("$Hkey_hash$$") && mangled.includes?("Hash$L") && func.params.size >= 2
         key_type_ref = func.params[1].type
+        key_llvm_type = @type_mapper.llvm_type(key_type_ref)
+        if direct_integer_hash_llvm_type?(key_llvm_type)
+          if key_type = @module.type_registry.get(key_type_ref)
+            if key_type.kind.integer?
+              emit_direct_integer_key_hash_override(
+                mangled,
+                key_llvm_type,
+                signed: key_type.kind.signed_integer?,
+                note: "direct integer hash override (type-driven bypass vdispatch)"
+              )
+              return true
+            elsif key_type.kind.char?
+              emit_direct_integer_key_hash_override(
+                mangled,
+                key_llvm_type,
+                signed: false,
+                note: "direct Char hash override (type-driven bypass vdispatch)"
+              )
+              return true
+            elsif key_type.kind.symbol?
+              emit_direct_integer_key_hash_override(
+                mangled,
+                key_llvm_type,
+                signed: true,
+                note: "direct Symbol hash override (type-driven bypass vdispatch)"
+              )
+              return true
+            elsif key_type.kind.enum?
+              emit_direct_integer_key_hash_override(
+                mangled,
+                key_llvm_type,
+                signed: true,
+                note: "direct enum hash override (type-driven bypass vdispatch)"
+              )
+              return true
+            end
+          end
+
+          if compiler_u32_alias_key_hash?(mangled)
+            emit_direct_integer_key_hash_override(
+              mangled,
+              key_llvm_type,
+              signed: false,
+              note: "direct compiler-id hash override (alias bypass vdispatch)"
+            )
+            return true
+          end
+        end
+
         if key_type = @module.type_registry.get(key_type_ref)
           if key_type.kind.enum?
-            key_llvm_type = @type_mapper.llvm_type(key_type_ref)
-            if key_llvm_type.starts_with?('i') && !key_llvm_type.includes?(".")
+            if direct_integer_hash_llvm_type?(key_llvm_type)
               emit_raw "; #{mangled} — direct enum hash override (bypass vdispatch)\n"
               emit_raw "define i32 @#{mangled}(ptr %self, #{key_llvm_type} %key) {\n"
               emit_raw "entry:\n"
@@ -6651,6 +6701,193 @@ module Crystal::MIR
       end
 
       false
+    end
+
+    private def compiler_u32_alias_hash_token?(mangled : String) : String?
+      {
+        "HIR$CCValueId",
+        "HIR$CCBlockId",
+        "HIR$CCScopeId",
+        "HIR$CCFunctionId",
+        "HIR$CCTypeId",
+        "HIR$CCStringId",
+        "Crystal$CCHIR$CCValueId",
+        "Crystal$CCHIR$CCBlockId",
+        "Crystal$CCHIR$CCScopeId",
+        "Crystal$CCHIR$CCFunctionId",
+        "Crystal$CCHIR$CCTypeId",
+        "Crystal$CCHIR$CCStringId",
+        "MIR$CCValueId",
+        "MIR$CCBlockId",
+        "MIR$CCFunctionId",
+        "MIR$CCTypeId",
+        "Crystal$CCMIR$CCValueId",
+        "Crystal$CCMIR$CCBlockId",
+        "Crystal$CCMIR$CCFunctionId",
+        "Crystal$CCMIR$CCTypeId",
+      }.find { |token| mangled.includes?("Hash$L#{token}$C$_") }
+    end
+
+    private def emit_compiler_u32_alias_hash_delegate_override(func : Function, mangled : String) : Bool
+      alias_token = compiler_u32_alias_hash_token?(mangled)
+      return false unless alias_token
+      return false unless mangled.includes?("Hash$L")
+
+      key_llvm_type = func.params.size >= 2 ? emitted_param_llvm_type(func.params[1]) : "ptr"
+      ret_llvm_type = @type_mapper.llvm_type(func.return_type)
+
+      if mangled.includes?("$Hkey_hash$$#{alias_token}")
+        target = mangled.sub("$Hkey_hash$$#{alias_token}", "$Hkey_hash$$UInt32")
+        return false unless @emitted_functions.includes?(target)
+        emit_compiler_u32_alias_hash_call_override(mangled, key_llvm_type, ret_llvm_type, target)
+        return true
+      end
+
+      if mangled.includes?("$Hfind_entry$$#{alias_token}")
+        target = mangled.sub("$Hfind_entry$$#{alias_token}", "$Hfind_entry$$UInt32")
+        return false unless @emitted_functions.includes?(target)
+        emit_compiler_u32_alias_hash_call_override(mangled, key_llvm_type, ret_llvm_type, target)
+        return true
+      end
+
+      if mangled.includes?("$Hfind_entry_with_index$$#{alias_token}")
+        target = mangled.sub("$Hfind_entry_with_index$$#{alias_token}", "$Hfind_entry_with_index$$UInt32")
+        return false unless @emitted_functions.includes?(target)
+        emit_compiler_u32_alias_hash_call_override(mangled, key_llvm_type, ret_llvm_type, target)
+        return true
+      end
+
+      if mangled.includes?("$Hfind_entry_with_index_linear_scan$$#{alias_token}")
+        target = mangled.sub("$Hfind_entry_with_index_linear_scan$$#{alias_token}", "$Hfind_entry_with_index_linear_scan$$UInt32")
+        return false unless @emitted_functions.includes?(target)
+        emit_compiler_u32_alias_hash_call_override(mangled, key_llvm_type, ret_llvm_type, target)
+        return true
+      end
+
+      if func.params.size >= 3 && mangled.includes?("$Hupsert$$#{alias_token}_")
+        target = mangled
+          .sub("Hash$L#{alias_token}$C$_", "Hash$LUInt32$C$_")
+          .sub("$Hupsert$$#{alias_token}_", "$Hupsert$$UInt32_")
+        target_func = @module.functions.find { |f| mangle_function_name(f.name) == target }
+        return false unless target_func || @emitted_functions.includes?(target)
+
+        canonical_ret = target_func ? @type_mapper.llvm_type(target_func.return_type) : ret_llvm_type.sub("Hash$CCEntry$L#{alias_token}$C$_", "Hash$CCEntry$LUInt32$C$_")
+        value_llvm_type = if target_func && target_func.params.size >= 3
+                            emitted_param_llvm_type(target_func.params[2])
+                          else
+                            emitted_param_llvm_type(func.params[2])
+                          end
+        emit_raw "; #{mangled} — delegate compiler-id alias upsert to canonical UInt32 specialization\n"
+        emit_raw "define #{ret_llvm_type} @#{mangled}(ptr %self, #{key_llvm_type} %key, #{value_llvm_type} %value) {\n"
+        emit_raw "entry:\n"
+        key_i32 = emit_compiler_u32_alias_key_cast(key_llvm_type)
+        emit_raw "  %raw = call #{canonical_ret} @#{target}(ptr %self, i32 #{key_i32}, #{value_llvm_type} %value)\n"
+        emit_raw "  %ret.slot = alloca #{ret_llvm_type}, align 8\n"
+        emit_raw "  store #{canonical_ret} %raw, ptr %ret.slot\n"
+        emit_raw "  %ret = load #{ret_llvm_type}, ptr %ret.slot\n"
+        emit_raw "  ret #{ret_llvm_type} %ret\n"
+        emit_raw "}\n\n"
+        return true
+      end
+
+      false
+    end
+
+    private def direct_integer_hash_llvm_type?(llvm_type : String) : Bool
+      llvm_type.starts_with?('i') && !llvm_type.includes?(".")
+    end
+
+    private def emitted_param_llvm_type(param) : String
+      llvm_type = @type_mapper.llvm_type(param.type)
+      llvm_type == "void" ? "ptr" : llvm_type
+    end
+
+    private def compiler_u32_alias_key_hash?(mangled : String) : Bool
+      {
+        "$Hkey_hash$$HIR$CCValueId",
+        "$Hkey_hash$$HIR$CCBlockId",
+        "$Hkey_hash$$HIR$CCScopeId",
+        "$Hkey_hash$$HIR$CCFunctionId",
+        "$Hkey_hash$$HIR$CCTypeId",
+        "$Hkey_hash$$HIR$CCStringId",
+        "$Hkey_hash$$Crystal$CCHIR$CCValueId",
+        "$Hkey_hash$$Crystal$CCHIR$CCBlockId",
+        "$Hkey_hash$$Crystal$CCHIR$CCScopeId",
+        "$Hkey_hash$$Crystal$CCHIR$CCFunctionId",
+        "$Hkey_hash$$Crystal$CCHIR$CCTypeId",
+        "$Hkey_hash$$Crystal$CCHIR$CCStringId",
+        "$Hkey_hash$$MIR$CCValueId",
+        "$Hkey_hash$$MIR$CCBlockId",
+        "$Hkey_hash$$MIR$CCFunctionId",
+        "$Hkey_hash$$MIR$CCTypeId",
+        "$Hkey_hash$$Crystal$CCMIR$CCValueId",
+        "$Hkey_hash$$Crystal$CCMIR$CCBlockId",
+        "$Hkey_hash$$Crystal$CCMIR$CCFunctionId",
+        "$Hkey_hash$$Crystal$CCMIR$CCTypeId",
+      }.any? { |suffix| mangled.ends_with?(suffix) }
+    end
+
+    private def emit_direct_integer_key_hash_override(mangled : String, key_llvm_type : String, *, signed : Bool, note : String) : Nil
+      emit_raw "; #{mangled} — #{note}\n"
+      emit_raw "define i32 @#{mangled}(ptr %self, #{key_llvm_type} %key) {\n"
+      emit_raw "entry:\n"
+      emit_raw "  %hasher = call ptr @Crystal$CCHasher$Dnew(i64 0, i64 0)\n"
+      key_bits = key_llvm_type[1..].to_i? || 32
+      if key_bits < 64
+        cast_op = signed ? "sext" : "zext"
+        emit_raw "  %key64 = #{cast_op} #{key_llvm_type} %key to i64\n"
+      elsif key_bits > 64
+        emit_raw "  %key64 = trunc #{key_llvm_type} %key to i64\n"
+      else
+        emit_raw "  %key64 = add i64 %key, 0\n"
+      end
+      emit_raw "  %hasher2 = call ptr @Crystal$CCHasher$Hpermute$$UInt64(ptr %hasher, i64 %key64)\n"
+      emit_raw "  %hash64 = call i64 @Crystal$CCHasher$Hresult(ptr %hasher2)\n"
+      emit_raw "  %hash32 = trunc i64 %hash64 to i32\n"
+      emit_raw "  %is_zero = icmp eq i32 %hash32, 0\n"
+      emit_raw "  br i1 %is_zero, label %ret_max, label %ret_hash\n"
+      emit_raw "ret_max:\n"
+      emit_raw "  ret i32 -1\n"
+      emit_raw "ret_hash:\n"
+      emit_raw "  ret i32 %hash32\n"
+      emit_raw "}\n\n"
+    end
+
+    private def emit_compiler_u32_alias_hash_call_override(mangled : String, key_llvm_type : String, ret_llvm_type : String, target : String) : Nil
+      emit_raw "; #{mangled} — delegate compiler-id alias hash path to UInt32 specialization\n"
+      emit_raw "define #{ret_llvm_type} @#{mangled}(ptr %self, #{key_llvm_type} %key) {\n"
+      emit_raw "entry:\n"
+      key_i32 = emit_compiler_u32_alias_key_cast(key_llvm_type)
+      emit_raw "  %ret = call #{ret_llvm_type} @#{target}(ptr %self, i32 #{key_i32})\n"
+      emit_raw "  ret #{ret_llvm_type} %ret\n"
+      emit_raw "}\n\n"
+    end
+
+    private def emit_compiler_u32_alias_key_cast(key_llvm_type : String) : String
+      case key_llvm_type
+      when "i32"
+        "%key"
+      when "ptr"
+        emit_raw "  %key.raw = ptrtoint ptr %key to i64\n"
+        emit_raw "  %key.i32 = trunc i64 %key.raw to i32\n"
+        "%key.i32"
+      else
+        if key_llvm_type.starts_with?('i') && !key_llvm_type.includes?(".")
+          key_bits = key_llvm_type[1..].to_i? || 32
+          if key_bits < 32
+            emit_raw "  %key.i32 = zext #{key_llvm_type} %key to i32\n"
+          elsif key_bits > 32
+            emit_raw "  %key.i32 = trunc #{key_llvm_type} %key to i32\n"
+          else
+            return "%key"
+          end
+          "%key.i32"
+        else
+          emit_raw "  %key.raw = ptrtoint #{key_llvm_type} %key to i64\n"
+          emit_raw "  %key.i32 = trunc i64 %key.raw to i32\n"
+          "%key.i32"
+        end
+      end
     end
 
     # Emit correct primitive binary operation for integer/float methods with
