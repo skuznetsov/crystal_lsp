@@ -80,7 +80,7 @@ closure cells, Tuple ptr/value confusion.
 
 ### Current checkpoint (2026-03-08 late)
 
-- The isolated `lower_expr -> lower_node_dynamic` wrapper probe is ruled out.
+- The first env-gated `lower_expr -> lower_node_dynamic` verdict is invalidated.
   - Experiment:
     - temporarily wrapped only the arena-fetched `lower_node` call in a separate
       dynamic helper behind `CRYSTAL2_DEBUG_NODE_KIND_LOWER=1`.
@@ -95,10 +95,12 @@ closure cells, Tuple ptr/value confusion.
       still logs `[COLLECT] depth=0 expr=0 kind=8 ...` and fails with
       `error: Unsupported AST node type: CrystalV2::Compiler::Frontend::Node`.
   - Meaning:
-    - a local wrapper around `lower_node` is not enough; the active failure is
-      deeper than the immediate `lower_expr` dispatch boundary.
-    - this branch should stay reverted rather than accumulating more local HIR
-      shims.
+    - this run no longer counts as evidence against the wrapper itself, because a
+      later runtime probe showed self-hosted binaries mis-evaluate the
+      `ENV.keys.any?` fast path used by `env_has?`; the debug gate may never have
+      turned on in the first place.
+    - the branch was still reverted, but the "wrapper ruled out" conclusion is
+      downgraded.
 
 - Verified dispatch asymmetry that explains misleading helper signals:
   - tiny standalone probe on the current compiler with
@@ -115,6 +117,39 @@ closure cells, Tuple ptr/value confusion.
     - therefore `Frontend.node_kind(node)` cannot be treated as equivalent
       evidence for what `case node` or fallback helpers will do on the same
       self-hosted value.
+
+- New verified stage2 boundary after bypassing the broken debug gate:
+  - direct-`ENV` diagnostic hook:
+    - stage1 control rebuild:
+      `/usr/bin/time -p scripts/build_stage1_original_debug.sh /private/tmp/stage1_dbg_nodeview_probe_20260308 --error-trace`
+      -> `real 9.04`
+    - stage2 self-hosted rebuild:
+      `/usr/bin/time -p scripts/build_stage2_debug.sh /private/tmp/stage1_dbg_nodeview_probe_20260308 /private/tmp/stage2_dbg_nodeview_probe_20260308`
+      -> `real 487.80`
+    - minimal oracle:
+      `DEBUG_NODE_VIEW=1 scripts/timeout_sample_lldb.sh --timeout 20 --memory-limit 1024 --no-series --sample 1 --lldb-timeout 5 --top 8 -- /private/tmp/stage2_dbg_nodeview_probe_20260308 repro.cr --no-prelude --no-link -o repro.o`
+      logs:
+      `[LOWER_NODE_VIEW] expr=0 class=CrystalV2::Compiler::Frontend::Node kind=8 is_number=true case_number=false`
+      and then fails with
+      `Unsupported AST node type: CrystalV2::Compiler::Frontend::Node`.
+  - Meaning:
+    - on the active self-hosted stage2 frontier, `node.is_a?(NumberNode)` still
+      succeeds, but `case node when NumberNode` fails and `node.class.name`
+      collapses to the abstract base.
+    - the broken mechanism is therefore specifically in the `case`/class-name
+      path for these frontend node values, not in all runtime type tests.
+
+- Separate runtime bug uncovered while validating debug gates:
+  - a tiny stage1-generated runtime probe with `DEBUG_MAIN=1` prints:
+    - `ENV.keys.any? { |k| k.starts_with?(\"DEBUG_\") }` -> `false`
+    - `!ENV[\"DEBUG_MAIN\"]?.nil?` -> `true`
+    - `ENV.keys.includes?(\"DEBUG_MAIN\")` -> `false`
+  - Meaning:
+    - direct environment lookup works in generated binaries, but `ENV.keys`
+      iteration / membership is wrong.
+    - `@any_debug_like_env_set` / `@any_debug_env_set` fast paths are therefore
+      unreliable in self-hosted compilers, and env-gated diagnostics that depend
+      on them must be treated with caution until this runtime bug is isolated.
 
 ### Current checkpoint (2026-03-07 late)
 
