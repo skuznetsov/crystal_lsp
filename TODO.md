@@ -22,7 +22,141 @@ closure cells, Tuple ptr/value confusion.
 - [ ] **Phase 5: FIX RC-3** — String.build block lowering
 - [ ] **Phase 6: RE-ENABLE RTA + BOOTSTRAP** — stage0→stage1→stage2→stage3 + benchmark
 
+### Current checkpoint (2026-03-08 early)
+
+- Fresh current-source control rebuild:
+  - `/usr/bin/time -p scripts/build_stage1_original_debug.sh /private/tmp/stage1_dbg_current_genericsplit_20260308 --error-trace`
+    -> `real 11.27`
+  - Adjacent stage1 debug oracles stay green:
+    - `bash regression_tests/named_tuple_literal_index_repro.sh /private/tmp/stage1_dbg_current_genericsplit_20260308`
+      -> `stdout: ok / yy`, `not reproduced`
+    - `bash regression_tests/proc_block_capture_write_repro.sh /private/tmp/stage1_dbg_current_genericsplit_20260308`
+      -> `stdout: ok`, `not reproduced`
+    - `bash regression_tests/stage2_no_prelude_pointer_args_key_repro.sh /private/tmp/stage1_dbg_current_genericsplit_20260308`
+      -> `status: 0`, `not reproduced`
+- Fresh current-source self-hosted stage2 debug rebuild now succeeds:
+  - `/usr/bin/time -p scripts/build_stage2_debug.sh /private/tmp/stage1_dbg_current_genericsplit_20260308 /private/tmp/stage2_dbg_current_genericsplit_20260308`
+    -> `real 445.59`
+- Boundary shift verified on the fresh stage2 debug compiler:
+  - old `Missing named tuple key: :args` signature is gone on the focused Pointer oracle.
+  - `bash regression_tests/stage2_no_prelude_pointer_args_key_repro.sh /private/tmp/stage2_dbg_current_genericsplit_20260308`
+    now fails with
+    `error: Unsupported AST node type: CrystalV2::Compiler::Frontend::Node`.
+  - new faster oracle:
+    `bash regression_tests/stage2_no_prelude_literal_unsupported_node_repro.sh /private/tmp/stage2_dbg_current_genericsplit_20260308`
+    reproduces the same unsupported-node failure from a bare `1` under
+    `--no-prelude --no-link`.
+- Trace + LLDB localization on the fresh stage2 debug compiler:
+  - `DEBUG_LOWER_UNSUPPORTED=1 CRYSTAL2_COLLECT_TRACE=1 .../stage2_dbg_current_genericsplit_20260308 repro.cr --no-prelude --no-link`
+    on `1` logs:
+    - stage1 control: `[COLLECT] depth=0 expr=0 kind=Number ...`, compile succeeds
+    - stage2 debug: `[COLLECT] depth=0 expr=0 kind=8 ...`, then
+      `Unsupported AST node type: CrystalV2::Compiler::Frontend::Node`
+  - LLDB on the same stage2 debug binary breaks in
+    `Crystal::HIR::LoweringError.new(String)` with stack:
+    `lower_node -> lower_expr -> lower_main -> CLI#compile`
+- Current reading:
+  - the bundled generic/named-tuple fixes in the dirty worktree are sufficient to
+    remove the older `split_generic_base_and_args` / `:args` blocker and let a fresh
+    stage2 debug self-build finish.
+  - the active frontier has shifted back to AST type identity loss between frontend
+    collection and HIR lowering: `Frontend.node_kind(node)` still reports `Number`,
+    but `lower_node` sees the same value as abstract `Frontend::Node` and falls
+    through its concrete `case node` ladder.
+  - standalone stage1-generated runtime probes still show a narrower symptom
+    (`node.class.name => Node` while `case` and `as` keep working), so the fresh
+    stage2 compiler is worse than the broad language runtime baseline.
+  - the whole "small cast probe inside lower_node" family is ruled out:
+    - inline `node.as(NumberNode)` under a `node_kind == Number` guard fails stage1
+      compilation because `lower_node` is instantiated for concrete frontend node types
+      (`AssignNode`, `LibNode`, ...), and Crystal rejects impossible casts in those
+      instantiations.
+    - moving that cast into a helper typed as `Frontend::Node` still fails for the same
+      reason: the helper call itself is specialized at concrete call sites, so the
+      impossible cast is still proven during stage1 compilation.
+    - implication: any node-kind-dispatch fix must change the dispatch boundary more
+      globally (for example via a separately isolated dynamic wrapper), not by dropping a
+      tiny guarded cast into the existing generic `lower_node` body.
+
+### Current checkpoint (2026-03-08 late)
+
+- The isolated `lower_expr -> lower_node_dynamic` wrapper probe is ruled out.
+  - Experiment:
+    - temporarily wrapped only the arena-fetched `lower_node` call in a separate
+      dynamic helper behind `CRYSTAL2_DEBUG_NODE_KIND_LOWER=1`.
+    - the helper tested `Frontend.node_kind(node) == Number` and then routed
+      just that case into `lower_number(node.as(NumberNode))`.
+  - Verification:
+    - fresh wrapper branch rebuild:
+      `/usr/bin/time -p scripts/build_stage2_debug.sh /private/tmp/stage1_dbg_nodekind_wrapper_probe_20260308 /private/tmp/stage2_dbg_nodekind_wrapper_probe_20260308`
+      -> `real 466.26`
+    - guarded oracle:
+      `CRYSTAL2_DEBUG_NODE_KIND_LOWER=1 DEBUG_LOWER_UNSUPPORTED=1 CRYSTAL2_COLLECT_TRACE=1 scripts/timeout_sample_lldb.sh --timeout 20 --memory-limit 1024 --no-series --sample 1 --lldb-timeout 5 --top 8 -- /private/tmp/stage2_dbg_nodekind_wrapper_probe_20260308 repro.cr --no-prelude --no-link -o repro.o`
+      still logs `[COLLECT] depth=0 expr=0 kind=8 ...` and fails with
+      `error: Unsupported AST node type: CrystalV2::Compiler::Frontend::Node`.
+  - Meaning:
+    - a local wrapper around `lower_node` is not enough; the active failure is
+      deeper than the immediate `lower_expr` dispatch boundary.
+    - this branch should stay reverted rather than accumulating more local HIR
+      shims.
+
+- Verified dispatch asymmetry that explains misleading helper signals:
+  - tiny standalone probe on the current compiler with
+    `node = NumberNode.new.as(Node)` shows:
+    - no fallback overload:
+      `def self.kind(node : NumberNode)` -> `1`
+    - with fallback overload:
+      `def self.kind(node : NumberNode)` plus `def self.kind(node : Node)` -> `0`
+    - runtime narrowing still works in the same program:
+      `node.is_a?(NumberNode)` -> `10`, `case node; when NumberNode` -> `30`
+  - Reading:
+    - helper-overload dispatch, helper fallback dispatch, and runtime class
+      narrowing are three different mechanisms in the current compiler.
+    - therefore `Frontend.node_kind(node)` cannot be treated as equivalent
+      evidence for what `case node` or fallback helpers will do on the same
+      self-hosted value.
+
 ### Current checkpoint (2026-03-07 late)
+
+- 2026-03-07 late-night TypedNode union branch was explored and rejected as a
+  root-cause fix for the current stage2 no-prelude instability.
+  - Experiment:
+    - temporarily changed `Frontend::TypedNode` from `Node` to a concrete union
+      of all frontend node classes and tried to carry that union into HIR
+      lowering (`AstToHir::AstNode = Frontend::TypedNode`).
+    - added focused helper adaptations (`node_literal`, `node_number_kind`) and
+      tiny no-prelude oracles around `1`, `foo = 1`,
+      `{base: "Pointer", args: "UInt8"}`, and
+      `x : Pointer(UInt8) = Pointer(UInt8).null`.
+  - Verified observations:
+    - fresh stage1 control with the union branch compiles `1` under
+      `--no-prelude --no-link` correctly (`[COLLECT] kind=Number`, MIR funcs `1`).
+    - stage2 built from the same source also self-builds successfully, so the
+      branch is not syntactically or bootstrap-trivially broken.
+    - but the produced stage2 still fails on the minimal oracle:
+      `1` logs `[COLLECT] kind=8` / `Number` and then hits unsupported-node
+      lowering.
+    - after switching `AstToHir::AstNode` to the union, the failure surface
+      changes from `Frontend::Node` to the full `TypedNode` union name, proving
+      the value reaches HIR as the union type, but `case node` still falls
+      through every concrete `when`.
+    - helper-based extraction is not a clean escape hatch:
+      `node_kind(node)` still reports `Number`, but helper fallbacks that use
+      `case node` return `nil`, and a discriminant-guarded
+      `unsafe_as(NumberNode)` probe segfaults immediately in stage2.
+  - Conclusion:
+    - the current self-hosted stage2 mishandles large AST union values more
+      deeply than simple helper-overload shadowing.
+    - `TypedNode = <big union>` is therefore a dead-end workaround for the
+      active stage2 bug set and should stay reverted until union lowering/runtime
+      semantics are understood independently.
+  - Perf note:
+    - on the `unsafe_as` predecessor branch, `stage1 debug -> stage2 debug`
+      timed out under `scripts/timeout_sample_lldb.sh --timeout 900`.
+    - hotspot sample pointed to compile-time blow-up in
+      `String#==`, `LLVMTypeMapper#mangle_name_uncached`, `String#byte_slice?`,
+      confirming that release-driven validation is the right outer loop once the
+      hypothesis is narrowed.
 
 - Added focused runtime oracle `regression_tests/primitive_template_digits_runtime_repro.sh`.
   - Repro keeps the signal on positional `Int#to_s` variants only:
