@@ -46024,14 +46024,32 @@ module Crystal::HIR
                     if suffix = method_suffix(target_for_lower)
                       expects_block_new = suffix == "block" || suffix.ends_with?("_block")
                     end
-                    matched = lookup_function_def_for_call(
-                      base_new,
-                      call_arg_types.not_nil!.size,
-                      expects_block_new,
-                      call_arg_types
-                    )
+                    matched : Tuple(String, CrystalV2::Compiler::Frontend::DefNode)? = nil
+                    call_has_named_new = false
+                    if exact_def = @function_defs[target_for_lower]?
+                      exact_stats = function_param_stats(target_for_lower, exact_def)
+                      call_has_named_new = exact_stats.has_named_only
+                      param_count, required, has_splat, has_double_splat, skip =
+                        effective_arity_stats_for_call(exact_stats, call_has_named_new)
+                      exact_matches = !skip &&
+                                      (expects_block_new ? exact_stats.has_block : !exact_stats.has_block) &&
+                                      call_arg_types.not_nil!.size >= required &&
+                                      (call_arg_types.not_nil!.size <= param_count || has_splat || has_double_splat) &&
+                                      params_compatible_with_args?(exact_def, call_arg_types.not_nil!, function_context_from_name(target_for_lower))
+                      matched = {target_for_lower, exact_def} if exact_matches
+                    end
                     unless matched
-                      generate_allocator(owner, class_info, call_arg_types)
+                      matched = lookup_function_def_for_call(
+                        base_new,
+                        call_arg_types.not_nil!.size,
+                        expects_block_new,
+                        call_arg_types,
+                        false,
+                        call_has_named_new
+                      )
+                    end
+                    unless matched
+                      generate_allocator(owner, class_info, call_arg_types, call_has_named_args: call_has_named_new)
                       return
                     end
                   elsif !explicit_new
@@ -46556,6 +46574,8 @@ module Crystal::HIR
       proc_return_type_name : String? = nil
       cached_callsite_key : String? = nil
       explicit_self_receiver = false
+      prefer_allocator_new_call = false
+      constructor_arg_binding_name : String? = nil
 
       case callee_node
       when CrystalV2::Compiler::Frontend::IdentifierNode
@@ -46591,10 +46611,14 @@ module Crystal::HIR
         if current_is_class && (current = @current_class) && method_name == "new"
           full_method_name = "#{current}.#{method_name}"
           static_class_name = current
+          prefer_allocator_new_call = true
+          constructor_arg_binding_name = resolve_method_with_inheritance(current, "initialize") || "#{current}#initialize"
         end
         if @current_method == "new" && (current = @current_class) && method_name == "new"
           full_method_name = "#{current}.#{method_name}"
           static_class_name = current
+          prefer_allocator_new_call = true
+          constructor_arg_binding_name = resolve_method_with_inheritance(current, "initialize") || "#{current}#initialize"
         end
         # Bare `new()` inside constant initialization (e.g., Time::Location::UTC = new("UTC", ...))
         # @current_class is set by deferred constant init processing but current_is_class
@@ -46602,6 +46626,8 @@ module Crystal::HIR
         if full_method_name.nil? && method_name == "new" && (current = @current_class)
           full_method_name = "#{current}.#{method_name}"
           static_class_name = current
+          prefer_allocator_new_call = true
+          constructor_arg_binding_name = resolve_method_with_inheritance(current, "initialize") || "#{current}#initialize"
         end
         # Handle qualified calls like Int32.to_s that may appear as IdentifierNodes
         # (e.g., from macro expansion or type-literal printing).
@@ -48633,6 +48659,7 @@ module Crystal::HIR
       has_splat = with_arena(call_arena) do
         call_args.any? { |arg_id| @arena[arg_id].is_a?(CrystalV2::Compiler::Frontend::SplatNode) }
       end
+      arg_binding_full_method_name = constructor_arg_binding_name || full_method_name
       args = with_arena(call_arena) do
         if DebugHooks::ENABLED && block_pass_expr
           kind = CrystalV2::Compiler::Frontend.node_kind(@arena[block_pass_expr])
@@ -48645,11 +48672,11 @@ module Crystal::HIR
           STDERR.puts "[SPLAT_TRACE_ARGS] #{@last_splat_context || "func=#{ctx.function.name}"} args=#{kinds.join(",")}"
         end
         args_result = if named_args = node.named_args
-                        reorder_named_args(ctx, call_args, named_args, method_name, full_method_name, has_block_call, call_arena)
+                        reorder_named_args(ctx, call_args, named_args, method_name, arg_binding_full_method_name, has_block_call, call_arena)
                       elsif has_splat
                         expand_splat_args(ctx, call_args, call_arena)
                       else
-                        lower_args_with_expected_types(ctx, call_args, method_name, full_method_name, has_block_call, call_arena)
+                        lower_args_with_expected_types(ctx, call_args, method_name, arg_binding_full_method_name, has_block_call, call_arena)
                       end
         if debug_env_filter_match?("DEBUG_CALL_TRACE", method_name, method_name, full_method_name || "")
           STDERR.puts "[CALL_TRACE] stage=with_arena_done method=#{method_name} args=#{args_result.size} receiver=#{!!receiver_id} full=#{full_method_name || ""}"
@@ -48659,7 +48686,8 @@ module Crystal::HIR
       if debug_env_filter_match?("DEBUG_CALL_TRACE", method_name, method_name, full_method_name || "")
         STDERR.puts "[CALL_TRACE] stage=after_args method=#{method_name} args=#{args.size} receiver=#{!!receiver_id} full=#{full_method_name || ""}"
       end
-      args = apply_default_args(ctx, args, method_name, full_method_name, has_block_call, has_named_args, receiver_id)
+      args, has_named_args = apply_default_args(ctx, args, method_name, arg_binding_full_method_name, has_block_call, has_named_args, receiver_id)
+      has_named_args = false if constructor_arg_binding_name
       if debug_env_filter_match?("DEBUG_CALL_TRACE", method_name, method_name, full_method_name || "")
         STDERR.puts "[CALL_TRACE] stage=after_defaults method=#{method_name} args=#{args.size} receiver=#{!!receiver_id} full=#{full_method_name || ""}"
       end
@@ -49523,7 +49551,7 @@ module Crystal::HIR
       # Refine class/module method resolution using concrete arg types once available.
       if receiver_id.nil? && full_method_name
         call_has_splat = call_args.any? { |arg_expr| call_arena[arg_expr].is_a?(CrystalV2::Compiler::Frontend::SplatNode) }
-        call_has_named_args = node.named_args.try(&.empty?) == false
+        call_has_named_args = has_named_args
         has_block_call = !!block_expr || !!block_pass_expr
         if entry = lookup_function_def_for_call(full_method_name, arg_types.size, has_block_call, arg_types, call_has_splat, call_has_named_args)
           full_method_name = entry[0]
@@ -50027,10 +50055,14 @@ module Crystal::HIR
             class_name = resolved_class_name
           end
           if class_info = @class_info[class_name]?
-            generate_allocator(class_name, class_info, arg_types)
+            generate_allocator(class_name, class_info, arg_types, call_has_named_args: has_named_args)
           end
         end
-        explicit_match = lookup_function_def_for_call(full_method_name, args.size, has_block_call, arg_types, false, has_named_args)
+        explicit_match = if prefer_allocator_new_call
+                           nil
+                         else
+                           lookup_function_def_for_call(full_method_name, args.size, has_block_call, arg_types, false, has_named_args)
+                         end
         explicit_new = !!explicit_match
         if explicit_new && explicit_match
           matched_def = explicit_match[1]

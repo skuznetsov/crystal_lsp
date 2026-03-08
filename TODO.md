@@ -118,6 +118,62 @@ closure cells, Tuple ptr/value confusion.
       dynamic helper behind `CRYSTAL2_DEBUG_NODE_KIND_LOWER=1`.
     - the helper tested `Frontend.node_kind(node) == Number` and then routed
       just that case into `lower_number(node.as(NumberNode))`.
+
+### Current checkpoint (2026-03-08 latest)
+
+- Verified `.new` root-cause slice fixed on the current worktree:
+  - bare internal `new(...)` in class / constant-init context was still using
+    explicit `.new` overload metadata for named/default-arg binding;
+  - for `Time::Span.self.new(*, days..., nanoseconds...)`, that meant the inner
+    bare `new(seconds: ..., nanoseconds: ...)` rebound to the same 5-arg wrapper,
+    producing self-recursive HIR instead of the allocator path;
+  - fix in `src/compiler/hir/ast_to_hir.cr`:
+    - keep explicit `.new` matching for real static calls,
+    - but when the call is an internal bare constructor, bind named/default args
+      against `#initialize`,
+    - then clear named-arg semantics before the later `.new` lookup so the call
+      resolves to the allocator-backed overload, not back to explicit `self.new`.
+- Focused verification:
+  - new oracle:
+    - `bash regression_tests/stage1_time_span_bare_new_ctor_repro.sh /private/tmp/stage1_rel_bare_new_ctor_fix_20260308`
+      -> `not reproduced`
+  - HIR evidence on fresh debug/release stage1:
+    - `Time::Span.new$Int32_Int32_Int32_Int32_Int32` now calls
+      `Time::Span.new$Int64_Int32`, and `Time::Span.new$Int64_Int32` is the
+      allocator body (`allocate (struct)` + `Time::Span#initialize...`);
+    - previous recursive back-edge to `Time::Span.new$Int32_Int32_Int32_Int32_Int32`
+      is gone.
+  - adjacent guard still green:
+    - `bash regression_tests/string_new_ptr_size_local_repro.sh /private/tmp/stage1_rel_bare_new_ctor_fix_20260308`
+      -> `not reproduced`
+- Fresh requested release timings on this fix:
+  - `stage1 --release`:
+    - `/usr/bin/time -p scripts/build_stage1_original_release.sh /private/tmp/stage1_rel_bare_new_ctor_fix_20260308`
+      -> `real 434.08`
+  - `stage2 --release`:
+    - `/usr/bin/time -p scripts/build_stage2_release.sh /private/tmp/stage1_rel_bare_new_ctor_fix_20260308 /private/tmp/stage2_rel_bare_new_ctor_fix_20260308`
+      -> `real 178.51`
+  - current measured speedup:
+    - `stage1/stage2 ~= 2.43x`
+- Boundary shift / remaining blocker:
+  - the old self-hosted startup hang is gone:
+    - fresh stage1 release binary accepts normal CLI flow and fully builds stage2;
+    - the failed `--error-trace` retry now exits immediately with `unknown option`,
+      which confirms the process reaches normal CLI parsing instead of dying in the
+      old `Time::Span` startup loop.
+  - but the deeper require-path corruption family remains active:
+    - `bash regression_tests/stage2_require_literal_empty_path_repro.sh /private/tmp/stage2_rel_bare_new_ctor_fix_20260308`
+      still reproduces `main.cr reqs=0`, `Source require fallback entries=1`,
+      `status: 139`;
+    - guarded `stage3` attempt:
+      - `scripts/timeout_sample_lldb.sh -t 420 -m 32768 -s 8 -n 10 -o /tmp/stage3_rel_bare_new_ctor_fix_probe -- bash -lc '/usr/bin/time -p scripts/build_stage2_release.sh /private/tmp/stage2_rel_bare_new_ctor_fix_20260308 /private/tmp/stage3_rel_bare_new_ctor_fix_20260308'`
+      - result: immediate `status=139` (no timeout, no OOM); `stage3` binary not produced.
+- Current reading:
+  - this pass produced a real constructor-lowering fix and restores full
+    `stage1 -> stage2` release bootstrap on the current tree;
+  - active frontier is no longer the `Time::Span` / bare-constructor recursion
+    branch, but the already-known self-hosted require literal / AST corruption
+    branch that still kills stage2 on focused repros and stage3 almost immediately.
   - Verification:
     - fresh wrapper branch rebuild:
       `/usr/bin/time -p scripts/build_stage2_debug.sh /private/tmp/stage1_dbg_nodekind_wrapper_probe_20260308 /private/tmp/stage2_dbg_nodekind_wrapper_probe_20260308`
