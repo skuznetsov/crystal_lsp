@@ -241,6 +241,55 @@ closure cells, Tuple ptr/value confusion.
     early-stage3 crash, so the next branch should debug that new crash directly
     instead of continuing to chase empty require paths.
 
+### Current checkpoint (2026-03-08 all-ref union layout finalization)
+
+- Verified root-cause slice fixed on the current worktree:
+  - the earlier pointer-backed array union fix was necessary but not sufficient.
+    `register_union_types(...)` still ran before class/container registration, so
+    all-ref unions like `A | B` were classified too early and kept the stale
+    discriminated `size = 16` MIR layout even after runtime/LLVM paths already
+    treated them as raw pointers.
+  - focused IR on `Array(A | B)` proved the mismatch directly:
+    - `__crystal_main` allocated/read the backing buffer with pointer stride
+      (`malloc64(32)` for capacity 4, `getelementptr ptr` loads),
+    - but specialized generic methods still multiplied indexes by `16` in
+      `Array(A | B)#push` and `Array(A | B)#unsafe_fetch`.
+  - fix in `src/compiler/mir/hir_to_mir.cr`:
+    - keep pointer-sized layout for currently-known all-ref unions during
+      `register_union_types(...)`,
+    - then run `finalize_pointer_backed_union_layouts` at the start of MIR
+      lowering, after class/container registration has populated the type
+      registry, so stale all-ref unions are normalized to pointer size.
+- Focused verification:
+  - new oracle:
+    - `bash regression_tests/array_all_ref_union_runtime_repro.sh /private/tmp/stage1_dbg_all_ref_union_layout_fix2_20260308`
+      -> `stdout: true / true / A | B / 2`,
+      `not reproduced: stride crash fixed, residual class.name still reports union`
+  - fresh requested release timings on the fix:
+    - `/usr/bin/time -p scripts/build_stage1_original_release.sh /private/tmp/stage1_rel_all_ref_union_layout_fix2_20260308`
+      -> `real 440.54`
+    - `/usr/bin/time -p scripts/build_stage2_release.sh /private/tmp/stage1_rel_all_ref_union_layout_fix2_20260308 /private/tmp/stage2_rel_all_ref_union_layout_fix2_20260308`
+      -> `real 182.18`
+    - current measured speedup:
+      - `stage1/stage2 ~= 2.42x`
+  - adjacent guards stay green on the fresh compiler:
+    - `bash regression_tests/hash_array_tuple_union_array_tid_repro.sh /private/tmp/stage1_dbg_all_ref_union_layout_fix2_20260308`
+      -> `not reproduced`
+    - `bash regression_tests/string_new_ptr_size_local_repro.sh /private/tmp/stage1_dbg_all_ref_union_layout_fix2_20260308`
+      -> `not reproduced`
+  - stage2 frontier is unchanged:
+    - `bash regression_tests/stage2_require_literal_hir_lowering_crash_repro.sh /private/tmp/stage2_rel_all_ref_union_layout_fix2_20260308`
+      still reproduces the later self-hosted HIR-lowering crash.
+- Current reading:
+  - this is a real correctness/runtime fix for stale MIR union layout metadata,
+    not a stage2 frontier fix by itself;
+  - the remaining visible residual on the focused oracle is narrower:
+    `value.class.name` still prints the union name (`A | B`) even though
+    `is_a?`, `case`, and field dispatch now work;
+  - the active bootstrap blocker remains the later stage2 HIR-lowering /
+    early-stage3 crash, so the next branch should keep using the stage2 focused
+    repros rather than revisiting this resolved stride mismatch.
+
 - Verified dispatch asymmetry that explains misleading helper signals:
   - tiny standalone probe on the current compiler with
     `node = NumberNode.new.as(Node)` shows:

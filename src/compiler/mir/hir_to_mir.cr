@@ -120,6 +120,8 @@ module Crystal
     # ─────────────────────────────────────────────────────────────────────────
 
     def lower(progress : Bool = false) : Crystal::MIR::Module
+      finalize_pointer_backed_union_layouts
+
       # Two-pass approach for forward references:
       # Pass 1: Create all function stubs (for call resolution)
       # Track which functions we've created stubs for (avoid duplicates from methods with/without blocks)
@@ -229,16 +231,22 @@ module Crystal
         # Register descriptor in MIR module (for debug info / LLVM metadata)
         @mir_module.register_union(mir_type_ref, descriptor)
 
-        # Calculate union size and alignment
-        max_variant_size = descriptor.variants.map(&.size).max? || 0
-        # Ensure payload is at least pointer-sized (8 bytes) to match LLVM type
-        # emission and prevent overflow from `store ptr` codegen patterns.
-        max_variant_size = {max_variant_size, 8}.max
-        alignment = descriptor.alignment.to_u32
+        # All-ref unions use the raw object pointer as their runtime value.
+        # Keeping a stale discriminated-union size here makes Pointer(T)/Array(T)
+        # arithmetic scale by 16 instead of pointer size.
+        alignment = pointer_word_align_u32
+        total_size = pointer_word_bytes_u64
+        unless all_ref_union_descriptor?(descriptor)
+          max_variant_size = descriptor.variants.map(&.size).max? || 0
+          # Ensure payload is at least pointer-sized (8 bytes) to match LLVM type
+          # emission and prevent overflow from `store ptr` codegen patterns.
+          max_variant_size = {max_variant_size, 8}.max
+          alignment = descriptor.alignment.to_u32
 
-        # Total size: 4 bytes for type_id + padding + max payload
-        payload_offset = ((4 + alignment - 1) // alignment) * alignment
-        total_size = payload_offset + max_variant_size
+          # Total size: 4 bytes for type_id + padding + max payload
+          payload_offset = ((4 + alignment - 1) // alignment) * alignment
+          total_size = payload_offset + max_variant_size
+        end
 
         # Create union type in TypeRegistry with the SAME TypeRef id
         # so that llvm_type lookup finds it
@@ -588,6 +596,29 @@ module Crystal
       {% else %}
         8
       {% end %}
+    end
+
+    private def all_ref_union_descriptor?(descriptor : UnionDescriptor) : Bool
+      descriptor.variants.all? do |variant|
+        next true if variant.type_ref == TypeRef::NIL || variant.type_ref == TypeRef::VOID
+        runtime_pointer_backed_union_variant?(@mir_module.type_registry.get(variant.type_ref))
+      end
+    end
+
+    private def runtime_pointer_backed_union_variant?(type : Type?) : Bool
+      return false unless type
+      type.kind.reference? || type.kind.array?
+    end
+
+    private def finalize_pointer_backed_union_layouts : Nil
+      @mir_module.union_descriptors.each do |type_ref, descriptor|
+        next unless all_ref_union_descriptor?(descriptor)
+        next unless mir_type = @mir_module.type_registry.get(type_ref)
+        next unless mir_type.kind.union?
+
+        mir_type.size = pointer_word_bytes_u64
+        mir_type.alignment = pointer_word_align_u32
+      end
     end
 
     private def container_elem_storage_size_u64(elem_type : Type?) : UInt64
