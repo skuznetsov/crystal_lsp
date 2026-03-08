@@ -22,6 +22,72 @@ closure cells, Tuple ptr/value confusion.
 - [ ] **Phase 5: FIX RC-3** — String.build block lowering
 - [ ] **Phase 6: RE-ENABLE RTA + BOOTSTRAP** — stage0→stage1→stage2→stage3 + benchmark
 
+### Current checkpoint (2026-03-08 ctor default-object wrapper)
+
+- Verified a real constructor-wrapper default-arg fix on the current worktree:
+  - focused oracle:
+    - `bash regression_tests/ctor_default_object_arg_repro.sh /private/tmp/stage1_rel_inline_break_fix3_20260308`
+      -> `stdout: 0 / 0 / -1`, `reproduced: constructor wrapper padded object default arg with null`
+  - emitted LLVM on the stale control showed the exact bad shape:
+    - `EngineLike$Dnew$$Int32_Int32_Int32` called
+      `EngineLike#initialize(..., ptr null)` directly;
+    - the missing `@ctx : Ctx = Ctx.new` default was never materialized in HIR,
+      so LLVM backend arg-padding filled it with `null`.
+  - source comparison with original Crystal:
+    - `../crystal/src/compiler/crystal/semantic/new.cr`
+      expands `.new` from `#initialize`, which means wrapper-owned default
+      materialization is the correct layer, not backend null-padding.
+  - final fix in `src/compiler/hir/ast_to_hir.cr`:
+    - synthetic allocator overloads now call `apply_default_args(...)` before
+      forwarding to `#initialize`;
+    - this materializes missing object defaults in the wrapper body instead of
+      relying on LLVM backend zero/null padding.
+- Focused verification:
+  - fresh debug stage1:
+    - `/usr/bin/time -p scripts/build_stage1_original_debug.sh /private/tmp/stage1_dbg_ctor_default_fix_20260308`
+      -> `real 9.79`
+    - `bash regression_tests/ctor_default_object_arg_repro.sh /private/tmp/stage1_dbg_ctor_default_fix_20260308`
+      -> `stdout: 0 / 0 / 42`, `not reproduced`
+    - emitted LLVM on the fresh debug compiler now shows:
+      - `%r17 = call ptr @Ctx$Dnew(i32 42)`
+      - `call void @EngineLike$Hinitialize...(ptr %r3, ..., ptr %r17)`
+      instead of the old `ptr null`.
+  - adjacent debug adversary checks stay green:
+    - `bash regression_tests/stage1_time_span_bare_new_ctor_repro.sh /private/tmp/stage1_dbg_ctor_default_fix_20260308`
+      -> `not reproduced`
+    - `bash regression_tests/string_new_ptr_size_local_repro.sh /private/tmp/stage1_dbg_ctor_default_fix_20260308`
+      -> `stdout: 5`, `not reproduced`
+- Fresh release verification:
+  - `stage1 --release`:
+    - `/usr/bin/time -p scripts/build_stage1_original_release.sh /private/tmp/stage1_rel_ctor_default_fix_20260308`
+      -> `real 441.92`
+  - `stage2 --release`:
+    - `/usr/bin/time -p scripts/timeout_sample_lldb.sh -t 420 -m 16384 --no-series --no-lldb -o /tmp/stage2_rel_ctor_default_fix_probe -- scripts/build_stage2_release.sh /private/tmp/stage1_rel_ctor_default_fix_20260308 /private/tmp/stage2_rel_ctor_default_fix_20260308`
+      -> `status 0`, `real 202.03`
+  - current measured speedup:
+    - `stage1/stage2 ~= 2.19x`
+  - fresh release oracles:
+    - `bash regression_tests/ctor_default_object_arg_repro.sh /private/tmp/stage1_rel_ctor_default_fix_20260308`
+      -> `stdout: 0 / 0 / 42`, `not reproduced`
+    - `bash regression_tests/stage1_time_span_bare_new_ctor_repro.sh /private/tmp/stage1_rel_ctor_default_fix_20260308`
+      -> `not reproduced`
+    - `bash regression_tests/string_new_ptr_size_local_repro.sh /private/tmp/stage1_rel_ctor_default_fix_20260308`
+      -> `stdout: 5`, `not reproduced`
+  - broad regression sweep:
+    - `/usr/bin/time -p regression_tests/run_all.sh /private/tmp/stage1_rel_ctor_default_fix_20260308`
+      -> `67 passed, 0 failed`, `real 295.80`
+- Boundary / remaining blocker:
+  - this fix is real and bootstrap-safe for `stage1 -> stage2`, but it does not
+    clear the current self-hosted frontier.
+  - fresh stage2 release still reproduces:
+    - `bash regression_tests/stage2_parse_prelude_nocodegen_crash_repro.sh /private/tmp/stage2_rel_ctor_default_fix_20260308`
+      -> `status: 139`
+    - even the new focused ctor-default oracle crashes on the same stage2 binary
+      while parsing `prelude.cr` / `lib_c.cr`, before it can test the user program.
+  - guarded `stage2 -> stage3` remains an immediate crash:
+    - `scripts/timeout_sample_lldb.sh -t 420 -m 24576 --no-series --no-lldb -o /tmp/stage3_rel_ctor_default_fix_probe -- bash -lc '/usr/bin/time -p scripts/build_stage2_release.sh /private/tmp/stage2_rel_ctor_default_fix_20260308 /private/tmp/stage3_rel_ctor_default_fix_20260308'`
+      -> `status 139`, command log stops after `prelude.cr` / `lib_c.cr`, `real 0.03`
+
 ### Current checkpoint (2026-03-08 inline iterator break boundary)
 
 - Verified a real control-flow writeback fix on the current worktree:

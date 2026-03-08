@@ -18150,7 +18150,20 @@ module Crystal::HIR
             end
           end
         end
-        init_call = Call.new(ctx.next_id, TypeRef::VOID, alloc.id, init_name, param_ids)
+        # Original Crystal expands `.new` from `#initialize`, so missing defaults are
+        # materialized in the wrapper before the body forwards to `initialize`.
+        # If we skip that here, the LLVM backend pads missing args with 0/null and
+        # object defaults like `Ctx.new` silently degrade to `ptr null`.
+        init_call_args, _ = apply_default_args(
+          ctx,
+          param_ids.dup,
+          init_base_name,
+          init_name,
+          false,
+          call_has_named_args,
+          alloc.id
+        )
+        init_call = Call.new(ctx.next_id, TypeRef::VOID, alloc.id, init_name, init_call_args)
         ctx.emit(init_call)
       end
 
