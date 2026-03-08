@@ -103,13 +103,14 @@ module CrystalV2
       # Numeric value (Int or Float)
       class MacroNumberValue < MacroValue
         getter value : Int64 | Float64
+        getter source_literal : String?
 
-        def initialize(value : Int32 | Int64 | Float32 | Float64)
+        def initialize(value : Int32 | Int64 | Float32 | Float64, @source_literal : String? = nil)
           @value = value.is_a?(Float32 | Float64) ? value.to_f64 : value.to_i64
         end
 
         def to_macro_output : String
-          @value.to_s
+          @source_literal || @value.to_s
         end
 
         def to_i : Int64
@@ -125,6 +126,30 @@ module CrystalV2
         end
 
         def type_name : String
+          if literal = @source_literal
+            case
+            when literal.ends_with?("_i8") || literal.ends_with?("i8")
+              return "Int8"
+            when literal.ends_with?("_i16") || literal.ends_with?("i16")
+              return "Int16"
+            when literal.ends_with?("_i32") || literal.ends_with?("i32")
+              return "Int32"
+            when literal.ends_with?("_i64") || literal.ends_with?("i64")
+              return "Int64"
+            when literal.ends_with?("_u8") || literal.ends_with?("u8")
+              return "UInt8"
+            when literal.ends_with?("_u16") || literal.ends_with?("u16")
+              return "UInt16"
+            when literal.ends_with?("_u32") || literal.ends_with?("u32")
+              return "UInt32"
+            when literal.ends_with?("_u64") || literal.ends_with?("u64")
+              return "UInt64"
+            when literal.ends_with?("_f32") || literal.ends_with?("f32")
+              return "Float32"
+            when literal.ends_with?("_f64") || literal.ends_with?("f64")
+              return "Float64"
+            end
+          end
           @value.is_a?(Float64) ? "Float64" : "Int64"
         end
 

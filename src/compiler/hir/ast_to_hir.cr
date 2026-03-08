@@ -5010,7 +5010,8 @@ module Crystal::HIR
         macro_name,
         macro_def.body,
         macro_def.body,
-        macro_params
+        macro_params,
+        macro_def.params
       )
 
       program = CrystalV2::Compiler::Frontend::Program.new(macro_arena, [] of ExprId)
@@ -5032,6 +5033,22 @@ module Crystal::HIR
         named_args: normalized_named,
         block_id: block_id
       )
+      if env_get("DEBUG_MACRO_EXPANDED_SHAPE") && !expanded_id.invalid? && macro_name == "[]"
+        expanded_node = macro_arena[expanded_id]
+        STDERR.puts "[MACRO_EXPANDED_SHAPE] name=#{macro_name} root=#{expanded_node.class.name} id=#{expanded_id.index}"
+        case expanded_node
+        when CrystalV2::Compiler::Frontend::BlockNode
+          expanded_node.body.each_with_index do |child_id, idx|
+            child = macro_arena[child_id]
+            STDERR.puts "[MACRO_EXPANDED_SHAPE] child#{idx}=#{child.class.name}"
+          end
+        when CrystalV2::Compiler::Frontend::BeginNode
+          expanded_node.body.each_with_index do |child_id, idx|
+            child = macro_arena[child_id]
+            STDERR.puts "[MACRO_EXPANDED_SHAPE] child#{idx}=#{child.class.name}"
+          end
+        end
+      end
       if debug_macro_result
         if expanded_id.invalid?
           diag_messages = expander.diagnostics.map(&.message).join(" | ")
@@ -5078,16 +5095,11 @@ module Crystal::HIR
     end
 
     # Expand a macro call inline using the full macro expander.
-    private def expand_macro(
+    private def lower_expanded_macro_result(
       ctx : LoweringContext,
-      macro_def : CrystalV2::Compiler::Frontend::MacroDefNode,
       macro_arena : CrystalV2::Compiler::Frontend::ArenaLike,
-      args : Array(ExprId),
-      named_args : Array(CrystalV2::Compiler::Frontend::NamedArgument)?,
-      block_id : ExprId?,
-      macro_key : String,
+      expanded_id : ExprId,
     ) : ValueId
-      expanded_id = expand_macro_expr(macro_def, macro_arena, args, named_args, block_id, macro_key)
       if expanded_id.invalid?
         nil_lit = Literal.new(ctx.next_id, TypeRef::NIL, nil)
         ctx.emit(nil_lit)
@@ -5106,6 +5118,69 @@ module Crystal::HIR
       ensure
         @arena = old_arena
       end
+    end
+
+    private def expand_macro(
+      ctx : LoweringContext,
+      macro_def : CrystalV2::Compiler::Frontend::MacroDefNode,
+      macro_arena : CrystalV2::Compiler::Frontend::ArenaLike,
+      args : Array(ExprId),
+      named_args : Array(CrystalV2::Compiler::Frontend::NamedArgument)?,
+      block_id : ExprId?,
+      macro_key : String,
+    ) : ValueId
+      expanded_id = expand_macro_expr(macro_def, macro_arena, args, named_args, block_id, macro_key)
+      lower_expanded_macro_result(ctx, macro_arena, expanded_id)
+    end
+
+    private def with_macro_owner_context(owner_name : String)
+      old_class = @current_class
+      old_type_param_map = @type_param_map.not_nil!.dup
+
+      effective_owner = owner_name
+      new_type_param_map = old_type_param_map
+
+      if info = split_generic_base_and_args(owner_name)
+        if template = @generic_templates[info.base]?
+          owner_args = split_generic_type_args(info.args)
+          if !owner_args.empty?
+            new_type_param_map = old_type_param_map.dup
+            template.type_params.each_with_index do |param_name, idx|
+              next unless arg_name = owner_args[idx]?
+              resolved_arg = resolve_type_alias_chain(substitute_type_params_in_type_name(arg_name))
+              new_type_param_map[param_name] = resolved_arg
+            end
+          end
+        end
+      elsif template = @generic_templates[owner_name]?
+        if !template.type_params.empty?
+          effective_owner = "#{owner_name}(#{template.type_params.join(", ")})"
+        end
+      end
+
+      @current_class = effective_owner
+      @type_param_map = new_type_param_map
+      yield
+    ensure
+      @current_class = old_class
+      @type_param_map = old_type_param_map.not_nil!
+    end
+
+    private def expand_macro_for_owner(
+      ctx : LoweringContext,
+      macro_def : CrystalV2::Compiler::Frontend::MacroDefNode,
+      macro_arena : CrystalV2::Compiler::Frontend::ArenaLike,
+      args : Array(ExprId),
+      named_args : Array(CrystalV2::Compiler::Frontend::NamedArgument)?,
+      block_id : ExprId?,
+      macro_key : String,
+      owner_name : String,
+    ) : ValueId
+      expanded_id = ExprId.new(-1)
+      with_macro_owner_context(owner_name) do
+        expanded_id = expand_macro_expr(macro_def, macro_arena, args, named_args, block_id, macro_key)
+      end
+      lower_expanded_macro_result(ctx, macro_arena, expanded_id)
     end
 
     private def normalize_macro_call_args(
@@ -5544,30 +5619,52 @@ module Crystal::HIR
 
     private def macro_owner_type_for(class_name : String) : CrystalV2::Compiler::Semantic::ClassSymbol?
       info = @class_info[class_name]?
-      return nil unless info
+      template : GenericClassTemplate? = nil
+      symbol_name = class_name
+      method_owner_name = class_name
+
+      unless info
+        if split = split_generic_base_and_args(class_name)
+          template = @generic_templates[split.base]?
+          method_owner_name = split.base if template
+        else
+          template = @generic_templates[class_name]?
+          if template && !template.type_params.empty?
+            symbol_name = "#{class_name}(#{template.type_params.join(", ")})"
+          end
+        end
+      end
+
+      return nil unless info || template
+
+      superclass_name = info.try(&.parent_name)
+      type_parameters = template.try(&.type_params)
+      is_struct = info ? info.is_struct : template.not_nil!.is_struct
 
       scope = CrystalV2::Compiler::Semantic::SymbolTable.new
       class_scope = CrystalV2::Compiler::Semantic::SymbolTable.new
 
       symbol = CrystalV2::Compiler::Semantic::ClassSymbol.new(
-        class_name,
+        symbol_name,
         ExprId.new(-1),
         scope: scope,
         class_scope: class_scope,
-        superclass_name: info.parent_name,
-        type_parameters: nil,
-        is_struct: info.is_struct,
+        superclass_name: superclass_name,
+        type_parameters: type_parameters,
+        is_struct: is_struct,
         is_abstract: false
       )
 
-      info.ivars.each do |ivar|
-        type_name = type_name_for_macro(ivar.type)
-        ivar_name = ivar.name
-        ivar_name = ivar_name[1..-1] if ivar_name.starts_with?('@')
-        symbol.add_instance_var(ivar_name, type_name, nil, false)
+      if info
+        info.ivars.each do |ivar|
+          type_name = type_name_for_macro(ivar.type)
+          ivar_name = ivar.name
+          ivar_name = ivar_name[1..-1] if ivar_name.starts_with?('@')
+          symbol.add_instance_var(ivar_name, type_name, nil, false)
+        end
       end
 
-      instance_method_names_for_class(class_name).each do |method_name|
+      instance_method_names_for_class(method_owner_name).each do |method_name|
         method_scope = CrystalV2::Compiler::Semantic::SymbolTable.new(scope)
         method_symbol = CrystalV2::Compiler::Semantic::MethodSymbol.new(
           method_name,
@@ -5894,6 +5991,38 @@ module Crystal::HIR
     # This handles the case where parser stores typeof(...) as an identifier name
     private def resolve_typeof_string_expr(expr : String) : String
       expr = expr.strip
+
+      # typeof(expr1, expr2, ...) in type positions should resolve each top-level
+      # argument separately and then combine them, not reinterpret the whole
+      # comma-joined payload as a single tuple literal string.
+      expr_args = split_generic_type_args(expr)
+      if expr_args.size > 1
+        resolved_parts = [] of String
+        expr_args.each do |arg_expr|
+          resolved = resolve_typeof_string_expr(arg_expr)
+          return "Pointer(Void)" if resolved == "Pointer(Void)"
+
+          if union_type_name?(resolved)
+            split_union_type_name(resolved).each do |part|
+              trimmed = part.strip
+              resolved_parts << trimmed unless trimmed.empty?
+            end
+          else
+            resolved_parts << resolved
+          end
+        end
+
+        return "Pointer(Void)" if resolved_parts.empty?
+
+        dedup = [] of String
+        resolved_parts.each do |part|
+          dedup << part unless dedup.includes?(part)
+        end
+
+        return dedup.first if dedup.size == 1
+        return normalize_union_type_name(dedup.join(" | "))
+      end
+
       if resolved = resolve_element_type_expression(expr)
         return normalize_typeof_type_name(resolved)
       end
@@ -6590,7 +6719,15 @@ module Crystal::HIR
 
       resolved = resolve_typeof_in_type_string(type_name)
       resolved = normalize_tuple_literal_type_name(resolved)
-      @type_param_map.each do |param, actual|
+      substitution_map = @type_param_map
+      if context
+        if receiver_map = type_param_map_for_receiver_name("#{context}#_")
+          unless receiver_map.empty?
+            substitution_map = receiver_map
+          end
+        end
+      end
+      substitution_map.each do |param, actual|
         resolved = substitute_type_param(resolved, param, actual)
       end
 
@@ -22930,14 +23067,17 @@ module Crystal::HIR
       primary_base = strip_type_suffix(primary_mangled_name)
       if resolved_base == primary_base
         # Prefer the call-site-specialized name only when that specialization
-        # actually exists (already lowered or registered).
+        # actually exists or has already been queued for lowering.
         #
         # Otherwise, using the primary mangled name can produce unresolved calls
         # (e.g., []$Range(Int32, Int32) when only []$Range exists) and later
         # fallback may bind to a wrong overload.
         primary_available = @module.has_function?(primary_mangled_name) ||
                             @function_defs.has_key?(primary_mangled_name) ||
-                            @function_types.has_key?(primary_mangled_name)
+                            @function_types.has_key?(primary_mangled_name) ||
+                            function_state(primary_mangled_name).pending? ||
+                            function_state(primary_mangled_name).in_progress? ||
+                            function_state(primary_mangled_name).completed?
         return primary_mangled_name if primary_available
 
         if entry = lookup_function_def_for_call(primary_base, arg_types.size, false, arg_types, false, false)
@@ -23869,6 +24009,34 @@ module Crystal::HIR
       end
 
       score
+    end
+
+    @[AlwaysInline]
+    private def class_method_owner_match_bonus(
+      lookup_name : String,
+      candidate_name : String,
+      arg_types : Array(TypeRef),
+    ) : Int32
+      return 0 unless lookup_name.includes?('.')
+      return 0 if arg_types.empty?
+
+      lookup_owner = method_owner(lookup_name)
+      return 0 if lookup_owner.empty? || lookup_owner.includes?('(')
+
+      candidate_owner = method_owner(candidate_name)
+      return 0 if candidate_owner.empty?
+
+      arg0_name = get_type_name_from_ref(arg_types[0])
+      return 0 if arg0_name.empty? || arg0_name == "Void" || arg0_name == "Unknown"
+
+      lookup_base = strip_generic_args(lookup_owner)
+      candidate_base = strip_generic_args(candidate_owner)
+      arg0_base = strip_generic_args(arg0_name)
+      return 0 unless lookup_base == candidate_base && candidate_base == arg0_base
+
+      return 4 if candidate_owner == arg0_name
+      return 1 if candidate_owner == candidate_base
+      -1
     end
 
     @[AlwaysInline]
@@ -34693,6 +34861,22 @@ module Crystal::HIR
           return merge_macro_or(left, right)
         when "&&"
           return merge_macro_and(left, right)
+        when "==", "!=", "<", "<=", ">", ">="
+          left_int = macro_condition_int_value(cond_node.left)
+          right_int = macro_condition_int_value(cond_node.right)
+          if left_int && right_int
+            return case op_str
+                   when "==" then left_int == right_int
+                   when "!=" then left_int != right_int
+                   when "<"  then left_int < right_int
+                   when "<=" then left_int <= right_int
+                   when ">"  then left_int > right_int
+                   when ">=" then left_int >= right_int
+                   else           nil
+                   end
+          end
+        end
+        case op_str
         when "==", "!="
           # Handle type parameter comparison: {% if F == Float32 %}
           left_type = macro_condition_type_name(cond_node.left)
@@ -34708,12 +34892,18 @@ module Crystal::HIR
             are_equal = left_type == right_type
             return op_str == "==" ? are_equal : !are_equal
           end
-        when "<"
+        when "<", "<="
           # Handle subtype check: {% if K < Number::Primitive %}
           left_type = macro_condition_type_name(cond_node.left)
           right_type = macro_condition_type_name(cond_node.right)
           if left_type && right_type
-            return macro_is_subtype(left_type, right_type)
+            if op_str == "<="
+              return macro_type_assignable?(left_type, right_type)
+            else
+              left_resolved = resolve_type_alias_chain(left_type)
+              right_resolved = resolve_type_alias_chain(right_type)
+              return left_resolved != right_resolved && macro_type_assignable?(left_type, right_type)
+            end
           end
         end
       end
@@ -34756,6 +34946,132 @@ module Crystal::HIR
         name = name.lchop("::")
       end
       name
+    end
+
+    private def macro_condition_int_value(expr_id : ExprId) : Int64?
+      node = @arena[expr_id]
+      case node
+      when CrystalV2::Compiler::Frontend::MacroExpressionNode
+        macro_condition_int_value(node.expression)
+      when CrystalV2::Compiler::Frontend::GroupingNode
+        macro_condition_int_value(node.expression)
+      when CrystalV2::Compiler::Frontend::NumberNode
+        num_str = strip_numeric_suffix(String.new(node.value)).gsub("_", "")
+        num_str.to_i64?(prefix: true) || num_str.to_i64?
+      when CrystalV2::Compiler::Frontend::UnaryNode
+        inner = macro_condition_int_value(node.operand)
+        return nil unless inner
+        case String.new(node.operator)
+        when "+"
+          inner
+        when "-"
+          -inner
+        else
+          nil
+        end
+      when CrystalV2::Compiler::Frontend::BinaryNode
+        left = macro_condition_int_value(node.left)
+        right = macro_condition_int_value(node.right)
+        return nil unless left && right
+        case String.new(node.operator)
+        when "+"
+          left + right
+        when "-"
+          left - right
+        when "*"
+          left * right
+        when "/", "//"
+          return nil if right == 0
+          left // right
+        when "%"
+          return nil if right == 0
+          left % right
+        else
+          nil
+        end
+      when CrystalV2::Compiler::Frontend::MemberAccessNode
+        macro_condition_member_int_value(node.object, String.new(node.member))
+      when CrystalV2::Compiler::Frontend::CallNode
+        if node.args.empty?
+          callee = @arena[node.callee]
+          if callee.is_a?(CrystalV2::Compiler::Frontend::MemberAccessNode)
+            return macro_condition_member_int_value(callee.object, String.new(callee.member))
+          end
+        end
+        nil
+      else
+        nil
+      end
+    end
+
+    private def macro_condition_member_int_value(expr_id : ExprId, member_name : String) : Int64?
+      case member_name
+      when "size"
+        obj_node = @arena[expr_id]
+        if obj_node.is_a?(CrystalV2::Compiler::Frontend::MemberAccessNode) &&
+           String.new(obj_node.member) == "union_types"
+          type_name = macro_condition_type_name(obj_node.object)
+          return nil unless type_name
+          return macro_union_type_count(type_name).to_i64
+        end
+
+        if type_name = macro_condition_type_name(expr_id)
+          if tuple_arity = macro_tuple_type_arity(type_name)
+            return tuple_arity.to_i64
+          end
+          if info = split_generic_base_and_args(type_name)
+            return split_generic_type_args(info[:args]).size.to_i64
+          end
+        end
+      end
+
+      nil
+    end
+
+    private def macro_tuple_type_arity(type_name : String) : Int32?
+      return nil unless type_name.starts_with?("Tuple(") && type_name.ends_with?(')')
+      inner = type_name[6...-1]
+      return 0 if inner.empty?
+      split_generic_type_args(inner).size
+    end
+
+    private def macro_union_type_count(type_name : String) : Int32
+      resolved = resolve_type_alias_chain(type_name)
+      if ref = type_ref_for_name(resolved)
+        if ref != TypeRef::VOID
+          if desc = @module.get_type_descriptor(ref)
+            if desc.kind == TypeKind::Union
+              variants = desc.type_params.reject { |variant| variant == TypeRef::VOID }
+              return variants.size.to_i32 unless variants.empty?
+            end
+          end
+        end
+      end
+
+      return split_union_type_names(resolved).size.to_i32 if resolved.includes?('|')
+      1
+    end
+
+    private def macro_type_assignable?(left_type : String, right_type : String) : Bool
+      left_resolved = resolve_type_alias_chain(left_type)
+      right_resolved = resolve_type_alias_chain(right_type)
+      return true if left_resolved == right_type || left_resolved == right_resolved
+
+      left_ref = type_ref_for_name(left_resolved)
+      right_ref = type_ref_for_name(right_resolved)
+      if left_ref != TypeRef::VOID && right_ref != TypeRef::VOID
+        return true if left_ref == right_ref
+        if is_union_type?(right_ref)
+          return true if get_union_variant_id(right_ref, left_ref) >= 0
+        end
+        if static = statically_is_a_type?(left_ref, right_ref)
+          return static unless static.nil?
+        end
+      end
+
+      return true if macro_is_subtype(left_resolved, right_type)
+      return true if right_resolved != right_type && macro_is_subtype(left_resolved, right_resolved)
+      false
     end
 
     # Check if left_type is a subtype of right_type for macro {% if K < SomeType %}.
@@ -39483,7 +39799,13 @@ module Crystal::HIR
       class_name = normalize_method_owner_name(class_name)
       base_method_name = class_name.empty? ? op : "#{class_name}##{op}"
       primary_mangled_name = mangle_function_name(base_method_name, [right_type])
+      if env_get("DEBUG_SORT_CMP_RESOLVE") && @current_method == "cmp"
+        STDERR.puts "[SORT_CMP_RESOLVE] stage=pre left=#{type_name_for_mangling(left_type)} right=#{type_name_for_mangling(right_type)} class=#{class_name} base=#{base_method_name} primary=#{primary_mangled_name} map=#{type_param_map_debug_string}"
+      end
       method_name = resolve_method_call(ctx, left, op, [right_type], false)
+      if env_get("DEBUG_SORT_CMP_RESOLVE") && @current_method == "cmp"
+        STDERR.puts "[SORT_CMP_RESOLVE] stage=post method=#{method_name}"
+      end
       remember_callsite_arg_types(primary_mangled_name, [right_type])
       if method_name != primary_mangled_name
         remember_callsite_arg_types(method_name, [right_type])
@@ -39496,11 +39818,11 @@ module Crystal::HIR
           record_pending_type_param_map(method_name, receiver_map)
         end
       end
-      call_target_name = prefer_primary_call_target(method_name, primary_mangled_name, [right_type])
       lower_function_if_needed(primary_mangled_name)
-      if method_name != primary_mangled_name && call_target_name == method_name
+      if method_name != primary_mangled_name
         lower_function_if_needed(method_name)
       end
+      call_target_name = prefer_primary_call_target(method_name, primary_mangled_name, [right_type])
       # Infer return type: comparison ops return Bool, arithmetic ops return left type
       return_type = case op
                     when "==", "!=", "<", "<=", ">", ">=", "==="
@@ -48190,6 +48512,16 @@ module Crystal::HIR
           STDERR.puts "[SELF_TO_S] explicit=#{explicit_self_receiver} force=#{force_instance_receiver} recv_id=#{recv_id} lit=#{recv_lit} class_name=#{class_name_str || "nil"} current=#{@current_class || "nil"}##{@current_method || "nil"} class_method=#{@current_method_is_class}"
         end
 
+        if env_get("DEBUG_MERGE_SORT_CLASSCALL") && method_name == "merge_sort!"
+          obj_kind = obj_node.class.name.split("::").last
+          raw_obj = stringify_type_expr(callee_node.object) ||
+                    (obj_node.is_a?(CrystalV2::Compiler::Frontend::PathNode) ? collect_path_string(obj_node) : nil) ||
+                    (obj_node.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode) ? String.new(obj_node.name) : nil) ||
+                    "(unknown)"
+          recv_name = receiver_id ? get_type_name_from_ref(ctx.type_of(receiver_id)) : "nil"
+          STDERR.puts "[MERGE_SORT_CLASSCALL] obj=#{obj_kind} raw=#{raw_obj} class_name=#{class_name_str || "nil"} recv=#{recv_name} current=#{@current_class || "nil"} map=#{type_param_map_debug_string}"
+        end
+
         if env_get("DEBUG_FIBER_CURRENT") && method_name == "current"
           obj_kind = obj_node.class.name.split("::").last
           STDERR.puts "[DEBUG_FIBER_CURRENT] obj=#{obj_kind} owner=#{class_name_str || "nil"} current_class=#{@current_class || "nil"}"
@@ -48262,7 +48594,7 @@ module Crystal::HIR
           if macro_lookup = lookup_macro_entry_with_inheritance(method_name, class_name_str)
             macro_entry, macro_key = macro_lookup
             macro_def, macro_arena = macro_entry
-            return expand_macro(ctx, macro_def, macro_arena, call_args, node.named_args, block_expr, macro_key)
+            return expand_macro_for_owner(ctx, macro_def, macro_arena, call_args, node.named_args, block_expr, macro_key, class_name_str)
           end
           # Check if this is a lib function call (e.g., LibC.puts)
           extern_func = @module.get_extern_function(class_name_str, method_name)
@@ -49740,7 +50072,9 @@ module Crystal::HIR
           is_array = check_and_fix_array_receiver_type(ctx, callee_node, receiver_id)
         end
         if is_array
-          return lower_array_sort_dynamic(ctx, receiver_id)
+          if lowered = lower_array_sort_dynamic(ctx, receiver_id)
+            return lowered
+          end
         end
       end
 
@@ -49751,7 +50085,9 @@ module Crystal::HIR
           is_array = check_and_fix_array_receiver_type(ctx, callee_node, receiver_id)
         end
         if is_array
-          return lower_array_sort_bang_dynamic(ctx, receiver_id)
+          if lowered = lower_array_sort_bang_dynamic(ctx, receiver_id)
+            return lowered
+          end
         end
       end
 
@@ -49950,7 +50286,6 @@ module Crystal::HIR
         type_names = arg_types.map { |t| get_type_name_from_ref(t) }
         STDERR.puts "[CALL_TRACE] stage=after_arg_types method=#{method_name} arg_types=#{type_ids.join(",")} names=#{type_names.join("|")}"
       end
-
       # Refine class/module method resolution using concrete arg types once available.
       if receiver_id.nil? && full_method_name
         call_has_splat = call_args.any? { |arg_expr| call_arena[arg_expr].is_a?(CrystalV2::Compiler::Frontend::SplatNode) }
@@ -54566,6 +54901,7 @@ module Crystal::HIR
       call_has_named_args : Bool = false,
     ) : Tuple(String, CrystalV2::Compiler::Frontend::DefNode)?
       dbg_slice_lookup = env_has?("DEBUG_SLICE_EACH") && func_name.includes?("Slice") && func_name.includes?("each")
+      debug_merge_sort_lookup = env_get("DEBUG_MERGE_SORT_LOOKUP") && func_name.includes?("Slice.merge_sort!")
       debug_join_lookup = false
       if env_has?("DEBUG_JOIN_LOOKUP") && func_name.includes?("Path#join") && arg_types && arg_types.size == 1
         if arg_desc = @module.get_type_descriptor(arg_types[0])
@@ -54845,6 +55181,13 @@ module Crystal::HIR
           compatible = params_compatible_with_args?(def_node, arg_types, func_context)
           if compatible
             score = params_match_score(def_node, arg_types, func_context)
+            score += class_method_owner_match_bonus(func_name, name, arg_types)
+          end
+          if debug_merge_sort_lookup
+            param_ann = def_node.params.try(&.find { |param| !param.is_block && !named_only_separator?(param) && !param.is_splat && !param.is_double_splat })
+            param_type = param_ann.try(&.type_annotation).try { |ann| String.new(ann) } || ""
+            arg_names = arg_types.map { |t| get_type_name_from_ref(t) }.join("|")
+            STDERR.puts "[MERGE_SORT_LOOKUP] func=#{func_name} cand=#{name} ctx=#{func_context || ""} param=#{param_type} compat=#{compatible} score=#{score} args=#{arg_names}"
           end
           next unless compatible
         end
@@ -58081,15 +58424,9 @@ module Crystal::HIR
     private def lower_array_sort_dynamic(
       ctx : LoweringContext,
       array_id : ValueId,
-    ) : ValueId
-      # Determine element type to pick the right dup+sort helper
-      element_type = array_element_type_for_value(ctx, array_id, TypeRef::INT32)
-      helper = case element_type
-               when TypeRef::STRING, TypeRef::POINTER
-                 "__crystal_v2_sort_string_array_dup"
-               else
-                 "__crystal_v2_sort_i32_array_dup"
-               end
+    ) : ValueId?
+      helper = array_sort_intrinsic_helper_for_value(ctx, array_id, dup: true)
+      return nil unless helper
 
       # Pass the array's type_id so the dup helper can set it in the new array header
       arr_type = ctx.type_of(array_id)
@@ -58109,21 +58446,32 @@ module Crystal::HIR
     private def lower_array_sort_bang_dynamic(
       ctx : LoweringContext,
       array_id : ValueId,
-    ) : ValueId
-      # Determine element type to pick the right sort helper
-      element_type = array_element_type_for_value(ctx, array_id, TypeRef::INT32)
-      helper = case element_type
-               when TypeRef::STRING, TypeRef::POINTER
-                 "__crystal_v2_sort_string_array"
-               else
-                 "__crystal_v2_sort_i32_array"
-               end
+    ) : ValueId?
+      helper = array_sort_intrinsic_helper_for_value(ctx, array_id, dup: false)
+      return nil unless helper
 
       sort_call = ExternCall.new(ctx.next_id, TypeRef::VOID, helper, [array_id])
       ctx.emit(sort_call)
       ctx.register_type(sort_call.id, TypeRef::NIL)
 
       array_id
+    end
+
+    private def array_sort_intrinsic_helper_for_value(
+      ctx : LoweringContext,
+      array_id : ValueId,
+      *,
+      dup : Bool,
+    ) : String?
+      element_type = array_element_type_for_value(ctx, array_id, TypeRef::VOID)
+      case element_type
+      when TypeRef::INT32
+        dup ? "__crystal_v2_sort_i32_array_dup" : "__crystal_v2_sort_i32_array"
+      when TypeRef::STRING
+        dup ? "__crystal_v2_sort_string_array_dup" : "__crystal_v2_sort_string_array"
+      else
+        nil
+      end
     end
 
     # Lower Array#any? { |x| condition } intrinsic
@@ -60485,6 +60833,17 @@ module Crystal::HIR
       end
 
       if static_owner_name
+        macro_scope_name = if info = split_generic_base_and_args(static_owner_name)
+                             info.base
+                           else
+                             static_owner_name
+                           end
+        if macro_lookup = lookup_macro_entry_with_inheritance("[]", macro_scope_name)
+          macro_entry, macro_key = macro_lookup
+          macro_def, macro_arena = macro_entry
+          return expand_macro_for_owner(ctx, macro_def, macro_arena, node.indexes, nil, nil, macro_key, static_owner_name)
+        end
+
         has_index_splat = node.indexes.any? { |idx| @arena[idx].is_a?(CrystalV2::Compiler::Frontend::SplatNode) }
         index_ids = if has_index_splat
                       expand_splat_args(ctx, node.indexes, @arena)
@@ -61438,9 +61797,13 @@ module Crystal::HIR
         end
         if is_array
           if member_name == "sort"
-            return lower_array_sort_dynamic(ctx, receiver_id)
+            if lowered = lower_array_sort_dynamic(ctx, receiver_id)
+              return lowered
+            end
           else
-            return lower_array_sort_bang_dynamic(ctx, receiver_id)
+            if lowered = lower_array_sort_bang_dynamic(ctx, receiver_id)
+              return lowered
+            end
           end
         end
       end

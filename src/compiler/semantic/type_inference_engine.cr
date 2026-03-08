@@ -897,6 +897,20 @@ module CrystalV2
             symbol = @global_table.try(&.lookup(identifier_name))
           end
 
+          if symbol.nil? && is_type_name?(identifier_name)
+            if resolved_symbol = resolve_scoped_symbol(identifier_name)
+              if type = type_from_symbol(resolved_symbol)
+                return type
+              elsif resolved_symbol.is_a?(EnumSymbol)
+                return EnumType.new(resolved_symbol)
+              end
+            end
+
+            if class_symbol = find_class_symbol_by_suffix(identifier_name)
+              return class_type_for(class_symbol)
+            end
+          end
+
           debug("  Symbol lookup: #{symbol ? symbol.class.name : "nil"}")
 
           return @context.nil_type unless symbol
@@ -1203,7 +1217,23 @@ module CrystalV2
           if value_expr = node.value
             infer_expression(value_expr)
           else
-            @context.nil_type
+            name = intern_name(node.name)
+            if symbol = resolve_scoped_symbol(name)
+              case symbol
+              when ConstantSymbol
+                infer_expression(symbol.value)
+              when EnumSymbol
+                EnumType.new(symbol)
+              else
+                if type = type_from_symbol(symbol)
+                  type
+                else
+                  @context.nil_type
+                end
+              end
+            else
+              @context.nil_type
+            end
           end
         end
 
@@ -2927,9 +2957,14 @@ module CrystalV2
 
         private def infer_index(node : Frontend::IndexNode, expr_id : ExprId) : Type
           target_type = infer_expression(node.object)
-          index_id = node.indexes.first?
+          index_ids = node.indexes
+          index_id = index_ids.first?
           return @context.nil_type unless index_id
-          _index_type = infer_expression(index_id)
+          index_types = Array(Type).new(index_ids.size)
+          index_ids.each do |idx|
+            index_types << infer_expression(idx)
+          end
+          _index_type = index_types.first
 
           # Phase 9: Array indexing
           if target_type.is_a?(ArrayType)
@@ -2991,10 +3026,39 @@ module CrystalV2
             else
               @context.char_type  # String[Int32] returns Char
             end
+          elsif target_type.is_a?(ClassType) || target_type.is_a?(ModuleType)
+            if macro_result = infer_static_index_macro(target_type, index_types)
+              macro_result
+            elsif method = lookup_method(target_type, "[]", index_types, false)
+              if ann = method.return_annotation
+                parse_type_name(ann)
+              else
+                infer_method_body_type(method, target_type)
+              end
+            else
+              emit_error("Cannot index type #{target_type}", expr_id)
+              @context.nil_type
+            end
           else
             # Not an array, hash, tuple, named tuple, or string - emit error
             emit_error("Cannot index type #{target_type}", expr_id)
             @context.nil_type
+          end
+        end
+
+        private def infer_static_index_macro(target_type : Type, index_types : Array(Type)) : Type?
+          return nil unless target_type.is_a?(ClassType)
+
+          owner_symbol = target_type.symbol
+          macro_symbol = owner_symbol.scope.lookup("[]")
+          return nil unless macro_symbol.is_a?(MacroSymbol)
+
+          case owner_symbol.name
+          when "Slice"
+            element_type = target_type.type_args.try(&.first?) || union_of(index_types)
+            instance_type_for(owner_symbol, [element_type])
+          else
+            nil
           end
         end
 

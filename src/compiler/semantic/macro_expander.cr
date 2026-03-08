@@ -221,6 +221,7 @@ module CrystalV2
         ) : Context
           variables = {} of String => MacroValue
           params = macro_symbol.params || [] of String
+          param_decls = macro_symbol.param_decls
           named_values = {} of String => MacroValue
 
           named_args.try do |list|
@@ -231,7 +232,7 @@ module CrystalV2
 
           # Bind parameters to arguments (supports *args and **kwargs).
           arg_index = 0
-          params.each do |raw_name|
+          params.each_with_index do |raw_name, idx|
             if raw_name.starts_with?("**")
               name = raw_name[2..]
               variables[name] = MacroNamedTupleValue.new(named_values)
@@ -256,6 +257,9 @@ module CrystalV2
             elsif arg_index < args.size
               variables[raw_name] = expr_to_macro_value(args[arg_index])
               arg_index += 1
+            elsif default_source = param_decls.try(&.[idx]?).try(&.default_source)
+              context = Context.new(variables, {} of String => String, owner_type, @depth, @flags, block_id)
+              variables[raw_name] = macro_value_from_default_source(default_source, context, macro_symbol.node_id)
             else
               variables[raw_name] = MACRO_NIL
             end
@@ -265,6 +269,12 @@ module CrystalV2
           variables["block"] = block_id ? MacroBoolValue.new(true) : MACRO_NIL
 
           Context.new(variables, {} of String => String, owner_type, @depth, @flags, block_id)
+        end
+
+        private def macro_value_from_default_source(source : String, context : Context, location : ExprId) : MacroValue
+          expr_id = reparse(source, location)
+          return MACRO_NIL if expr_id.invalid?
+          evaluate_to_macro_value(expr_id, context)
         end
 
         # Convert expression to string representation (for legacy/simple use)
@@ -282,18 +292,39 @@ module CrystalV2
           end
         end
 
+        private def macro_number_value_from_literal(literal : String) : MacroNumberValue
+          normalized = literal
+          ["_i8", "_i16", "_i32", "_i64", "_u8", "_u16", "_u32", "_u64", "_f32", "_f64",
+           "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "f32", "f64"].each do |suffix|
+            if normalized.ends_with?(suffix)
+              normalized = normalized[0, normalized.size - suffix.size]
+              break
+            end
+          end
+
+          if normalized.includes?(".") || normalized.includes?("e") || normalized.includes?("E")
+            MacroNumberValue.new(normalized.to_f64? || 0.0, literal)
+          else
+            MacroNumberValue.new(normalized.to_i64? || 0_i64, literal)
+          end
+        end
+
         # Convert AST expression to MacroValue (for simple literals only)
         private def expr_to_macro_value(expr_id : ExprId) : MacroValue
           node = @arena[expr_id]
 
+          if node.is_a?(Frontend::MacroExpressionNode)
+            return expr_to_macro_value(node.expression)
+          end
+
+          if node.is_a?(Frontend::GroupingNode)
+            return expr_to_macro_value(node.expression)
+          end
+
           case Frontend.node_kind(node)
           when .number?
             literal = Frontend.node_literal_string(node) || "0"
-            if literal.includes?(".")
-              MacroNumberValue.new(literal.to_f64? || 0.0)
-            else
-              MacroNumberValue.new(literal.to_i64? || 0_i64)
-            end
+            macro_number_value_from_literal(literal)
           when .string?
             MacroStringValue.new(Frontend.node_literal_string(node) || "")
           when .symbol?
@@ -309,7 +340,17 @@ module CrystalV2
           when .identifier?
             MacroIdValue.new(Frontend.node_literal_string(node) || "")
           else
-            if node.is_a?(Frontend::TypeDeclarationNode) || node.is_a?(Frontend::AssignNode) || node.is_a?(Frontend::GenericNode)
+            if node.is_a?(Frontend::ArrayLiteralNode)
+              MacroArrayValue.new(node.elements.map { |elem_id| expr_to_macro_value(elem_id).as(MacroValue) })
+            elsif node.is_a?(Frontend::TupleLiteralNode)
+              MacroTupleValue.new(node.elements.map { |elem_id| expr_to_macro_value(elem_id).as(MacroValue) })
+            elsif node.is_a?(Frontend::NamedTupleLiteralNode)
+              entries = {} of String => MacroValue
+              node.entries.each do |entry|
+                entries[intern_name(entry.key)] = expr_to_macro_value(entry.value)
+              end
+              MacroNamedTupleValue.new(entries)
+            elsif node.is_a?(Frontend::TypeDeclarationNode) || node.is_a?(Frontend::AssignNode) || node.is_a?(Frontend::GenericNode)
               MacroNodeValue.new(expr_id, @arena, @string_pool)
             elsif node.is_a?(Frontend::PathNode)
               name = path_to_string(node)
@@ -346,11 +387,7 @@ module CrystalV2
           case Frontend.node_kind(node)
           when .number?
             literal = Frontend.node_literal_string(node) || "0"
-            if literal.includes?(".")
-              MacroNumberValue.new(literal.to_f64? || 0.0)
-            else
-              MacroNumberValue.new(literal.to_i64? || 0_i64)
-            end
+            macro_number_value_from_literal(literal)
           when .string?
             MacroStringValue.new(Frontend.node_literal_string(node) || "")
           when .symbol?
@@ -1036,8 +1073,10 @@ module CrystalV2
             elsif roots.size == 1
               roots.first
             else
-              block = Frontend::BlockNode.new(Frontend::Span.zero, nil, roots)
-              @arena.add_typed(block)
+              first_span = @arena[roots.first].span
+              last_span = @arena[roots.last].span
+              begin_node = Frontend::BeginNode.new(first_span.cover(last_span), roots)
+              @arena.add_typed(begin_node)
             end
           rescue ex
             # Catch any parser exceptions
@@ -2124,6 +2163,7 @@ module CrystalV2
 
           # Evaluate iterable → get MacroValue elements
           iterable_node = @arena[iterable_expr]
+          pair_iteration = pair_iteration_iterable?(iterable_node, context)
 
           elem_values = evaluate_iterable_to_macro_values(iterable_node, context)
 
@@ -2146,7 +2186,7 @@ module CrystalV2
           end
           output = String.build do |str|
             elem_values.each_with_index do |elem_value, idx|
-              if index_var && elem_value.is_a?(MacroTupleValue) && elem_value.elements.size >= 2
+              if pair_iteration && index_var && elem_value.is_a?(MacroTupleValue) && elem_value.elements.size >= 2
                 # Hash/named-tuple iteration: destructure into key + value variables
                 if ENV["DEBUG_MACRO_TYPE"]?
                   STDERR.puts "[MACRO_FOR_TUPLE] #{value_var}=#{elem_value.elements[0].to_macro_output.inspect} #{index_var}=#{elem_value.elements[1].to_macro_output.inspect}"
@@ -2166,6 +2206,19 @@ module CrystalV2
           end
 
           return {output, end_index + 1}
+        end
+
+        private def pair_iteration_iterable?(iterable_node, context : Context) : Bool
+          case iterable_node
+          when Frontend::HashLiteralNode, Frontend::NamedTupleLiteralNode
+            true
+          when Frontend::IdentifierNode
+            name = Frontend.node_literal_string(iterable_node)
+            macro_val = name ? context.variables[name]? : nil
+            macro_val.is_a?(MacroNamedTupleValue)
+          else
+            false
+          end
         end
 
         # Evaluate an iterable expression to an array of MacroValue

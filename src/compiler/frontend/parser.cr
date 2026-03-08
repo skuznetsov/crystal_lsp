@@ -7320,9 +7320,27 @@ module CrystalV2
 
           external_name : String? = nil
           names = [] of String
+          default_source : String? = nil
+          seen_default = false
 
           while idx < tokens.size
             tok = tokens[idx]
+            if !seen_default && tok.kind == Token::Kind::Eq
+              seen_default = true
+              idx += 1
+              next
+            end
+
+            if seen_default
+              default_source = if existing = default_source
+                                 existing + String.new(tok.slice)
+                               else
+                                 String.new(tok.slice)
+                               end
+              idx += 1
+              next
+            end
+
             case tok.kind
             when Token::Kind::String
               external_name ||= String.new(tok.slice)
@@ -7338,7 +7356,7 @@ module CrystalV2
 
           internal = names.last
           external = names.size > 1 ? names.first : external_name
-          MacroDefNode::MacroParamDecl.new(internal, external, prefix)
+          MacroDefNode::MacroParamDecl.new(internal, external, prefix, default_source)
         end
 
         private def skip_whitespace_and_comments

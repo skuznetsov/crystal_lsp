@@ -22,6 +22,48 @@ closure cells, Tuple ptr/value confusion.
 - [ ] **Phase 5: FIX RC-3** — String.build block lowering
 - [ ] **Phase 6: RE-ENABLE RTA + BOOTSTRAP** — stage0→stage1→stage2→stage3 + benchmark
 
+### Current checkpoint (2026-03-08 `Slice[...]` macro owner-context split)
+
+- Verified a real stage1/runtime sub-root-cause in the broader tuple/sort family:
+  - focused oracle:
+    - `bash regression_tests/slice_tuple_size_runtime_repro.sh /private/tmp/stage1_dbg_slice_macro_bundle_20260308`
+      -> `run_status: 0`, `stdout: 3`, `not reproduced`
+    - original control:
+      - `bash regression_tests/slice_tuple_size_runtime_repro.sh /opt/homebrew/bin/crystal`
+        -> `run_status: 0`, `stdout: 3`, `not reproduced`
+- Root cause on the stale compiler was not the `Slice[...]` macro text itself:
+  - macro expansion already produced the expected absolute-path shape
+    (`::Pointer(typeof(...)).malloc(...)` + `::Slice.new(...)`);
+  - the leak happened later, when the expanded AST was lowered while
+    `@current_class` / type-param context still pointed at the generic macro
+    owner (`Slice(T)`), so explicit `::Slice.new(...)` and related `typeof(...)`
+    pieces were reinterpreted through the wrong lexical owner context;
+  - the active bundle fixes that split by expanding under owner context but
+    lowering the generated AST afterward in the caller lexical context, while
+    also restoring enough macro/frontend parity for this corridor:
+    - preserve macro param default source,
+    - preserve tuple/named-tuple macro values,
+    - infer static `Type[...]` macro result shape in type inference,
+    - avoid false `_super` stripping on real lowered helper names.
+- Fresh verification:
+  - `stage1 debug`:
+    - `/usr/bin/time -p scripts/build_stage1_original_debug.sh /private/tmp/stage1_dbg_slice_macro_bundle_20260308 --error-trace`
+      -> `real 8.90`
+  - original controls:
+    - `bash regression_tests/absolute_path_pointer_tuple_index_repro.sh /opt/homebrew/bin/crystal`
+      -> `run_status: 0`, `stdout: 3`, `not reproduced`
+  - broad regression:
+    - `/usr/bin/time -p regression_tests/run_all.sh /private/tmp/stage1_dbg_slice_macro_bundle_20260308`
+      -> `67 passed, 0 failed`, `real 860.49`
+- Adversary / boundary:
+  - `bash regression_tests/slice_tuple_reverse_runtime_repro.sh /private/tmp/stage1_dbg_slice_macro_bundle_20260308`
+    -> `run_status: 0`, `stdout: Pointer().null`, still reproduced
+  - `bash regression_tests/absolute_path_pointer_tuple_index_repro.sh /private/tmp/stage1_dbg_slice_macro_bundle_20260308`
+    -> `run_status: 0`, `stdout: Pointer().null`, still reproduced
+  - So this bundle removes the `Slice[...]` construction/type/size sub-root-cause
+    but does not clear the deeper tuple-element-read path. The next frontier is
+    after correct slice construction, not inside macro expansion.
+
 ### Current checkpoint (2026-03-08 string `typeof` tuple literal inference)
 
 - Verified another real stage1/runtime sub-root-cause inside the broader

@@ -1824,7 +1824,7 @@ module CrystalV2
           NodeKind::MacroDef
         end
 
-        record MacroParamDecl, name : String, external_name : String? = nil, prefix : String = ""
+        record MacroParamDecl, name : String, external_name : String? = nil, prefix : String = "", default_source : String? = nil
 
         getter name : Slice(UInt8)
         getter body : ExprId

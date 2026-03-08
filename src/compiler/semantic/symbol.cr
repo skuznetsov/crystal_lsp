@@ -22,8 +22,15 @@ module CrystalV2
       class MacroSymbol < Symbol
         getter body : ExprId
         getter params : Array(String)?
+        getter param_decls : Array(Frontend::MacroDefNode::MacroParamDecl)?
 
-        def initialize(name : String, node_id : ExprId, @body : ExprId, @params : Array(String)? = nil)
+        def initialize(
+          name : String,
+          node_id : ExprId,
+          @body : ExprId,
+          @params : Array(String)? = nil,
+          @param_decls : Array(Frontend::MacroDefNode::MacroParamDecl)? = nil
+        )
           super(name, node_id)
         end
       end
