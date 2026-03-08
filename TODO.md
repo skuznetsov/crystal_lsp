@@ -22,6 +22,55 @@ closure cells, Tuple ptr/value confusion.
 - [ ] **Phase 5: FIX RC-3** — String.build block lowering
 - [ ] **Phase 6: RE-ENABLE RTA + BOOTSTRAP** — stage0→stage1→stage2→stage3 + benchmark
 
+### Current checkpoint (2026-03-08 scalar-stack iterative inference)
+
+- Verified a real self-hosted stage2 unblock in `src/compiler/semantic/type_inference_engine.cr`:
+  - the old iterative inference fast path kept traversal frames as
+    `{ExprId, Bool}` tuples and tracked visit state through the global
+    epoch-array helpers `@expr_state_epoch/@expr_state_version/@expr_state_value`;
+  - on the current branch that path was not robust under self-hosted stage2:
+    earlier LLDB/localization kept landing in the same `infer_expression`
+    family, and the smallest stable working change was to remove the tuple-frame
+    stack and epoch-array helpers entirely;
+  - final fix:
+    - keep `@context.expression_types` keyed by `ExprId`,
+    - replace tuple frame storage with two scalar stacks
+      (`stack_ids : Array(Int32)`, `stack_visited : Array(Bool)`),
+    - keep the local iterative-state map as `Hash(Int32, Int32)`,
+    - reconstruct `ExprId` only at the point of arena/context access.
+- Fresh release verification:
+  - `stage1 --release`:
+    - `/usr/bin/time -p scripts/timeout_sample_lldb.sh -t 1800 -m 32768 --no-series --no-lldb -o /tmp/stage1_rel_scalarstack_reverify_probe_20260308 -- scripts/build_stage1_original_release.sh /private/tmp/stage1_rel_scalarstack_reverify_20260308`
+      -> `status 0`, `real 424.12`
+  - focused stage1 controls:
+    - `bash regression_tests/stage2_parse_prelude_nocodegen_crash_repro.sh /private/tmp/stage1_rel_scalarstack_reverify_20260308`
+      -> `status 0`, `not reproduced`
+    - `bash regression_tests/stage2_no_prelude_const_assign_hir_env_cache_repro.sh /private/tmp/stage1_rel_scalarstack_reverify_20260308`
+      -> `status 0`, `not reproduced`
+  - broad regression sweep:
+    - `/usr/bin/time -p regression_tests/run_all.sh /private/tmp/stage1_rel_scalarstack_reverify_20260308`
+      -> `67 passed, 0 failed`, `real 214.68`
+  - `stage2 --release`:
+    - `/usr/bin/time -p scripts/timeout_sample_lldb.sh -t 900 -m 24576 --no-series --no-lldb -o /tmp/stage2_rel_scalarstack_reverify_probe_20260308 -- scripts/build_stage2_release.sh /private/tmp/stage1_rel_scalarstack_reverify_20260308 /private/tmp/stage2_rel_scalarstack_reverify_20260308`
+      -> `status 0`, `real 182.97`
+  - current measured speedup:
+    - `stage1/stage2 ~= 2.32x`
+- Boundary shift:
+  - fresh self-hosted stage2 no longer reproduces the older early prelude crash:
+    - `bash regression_tests/stage2_parse_prelude_nocodegen_crash_repro.sh /private/tmp/stage2_rel_scalarstack_reverify_20260308`
+      -> `status 133`, `not reproduced`
+  - the broader stage2 frontier still exists, but it is later:
+    - `bash regression_tests/stage2_macro_record_heredoc_index_oob_repro.sh /private/tmp/stage2_rel_scalarstack_reverify_20260308`
+      -> `status 139`, reproduced
+    - direct LLDB on a one-line `X = 1` repro under
+      `--no-prelude --no-link --verbose` now reaches:
+      `Crystal::MIR::HIRToMIRLowering#order_blocks_for(Crystal::HIR::Function)`
+      with `EXC_BAD_ACCESS`, after printing `[4/6] Lowering to MIR...`
+  - guarded `stage2 -> stage3` is still red:
+    - `/usr/bin/time -p scripts/timeout_sample_lldb.sh -t 600 -m 24576 --no-series --no-lldb -o /tmp/stage3_rel_scalarstack_reverify_probe_20260308 -- scripts/build_stage2_release.sh /private/tmp/stage2_rel_scalarstack_reverify_20260308 /private/tmp/stage3_rel_scalarstack_reverify_20260308`
+      -> `status 139`, `real 1.06`
+    - command log stops after `prelude.cr` / `lib_c.cr`.
+
 ### Current checkpoint (2026-03-08 ctor default-object wrapper)
 
 - Verified a real constructor-wrapper default-arg fix on the current worktree:

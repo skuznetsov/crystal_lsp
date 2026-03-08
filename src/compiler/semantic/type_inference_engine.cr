@@ -62,9 +62,6 @@ module CrystalV2
         @node_kind_cache : Array(Frontend::NodeKind?)
         @method_candidates_cache : Hash(MethodCandidatesKey, Array(MethodSymbol))
         @parse_type_cache : Hash(String, Type)
-        @expr_state_epoch : Int32
-        @expr_state_version : Array(Int32)
-        @expr_state_value : Array(Int32)
         @class_type_cache : Hash(ClassSymbol, ClassType)
         @module_type_cache : Hash(ModuleSymbol, ModuleType)
         @instance_type_cache : Hash(ClassSymbol, InstanceType)
@@ -127,9 +124,6 @@ module CrystalV2
           @node_kind_cache = Array(Frontend::NodeKind?).new(@program.arena.size)
           @method_candidates_cache = {} of MethodCandidatesKey => Array(MethodSymbol)
           @parse_type_cache = {} of String => Type
-          @expr_state_epoch = 0
-          @expr_state_version = Array(Int32).new(@program.arena.size, 0)
-          @expr_state_value = Array(Int32).new(@program.arena.size, 0)
           @class_type_cache = {} of ClassSymbol => ClassType
           @module_type_cache = {} of ModuleSymbol => ModuleType
           @instance_type_cache = {} of ClassSymbol => InstanceType
@@ -173,24 +167,28 @@ module CrystalV2
           if t0 = @context.get_type(expr_id)
             return t0
           end
-          # local frame as tuple {id, visited}, plus state map 0/1/2
-          stack = [] of {ExprId, Bool}
-          state_hash = {} of ExprId => Int32
-          epoch = next_expr_state_epoch
-          stack << {expr_id, false}
-          set_expr_state(expr_id, epoch, 1, state_hash)
-          while frame = stack.pop?
+          # Keep traversal state in scalar stacks; tuple pop? on wrapper structs
+          # is still unstable on self-hosted stage2.
+          stack_ids = [] of Int32
+          stack_visited = [] of Bool
+          state = {} of Int32 => Int32
+          stack_ids << expr_id.index
+          stack_visited << false
+          state[expr_id.index] = 1
+          until stack_ids.empty?
             # Check watchdog to prevent infinite loops in type inference
             Frontend::Watchdog.check!
 
-            id = frame[0]
+            id = ExprId.new(stack_ids.pop)
+            visited = stack_visited.pop
             next if @context.get_type(id)
             node = @program.arena[id]
-          if !frame[1]
-              stack << {id, true}
+            if !visited
+              stack_ids << id.index
+              stack_visited << true
               children_of(id, node).each do |child|
                 next if @context.get_type(child)
-                case expr_state(child, epoch, state_hash)
+                case state[child.index]?
                 when 2
                   next
                 when 1
@@ -203,8 +201,9 @@ module CrystalV2
                   end
                   next
                 else
-                  set_expr_state(child, epoch, 1, state_hash)
-                  stack << {child, false}
+                  state[child.index] = 1
+                  stack_ids << child.index
+                  stack_visited << false
                 end
               end
             else
@@ -215,16 +214,16 @@ module CrystalV2
                   debug("ITERATIVE: #{last_path_segment(node.class.name)} computed type #{t}")
                 end
                 @context.set_type(id, t)
-                set_expr_state(id, epoch, 2, state_hash)
+                state[id.index] = 2
               else
                 # Complex node - skip in iterative path, leave for recursive fallback
                 if @debug_enabled
                   debug("ITERATIVE: #{last_path_segment(node.class.name)} returned nil, will use recursive")
                 end
-                # IMPORTANT: Clear any type that might have been set by cycle detection (line 97)
-                # Otherwise line 86 will skip this node even though it needs recursive processing
+                # Clear any type seeded by cycle detection so recursive fallback
+                # can recompute the node from scratch.
                 @context.expression_types.delete(id)
-                set_expr_state(id, epoch, 0, state_hash) # Reset to allow recursive processing
+                state[id.index] = 0 # Reset to allow recursive processing
               end
             end
           end
@@ -984,51 +983,6 @@ module CrystalV2
             return kind
           end
           Frontend.node_kind(node)
-        end
-
-        private def next_expr_state_epoch : Int32
-          @expr_state_epoch += 1
-          if @expr_state_epoch == Int32::MAX
-            @expr_state_epoch = 1
-            @expr_state_version.fill(0)
-          end
-          @expr_state_epoch
-        end
-
-        private def ensure_expr_state_capacity(idx : Int32)
-          return if idx < @expr_state_version.size
-          new_size = @program.arena.size
-          return if new_size <= @expr_state_version.size
-          (new_size - @expr_state_version.size).times do
-            @expr_state_version << 0
-            @expr_state_value << 0
-          end
-        end
-
-        private def expr_state(expr_id : ExprId, epoch : Int32, state_hash : Hash(ExprId, Int32)) : Int32
-          idx = expr_id.index
-          if idx < 0
-            return state_hash[expr_id]? || 0
-          end
-          ensure_expr_state_capacity(idx)
-          if @expr_state_version[idx] != epoch
-            @expr_state_version[idx] = epoch
-            @expr_state_value[idx] = 0
-          end
-          @expr_state_value[idx]
-        end
-
-        private def set_expr_state(expr_id : ExprId, epoch : Int32, value : Int32, state_hash : Hash(ExprId, Int32))
-          idx = expr_id.index
-          if idx < 0
-            state_hash[expr_id] = value
-            return
-          end
-          ensure_expr_state_capacity(idx)
-          if @expr_state_version[idx] != epoch
-            @expr_state_version[idx] = epoch
-          end
-          @expr_state_value[idx] = value
         end
 
         private def class_type_for(symbol : ClassSymbol) : ClassType
