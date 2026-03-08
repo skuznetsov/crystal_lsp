@@ -24,6 +24,38 @@ closure cells, Tuple ptr/value confusion.
 
 ### Current checkpoint (2026-03-08 early)
 
+- New verified runtime/codegen fix on the current dirty worktree:
+  - `case ... when Type` was mislowered for nested/frontend type conditions.
+  - Root cause:
+    - frontend `when NumberNode` conditions arrive as `IdentifierNode`,
+      `when Outer::NumberNode` as `PathNode`, and generic type cases as
+      `GenericNode`; `emit_case_comparison` only recognized `ConstantNode`
+      as a type-test input, so qualified type conditions fell through to
+      plain equality, and nested unqualified type names skipped context
+      resolution.
+    - branch narrowing in `lower_case` had the same asymmetry: it only
+      recognized `ConstantNode` / `IdentifierNode`, so even a future match on
+      `PathNode` / `GenericNode` would still miss type narrowing in the body.
+  - Fix:
+    - added a shared `case_condition_type_name(...)` helper that reuses
+      `extract_type_name_from_node(...)`, resolves nested names via
+      `normalize_declared_type_name(...)`, validates real type-like targets,
+      and feeds both `emit_case_comparison` and `lower_case` narrowing.
+  - Verification:
+    - original Crystal control on the focused oracle prints:
+      `true / number / number`
+    - fresh stage1 debug rebuild:
+      `/usr/bin/time -p scripts/build_stage1_original_debug.sh /private/tmp/stage1_dbg_case_type_fix_20260307`
+      then
+      `bash regression_tests/case_type_narrowing_repro.sh /private/tmp/stage1_dbg_case_type_fix_20260307`
+      -> `stdout: true / number / number`, `not reproduced`
+    - stale control:
+      `bash regression_tests/case_type_narrowing_repro.sh /private/tmp/stage1_dbg_current_genericsplit_20260308`
+      -> `stdout: true / miss / miss`, `reproduced`
+    - adversary check:
+      a separate stage1 probe still keeps value equality semantics for
+      `case 7; when y` and enum-member equality for `case Color::Red; when Color::Red`.
+
 - Fresh current-source control rebuild:
   - `/usr/bin/time -p scripts/build_stage1_original_debug.sh /private/tmp/stage1_dbg_current_genericsplit_20260308 --error-trace`
     -> `real 11.27`
@@ -150,6 +182,24 @@ closure cells, Tuple ptr/value confusion.
     - `@any_debug_like_env_set` / `@any_debug_env_set` fast paths are therefore
       unreliable in self-hosted compilers, and env-gated diagnostics that depend
       on them must be treated with caution until this runtime bug is isolated.
+
+- Fresh post-fix stage2 checkpoint:
+  - fresh self-hosted stage2 debug rebuild from the fixed stage1 succeeds:
+    - `/usr/bin/time -p scripts/build_stage2_cached.sh /private/tmp/stage1_dbg_case_type_fix_20260307 debug /private/tmp/stage2_dbg_case_type_fix_20260307`
+      -> `real 460.06`
+  - the old focused unsupported-node frontier is no longer the active failure signature:
+    - `bash regression_tests/stage2_no_prelude_literal_unsupported_node_repro.sh /private/tmp/stage2_dbg_case_type_fix_20260307`
+      now ends in `status: 139` / `reproduced: unexpected failure signature`
+      instead of `error: Unsupported AST node type: CrystalV2::Compiler::Frontend::Node`
+    - `bash regression_tests/case_type_narrowing_repro.sh /private/tmp/stage2_dbg_case_type_fix_20260307`
+      now crashes the compiler during compilation with `status: 139`
+  - LLDB on the fresh stage2 debug compiler localizes the new frontier to:
+    - `EXC_BAD_ACCESS (code=1, address=0x0)`
+    - top frame:
+      `Hash(String, Array(Tuple(Frontend::ModuleNode, Frontend::ArenaLike)))#set_entry`
+    - this value type matches `AstToHir`'s `@module_defs`, so the next live
+      blocker is likely in module-definition map population / mutation rather
+      than the earlier `case node` dispatch path.
 
 ### Current checkpoint (2026-03-07 late)
 

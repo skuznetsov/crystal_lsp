@@ -31319,6 +31319,43 @@ module Crystal::HIR
       end
     end
 
+    private def case_condition_type_name(node) : String?
+      raw = extract_type_name_from_node(node)
+      return nil unless raw
+
+      resolved = normalize_declared_type_name(raw)
+      resolved_case_condition_type_name?(resolved) ? resolved : nil
+    end
+
+    private def resolved_case_condition_type_name?(type_name : String) : Bool
+      return false if type_name.empty?
+      return true if type_name_exists?(type_name)
+
+      if split = split_generic_base_and_args(type_name)
+        base_name = normalize_declared_type_name(split.base)
+        return resolved_case_condition_type_name?(base_name)
+      end
+
+      if type_name.includes?('|')
+        parts = split_union_type_name(type_name)
+        return !parts.empty? && parts.all? { |part| resolved_case_condition_type_name?(part.strip) }
+      end
+
+      if type_name.ends_with?('?')
+        return resolved_case_condition_type_name?(type_name[0...-1])
+      end
+
+      if type_name.ends_with?('*')
+        base_name = type_name
+        while base_name.ends_with?('*')
+          base_name = base_name[0...-1].rstrip
+        end
+        return base_name.empty? || resolved_case_condition_type_name?(base_name)
+      end
+
+      false
+    end
+
     # Check if a type is a union type
     private def is_union_type?(type_ref : TypeRef) : Bool
       if type_desc = @module.get_type_descriptor(type_ref)
@@ -41467,6 +41504,10 @@ module Crystal::HIR
         end
       end
 
+      if type_name = case_condition_type_name(cond_node)
+        return emit_is_a_check(ctx, subject_id, type_name)
+      end
+
       case cond_node
       when CrystalV2::Compiler::Frontend::StringNode
         # String literals: use content comparison, not pointer comparison
@@ -42056,16 +42097,7 @@ module Crystal::HIR
           if subj_type
             when_branch.conditions.each do |cond_expr|
               cond_node = @arena[cond_expr]
-              type_name = case cond_node
-                          when CrystalV2::Compiler::Frontend::ConstantNode
-                            n = String.new(cond_node.name)
-                            is_type_name?(n) ? n : nil
-                          when CrystalV2::Compiler::Frontend::IdentifierNode
-                            n = String.new(cond_node.name)
-                            is_type_name?(n) ? n : nil
-                          else
-                            nil
-                          end
+              type_name = case_condition_type_name(cond_node)
               if type_name
                 target_ref = type_ref_for_name(type_name)
                 target_desc = @module.get_type_descriptor(target_ref)
