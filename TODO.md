@@ -22,6 +22,35 @@ closure cells, Tuple ptr/value confusion.
 - [ ] **Phase 5: FIX RC-3** — String.build block lowering
 - [ ] **Phase 6: RE-ENABLE RTA + BOOTSTRAP** — stage0→stage1→stage2→stage3 + benchmark
 
+### Current checkpoint (2026-03-08 bare collection callsite specialization)
+
+- Verified a separate stage1/runtime root cause behind the broader `sort_by!` tuple-key family:
+  - focused oracle:
+    - `bash regression_tests/bare_collection_tuple_size_repro.sh /private/tmp/stage1_dbg_bare_collection_minpatch_20260308`
+      -> `stdout: 2 / 3`, `not reproduced`
+    - `bash regression_tests/bare_collection_tuple_size_repro.sh /private/tmp/stage1_rel_bare_collection_minpatch_20260308`
+      -> `stdout: 2 / 3`, `not reproduced`
+  - stale shape before the fix:
+    - tiny `def tuple_size(x : Tuple); x.size; end` sample printed `0 / 0`;
+    - tracing showed `lower_call` could force-lower `tuple_size$Tuple` through
+      `get_function_return_type(...)` before the final callsite-arg remember, so
+      the first lowered body saw only the broad bare-annotation name;
+    - even after early callsite remember, later top-level lowering could still
+      collapse back to the canonical broad name and overwrite the specialized body.
+- Final fix in `src/compiler/hir/ast_to_hir.cr`:
+  - record non-void callsite args before return-type probing in `lower_call`;
+  - treat bare collection annotations (`Tuple`, `NamedTuple`, `Array`, `Slice`,
+    `StaticArray`) like other callsite-specialized surfaces when remangling and
+    when preserving requested lowered names;
+  - keep top-level lowered defs on the requested specialized name when it differs
+    from the canonical annotation-only name.
+- Adversary check / boundary:
+  - `bash regression_tests/sort_by_tuple_key_runtime_repro.sh /private/tmp/stage1_dbg_bare_collection_minpatch_20260308`
+    -> compile succeeds, runtime `139`, still reproduced.
+  - So this fix removes one real sub-root-cause (`Tuple`-annotated broad-body
+    reuse) but does not clear the broader `sort_by!` / `stage2 -> stage3`
+    frontier by itself.
+
 ### Current checkpoint (2026-03-08 scalar-stack iterative inference)
 
 - Verified a real self-hosted stage2 unblock in `src/compiler/semantic/type_inference_engine.cr`:

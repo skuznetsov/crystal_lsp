@@ -21097,6 +21097,32 @@ module Crystal::HIR
       full_name
     end
 
+    private def canonical_function_name_for_def(
+      base_name : String,
+      node : CrystalV2::Compiler::Frontend::DefNode,
+    ) : String
+      param_types = [] of TypeRef
+      has_block = false
+      if params = node.params
+        params.each do |param|
+          next if named_only_separator?(param)
+          if param.is_block
+            has_block = true
+            next
+          end
+          param_type = if ta = param.type_annotation
+                         type_ref_for_name(String.new(ta))
+                       elsif param.is_double_splat
+                         type_ref_for_name("NamedTuple")
+                       else
+                         TypeRef::VOID
+                       end
+          param_types << param_type
+        end
+      end
+      function_full_name_for_def(base_name, param_types, node.params, has_block)
+    end
+
     private def should_register_base_name?(
       full_name : String,
       base_name : String,
@@ -23620,13 +23646,16 @@ module Crystal::HIR
       if desc = @module.get_type_descriptor(type_ref)
         name = desc.name
         return true if desc.kind == TypeKind::Tuple
+        return true if desc.kind == TypeKind::NamedTuple
         return true if name.starts_with?("Tuple(") ||
+                       name.starts_with?("NamedTuple(") ||
                        name.starts_with?("Array(") ||
                        name.starts_with?("Slice(") ||
                        name.starts_with?("StaticArray(")
       else
         name = get_type_name_from_ref(type_ref)
         return true if name.starts_with?("Tuple(") ||
+                       name.starts_with?("NamedTuple(") ||
                        name.starts_with?("Array(") ||
                        name.starts_with?("Slice(") ||
                        name.starts_with?("StaticArray(")
@@ -44835,6 +44864,17 @@ module Crystal::HIR
                 keep_requested_name = name.includes?('$') && (
                   def_has_untyped_regular_param?(resolved_entry_def) ||
                   (
+                    def_has_bare_collection_regular_param?(resolved_entry_def) &&
+                    begin
+                      if suffix_name = method_suffix(name)
+                        parsed_name_types = parse_types_from_suffix(strip_mangled_suffix_flags(suffix_name))
+                        parsed_name_types.any? { |t| concrete_collection_type_ref?(t) }
+                      else
+                        false
+                      end
+                    end
+                  ) ||
+                  (
                     def_has_module_like_regular_param?(resolved_entry_def) &&
                     begin
                       if suffix_name = method_suffix(name)
@@ -44866,6 +44906,10 @@ module Crystal::HIR
                 arena = @function_def_arenas[resolved_entry_name]
                 keep_requested_name = name.includes?('$') && (
                   def_has_untyped_regular_param?(resolved_entry_def) ||
+                  (
+                    def_has_bare_collection_regular_param?(resolved_entry_def) &&
+                    parsed_types.any? { |t| concrete_collection_type_ref?(t) }
+                  ) ||
                   (
                     def_has_module_like_regular_param?(resolved_entry_def) &&
                     parsed_types.any? { |t| concrete_collection_type_ref?(t) }
@@ -46271,13 +46315,21 @@ module Crystal::HIR
               end
             end
           else
-            # Use the call-site mangled name so top-level defs match call signatures.
+            override_name : String? = nil
+            canonical_name = canonical_function_name_for_def(name_parts.base, func_def)
+            if name != target_name
+              override_name = name
+            elsif call_arg_types.nil? || call_arg_types.not_nil!.all? { |t| t == TypeRef::VOID }
+              override_name = name
+            elsif name != canonical_name
+              override_name = name
+            end
             if extra_type_params && !extra_type_params.empty?
               with_isolated_type_param_map(extra_type_params) do
-                lower_def(func_def, call_arg_types, call_arg_literals, call_arg_enum_names, name)
+                lower_def(func_def, call_arg_types, call_arg_literals, call_arg_enum_names, override_name)
               end
             else
-              lower_def(func_def, call_arg_types, call_arg_literals, call_arg_enum_names, name)
+              lower_def(func_def, call_arg_types, call_arg_literals, call_arg_enum_names, override_name)
             end
           end
         end
@@ -50054,6 +50106,13 @@ module Crystal::HIR
              arg_types.any? { |t| t != TypeRef::VOID } && !has_unknown_arg_types
             mangled_method_name = mangle_function_name(base_method_name, arg_types, has_block_call)
           elsif !arg_types.empty? &&
+                def_has_bare_collection_regular_param?(entry_def) &&
+                arg_types.any? { |t| concrete_collection_type_ref?(t) } &&
+                !has_unknown_arg_types
+            # Bare collection annotations (`x : Tuple`, `x : Array`, etc.) still need
+            # per-callsite lowering when the body depends on the concrete shape.
+            mangled_method_name = mangle_function_name(base_method_name, arg_types, has_block_call)
+          elsif !arg_types.empty? &&
                 def_has_module_like_regular_param?(entry_def) &&
                 arg_types.any? { |t| concrete_collection_type_ref?(t) } &&
                 !has_unknown_arg_types
@@ -50953,6 +51012,14 @@ module Crystal::HIR
             has_block_call = true
           end
         end
+      end
+
+      # Record the callsite before any return-type probing. `get_function_return_type`
+      # can force-lower the callee, and without an early pending signature that eager
+      # lower would see only the broad def name (e.g. `tuple_size$Tuple`) instead of
+      # the concrete callsite args.
+      if callsite_arg_types.any? { |t| t != TypeRef::VOID }
+        remember_callsite_arg_types(mangled_method_name, callsite_arg_types, callsite_arg_literals, callsite_arg_enum_names, has_block_call)
       end
 
       # Try to infer return type using mangled name first, fallback to base name
@@ -66588,6 +66655,24 @@ module Crystal::HIR
         base_name = strip_generic_args(type_name)
         return true if module_like_type_name?(type_name) || module_like_type_name?(base_name)
         return true if collection_module_type_name?(type_name) || collection_module_type_name?(base_name)
+      end
+
+      false
+    end
+
+    private def def_has_bare_collection_regular_param?(func_def : CrystalV2::Compiler::Frontend::DefNode) : Bool
+      params = func_def.params
+      return false unless params
+
+      params.each do |param|
+        next if named_only_separator?(param) || param.is_block || param.is_double_splat
+        next unless ta = param.type_annotation
+        type_name = resolve_type_alias_chain(String.new(ta))
+        next if type_name.includes?('(')
+        case strip_generic_args(type_name)
+        when "Tuple", "NamedTuple", "Array", "Slice", "StaticArray"
+          return true
+        end
       end
 
       false
