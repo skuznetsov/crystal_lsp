@@ -306,6 +306,32 @@ module Crystal::HIR
     private alias DeferredModuleContextKey = {String, UInt64, UInt64, String?}
     private alias DeferredModuleLookupKey = {String, String}
 
+    private struct GenericSplitInfo
+      getter base : String
+      getter args : String
+
+      def initialize(@base : String, @args : String)
+      end
+
+      def [](key : Symbol) : String
+        case key
+        when :base then @base
+        when :args then @args
+        else
+          raise KeyError.new("Missing generic split key: #{key}")
+        end
+      end
+
+      def []?(key : Symbol) : String?
+        case key
+        when :base then @base
+        when :args then @args
+        else
+          nil
+        end
+      end
+    end
+
     private struct CallSignature
       getter base_name : String
       getter arity : Int32
@@ -878,6 +904,65 @@ module Crystal::HIR
       end
     end
 
+    # Bare generic restrictions inside a generic owner inherit the owner's type
+    # arguments positionally when they omit explicit params.
+    # Example: inside Array(String), `Array | Slice` means
+    # `Array(String) | Slice(String)`, not abstract `Array | Slice`.
+    private def specialize_bare_generic_annotation(annot_str : String, owner : String?) : String
+      return annot_str unless owner
+      owner_split = split_generic_base_and_args(owner)
+      return annot_str unless owner_split
+
+      receiver_map = type_param_map_for_receiver_name("#{owner}#_")
+      return annot_str if receiver_map.empty?
+
+      union_annotation = annot_str.includes?('|')
+      parts = union_annotation ? split_union_type_name(annot_str) : [annot_str]
+      rewritten = [] of String
+      changed = false
+
+      idx = 0
+      while idx < parts.size
+        trimmed = parts.unsafe_fetch(idx).strip
+        rewritten_part = trimmed
+        absolute = trimmed.starts_with?("::")
+        bare_name = absolute ? (trimmed.size > 2 ? trimmed[2..] : "") : trimmed
+
+        if !bare_name.empty? && simple_identifier_token?(bare_name)
+          if template = @generic_templates[bare_name]?
+            unless template.type_params.empty?
+              mapped_args = [] of String
+              missing = false
+              param_idx = 0
+              while param_idx < template.type_params.size
+                param_name = template.type_params.unsafe_fetch(param_idx)
+                if actual = receiver_map[param_name]?
+                  mapped_args << actual
+                else
+                  missing = true
+                  break
+                end
+                param_idx += 1
+              end
+
+              unless missing
+                specialized = "#{bare_name}(#{mapped_args.join(", ")})"
+                rewritten_part = absolute ? "::#{specialized}" : specialized
+                changed = true if rewritten_part != trimmed
+              end
+            end
+          end
+        end
+
+        rewritten << rewritten_part
+        idx += 1
+      end
+
+      return annot_str unless changed
+      return normalize_union_type_name(rewritten.join(" | ")) if union_annotation
+      rewritten.first
+    end
+
     @[AlwaysInline]
     private def starts_with_generic_base?(name : String, base : String) : Bool
       return false if base.empty?
@@ -1228,7 +1313,7 @@ module Crystal::HIR
     @split_generic_args_last_output : Array(String)? = nil
     # Cache for split_generic_base_and_args (pure function of input string).
     @generic_split_last_input : String? = nil
-    @generic_split_last_output : NamedTuple(base: String, args: String)? = nil
+    @generic_split_last_output : GenericSplitInfo? = nil
     # Recursion guard for unresolved_generic_type_arg? to avoid cyclic alias/union loops.
     @unresolved_generic_arg_stack : Set(String) = Set(String).new
     @unresolved_generic_arg_depth : Int32 = 0
@@ -2097,7 +2182,7 @@ module Crystal::HIR
     # Method resolution cache (per-lowering scope).
     @method_resolution_cache : Hash(String, String)
     @method_resolution_cache_scope : String?
-    @generic_split_cache : Hash(String, NamedTuple(base: String, args: String)?)
+    @generic_split_cache : Hash(String, GenericSplitInfo)
     @callsite_method_cache : Hash(String, String)
     @callsite_method_cache_scope : String?
     # Method resolution cache for inheritance lookups (class_name + method).
@@ -2370,6 +2455,9 @@ module Crystal::HIR
     @loop_phi_stack : Array(Hash(String, Phi)) = [] of Hash(String, Phi)
     # Track break blocks and their variable values for exit phi construction
     @loop_break_info_stack : Array(Array({BlockId, Hash(String, ValueId)})) = [] of Array({BlockId, Hash(String, ValueId)})
+    # Track caller-local snapshots for break exits that originate inside
+    # inlined iterator blocks. Loop phi info only covers loop-owned vars.
+    @loop_break_inline_locals_stack : Array(Array({BlockId, Array(Hash(String, ValueId))})) = [] of Array({BlockId, Array(Hash(String, ValueId))})
     # Track break values for while expression result (break VALUE passes value out of while)
     @loop_break_value_stack : Array(Array({BlockId, ValueId})) = [] of Array({BlockId, ValueId})
     # Dead continuation blocks created after control-flow exits (`next`/`break`).
@@ -2549,7 +2637,7 @@ module Crystal::HIR
       @eager_monomorphization = env_has?("CRYSTAL_V2_EAGER_MONO")
       @method_resolution_cache = Hash(String, String).new(initial_capacity: 8192)
       @method_resolution_cache_scope = nil
-      @generic_split_cache = Hash(String, NamedTuple(base: String, args: String)?).new(initial_capacity: 4096)
+      @generic_split_cache = Hash(String, GenericSplitInfo).new(initial_capacity: 4096)
       @callsite_method_cache = Hash(String, String).new(initial_capacity: 8192)
       @callsite_method_cache_scope = nil
       @method_inheritance_cache = Hash(String, String?).new(initial_capacity: 8192)
@@ -2652,6 +2740,7 @@ module Crystal::HIR
     @block_owner_function_ids = {} of UInt64 => FunctionId
     @block_lowering_cache = {} of BlockLoweringKey => BlockId
     @block_lowering_in_progress = {} of BlockLoweringKey => BlockId
+      @loop_break_inline_locals_stack = [] of Array({BlockId, Array(Hash(String, ValueId))})
       @sources_by_arena = sources_by_arena || {} of CrystalV2::Compiler::Frontend::ArenaLike => String
       @main_arenas = [] of CrystalV2::Compiler::Frontend::ArenaLike
       if configured_main_arenas = main_arenas
@@ -2707,6 +2796,7 @@ module Crystal::HIR
     private def env_has?(key : String) : Bool
       !env_get(key).nil?
     end
+
     # Lazy RTA is enabled by default and can be disabled with:
     #   CRYSTAL_V2_LAZY_RTA=0
     #   CRYSTAL_V2_LAZY_RTA=false
@@ -4367,93 +4457,10 @@ module Crystal::HIR
           MacroParamInfo.new(param.name, param.external_name, param.prefix)
         end
       end
-
-      source = @sources_by_arena[@arena]?
-      unless source
-        return fallback_macro_params_for(macro_name)
-      end
-
-      span = node.span
-      start = span.start_offset
-      length = span.end_offset - span.start_offset
-      return [] of MacroParamInfo if length <= 0
-      return [] of MacroParamInfo if start < 0 || start >= source.bytesize
-      if start + length > source.bytesize
-        length = source.bytesize - start
-      end
-
-      snippet = source.byte_slice(start, length)
-      lexer = CrystalV2::Compiler::Frontend::Lexer.new(snippet)
-
-      params = [] of MacroParamInfo
-      seen_macro = false
-      seen_name = false
-      depth = 0
-      current_tokens = [] of CrystalV2::Compiler::Frontend::Token
-
-      loop do
-        token = lexer.next_token
-        break if token.kind == CrystalV2::Compiler::Frontend::Token::Kind::EOF
-        next if token.kind == CrystalV2::Compiler::Frontend::Token::Kind::Whitespace ||
-                token.kind == CrystalV2::Compiler::Frontend::Token::Kind::Comment
-
-        case token.kind
-        when CrystalV2::Compiler::Frontend::Token::Kind::Macro
-          seen_macro = true
-        when CrystalV2::Compiler::Frontend::Token::Kind::Identifier
-          if seen_macro && !seen_name
-            seen_name = true
-          elsif depth == 1
-            current_tokens << token
-          end
-        when CrystalV2::Compiler::Frontend::Token::Kind::LParen
-          # Macro names can be lexer keywords (e.g. `record`) or operator forms.
-          # If we already saw `macro` and this is the first meaningful token after
-          # it, treat the name as consumed so we can enter the parameter list.
-          if seen_macro && !seen_name
-            seen_name = true
-          end
-          if seen_name && depth == 0
-            depth = 1
-          elsif depth > 0
-            depth += 1
-          end
-        when CrystalV2::Compiler::Frontend::Token::Kind::RParen
-          if depth == 1
-            if info = parse_macro_param_tokens(current_tokens)
-              params << info
-            end
-            current_tokens.clear
-            depth = 0
-            break
-          elsif depth > 1
-            depth -= 1
-          end
-        when CrystalV2::Compiler::Frontend::Token::Kind::Comma
-          if depth == 1
-            if info = parse_macro_param_tokens(current_tokens)
-              params << info
-            end
-            current_tokens.clear
-          end
-        when CrystalV2::Compiler::Frontend::Token::Kind::StarStar
-          current_tokens << token if depth == 1
-        when CrystalV2::Compiler::Frontend::Token::Kind::Star
-          current_tokens << token if depth == 1
-        else
-          if seen_macro && !seen_name
-            # Accept keyword/operator macro names without relying on Identifier kind.
-            seen_name = true
-          elsif depth == 1
-            current_tokens << token
-          end
-        end
-      end
-
-      if params.empty?
-        return fallback_macro_params_for(macro_name)
-      end
-      params
+      # Macro params are persisted in the AST, including the authoritative empty list
+      # for zero-arg macros. Re-parsing source slices here only reintroduces brittle
+      # arena/source-map coupling during macro registration.
+      fallback_macro_params_for(macro_name)
     end
 
     private def fallback_macro_params_for(macro_name : String) : Array(MacroParamInfo)
@@ -6543,6 +6550,11 @@ module Crystal::HIR
             end
           end
         end
+      end
+
+      if effective_context
+        specialized = specialize_bare_generic_annotation(resolved, effective_context)
+        resolved = specialized if specialized != resolved
       end
 
       old_class = @current_class
@@ -9991,7 +10003,7 @@ module Crystal::HIR
             base_name = resolve_method_with_inheritance(class_name, member_name)
             if base_name.nil?
               # Fall back to base name (without generic params) for inherited methods
-              owner_name = split_generic_base_and_args(class_name).try(&.[](:base)) || class_name
+              owner_name = split_generic_base_and_args(class_name).try(&.base) || class_name
               base_name = resolve_method_with_inheritance(owner_name, member_name) || "#{owner_name}##{member_name}"
             end
             ret_type = resolve_return_type_from_def(base_name, base_name, obj_type)
@@ -10581,7 +10593,7 @@ module Crystal::HIR
             if recv_type != TypeRef::VOID
               recv_name = get_type_name_from_ref(recv_type)
               if block_expr || block_pass_expr
-                owner_name = split_generic_base_and_args(recv_name).try(&.[](:base)) || recv_name
+                owner_name = split_generic_base_and_args(recv_name).try(&.base) || recv_name
                 base_name = resolve_method_with_inheritance(owner_name, member_name) || "#{owner_name}##{member_name}"
                 block_param_types = block_param_types_for_call(base_name, base_name, recv_type)
                 if block_return_name = infer_call_block_return_name(block_expr, block_pass_expr, expr_node.span, block_param_types, self_type_name)
@@ -17504,6 +17516,7 @@ module Crystal::HIR
       class_info : ClassInfo,
       call_arg_types : Array(TypeRef)? = nil,
       force : Bool = false,
+      call_has_named_args : Bool = false,
     )
       if env_get("DEBUG_ALLOC_STATS")
         @allocator_debug_total += 1
@@ -17552,7 +17565,7 @@ module Crystal::HIR
             remember_callsite_arg_types(init_base_name, call_arg_types)
             lower_function_if_needed(init_base_name)
           end
-          generate_allocator_overload(class_name, class_info, call_arg_types)
+          generate_allocator_overload(class_name, class_info, call_arg_types, call_has_named_args)
         end
         return
       end
@@ -17810,13 +17823,14 @@ module Crystal::HIR
         instance_ctx.terminate(Return.new(new_call.id))
       end
 
-      generate_allocator_overload(class_name, class_info, call_arg_types)
+      generate_allocator_overload(class_name, class_info, call_arg_types, call_has_named_args)
     end
 
     private def generate_allocator_overload(
       class_name : String,
       class_info : ClassInfo,
       call_arg_types : Array(TypeRef)?,
+      call_has_named_args : Bool = false,
     ) : Nil
       return unless call_arg_types
       return if call_arg_types.empty?
@@ -17833,12 +17847,36 @@ module Crystal::HIR
       return if overload_name == base_name
       return if @module.has_function?(overload_name)
 
+      debug_string_new = env_get("DEBUG_STRING_NEW_OVERLOAD") &&
+                         class_name == "String" &&
+                         call_arg_types.size == 2
+      if debug_string_new
+        arg_names = call_arg_types.map { |t| get_type_name_from_ref(t) }
+        STDERR.puts "[STRING_NEW_ALLOC] class=#{class_name} overload=#{overload_name} named=#{call_has_named_args} arg_types=#{arg_names.join(",")}"
+        STDERR.puts "[STRING_NEW_ALLOC] overload_keys=#{function_def_overloads(base_name).join(",")}"
+        if match = lookup_function_def_for_call(base_name, call_arg_types.size, false, call_arg_types, false, false)
+          stats = function_param_stats(match[0], match[1])
+          STDERR.puts "[STRING_NEW_ALLOC] lookup named=false => #{match[0]} named_only=#{stats.has_named_only} param_count=#{stats.param_count} required=#{stats.required}"
+        else
+          STDERR.puts "[STRING_NEW_ALLOC] lookup named=false => nil"
+        end
+        if match = lookup_function_def_for_call(base_name, call_arg_types.size, false, call_arg_types, false, true)
+          stats = function_param_stats(match[0], match[1])
+          STDERR.puts "[STRING_NEW_ALLOC] lookup named=true => #{match[0]} named_only=#{stats.has_named_only} param_count=#{stats.param_count} required=#{stats.required}"
+        else
+          STDERR.puts "[STRING_NEW_ALLOC] lookup named=true => nil"
+        end
+        caller.first(8).each do |frame|
+          STDERR.puts "[STRING_NEW_ALLOC]   caller #{frame}"
+        end
+      end
+
       # Explicit `def self.new` should usually win over synthesized allocator overloads.
       # Exception: wrapper-style `.new` forwarding that passes a Proc argument can be
       # lowered as a plain call and incorrectly bind to a generic explicit overload
       # (for example `default_value : V`) instead of the initialize-backed allocator.
       # In that case, keep generating the allocator overload for this concrete shape.
-      if explicit_match = lookup_function_def_for_call(base_name, call_arg_types.size, false, call_arg_types)
+      if explicit_match = lookup_function_def_for_call(base_name, call_arg_types.size, false, call_arg_types, false, call_has_named_args)
         explicit_name, explicit_def = explicit_match
         allow_allocator_overload = false
 
@@ -21153,7 +21191,7 @@ module Crystal::HIR
          @top_level_class_kinds.has_key?(type_name)
         if current = @current_class
           current_base = if info = split_generic_base_and_args(current)
-                           info[:base]
+                           info.base
                          else
                            current
                          end
@@ -22567,6 +22605,42 @@ module Crystal::HIR
       {param_count, required, has_splat, has_double_splat, skip}
     end
 
+    private def compatible_non_named_overload_exists_for_call?(
+      overload_keys : Array(String),
+      arg_count : Int32,
+      has_block_call : Bool,
+      arg_types : Array(TypeRef)? = nil,
+      call_has_named_args : Bool = false,
+      unknown_args : Bool = false,
+    ) : Bool
+      overload_keys.any? do |name|
+        def_node = @function_defs[name]?
+        next false unless def_node
+        stats = function_param_stats(name, def_node)
+        next false if stats.has_named_only
+
+        _, _, _, _, skip = effective_arity_stats_for_call(stats, call_has_named_args)
+        next false if skip
+
+        if has_block_call
+          next false unless stats.has_block
+        else
+          next false if stats.has_block
+        end
+
+        param_count, required, has_splat, has_double_splat, _ = effective_arity_stats_for_call(stats, call_has_named_args)
+        next false if arg_count < required
+        next false if arg_count > param_count && !has_splat && !has_double_splat
+
+        if arg_types && !unknown_args
+          func_context = function_context_from_name(name)
+          next false unless params_compatible_with_args?(def_node, arg_types, func_context)
+        end
+
+        true
+      end
+    end
+
     private def ensure_module_def_lookup_cache
       return if @module_def_lookup_cache_version == @module_defs_cache_version
       @module_def_lookup_cache.clear
@@ -22614,12 +22688,14 @@ module Crystal::HIR
       overload_keys = function_def_overloads(base_method_name)
       prefer_non_named = false
       unless call_has_named_args
-        prefer_non_named = overload_keys.any? do |name|
-          def_node = @function_defs[name]?
-          next false unless def_node
-          stats = function_param_stats(name, def_node)
-          !stats.has_named_only
-        end
+        prefer_non_named = compatible_non_named_overload_exists_for_call?(
+          overload_keys,
+          arg_count,
+          has_block_call,
+          nil,
+          call_has_named_args,
+          false,
+        )
       end
 
       overload_keys.each do |name|
@@ -26786,13 +26862,13 @@ module Crystal::HIR
       if override = @current_namespace_override
         namespaces << override
         if info = split_generic_base_and_args(override)
-          namespaces << info[:base] unless namespaces.includes?(info[:base])
+          namespaces << info.base unless namespaces.includes?(info.base)
         end
       end
       if current = @current_class
         namespaces << current unless namespaces.includes?(current)
         if info = split_generic_base_and_args(current)
-          namespaces << info[:base] unless namespaces.includes?(info[:base])
+          namespaces << info.base unless namespaces.includes?(info.base)
         end
       end
 
@@ -27012,7 +27088,7 @@ module Crystal::HIR
         stripped = name.size > 2 ? name[2..] : ""
         return "" if stripped.empty?
         if info = split_generic_base_and_args(stripped)
-          resolved_args = split_generic_type_args(info[:args]).map do |arg|
+          resolved_args = split_generic_type_args(info.args).map do |arg|
             arg = arg.strip
             if arg.starts_with?(':')
               arg = arg.size > 1 ? arg[1..] : ""
@@ -27023,7 +27099,7 @@ module Crystal::HIR
               resolve_type_name_in_context(arg)
             end
           end.join(", ")
-          return "#{info[:base]}(#{resolved_args})"
+          return "#{info.base}(#{resolved_args})"
         end
         return @current_class || stripped if stripped == "self"
         return stripped
@@ -27048,8 +27124,8 @@ module Crystal::HIR
 
       if name.ends_with?(')') || name.includes?('(') || name.includes?(',')
         if info = split_generic_base_and_args(name)
-          resolved_base = resolve_class_name_in_signature_context(info[:base]) || info[:base]
-          resolved_args = split_generic_type_args(info[:args]).map do |arg|
+          resolved_base = resolve_class_name_in_signature_context(info.base) || info.base
+          resolved_args = split_generic_type_args(info.args).map do |arg|
             arg = arg.strip
             if arg.starts_with?(':')
               arg = arg.size > 1 ? arg[1..] : ""
@@ -27060,7 +27136,7 @@ module Crystal::HIR
               normalize_tuple_literal_type_name(resolve_type_name_in_context(arg))
             end
           end.join(", ")
-          return resolved_base == info[:base] && resolved_args == info[:args] ? name : "#{resolved_base}(#{resolved_args})"
+          return resolved_base == info.base && resolved_args == info.args ? name : "#{resolved_base}(#{resolved_args})"
         end
       end
 
@@ -27149,7 +27225,7 @@ module Crystal::HIR
           return ""
         end
         if info = split_generic_base_and_args(stripped)
-          resolved_args = split_generic_type_args(info[:args]).map do |arg|
+          resolved_args = split_generic_type_args(info.args).map do |arg|
             arg = arg.strip
             if arg.starts_with?(':')
               arg = arg.size > 1 ? arg[1..] : ""
@@ -27160,7 +27236,7 @@ module Crystal::HIR
               resolve_type_name_in_context(arg)
             end
           end.join(", ")
-          resolved = "#{info[:base]}(#{resolved_args})"
+          resolved = "#{info.base}(#{resolved_args})"
           resolved_type_name_cache_set(name, resolved)
           return resolved
         end
@@ -27206,8 +27282,8 @@ module Crystal::HIR
 
       if has_generic_shape
         if info = split_generic_base_and_args(name)
-          resolved_base = resolve_type_name_in_context(info[:base])
-          resolved_args = split_generic_type_args(info[:args]).map do |arg|
+          resolved_base = resolve_type_name_in_context(info.base)
+          resolved_args = split_generic_type_args(info.args).map do |arg|
             arg = arg.strip
             if arg.starts_with?(':')
               arg = arg.size > 1 ? arg[1..] : ""
@@ -27220,7 +27296,7 @@ module Crystal::HIR
               normalize_tuple_literal_type_name(resolve_type_name_in_context(arg))
             end
           end.join(", ")
-          resolved = resolved_base == info[:base] && resolved_args == info[:args] ? name : "#{resolved_base}(#{resolved_args})"
+          resolved = resolved_base == info.base && resolved_args == info.args ? name : "#{resolved_base}(#{resolved_args})"
           resolved_type_name_cache_set(name, resolved)
           return resolved
         end
@@ -27314,7 +27390,7 @@ module Crystal::HIR
 
     private def namespace_chain_has_nested?(ns : String, name : String) : Bool
       base = if info = split_generic_base_and_args(ns)
-               info[:base]
+               info.base
              else
                ns
              end
@@ -27336,7 +27412,7 @@ module Crystal::HIR
     # and repeated type_name_exists? calls for nested constants/types.
     private def nested_type_full_name_in_namespace_chain(ns : String, name : String) : String?
       base = if info = split_generic_base_and_args(ns)
-               info[:base]
+               info.base
              else
                ns
              end
@@ -27357,7 +27433,7 @@ module Crystal::HIR
                           BUILTIN_TYPE_NAMES.includes?(name)
       if override = @current_namespace_override
         override_base = if info = split_generic_base_and_args(override)
-                          info[:base]
+                          info.base
                         else
                           override
                         end
@@ -27367,7 +27443,7 @@ module Crystal::HIR
       end
       if current = @current_class
         current_base = if info = split_generic_base_and_args(current)
-                         info[:base]
+                         info.base
                        else
                          current
                        end
@@ -27411,7 +27487,7 @@ module Crystal::HIR
 
     private def nested_type_shadow_in_namespace(name : String, namespace : String) : String?
       namespace_base = if info = split_generic_base_and_args(namespace)
-                         info[:base]
+                         info.base
                        else
                          namespace
                        end
@@ -27548,8 +27624,8 @@ module Crystal::HIR
       # If this is a generic type name, resolve the base in context and
       # reconstruct with the original type args.
       if info = split_generic_base_and_args(name)
-        resolved_base = resolve_class_name_in_context(info[:base])
-        result = resolved_base == info[:base] ? name : "#{resolved_base}(#{info[:args]})"
+        resolved_base = resolve_class_name_in_context(info.base)
+        result = resolved_base == info.base ? name : "#{resolved_base}(#{info.args})"
         debug_hook_type_resolve(name, @current_class || "", result)
         return result
       end
@@ -27571,13 +27647,13 @@ module Crystal::HIR
       if override = @current_namespace_override
         namespaces << override
         if info = split_generic_base_and_args(override)
-          namespaces << info[:base] unless namespaces.includes?(info[:base])
+          namespaces << info.base unless namespaces.includes?(info.base)
         end
       end
       if current = @current_class
         namespaces << current unless namespaces.includes?(current)
         if info = split_generic_base_and_args(current)
-          namespaces << info[:base] unless namespaces.includes?(info[:base])
+          namespaces << info.base unless namespaces.includes?(info.base)
         end
       end
 
@@ -27588,7 +27664,7 @@ module Crystal::HIR
       # Prefer the override namespace (module mixins), then the current class namespace.
       namespaces.each do |namespace|
         namespace_base = if info = split_generic_base_and_args(namespace)
-                           info[:base]
+                           info.base
                          else
                            namespace
                          end
@@ -27656,7 +27732,7 @@ module Crystal::HIR
         # Look in ancestor classes for nested constants/types (e.g., TZLocation -> Location::Zone).
         if current = @current_class
           current_base = if info = split_generic_base_and_args(current)
-                           info[:base]
+                           info.base
                          else
                            current
                          end
@@ -27679,7 +27755,7 @@ module Crystal::HIR
         # This avoids resolving to outer namespaces when the nested type is defined later.
         if current = @current_class
           current_base = if info = split_generic_base_and_args(current)
-                           info[:base]
+                           info.base
                          else
                            current
                          end
@@ -27718,7 +27794,7 @@ module Crystal::HIR
         unless builtin_alias_target?(name) || LIBC_TYPE_ALIASES.has_key?(name)
           unless @top_level_type_names.includes?(name)
             current_base = if info = split_generic_base_and_args(current)
-                             info[:base]
+                             info.base
                            else
                              current
                            end
@@ -27801,7 +27877,7 @@ module Crystal::HIR
         # when the type should be Polling::Waiters (a sibling struct in the module).
         if current = @current_class
           current_base = if info = split_generic_base_and_args(current)
-                           info[:base]
+                           info.base
                          else
                            current
                          end
@@ -27885,7 +27961,7 @@ module Crystal::HIR
         prefixes = [] of String
         prefixes << current
         if info = split_generic_base_and_args(current)
-          prefixes << info[:base] unless prefixes.includes?(info[:base])
+          prefixes << info.base unless prefixes.includes?(info.base)
         end
         candidates = [] of String
         @generic_templates.each_key do |key|
@@ -27991,15 +28067,15 @@ module Crystal::HIR
 
       if name.ends_with?(')') || name.includes?('(') || name.includes?(',')
         if info = split_generic_base_and_args(name)
-          resolved_base = resolve_class_name_in_signature_context(info[:base]) || info[:base]
-          resolved_args = split_generic_type_args(info[:args]).map do |arg|
+          resolved_base = resolve_class_name_in_signature_context(info.base) || info.base
+          resolved_args = split_generic_type_args(info.args).map do |arg|
             arg = arg.strip
             if arg.starts_with?(':')
               arg = arg.size > 1 ? arg[1..] : ""
             end
             resolve_type_name_in_context(arg)
           end.join(", ")
-          return resolved_base == info[:base] && resolved_args == info[:args] ? name : "#{resolved_base}(#{resolved_args})"
+          return resolved_base == info.base && resolved_args == info.args ? name : "#{resolved_base}(#{resolved_args})"
         end
       end
 
@@ -28039,7 +28115,7 @@ module Crystal::HIR
         # E.g., when @current_class = "A::B::C", check "A::B::C::", then "A::B::", then "A::".
         if override = @current_namespace_override
           override_base = if info = split_generic_base_and_args(override)
-                            info[:base]
+                            info.base
                           else
                             override
                           end
@@ -28055,7 +28131,7 @@ module Crystal::HIR
         end
         if current = @current_class
           current_base = if info = split_generic_base_and_args(current)
-                           info[:base]
+                           info.base
                          else
                            current
                          end
@@ -28077,7 +28153,7 @@ module Crystal::HIR
         if name[0]?.try(&.uppercase?)
           if override = @current_namespace_override
             override_base = if info = split_generic_base_and_args(override)
-                              info[:base]
+                              info.base
                             else
                               override
                             end
@@ -28085,7 +28161,7 @@ module Crystal::HIR
           end
           if current = @current_class
             current_base = if info = split_generic_base_and_args(current)
-                             info[:base]
+                             info.base
                            else
                              current
                            end
@@ -28240,7 +28316,7 @@ module Crystal::HIR
             seen.add(mod)
             modules << mod
             if info = split_generic_base_and_args(mod)
-              base = info[:base]
+              base = info.base
               unless base.empty? || seen.includes?(base)
                 seen.add(base)
                 modules << base
@@ -28263,7 +28339,7 @@ module Crystal::HIR
       end
 
       if info = split_generic_base_and_args(raw_ns)
-        base = info[:base]
+        base = info.base
         unless base.empty? || seen.includes?(base)
           seen.add(base)
           namespaces << base
@@ -28275,7 +28351,7 @@ module Crystal::HIR
       return unless raw_ns
 
       ns = if info = split_generic_base_and_args(raw_ns)
-             info[:base]
+             info.base
            else
              raw_ns
            end
@@ -28461,25 +28537,52 @@ module Crystal::HIR
 
     # Split a full generic type name into base and args, handling nested parens in the base.
     # Example: "Foo(Bar, Baz)::Entry(Qux)" -> base="Foo(Bar, Baz)::Entry", args="Qux"
-    private def split_generic_base_and_args(name : String) : NamedTuple(base: String, args: String)?
-      if last_input = @generic_split_last_input
-        if last_input == name
-          return @generic_split_last_output
+    @[NoInline]
+    private def debug_validate_generic_split(label : String, name : String, value : GenericSplitInfo?)
+      return unless env_has?("DEBUG_GENERIC_SPLIT_VALIDATE")
+
+      if value
+        begin
+          STDERR.puts "[GEN_SPLIT_VALIDATE] label=#{label} name=#{name} base=#{value.base} args=#{value.args}"
+        rescue ex
+          STDERR.puts "[GEN_SPLIT_VALIDATE_ERR] label=#{label} name=#{name} ex=#{ex.class} msg=#{ex.message}"
+          raise ex
+        end
+      else
+        STDERR.puts "[GEN_SPLIT_VALIDATE] label=#{label} name=#{name} nil"
+      end
+    end
+
+    @[NoInline]
+    private def split_generic_base_and_args(name : String) : GenericSplitInfo?
+      bypass_cache = env_has?("CRYSTAL2_DEBUG_BYPASS_GENERIC_SPLIT_CACHE")
+
+      unless bypass_cache
+        if last_input = @generic_split_last_input
+          if last_input == name
+            debug_validate_generic_split("last-hit", name, @generic_split_last_output)
+            return @generic_split_last_output
+          end
         end
       end
 
       # Fast negative path for plain type names: avoid cache churn on ubiquitous
       # non-generic lookups (e.g., String, Int32, Foo::Bar).
       unless name.ends_with?(')') || name.includes?('(') || name.includes?(',')
-        @generic_split_last_input = name
-        @generic_split_last_output = nil
+        unless bypass_cache
+          @generic_split_last_input = name
+          @generic_split_last_output = nil
+        end
         return nil
       end
 
-      if cached = @generic_split_cache[name]?
-        @generic_split_last_input = name
-        @generic_split_last_output = cached
-        return cached
+      unless bypass_cache
+        if cached = @generic_split_cache[name]?
+          @generic_split_last_input = name
+          @generic_split_last_output = cached
+          debug_validate_generic_split("cache-hit", name, cached)
+          return cached
+        end
       end
 
       parse_name = name
@@ -28488,18 +28591,21 @@ module Crystal::HIR
         parse_name = normalized unless normalized == name
       end
 
-      if parse_name != name
+      if !bypass_cache && parse_name != name
         if cached = @generic_split_cache[parse_name]?
           @generic_split_cache[name] = cached
           @generic_split_last_input = name
           @generic_split_last_output = cached
+          debug_validate_generic_split("parse-cache-hit", name, cached)
           return cached
         end
       end
 
       unless parse_name.ends_with?(')')
-        @generic_split_last_input = name
-        @generic_split_last_output = nil
+        unless bypass_cache
+          @generic_split_last_input = name
+          @generic_split_last_output = nil
+        end
         return nil
       end
 
@@ -28515,19 +28621,26 @@ module Crystal::HIR
           if depth == 0
             base = parse_name.byte_slice(0, i)
             args = parse_name.byte_slice(i + 1, parse_name.size - i - 2)
-            result = {base: base, args: args}
-            @generic_split_cache[parse_name] = result
-            @generic_split_cache[name] = result unless parse_name == name
-            @generic_split_last_input = name
-            @generic_split_last_output = result
+            result = GenericSplitInfo.new(base, args)
+            debug_validate_generic_split("fresh", name, result)
+            unless bypass_cache
+              @generic_split_cache[parse_name] = result
+              @generic_split_cache[name] = result unless parse_name == name
+              @generic_split_last_input = name
+              @generic_split_last_output = result
+              debug_validate_generic_split("after-last-store", name, @generic_split_last_output)
+              debug_validate_generic_split("after-cache-store", name, @generic_split_cache[name]?)
+            end
             return result
           end
         end
         i -= 1
       end
 
-      @generic_split_last_input = name
-      @generic_split_last_output = nil
+      unless bypass_cache
+        @generic_split_last_input = name
+        @generic_split_last_output = nil
+      end
       nil
     end
 
@@ -33679,7 +33792,10 @@ module Crystal::HIR
       when CrystalV2::Compiler::Frontend::SpawnNode
         lower_spawn(ctx, node)
       else
-        raise LoweringError.new("Unsupported AST node type: #{node.class}", node)
+        if env_has?("DEBUG_LOWER_UNSUPPORTED")
+          STDERR.puts "[LOWER_UNSUPPORTED] #{node.class.name}"
+        end
+        raise LoweringError.new("Unsupported AST node type: #{node.class.name}")
       end
     end
 
@@ -40192,6 +40308,7 @@ module Crystal::HIR
       # We need phi nodes at the loop header for these
       assigned_vars = collect_assigned_vars(node.body)
       inline_vars = Set(String).new
+      pre_inline_caller_locals = @inline_caller_locals_stack.map(&.dup)
 
       # Save the initial values of variables before the loop
       pre_loop_block = ctx.current_block
@@ -40334,6 +40451,7 @@ module Crystal::HIR
       @loop_cond_stack << cond_block
       @loop_phi_stack << phi_nodes
       @loop_break_info_stack << [] of {BlockId, Hash(String, ValueId)}
+      @loop_break_inline_locals_stack << [] of {BlockId, Array(Hash(String, ValueId))}
       @loop_break_value_stack << [] of {BlockId, ValueId}
       # Apply truthy narrowing (e.g., `while current` narrows ListNode? to ListNode)
       while_truthy_targets = truthy_narrowing_targets(node.condition)
@@ -40354,6 +40472,7 @@ module Crystal::HIR
         @loop_phi_stack.pop?
       end
       break_info = @loop_break_info_stack.pop
+      break_inline_locals = @loop_break_inline_locals_stack.pop
       break_values = @loop_break_value_stack.pop
       body_exit_block = ctx.current_block
       ctx.pop_scope
@@ -40461,6 +40580,14 @@ module Crystal::HIR
           ctx.emit(exit_phi)
           ctx.register_local(var_name, exit_phi.id)
         end
+      end
+
+      unless pre_inline_caller_locals.empty?
+        flowing_inline_info = [{cond_branch_block, @inline_caller_locals_stack.map(&.dup)}] of {BlockId, Array(Hash(String, ValueId))}
+        break_inline_locals.each do |entry|
+          flowing_inline_info << entry
+        end
+        merge_inline_caller_locals_after_if(ctx, pre_inline_caller_locals, flowing_inline_info)
       end
 
       # While expression result: nil for normal exit, break value for break exit
@@ -40950,6 +41077,24 @@ module Crystal::HIR
         end
       end
       snapshot
+    end
+
+    private def snapshot_active_inline_caller_locals(
+      ctx : LoweringContext,
+      caller_locals_index : Int32,
+    ) : Hash(String, ValueId)?
+      caller_locals = @inline_caller_locals_stack[caller_locals_index]?
+      return nil unless caller_locals
+
+      snapshot = caller_locals.dup
+      current_locals = ctx.save_locals
+      caller_locals.each_key do |name|
+        next if name == "self"
+        if updated = current_locals[name]?
+          snapshot[name] = updated
+        end
+      end
+      snapshot_inline_caller_locals_for_return(snapshot)
     end
 
     # Collect names that are local to an inlined callee function body, without
@@ -42621,6 +42766,25 @@ module Crystal::HIR
             break_info << {ctx.current_block, break_locals}
           end
         end
+        if caller_locals_index = @inline_active_caller_locals_index_stack.last?
+          if snapshot = snapshot_active_inline_caller_locals(ctx, caller_locals_index)
+            # `break` can exit an inlined iterator before the surrounding lowering
+            # path has a chance to snapshot caller locals. Preserve the live caller
+            # view now so writes like `matches = false; break` are not lost.
+            @inline_caller_locals_stack[caller_locals_index] = snapshot
+          end
+        end
+        if break_inline_locals = @loop_break_inline_locals_stack.last?
+          unless @inline_caller_locals_stack.empty?
+            snapshot_stack = @inline_caller_locals_stack.map(&.dup)
+            if caller_locals_index = @inline_active_caller_locals_index_stack.last?
+              if snapshot = snapshot_active_inline_caller_locals(ctx, caller_locals_index)
+                snapshot_stack[caller_locals_index] = snapshot
+              end
+            end
+            break_inline_locals << {ctx.current_block, snapshot_stack}
+          end
+        end
         ctx.terminate(Jump.new(exit_block))
       else
         ctx.terminate(Unreachable.new)
@@ -43727,6 +43891,7 @@ module Crystal::HIR
       false
     end
 
+    @[NoInline]
     private def generic_owner_info(owner : String) : GenericOwnerInfo?
       if @generic_owner_info_cache_gen != @subst_cache_gen
         @generic_owner_info_cache.clear
@@ -43742,8 +43907,8 @@ module Crystal::HIR
         return nil
       end
 
-      base = info[:base]
-      raw_args = split_generic_type_args(info[:args]).map do |arg|
+      base = info.base
+      raw_args = split_generic_type_args(info.args).map do |arg|
         normalize_tuple_literal_type_name(arg.strip)
       end
 
@@ -50553,8 +50718,8 @@ module Crystal::HIR
                 STDERR.puts "[SLICE_EACH3] owner_part=#{owner_part} owner_name=#{owner_name || "nil"} recv_name=#{recv_name}"
               end
               if owner_name && owner_name.includes?('(') && recv_name.includes?('(')
-                owner_base = split_generic_base_and_args(owner_name).try(&.[](:base)) || owner_name
-                recv_base = split_generic_base_and_args(recv_name).try(&.[](:base)) || recv_name
+                owner_base = split_generic_base_and_args(owner_name).try(&.base) || owner_name
+                recv_base = split_generic_base_and_args(recv_name).try(&.base) || recv_name
                 if owner_base == recv_base && owner_name != recv_name
                   # Only skip when we can't map generic params from the receiver type.
                   receiver_map = type_param_map_for_receiver_type(ctx.type_of(receiver_id))
@@ -54312,12 +54477,14 @@ module Crystal::HIR
       end
       prefer_non_named = false
       unless call_has_named_args
-        prefer_non_named = overload_keys.any? do |name|
-          def_node = @function_defs[name]?
-          next false unless def_node
-          stats = function_param_stats(name, def_node)
-          !stats.has_named_only
-        end
+        prefer_non_named = compatible_non_named_overload_exists_for_call?(
+          overload_keys,
+          arg_count,
+          has_block,
+          arg_types,
+          call_has_named_args,
+          !!unknown_args,
+        )
       end
       if env_get("DEBUG_EACH_OVERLOAD") && func_name.includes?("Tuple#each")
         STDERR.puts "[EACH_OVERLOAD] func=#{func_name} arg_count=#{arg_count} named=#{call_has_named_args} block=#{has_block} prefer_non_named=#{prefer_non_named}"
@@ -55233,7 +55400,7 @@ module Crystal::HIR
       has_block_call : Bool,
       call_has_named_args : Bool,
       receiver_id : ValueId? = nil,
-    ) : Array(ValueId)
+    ) : {Array(ValueId), Bool}
       func_name = full_method_name || method_name
       arg_types = args.map { |arg_id| ctx.type_of(arg_id) }
       # Pass call_has_named_args=true to allow matching defs with named-only params
@@ -55267,12 +55434,13 @@ module Crystal::HIR
         found_name = func_entry ? func_entry[0] : "nil"
         STDERR.puts "[DEFAULT_ARGS] func_name=#{func_name} args.size=#{args.size} found=#{found_name}"
       end
-      return args unless func_entry
+      return {args, call_has_named_args} unless func_entry
       func_def = func_entry[1]
       func_context = function_context_from_name(func_entry[0])
       def_arena = @function_def_arenas[func_entry[0]]? || @arena
       params = func_def.params
-      return args unless params
+      return {args, call_has_named_args} unless params
+      func_stats = function_param_stats(func_entry[0], func_def)
 
       # When dealing with .new calls, the found def may be a different overload
       # than what reorder_named_args resolved (e.g., Time.new(time, location) vs
@@ -55293,7 +55461,7 @@ module Crystal::HIR
                   next if p.is_block || named_only_separator?(p)
                   real_param_count += 1
                 end
-                return args if real_param_count == args.size
+                return {args, call_has_named_args} if real_param_count == args.size
               end
             end
           end
@@ -55321,7 +55489,7 @@ module Crystal::HIR
         end
       end
 
-      return args if args.size >= param_defaults.size
+      return {args, call_has_named_args} if args.size >= param_defaults.size
 
       # If any missing argument does not have a default expression, this
       # overload is not applicable for default-argument expansion.
@@ -55329,7 +55497,7 @@ module Crystal::HIR
       # and selecting an arity-incompatible overload.
       idx = args.size
       while idx < param_defaults.size
-        return args if param_defaults[idx].nil?
+        return {args, call_has_named_args} if param_defaults[idx].nil?
         idx += 1
       end
 
@@ -55391,7 +55559,12 @@ module Crystal::HIR
         end
       end
 
-      args
+      effective_has_named_args = call_has_named_args
+      if !effective_has_named_args && func_stats.has_named_only && args.size > func_stats.positional_count
+        effective_has_named_args = true
+      end
+
+      {args, effective_has_named_args}
     end
 
     # Intrinsic: n.times { |i| body }
@@ -59727,7 +59900,11 @@ module Crystal::HIR
                          STDERR.puts "[INLINE_YIELD_RESULT] callee=#{callee_name} args=#{arg_names} result=#{res_name}"
                        end
 
-                       caller_locals_after = ctx.save_locals
+                       caller_locals_after = if use_stack_caller_locals && control_flow_dead_block?(ctx, ctx.current_block)
+                                               (@inline_caller_locals_stack[caller_locals_index]? || ctx.save_locals).dup
+                                             else
+                                               ctx.save_locals
+                                             end
                        # Block parameters must not leak outside the block.
                        param_names.each do |name|
                          if prev = caller_locals_before_params[name]?
@@ -62280,7 +62457,7 @@ module Crystal::HIR
         end
       end
 
-      args = apply_default_args(ctx, [] of ValueId, member_name, base_method_name, false, false)
+      args, _ = apply_default_args(ctx, [] of ValueId, member_name, base_method_name, false, false)
       arg_types = args.map { |arg_id| ctx.type_of(arg_id) }
 
       actual_name = if resolved_method_name
@@ -63281,7 +63458,7 @@ module Crystal::HIR
 
       enum_name = resolve_enum_name(class_name_str)
 
-      args = apply_default_args(ctx, [] of ValueId, member_name, full_method_name, false, false)
+      args, _ = apply_default_args(ctx, [] of ValueId, member_name, full_method_name, false, false)
       if enum_name && member_name == "new"
         enum_type = enum_base_type(enum_name)
         if args.size == 1
@@ -66579,10 +66756,10 @@ module Crystal::HIR
           end
           # Normalize generic spacing to avoid cache misses like "Hash(String,Int32)" vs "Hash(String, Int32)"
           if (has_paren || has_comma) && (info = split_generic_base_and_args(name))
-            arg_names = split_generic_type_args(info[:args]).map do |arg|
+            arg_names = split_generic_type_args(info.args).map do |arg|
               normalize_tuple_literal_type_name(arg.strip)
             end
-            name = "#{info[:base]}(#{arg_names.join(", ")})"
+            name = "#{info.base}(#{arg_names.join(", ")})"
           end
           @type_name_normalize_cache[raw_name] = name
         end
@@ -66725,7 +66902,7 @@ module Crystal::HIR
       if !@type_param_map.empty? && !lookup_has_generic && lookup_has_ns
         if current = @current_class
           current_base = if info = split_generic_base_and_args(current)
-                           info[:base]
+                           info.base
                          else
                            current
                          end
@@ -66809,7 +66986,7 @@ module Crystal::HIR
         end
         if cached
           if info = split_generic_base_and_args(lookup_name)
-            if template = @generic_templates[info[:base]]?
+            if template = @generic_templates[info.base]?
               if desc = @module.get_type_descriptor(cached)
                 expected_kind = template.is_struct ? TypeKind::Struct : TypeKind::Class
                 return cached if desc.kind == expected_kind
@@ -66853,7 +67030,7 @@ module Crystal::HIR
       if !lookup_name.empty? && !lookup_has_ns
         if current = @current_class
           current_base = if info = split_generic_base_and_args(current)
-                           info[:base]
+                           info.base
                          else
                            current
                          end
@@ -66899,8 +67076,8 @@ module Crystal::HIR
       # Handle generic types like Pointer(K), Array(T) - substitute type parameters
       if info = split_generic_base_and_args(lookup_name)
         # Parse generic: "Pointer(K)" -> base="Pointer", params=["K"]
-        base_name = info[:base]
-        params_str = info[:args]
+        base_name = info.base
+        params_str = info.args
         expected_arity : Int32? = nil
 
         # First split generic args with proc-arrow disambiguation (so `A, B -> C`

@@ -22,6 +22,56 @@ closure cells, Tuple ptr/value confusion.
 - [ ] **Phase 5: FIX RC-3** — String.build block lowering
 - [ ] **Phase 6: RE-ENABLE RTA + BOOTSTRAP** — stage0→stage1→stage2→stage3 + benchmark
 
+### Current checkpoint (2026-03-08 inline iterator break boundary)
+
+- Verified a real control-flow writeback fix on the current worktree:
+  - the earlier focused oracle with `matches = false; break` inside an inlined
+    iterator block was a real bug, but the first local fix was still wrong: it
+    snapshotted raw `ctx.save_locals` in `lower_break`, which preserved the
+    outer write but leaked callee `self` back into the caller on iterator
+    internal-break paths.
+  - tiny adversary oracle:
+    - `Iter#each_token { |token| @tokens << token }`
+    - the intermediate local branch crashed in `Holder#run` because post-loop
+      code read `@tokens` from the callee `Iter` receiver instead of the caller
+      `Holder`.
+  - final fix in `src/compiler/hir/ast_to_hir.cr`:
+    - added `snapshot_active_inline_caller_locals(...)` for `lower_break`;
+    - snapshot only caller-visible locals from the active inline caller frame;
+    - keep lexical caller `self` stable instead of copying current callee `self`;
+    - still preserve loop backedge values via `snapshot_inline_caller_locals_for_return(...)`.
+- New focused oracles:
+  - `bash regression_tests/inline_iterator_break_writeback_repro.sh /private/tmp/stage1_rel_inline_break_fix3_20260308`
+    -> `stdout: true / 3 / false / 2`, `not reproduced`
+  - `bash regression_tests/inline_iterator_callee_self_leak_repro.sh /private/tmp/stage1_rel_inline_break_fix3_20260308`
+    -> `stdout: 3 / 0,1,2`, `not reproduced`
+- Fresh release timings on the fixed pair:
+  - `stage1 --release`:
+    - `/usr/bin/time -p scripts/build_stage1_original_release.sh /private/tmp/stage1_rel_inline_break_fix3_20260308`
+      -> `real 433.99`
+  - `stage2 --release`:
+    - `/usr/bin/time -p scripts/timeout_sample_lldb.sh -t 420 -m 16384 --no-series --no-lldb -o /tmp/stage2_rel_inline_break_fix3_probe -- scripts/build_stage2_release.sh /private/tmp/stage1_rel_inline_break_fix3_20260308 /private/tmp/stage2_rel_inline_break_fix3_20260308`
+      -> `status 0`, `real 198.80`
+  - current measured speedup:
+    - `stage1/stage2 ~= 2.18x`
+- Regression sweep:
+  - `/usr/bin/time -p regression_tests/run_all.sh /private/tmp/stage1_rel_inline_break_fix3_20260308`
+    -> `67 passed, 0 failed`, `real 302.69`
+- Boundary shift / remaining blocker:
+  - fresh self-hosted stage2 still reproduces the fast crash family:
+    - `bash regression_tests/stage2_parse_prelude_nocodegen_crash_repro.sh /private/tmp/stage2_rel_inline_break_fix3_20260308`
+      -> reproduced, `status: 139`
+    - `bash regression_tests/stage2_macro_record_heredoc_index_oob_repro.sh /private/tmp/stage2_rel_inline_break_fix3_20260308`
+      -> reproduced, `status: 139`
+  - but LLDB on the fresh stage2 release no longer stops in the temporary
+    `Parser#initialize` regression from the bad local patch; the active frame is now:
+    - `CrystalV2::Compiler::Semantic::TypeInferenceEngine#infer_expression(ExprId)`
+    - faulting on a null hash/table path (`ldr x0, [x8, #0x8]`, `x8 = 0`)
+  - current reading:
+    - this pass produces a real inline-iterator `break` writeback fix,
+      preserves release bootstrap speed, keeps the full stage1 regression suite green,
+      and exposes a deeper semantic-inference blocker on self-hosted stage2.
+
 ### Current checkpoint (2026-03-08 early)
 
 - New verified runtime/codegen fix on the current dirty worktree:
