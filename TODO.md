@@ -200,6 +200,21 @@ closure cells, Tuple ptr/value confusion.
     - this value type matches `AstToHir`'s `@module_defs`, so the next live
       blocker is likely in module-definition map population / mutation rather
       than the earlier `case node` dispatch path.
+  - new fast runtime oracle for the shifted crash family:
+    - `bash regression_tests/hash_array_tuple_union_size_repro.sh /private/tmp/stage1_dbg_case_type_fix_20260307`
+      -> `stdout: 4 / 101`, `reproduced`
+    - focused controls stay green on the same binary:
+      - `Hash(String, Array(Int32))` -> `1 / 101`
+      - `Hash(String, Array(Tuple(Int32, Int32)))` -> `1 / 1 / 2`
+      - `Hash(String, Array(Int32 | Int64))` -> `1 / 101`
+    - reading:
+      - the fast corruption signal is specific to `Hash` values whose array
+        element type is a tuple carrying a union payload
+        (`Array(Tuple(Int32, Int32 | Int64))`), not to plain arrays, plain
+        tuple arrays, or plain array-of-union values.
+      - this is not yet a proven root cause for the fresh stage2
+        `@module_defs` crash, but it is the closest current small model of the
+        same `Hash(String, Array(Tuple(...)))#set_entry` family.
 
 ### Current checkpoint (2026-03-07 late)
 
