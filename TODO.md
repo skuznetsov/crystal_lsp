@@ -22,6 +22,49 @@ closure cells, Tuple ptr/value confusion.
 - [ ] **Phase 5: FIX RC-3** — String.build block lowering
 - [ ] **Phase 6: RE-ENABLE RTA + BOOTSTRAP** — stage0→stage1→stage2→stage3 + benchmark
 
+### Current checkpoint (2026-03-08 string `typeof` tuple literal inference)
+
+- Verified another real stage1/runtime sub-root-cause inside the broader
+  `sort_by!` / tuple-key family:
+  - focused oracle:
+    - `bash regression_tests/pointer_tuple_slot_runtime_repro.sh /private/tmp/stage1_dbg_typeof_tuple_fix_20260308`
+      -> `run_status: 0`, expected output, `not reproduced`
+    - `bash regression_tests/pointer_tuple_slot_runtime_repro.sh /private/tmp/stage1_rel_typeof_tuple_fix_20260308`
+      -> `run_status: 0`, expected output, `not reproduced`
+- Root cause on the stale compiler was narrower than a generic
+  `Pointer(Tuple(...))` ABI break:
+  - explicit `Pointer(Tuple(UInt32, UInt32)).malloc(1)` already worked and
+    printed `1 / 3`;
+  - only `Pointer(typeof({1_u32, 3_u32})).malloc(1)` degraded, and nested
+    `Pointer(typeof({ {1_u32, 3_u32}, 3_u32 }))` showed the same family;
+  - the string-based `typeof(...)` path fell through to
+    `resolve_typeof_inner(...)`, which did not understand tuple literal strings
+    (or their numeric literal elements), so the resulting pointer specialization
+    broadened and later tuple slot loads came back as empty/broad values.
+- Final fix in `src/compiler/hir/ast_to_hir.cr`:
+  - teach `resolve_typeof_inner(...)` to recognize string literal forms for:
+    - booleans / `nil`
+    - numeric literals with Crystal suffixes
+    - tuple literals
+    - named tuple literals
+  - synthesize concrete type names from those string expressions before the
+    fallback broad-resolution path can collapse them.
+- Fresh verification:
+  - `stage1 debug`:
+    - `/usr/bin/time -p scripts/build_stage1_original_debug.sh /private/tmp/stage1_dbg_typeof_tuple_fix_20260308 --error-trace`
+      -> `real 9.46`
+  - `stage1 --release`:
+    - `/usr/bin/time -p scripts/build_stage1_original_release.sh /private/tmp/stage1_rel_typeof_tuple_fix_20260308`
+      -> `real 442.95`
+  - broad release regression:
+    - `/usr/bin/time -p regression_tests/run_all.sh /private/tmp/stage1_rel_typeof_tuple_fix_20260308`
+      -> `67 passed, 0 failed`, `real 299.24`
+- Adversary / boundary:
+  - `bash regression_tests/sort_by_tuple_key_runtime_repro.sh /private/tmp/stage1_dbg_typeof_tuple_fix_20260308`
+    -> runtime `139`, still reproduced.
+  - So this removes a real `Pointer(typeof(tuple_literal))` mis-specialization
+    branch but does not clear the broader `sort_by!` / self-hosted frontier.
+
 ### Current checkpoint (2026-03-08 tuple compare deferred-map propagation)
 
 - Verified another real stage1/runtime sub-root-cause behind the broader

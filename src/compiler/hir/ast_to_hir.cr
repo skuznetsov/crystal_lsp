@@ -6190,6 +6190,12 @@ module Crystal::HIR
         return normalize_typeof_type_name(resolved)
       end
 
+      if literal_type = infer_literal_type_name_from_string_expr(expr)
+        literal_type = apply_index_to_type_name(literal_type, index_suffix) if index_suffix
+        literal_type = drop_nil_from_union(literal_type) if drop_nil
+        return normalize_typeof_type_name(literal_type)
+      end
+
       # Allow simple constant/path typeof usage in type contexts (no local scope needed).
       if expr.includes?("::") || (expr.size > 0 && expr[0].uppercase?)
         resolved = resolve_type_alias_chain(expr)
@@ -6202,6 +6208,91 @@ module Crystal::HIR
       end
 
       "Pointer(Void)"
+    end
+
+    private def infer_literal_type_name_from_string_expr(expr : String) : String?
+      literal = expr.strip
+      return nil if literal.empty?
+
+      case literal
+      when "true", "false"
+        return "Bool"
+      when "nil"
+        return "Nil"
+      end
+
+      if type_name = number_literal_type_name(literal)
+        return type_name
+      end
+
+      if literal.starts_with?('{') && literal.ends_with?('}')
+        inner = literal[1, literal.size - 2].strip
+        return "Tuple()" if inner.empty?
+
+        entries = split_generic_type_args(inner)
+        return nil if entries.empty?
+
+        named_entries = entries.compact_map { |entry| split_named_tuple_entry(entry) }
+        if named_entries.size == entries.size
+          named_types = [] of String
+          named_entries.each do |entry|
+            value_type = resolve_typeof_string_expr(entry[1].strip)
+            return nil if value_type == "Pointer(Void)"
+            named_types << "#{normalize_named_tuple_key_name(entry[0])}: #{value_type}"
+          end
+          return "NamedTuple(#{named_types.join(", ")})"
+        end
+
+        element_types = [] of String
+        entries.each do |entry|
+          entry_type = resolve_typeof_string_expr(entry)
+          return nil if entry_type == "Pointer(Void)"
+          element_types << entry_type
+        end
+        return "Tuple(#{element_types.join(", ")})"
+      end
+
+      nil
+    end
+
+    private def number_literal_type_name(literal : String) : String?
+      value = literal.strip
+      return nil if value.empty?
+
+      if value.starts_with?('+') || value.starts_with?('-')
+        inner = value[1..]
+        inner_type = number_literal_type_name(inner)
+        return inner_type if inner_type
+      end
+
+      if match = value.match(/_?(i8|i16|i32|i64|i128|u8|u16|u32|u64|u128|f32|f64|i|u|f)\z/i)
+        suffix = match[1].downcase
+        return case suffix
+               when "i8"   then "Int8"
+               when "i16"  then "Int16"
+               when "i32"  then "Int32"
+               when "i64"  then "Int64"
+               when "i128" then "Int128"
+               when "u8"   then "UInt8"
+               when "u16"  then "UInt16"
+               when "u32"  then "UInt32"
+               when "u64"  then "UInt64"
+               when "u128" then "UInt128"
+               when "f32"  then "Float32"
+               when "f64"  then "Float64"
+               when "i"    then "Int32"
+               when "u"    then "UInt64"
+               when "f"    then "Float64"
+               else             nil
+               end
+      end
+
+      stripped = strip_numeric_suffix(value).gsub("_", "")
+      return nil if stripped.empty?
+      return "Float64" if stripped.includes?('.') || stripped.includes?('e') || stripped.includes?('E')
+      return "Int32" if stripped.to_i64?(prefix: true)
+
+      nil
     end
 
     ELEMENT_TYPE_PREFIXES = ["Enumerable.element_type", "::Enumerable.element_type", "Indexable.element_type",
