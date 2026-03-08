@@ -47997,7 +47997,9 @@ module Crystal::HIR
               end
             end
             if entry = lookup_function_def_for_call(full_method_name, call_arg_types.size, has_block_call, call_arg_types, call_has_splat, call_has_named_args)
-              full_method_name = entry[0]
+              if call_arg_types.all? { |t| t != TypeRef::VOID }
+                full_method_name = entry[0]
+              end
             end
           end
           receiver_id = nil if static_class_name # Static call, no receiver
@@ -49749,6 +49751,14 @@ module Crystal::HIR
             mangled_method_name = mangle_function_name(base_method_name, arg_types, has_block_call)
           end
         end
+      end
+
+      # Static/class calls can be pre-resolved before local arg types are known.
+      # Once real arg types are available, discard that early typed overload key
+      # and rerun overload lookup from the base name.
+      if receiver_id.nil? && full_method_name && full_method_name.includes?('$') &&
+         full_method_name.includes?('.') && !has_unknown_arg_types
+        full_method_name = strip_type_suffix(full_method_name)
       end
 
       lookup_name = full_method_name || base_method_name

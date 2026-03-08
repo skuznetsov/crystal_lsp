@@ -375,6 +375,68 @@ closure cells, Tuple ptr/value confusion.
       deeper self-hosted require/AST corruption remains active even though the
       fallback path is now cheaper.
 
+### Current checkpoint (2026-03-08 static-call overload lock)
+
+- New focused stage1 fix is verified on the current dirty worktree.
+  - New focused oracle:
+    - `bash regression_tests/string_new_ptr_size_local_repro.sh <compiler>`
+      compiles and runs:
+      ```crystal
+      size = 5
+      str = "./dep"
+      puts String.new(str.to_unsafe, size).bytesize
+      ```
+      Stage1 control should print `5`; the old broken path printed `0`.
+  - Root cause:
+    - static/class-call pre-resolution in `lower_call` was committing a typed
+      overload key even when the pre-lowering `call_arg_types` still contained
+      `Void`.
+    - on top-level/local callsites that let `lower_args` and
+      `apply_default_args(...)` run against the wrong def before real local arg
+      types were known.
+    - the focused HIR symptom before the fix was:
+      `String.new$Slice(UInt8)_String_Nil | Symbol` for direct
+      `String.new(str.to_unsafe, size)`, while helper and literal-size controls
+      already lowered to the pointer constructor path.
+  - Fix:
+    - static/class pre-resolution now keeps the base method name when the
+      pre-lowering `call_arg_types` are incomplete.
+    - late call lookup also strips stale typed overload keys for static/class
+      calls once concrete arg types are available, so early guessed overloads do
+      not remain sticky.
+  - Verification on fresh stage1 debug:
+    - `/usr/bin/time -p scripts/build_stage1_original_cached.sh debug /private/tmp/stage1_dbg_string_new_local_fix2_20260308`
+      -> `real 8.70`
+    - `bash regression_tests/string_new_ptr_size_local_repro.sh /private/tmp/stage1_dbg_string_new_local_fix2_20260308`
+      -> `stdout: 5`, `not reproduced`
+    - `bash regression_tests/stage2_require_literal_empty_path_repro.sh /private/tmp/stage1_dbg_string_new_local_fix2_20260308`
+      -> `main.cr reqs=1`, `not reproduced`
+    - no-link HIR on the same compiler now lowers the direct call as:
+      `String.new$Pointer(UInt8)_Int32_Int32`
+  - Verification on fresh stage1 release:
+    - `/usr/bin/time -p scripts/build_stage1_original_cached.sh release /private/tmp/stage1_rel_string_new_local_fix2_20260308`
+      -> `real 437.53`
+    - `bash regression_tests/string_new_ptr_size_local_repro.sh /private/tmp/stage1_rel_string_new_local_fix2_20260308`
+      -> `stdout: 5`, `not reproduced`
+    - `bash regression_tests/stage2_require_literal_empty_path_repro.sh /private/tmp/stage1_rel_string_new_local_fix2_20260308`
+      -> `main.cr reqs=1`, `not reproduced`
+  - Release bootstrap status after the fix:
+    - `/usr/bin/time -p scripts/build_stage2_cached.sh /private/tmp/stage1_rel_string_new_local_fix2_20260308 release /private/tmp/stage2_rel_string_new_local_fix2_20260308`
+      -> `real 175.69`
+    - current measured pair on the same warm caches:
+      `stage1 --release = 437.53s`, `stage2 --release = 175.69s`
+      (~`2.49x` speedup).
+  - Important negative result:
+    - the fix is real for stage1, but not sufficient for self-hosted stage2.
+    - fresh stage2 release still reproduces both focused oracles:
+      - `bash regression_tests/string_new_ptr_size_local_repro.sh /private/tmp/stage2_rel_string_new_local_fix2_20260308`
+        -> compiler `status 139`
+      - `bash regression_tests/stage2_require_literal_empty_path_repro.sh /private/tmp/stage2_rel_string_new_local_fix2_20260308`
+        -> `main.cr reqs=0`, empty `[req-path]`, `Source require fallback entries=1`,
+        `status 139`
+    - so the current active frontier is still the self-hosted stage2 parser /
+      string-constructor corruption family, not stage3 timing yet.
+
 ### Current checkpoint (2026-03-07 late)
 
 - 2026-03-07 late-night TypedNode union branch was explored and rejected as a
