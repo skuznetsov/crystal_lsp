@@ -5778,8 +5778,7 @@ module Crystal::HIR
       node = @arena[expr_id]
       case node
       when CrystalV2::Compiler::Frontend::TypeofNode
-        inner = node.args.first?
-        inner ? resolve_typeof_expr(inner) : "Pointer(Void)"
+        resolve_typeof_exprs(node.args)
       when CrystalV2::Compiler::Frontend::IdentifierNode
         name = String.new(node.name)
         if name == "self" || name == "Self"
@@ -5821,12 +5820,7 @@ module Crystal::HIR
         return nil unless base
         # typeof(expr) parsed as CallNode — resolve the inner expression type
         if base == "typeof"
-          if first_arg = node.args.first?
-            inner_node = @arena[first_arg]
-            resolved = resolve_typeof_expr(first_arg)
-            return normalize_typeof_type_name(resolved)
-          end
-          return "Pointer(Void)"
+          return resolve_typeof_exprs(node.args)
         end
         args = [] of String
         node.args.each do |arg|
@@ -5942,9 +5936,47 @@ module Crystal::HIR
       type_name
     end
 
+    private def combine_typeof_resolved_parts(resolved_parts : Array(String)) : String
+      return "Pointer(Void)" if resolved_parts.empty?
+
+      dedup = [] of String
+      resolved_parts.each do |part|
+        trimmed = part.strip
+        next if trimmed.empty?
+        dedup << trimmed unless dedup.includes?(trimmed)
+      end
+
+      return "Pointer(Void)" if dedup.empty?
+      return dedup.first if dedup.size == 1
+      normalize_union_type_name(dedup.join(" | "))
+    end
+
+    private def resolve_typeof_exprs(expr_ids : Array(ExprId)) : String
+      return "Pointer(Void)" if expr_ids.empty?
+
+      resolved_parts = [] of String
+      expr_ids.each do |expr_id|
+        resolved = resolve_typeof_expr(expr_id)
+        return "Pointer(Void)" if resolved == "Pointer(Void)"
+
+        if union_type_name?(resolved)
+          split_union_type_name(resolved).each do |part|
+            trimmed = part.strip
+            resolved_parts << trimmed unless trimmed.empty?
+          end
+        else
+          resolved_parts << resolved
+        end
+      end
+
+      combine_typeof_resolved_parts(resolved_parts)
+    end
+
     private def resolve_typeof_expr(expr_id : ExprId) : String
       node = @arena[expr_id]
       case node
+      when CrystalV2::Compiler::Frontend::TypeofNode
+        resolve_typeof_exprs(node.args)
       when CrystalV2::Compiler::Frontend::IdentifierNode
         name = String.new(node.name)
         # Parser stores typeof(...) as identifier name in generic type args
@@ -5960,6 +5992,32 @@ module Crystal::HIR
         resolve_typeof_inner(String.new(node.name))
       when CrystalV2::Compiler::Frontend::SelfNode
         resolve_typeof_inner("self")
+      when CrystalV2::Compiler::Frontend::NumberNode
+        normalize_typeof_type_name(number_literal_type_name(String.new(node.value)) || "Pointer(Void)")
+      when CrystalV2::Compiler::Frontend::StringNode
+        "String"
+      when CrystalV2::Compiler::Frontend::CharNode
+        "Char"
+      when CrystalV2::Compiler::Frontend::BoolNode
+        "Bool"
+      when CrystalV2::Compiler::Frontend::NilNode
+        "Nil"
+      when CrystalV2::Compiler::Frontend::TupleLiteralNode
+        element_types = [] of String
+        node.elements.each do |elem_id|
+          resolved = resolve_typeof_expr(elem_id)
+          return "Pointer(Void)" if resolved == "Pointer(Void)"
+          element_types << resolved
+        end
+        "Tuple(#{element_types.join(", ")})"
+      when CrystalV2::Compiler::Frontend::NamedTupleLiteralNode
+        entries = [] of String
+        node.entries.each do |entry|
+          resolved = resolve_typeof_expr(entry.value)
+          return "Pointer(Void)" if resolved == "Pointer(Void)"
+          entries << "#{String.new(entry.key)}: #{resolved}"
+        end
+        "NamedTuple(#{entries.join(", ")})"
       when CrystalV2::Compiler::Frontend::MemberAccessNode
         # Handle expressions like str.to_unsafe.value
         resolve_typeof_member_chain(node)
@@ -6012,15 +6070,7 @@ module Crystal::HIR
           end
         end
 
-        return "Pointer(Void)" if resolved_parts.empty?
-
-        dedup = [] of String
-        resolved_parts.each do |part|
-          dedup << part unless dedup.includes?(part)
-        end
-
-        return dedup.first if dedup.size == 1
-        return normalize_union_type_name(dedup.join(" | "))
+        return combine_typeof_resolved_parts(resolved_parts)
       end
 
       if resolved = resolve_element_type_expression(expr)
@@ -10617,6 +10667,25 @@ module Crystal::HIR
           if member_name == "clone" || member_name == "dup"
             if receiver_type = infer_type_from_expr(callee_node.object, self_type_name)
               return receiver_type if receiver_type != TypeRef::VOID
+            end
+          end
+          if member_name == "malloc" || member_name == "null"
+            if type_str = stringify_type_expr(callee_node.object)
+              if type_str == "self" && self_type_name
+                type_str = self_type_name
+              end
+              if local_name = @current_typeof_local_names.try(&.[type_str]?)
+                type_str = local_name unless local_name.empty?
+              elsif local_ref = @current_typeof_locals.try(&.[type_str]?)
+                local_type_name = get_type_name_from_ref(local_ref)
+                type_str = local_type_name unless local_type_name.empty? || local_type_name == "Void" || local_type_name == "Unknown"
+              end
+              resolved_type_str = resolve_type_alias_chain(resolve_type_name_in_context(type_str))
+              type_str = resolved_type_str unless resolved_type_str.empty?
+              if type_str == "Pointer" || type_str.starts_with?("Pointer(")
+                pointer_ref = type_ref_for_name(type_str)
+                return pointer_ref if pointer_ref != TypeRef::VOID
+              end
             end
           end
           if member_name == "new"
@@ -31168,6 +31237,40 @@ module Crystal::HIR
       # MUST be before the generic fallback — otherwise the fallback infers T=Pointer(UInt8)
       # instead of T=UInt8 (the first arg IS a Pointer(T), not T itself).
       if class_name == "Slice" && args && args.size >= 1
+        pointer_arg_id = args[0]
+        pointer_arg = @arena[pointer_arg_id]
+
+        # Prefer the currently lowered local type when available.
+        # This avoids re-guessing `ptr` from AST after its assignment has
+        # already established a concrete Pointer(T) type in the active context.
+        if pointer_arg.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode)
+          if local_id = ctx.lookup_local(String.new(pointer_arg.name))
+            local_type = ctx.type_of(local_id)
+            if local_type != TypeRef::VOID
+              local_type_name = get_type_name_from_ref(local_type)
+              if elem_ref = pointer_element_type(local_type_name)
+                elem_name = get_type_name_from_ref(elem_ref)
+                return elem_name unless elem_name.empty? || elem_name == "Void" || elem_name == "Unknown"
+              end
+            end
+          end
+        end
+
+        if inferred_ref = infer_type_from_expr(pointer_arg_id, @current_class)
+          inferred_name = get_type_name_from_ref(inferred_ref)
+          if elem_ref = pointer_element_type(inferred_name)
+            elem_name = get_type_name_from_ref(elem_ref)
+            return elem_name unless elem_name.empty? || elem_name == "Void" || elem_name == "Unknown"
+          end
+        end
+
+        if inferred_name = infer_type_from_expr(pointer_arg)
+          if elem_ref = pointer_element_type(inferred_name)
+            elem_name = get_type_name_from_ref(elem_ref)
+            return elem_name unless elem_name.empty? || elem_name == "Void" || elem_name == "Unknown"
+          end
+        end
+
         if current = @current_class
           if info = split_generic_base_and_args(current)
             base = normalize_method_owner_name(info[:base])
@@ -31180,8 +31283,6 @@ module Crystal::HIR
             end
           end
         end
-        pointer_arg_id = args[0]
-        pointer_arg = @arena[pointer_arg_id]
         # Try to get the pointer's element type
         # First check if it's an ivar access (like @buffer which is Pointer(UInt8))
         if pointer_arg.is_a?(CrystalV2::Compiler::Frontend::InstanceVarNode)

@@ -64,6 +64,62 @@ closure cells, Tuple ptr/value confusion.
     but does not clear the deeper tuple-element-read path. The next frontier is
     after correct slice construction, not inside macro expansion.
 
+### Current checkpoint (2026-03-08 `Slice.new(ptr, ...)` ctx-local owner inference)
+
+- Verified another real stage1/runtime sub-root-cause in the remaining
+  slice/tuple-element-read family:
+  - fresh debug focused oracles on `/private/tmp/stage1_dbg_slice_ctxlocal_fix_20260308`:
+    - `bash regression_tests/slice_new_pointer_tuple_runtime_repro.sh /private/tmp/stage1_dbg_slice_ctxlocal_fix_20260308`
+      -> `run_status: 0`, `stdout: 3`, `not reproduced`
+    - `bash regression_tests/absolute_path_pointer_tuple_index_repro.sh /private/tmp/stage1_dbg_slice_ctxlocal_fix_20260308`
+      -> `run_status: 0`, `stdout: 3`, `not reproduced`
+    - `bash regression_tests/slice_tuple_size_runtime_repro.sh /private/tmp/stage1_dbg_slice_ctxlocal_fix_20260308`
+      -> `run_status: 0`, `stdout: 3`, `not reproduced`
+    - `bash regression_tests/slice_tuple_reverse_runtime_repro.sh /private/tmp/stage1_dbg_slice_ctxlocal_fix_20260308`
+      -> `run_status: 0`, `stdout: 2`, `not reproduced`
+- Root cause on the stale compiler was narrower than a general
+  `Pointer(Tuple(...))` / `Slice(Tuple(...))` ABI bug:
+  - the current lowering context already knew the local `ptr` as
+    `Pointer(Tuple(UInt32, UInt32))`;
+  - but `infer_generic_type_arg("Slice", ...)` ignored that known local type,
+    re-guessed from AST, and eventually fell back to `UInt8`;
+  - the direct HIR proof on the stale binary showed the contradiction in one
+    function body:
+    - local `%34826 = local "ptr" : Pointer(Tuple(UInt32, UInt32))`
+    - but the callsite still emitted
+      `Slice(UInt8).new$Pointer(Tuple(UInt32, UInt32))_Int32_Bool(...)`
+      followed by `Slice(UInt8)#[]$Int32(...)` and `IO#puts$Pointer(...)`
+- Final fix in `src/compiler/hir/ast_to_hir.cr`:
+  - for `Slice.new(pointer, ...)`, prefer `ctx.lookup_local(...)` +
+    `ctx.type_of(...)` when the first arg is an identifier already lowered in
+    the current function body;
+  - only fall back to AST/lightweight inference when no current local type is
+    available;
+  - keep the earlier `Pointer(T).malloc/null` lightweight inference and
+    `typeof(...)` improvements as supporting fallbacks, not the primary source
+    of truth.
+- Fresh verification:
+  - `stage1 debug`:
+    - `/usr/bin/time -p scripts/build_stage1_original_debug.sh /private/tmp/stage1_dbg_slice_ctxlocal_fix_20260308 --error-trace`
+      -> `real 8.53`
+    - structural HIR check on the direct sample now shows:
+      - `Slice(Tuple(UInt32, UInt32)).new$Pointer(Tuple(UInt32, UInt32))_Int32_Bool(...)`
+      - `IO#puts$UInt32(...)`
+      instead of the stale `Slice(UInt8)...` / `IO#puts$Pointer(...)` pair
+    - `/usr/bin/time -p regression_tests/run_all.sh /private/tmp/stage1_dbg_slice_ctxlocal_fix_20260308`
+      -> `67 passed, 0 failed`, `real 850.87`
+  - `stage1 release`:
+    - `/usr/bin/time -p scripts/build_stage1_original_release.sh /private/tmp/stage1_rel_slice_ctxlocal_fix_20260308`
+      -> `real 423.65`
+    - same four focused slice-family oracles above are all green on
+      `/private/tmp/stage1_rel_slice_ctxlocal_fix_20260308`
+- Boundary / remaining frontier:
+  - this fix clears the remaining `Slice.new(ptr, ...)` owner mismatch, but it
+    does not yet re-measure the broader `sort_by!` / stage2 self-hosted /
+    `stage2 -> stage3` frontier;
+  - next useful step is to resume bootstrap/timing work from this cleaner
+    baseline rather than keep debugging stale slice-family symptoms.
+
 ### Current checkpoint (2026-03-08 string `typeof` tuple literal inference)
 
 - Verified another real stage1/runtime sub-root-cause inside the broader
