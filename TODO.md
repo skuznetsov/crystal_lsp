@@ -70,6 +70,20 @@ closure cells, Tuple ptr/value confusion.
     - `/usr/bin/time -p scripts/timeout_sample_lldb.sh -t 600 -m 24576 --no-series --no-lldb -o /tmp/stage3_rel_scalarstack_reverify_probe_20260308 -- scripts/build_stage2_release.sh /private/tmp/stage2_rel_scalarstack_reverify_20260308 /private/tmp/stage3_rel_scalarstack_reverify_20260308`
       -> `status 139`, `real 1.06`
     - command log stops after `prelude.cr` / `lib_c.cr`.
+- New oracle / next branch:
+  - `bash regression_tests/sort_by_tuple_key_runtime_repro.sh /opt/homebrew/bin/crystal`
+    -> `run_status 0`, `stdout: 1,2,3`, `not reproduced`
+  - `bash regression_tests/sort_by_tuple_key_runtime_repro.sh /private/tmp/stage1_rel_scalarstack_reverify_20260308`
+    -> compile succeeds, runtime `139`, `reproduced: sort_by! tuple-key sample crashes at runtime`
+  - `bash regression_tests/sort_by_tuple_key_runtime_repro.sh /private/tmp/stage2_rel_scalarstack_reverify_20260308`
+    -> compile `139`, reproduced
+  - current reading:
+    - disassembly of `MIR::HIRToMIRLowering#order_blocks_for` shows the
+      stage2 `X = 1` crash in the post-`qsort` copy-back tail of
+      `ordered.sort_by!`, not in the earlier DFS over block successors;
+    - therefore the next root-cause branch should treat `order_blocks_for`
+      as a likely symptom of a broader `Array(Ref)#sort_by!` / tuple-key
+      runtime miscompile, not as only a bad block-id traversal.
 
 ### Current checkpoint (2026-03-08 ctor default-object wrapper)
 
