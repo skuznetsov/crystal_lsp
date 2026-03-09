@@ -22,6 +22,69 @@ closure cells, Tuple ptr/value confusion.
 - [ ] **Phase 5: FIX RC-3** — String.build block lowering
 - [ ] **Phase 6: RE-ENABLE RTA + BOOTSTRAP** — stage0→stage1→stage2→stage3 + benchmark
 
+### Current checkpoint (2026-03-09 alloc metadata prepass for forward tuple consumers)
+
+- Verified that the stale range-slice runtime crash on fresh stage1-generated
+  binaries was not an `Array#[]?` semantics issue and not tuple registry loss:
+  - the focused oracle `regression_tests/array_range_slice_tuple_runtime_repro.sh`
+    reproduces on stale stage1 release with a runtime segfault, while
+    `regression_tests/array_negative_index_runtime_repro.sh` stays green;
+  - raw LLVM on the stale compiler showed `Array(String)#[]?$Int32_Int32`
+    reading `%r39` as if it were an array object (`+4` size, `+16` buffer),
+    even though `%r39` was a GC-allocated `Tuple(Int32, Int32)` scratch object;
+  - temporary backend instrumentation proved the exact split:
+    stack alloc tuple scratch `%28` already had `alloc_elem=313`, but heap/GC
+    alloc scratch `%39` reached `emit_array_get` with `raw_value_type=Pointer`
+    and `alloc_elem=nil`.
+- Root cause:
+  - cross-block / forward users of `MIR::Alloc` could be emitted before the
+    defining `emit_alloc(...)` populated `@alloc_types` /
+    `@alloc_element_types`;
+  - when that happened, heap tuple scratch storage degraded to a bare pointer,
+    so later array helpers misinterpreted tuple scratch memory as runtime
+    `Array(...)` layout.
+- Corrective fix on the current worktree:
+  - add `prepass_register_alloc_metadata(func)` in
+    `src/compiler/mir/llvm_backend.cr`;
+  - run it before the existing cross-block prepasses so all `Alloc` ids already
+    have `TypeRef::POINTER`, `@alloc_types[id]`, and `@alloc_element_types[id]`
+    registered before any forward consumer is emitted.
+- New oracle:
+  - `bash regression_tests/array_range_slice_tuple_runtime_repro.sh /private/tmp/stage1_rel_alloc_prepass_fix_20260309`
+    -> `not reproduced`
+- Fresh verification:
+  - `stage1 debug`:
+    - `/usr/bin/time -p scripts/build_stage1_original_debug.sh /private/tmp/stage1_dbg_alloc_prepass_min_20260309`
+      -> `real 9.14`
+  - `stage1 --release`:
+    - `/usr/bin/time -p scripts/build_stage1_original_release.sh /private/tmp/stage1_rel_alloc_prepass_fix_20260309`
+      -> `real 451.14`
+  - `stage2 --release`:
+    - `/usr/bin/time -p scripts/build_stage2_cached.sh /private/tmp/stage1_rel_alloc_prepass_fix_20260309 release /private/tmp/stage2_rel_alloc_prepass_fix_20260309`
+      -> `real 199.77`
+  - broad adversary:
+    - `regression_tests/run_all.sh /private/tmp/stage1_rel_alloc_prepass_fix_20260309`
+      -> `67 passed, 0 failed`
+  - adjacent controls:
+    - `bash regression_tests/array_negative_index_runtime_repro.sh /private/tmp/stage1_rel_alloc_prepass_fix_20260309`
+      -> `not reproduced`
+    - `bash regression_tests/stage2_no_prelude_min_crash_repro.sh /private/tmp/stage2_rel_alloc_prepass_fix_20260309`
+      -> `not reproduced`
+  - current observed speedup:
+    - `451.14 / 199.77 ~= 2.26x`
+- Boundary after the fix:
+  - `stage1 -> stage2` stays green on a fresh release pair;
+  - the stale stage1/runtime tuple-scratch crash is gone;
+  - the older stage2-only blocker remains:
+    - `bash regression_tests/nilable_abstract_union_nil_negative_repro.sh /private/tmp/stage2_rel_alloc_prepass_fix_20260309`
+      -> `reproduced: compiler crashed on nil abstract-union negative case`
+  - the new tuple-slice oracle now also exposes that stage2 is still unstable:
+    - `bash regression_tests/array_range_slice_tuple_runtime_repro.sh /private/tmp/stage2_rel_alloc_prepass_fix_20260309`
+      -> compile-time crash on fresh stage2
+  - guarded `stage2 -> stage3` still stays red behind the same later self-hosted
+    corridor, so this checkpoint removes one real forward-alloc metadata family
+    but does not yet clear stable stage2/stage3.
+
 ### Current checkpoint (2026-03-09 allocator invalidation after late layout growth)
 
 - Verified that the reduced fresh `stage2` crash on `X = 1` with

@@ -7206,6 +7206,10 @@ module Crystal::MIR
       # Set current func name BEFORE prepass
       @current_func_name = mangled_name
 
+      # Pre-pass: register alloc metadata up front so forward/cross-block users
+      # can recover pointee types before the defining Alloc is emitted.
+      prepass_register_alloc_metadata(func)
+
       # Pre-pass: detect cross-block values that need alloca slots for dominance
       prepass_detect_cross_block_values(func)
 
@@ -8677,6 +8681,17 @@ module Crystal::MIR
           cross_block_incoming.each do |val_id|
             @phi_slot_redirect[val_id] = inst.id
           end
+        end
+      end
+    end
+
+    private def prepass_register_alloc_metadata(func : Function)
+      func.blocks.each do |block|
+        block.instructions.each do |inst|
+          next unless inst.is_a?(Alloc)
+          @value_types[inst.id] = TypeRef::POINTER unless @value_types.has_key?(inst.id)
+          @alloc_types[inst.id] = inst.alloc_type
+          @alloc_element_types[inst.id] = inst.alloc_type
         end
       end
     end
