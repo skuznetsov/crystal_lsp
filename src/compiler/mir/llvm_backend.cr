@@ -5725,6 +5725,15 @@ module Crystal::MIR
       if mangled.includes?("$Hkey_hash$$") && mangled.includes?("Hash$L") && func.params.size >= 2
         key_type_ref = func.params[1].type
         key_llvm_type = @type_mapper.llvm_type(key_type_ref)
+        if compiler_i32_wrapper_key_hash?(mangled)
+          emit_struct_i32_field_key_hash_override(
+            mangled,
+            key_llvm_type,
+            note: "direct compiler wrapper Int32 hash override (extract field bypass vdispatch)"
+          )
+          return true
+        end
+
         if direct_integer_hash_llvm_type?(key_llvm_type)
           if key_type = @module.type_registry.get(key_type_ref)
             if key_type.kind.integer?
@@ -6827,6 +6836,13 @@ module Crystal::MIR
       }.any? { |suffix| mangled.ends_with?(suffix) }
     end
 
+    private def compiler_i32_wrapper_key_hash?(mangled : String) : Bool
+      {
+        "$Hkey_hash$$CrystalV2$CCCompiler$CCFrontend$CCExprId",
+        "$Hkey_hash$$CrystalV2$CCCompiler$CCSemantic$CCTypeId",
+      }.any? { |suffix| mangled.ends_with?(suffix) }
+    end
+
     private def emit_direct_integer_key_hash_override(mangled : String, key_llvm_type : String, *, signed : Bool, note : String) : Nil
       emit_raw "; #{mangled} — #{note}\n"
       emit_raw "define i32 @#{mangled}(ptr %self, #{key_llvm_type} %key) {\n"
@@ -6841,6 +6857,25 @@ module Crystal::MIR
       else
         emit_raw "  %key64 = add i64 %key, 0\n"
       end
+      emit_raw "  %hasher2 = call ptr @Crystal$CCHasher$Hpermute$$UInt64(ptr %hasher, i64 %key64)\n"
+      emit_raw "  %hash64 = call i64 @Crystal$CCHasher$Hresult(ptr %hasher2)\n"
+      emit_raw "  %hash32 = trunc i64 %hash64 to i32\n"
+      emit_raw "  %is_zero = icmp eq i32 %hash32, 0\n"
+      emit_raw "  br i1 %is_zero, label %ret_max, label %ret_hash\n"
+      emit_raw "ret_max:\n"
+      emit_raw "  ret i32 -1\n"
+      emit_raw "ret_hash:\n"
+      emit_raw "  ret i32 %hash32\n"
+      emit_raw "}\n\n"
+    end
+
+    private def emit_struct_i32_field_key_hash_override(mangled : String, key_llvm_type : String, *, note : String) : Nil
+      emit_raw "; #{mangled} — #{note}\n"
+      emit_raw "define i32 @#{mangled}(ptr %self, #{key_llvm_type} %key) {\n"
+      emit_raw "entry:\n"
+      emit_raw "  %hasher = call ptr @Crystal$CCHasher$Dnew(i64 0, i64 0)\n"
+      key_i32 = emit_struct_i32_field0_cast(key_llvm_type)
+      emit_raw "  %key64 = sext i32 #{key_i32} to i64\n"
       emit_raw "  %hasher2 = call ptr @Crystal$CCHasher$Hpermute$$UInt64(ptr %hasher, i64 %key64)\n"
       emit_raw "  %hash64 = call i64 @Crystal$CCHasher$Hresult(ptr %hasher2)\n"
       emit_raw "  %hash32 = trunc i64 %hash64 to i32\n"
@@ -6887,6 +6922,21 @@ module Crystal::MIR
           emit_raw "  %key.i32 = trunc i64 %key.raw to i32\n"
           "%key.i32"
         end
+      end
+    end
+
+    private def emit_struct_i32_field0_cast(key_llvm_type : String) : String
+      case key_llvm_type
+      when "i32"
+        "%key"
+      when "ptr"
+        emit_raw "  %key.i32 = load i32, ptr %key, align 4\n"
+        "%key.i32"
+      else
+        emit_raw "  %key.slot = alloca #{key_llvm_type}, align 4\n"
+        emit_raw "  store #{key_llvm_type} %key, ptr %key.slot, align 4\n"
+        emit_raw "  %key.i32 = load i32, ptr %key.slot, align 4\n"
+        "%key.i32"
       end
     end
 

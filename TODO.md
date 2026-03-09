@@ -22,6 +22,60 @@ closure cells, Tuple ptr/value confusion.
 - [ ] **Phase 5: FIX RC-3** — String.build block lowering
 - [ ] **Phase 6: RE-ENABLE RTA + BOOTSTRAP** — stage0→stage1→stage2→stage3 + benchmark
 
+### Current checkpoint (2026-03-08 `ExprId` wrapper-hash self-host fix)
+
+- Verified a new real self-hosted stage2 root cause behind the tiny
+  `macro_if_min` / `exception/call_stack` corridor:
+  - stale/fresh focused oracle:
+    - `bash regression_tests/stage2_macro_if_exprid_hash_repro.sh /private/tmp/stage2_rel_lexer_lazy_debug_20260308`
+      -> `status: 139`, `reproduced: stage2 macro-if still segfaults in ExprId hash path`
+    - `bash regression_tests/stage2_macro_if_exprid_hash_repro.sh /private/tmp/stage2_rel_exprid_structhash_fix_20260308`
+      -> `status: 0`, `not reproduced: no segfault on macro-if no-prelude compile`
+    - stage1 control:
+      - `bash regression_tests/stage2_macro_if_exprid_hash_repro.sh /private/tmp/stage1_rel_exprid_structhash_fix_20260308`
+        -> `status: 0`, `not reproduced`
+- LLDB on the stale self-hosted stage2 localized the crash to:
+  - `__vdispatch__Object#hash`
+  - `Hash(Frontend::ExprId, Semantic::Type)#key_hash`
+  - `Hash(... )#upsert`
+  - `TypeContext#set_type`
+  - `TypeInferenceEngine#infer_expression(ExprId)`
+- Root cause was narrower and more specific than the older `UInt32` alias-hash
+  family:
+  - `Frontend::ExprId` is a wrapper `struct` over `Int32`, not a raw `UInt32`
+    alias like the HIR/MIR ids;
+  - stale generated LLVM lowered `Hash(ExprId, Type)#key_hash` as
+    `define i32 @... (ptr %self, ptr %key)`, so the old integer-only hash
+    bypass never fired and the code fell back to `Object#hash` on wrapper
+    storage;
+  - an intermediate failed patch that emitted `extractvalue ptr %key, 0`
+    proved the ABI point directly: the active lowering path passes wrapper ids
+    as pointer-backed storage, not by-value aggregates;
+  - final fix in `src/compiler/mir/llvm_backend.cr` emits a dedicated
+    wrapper-id `key_hash` override for `ExprId` / `TypeId` that loads the first
+    `Int32` field from wrapper storage and hashes that scalar directly.
+- Fresh verification:
+  - `stage1 --release`:
+    - `/usr/bin/time -p scripts/build_stage1_original_release.sh /private/tmp/stage1_rel_exprid_structhash_fix_20260308`
+      -> `real 454.66`
+  - `stage2 --release`:
+    - guarded via `scripts/run_safe.sh /private/tmp/run_stage2_rel_exprid_structhash_fix.sh 1200 32768`
+      -> `/private/tmp/stage2_rel_exprid_structhash_fix_20260308`, safe `exit 0`, inner `real 195.23`
+  - broad regression:
+    - `/usr/bin/time -p regression_tests/run_all.sh /private/tmp/stage1_rel_exprid_structhash_fix_20260308`
+      -> `67 passed, 0 failed`, `real 309.30`
+- Boundary / new frontier:
+  - `stage1 -> stage2` remains green with the new fix;
+  - current measured speedup is `454.66 / 195.23 ~= 2.33x`;
+  - guarded `stage2 -> stage3` is still red:
+    - `scripts/run_safe.sh /private/tmp/run_stage3_rel_exprid_structhash_fix.sh 1200 49152`
+      -> `status 139`
+      after parsing/req-scanning through `prelude.cr`, `lib_c.cr`, `macros.cr`,
+      `object.cr`, `crystal/once.cr`, `comparable.cr`, `exception.cr`, and into
+      `exception/call_stack.cr`;
+  - so this fix is a verified bootstrap-safe stage2 stability improvement, but
+    not yet the final stage3 blocker removal.
+
 ### Current checkpoint (2026-03-08 lazy lexer debug / heredoc self-host crash)
 
 - Verified a real self-hosted stage2 root cause behind the old
