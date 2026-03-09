@@ -22,6 +22,67 @@ closure cells, Tuple ptr/value confusion.
 - [ ] **Phase 5: FIX RC-3** — String.build block lowering
 - [ ] **Phase 6: RE-ENABLE RTA + BOOTSTRAP** — stage0→stage1→stage2→stage3 + benchmark
 
+### Current checkpoint (2026-03-09 mixed nil-union guard + parent `super` RTA retention)
+
+- Verified two separate real fixes on the current branch:
+  - `93669b48` `fix: guard mixed ref-union nil type checks`
+  - `62aaabcf` `fix: retain parent super bodies through HIR RTA`
+- Nilable mixed-union status:
+  - fresh release stage1 `/private/tmp/stage1_rel_super_rta_fix_20260309`
+    keeps both focused oracles green:
+    - `bash regression_tests/nilable_abstract_union_nil_negative_repro.sh /private/tmp/stage1_rel_super_rta_fix_20260309`
+      -> `run status: 0`, `not reproduced`
+    - `bash regression_tests/nilable_abstract_union_typecheck_repro.sh /private/tmp/stage1_rel_super_rta_fix_20260309`
+      -> `not reproduced`
+  - fresh release stage2 `/private/tmp/stage2_rel_super_rta_fix_20260309`
+    still reproduces the negative oracle at compile time:
+    - `bash regression_tests/nilable_abstract_union_nil_negative_repro.sh /private/tmp/stage2_rel_super_rta_fix_20260309`
+      -> `reproduced: compiler crashed on nil abstract-union negative case`
+- Parent `super` root cause and fix:
+  - the active ordinary-parent `super` failure was not lookup failure and not the
+    speculative `force_lower_function_for_return_type(...)` hunk in `lower_super`;
+  - `lower_super(...)` emits synthetic `<target>_super` call names so MIR can skip
+    virtual dispatch, but `HIR::Module#reachable_function_names(...)` was keeping only
+    exact non-virtual callee names;
+  - on tiny `Sub#foo -> super(x)`, HIR/MIR therefore retained `Base#foo$Int32_super`
+    as the edge, pruned real `Base#foo$Int32` as unreachable, and LLVM later emitted
+    only a dead `_super` stub;
+  - normalizing direct non-virtual `_super` edges back to the unsuffixed parent body
+    name only when no real `_super` body exists fixes the real retention bug without
+    touching genuine helper wrappers that are actually defined with `_super`.
+- Fresh verification on the new `super` fix:
+  - fresh debug stage1 `/private/tmp/stage1_dbg_super_rta_fix_20260308`
+    - `bash regression_tests/super_parent_dispatch_runtime_repro.sh /private/tmp/stage1_dbg_super_rta_fix_20260308`
+      -> `stdout: 42`, `not reproduced`
+    - `bash regression_tests/super_constructor_parent_init_runtime_repro.sh /private/tmp/stage1_dbg_super_rta_fix_20260308`
+      -> `stdout tail: 934`, `not reproduced: parent initialize preserved node_id`
+  - fresh release stage1 `/private/tmp/stage1_rel_super_rta_fix_20260309`
+    - same two focused oracles green
+    - broad adversary:
+      - `regression_tests/run_all.sh /private/tmp/stage1_rel_super_rta_fix_20260309`
+        -> `67 passed, 0 failed`
+- Fresh release bootstrap boundary on the same committed state:
+  - `stage1 -> stage2`: green (`/private/tmp/stage2_rel_super_rta_fix_20260309`)
+  - old early stage2 control is green again:
+    - wrapper under `scripts/run_safe.sh` for `class A; end; 1 --no-codegen`
+      -> `Parsed 2 top-level expressions`, `exit 0`
+  - guarded `stage2 -> stage3` is still red:
+    - wrapper under `scripts/run_safe.sh` for
+      `/private/tmp/stage2_rel_super_rta_fix_20260309 src/crystal_v2.cr --release ...`
+      -> `status 139`
+      after parsing/req-scanning through `prelude.cr`, `lib_c.cr`, `macros.cr`,
+      `object.cr`, `crystal/once.cr`, `comparable.cr`, `exception.cr`, and into
+      `exception/call_stack.cr`
+  - direct stage2 build reached `[LLVM] total MIR functions: 42453`, so the live
+    self-hosted corridor is later than the old `SymbolCollector#handle_def` / ordinary
+    `super` failure family.
+- Open items from this checkpoint:
+  - rerun timed `stage1 --release` and `stage2 --release` measurements on the current
+    committed pair (this cycle verified stability but did not capture fresh wall-clock timings);
+  - root-cause the remaining fresh stage2 compile crash on
+    `nilable_abstract_union_nil_negative_repro.sh`;
+  - then retry guarded `stage2 -> stage3` and update the benchmark delta.
+
 ### Current checkpoint (2026-03-08 nilable abstract-union runtime typecheck fix)
 
 - Verified a real multi-layer root cause behind the stale
