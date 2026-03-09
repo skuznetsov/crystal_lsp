@@ -15119,8 +15119,12 @@ module Crystal::MIR
         # This matches how emit_union_is handles all-ref unions.
         if @type_mapper.is_all_ref_union?(union_type_ref)
           emit "%#{base_name}.is_null = icmp eq ptr #{ptr_val}, null"
-          # Read type_id from object header at offset 0 (safe only when non-null)
-          emit "%#{base_name}.obj_tid_raw = load i32, ptr #{ptr_val}"
+          # Read type_id from object header at offset 0. The load itself must
+          # be null-safe because `select` does not short-circuit in LLVM IR.
+          emit "%#{base_name}.null_tid_ptr = alloca i32, align 4"
+          emit "store i32 0, ptr %#{base_name}.null_tid_ptr"
+          emit "%#{base_name}.safe_tid_ptr = select i1 %#{base_name}.is_null, ptr %#{base_name}.null_tid_ptr, ptr #{ptr_val}"
+          emit "%#{base_name}.obj_tid_raw = load i32, ptr %#{base_name}.safe_tid_ptr"
           # Return 0 for null (Nil), otherwise the actual type_id from header
           emit "#{name} = select i1 %#{base_name}.is_null, i32 0, i32 %#{base_name}.obj_tid_raw"
         else
@@ -15248,7 +15252,10 @@ module Crystal::MIR
                 # Class variant: load type_id from object header, compare
                 expected_tid = variant.type_ref.id.to_i32
                 emit "%#{base_name}.is_null = icmp eq ptr #{ptr_val}, null"
-                emit "%#{base_name}.obj_tid = load i32, ptr #{ptr_val}"
+                emit "%#{base_name}.null_tid_ptr = alloca i32, align 4"
+                emit "store i32 0, ptr %#{base_name}.null_tid_ptr"
+                emit "%#{base_name}.safe_tid_ptr = select i1 %#{base_name}.is_null, ptr %#{base_name}.null_tid_ptr, ptr #{ptr_val}"
+                emit "%#{base_name}.obj_tid = load i32, ptr %#{base_name}.safe_tid_ptr"
                 emit "%#{base_name}.tid_match = icmp eq i32 %#{base_name}.obj_tid, #{expected_tid}"
                 # Must be non-null AND type_id matches
                 emit "#{name} = select i1 %#{base_name}.is_null, i1 false, i1 %#{base_name}.tid_match"

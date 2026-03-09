@@ -3545,6 +3545,22 @@ module Crystal
         end
       end
 
+      type_id_matches = ->(type_id_value : ValueId) do
+        if matching_type_ids.size == 1
+          expected = builder.const_int(matching_type_ids[0].to_i64, TypeRef::INT32)
+          builder.eq(type_id_value, expected)
+        else
+          first_expected = builder.const_int(matching_type_ids[0].to_i64, TypeRef::INT32)
+          result = builder.eq(type_id_value, first_expected)
+          matching_type_ids[1..].each do |tid|
+            expected = builder.const_int(tid.to_i64, TypeRef::INT32)
+            check = builder.eq(type_id_value, expected)
+            result = builder.bit_or(result, check, TypeRef::BOOL)
+          end
+          result
+        end
+      end
+
       # All-ref unions (for example `Base | Nil`) are lowered as nullable raw
       # pointers, so their runtime type_id must be recovered through
       # UnionTypeIdGet instead of treating the union value itself as a plain
@@ -3553,19 +3569,28 @@ module Crystal
         if union_desc = @mir_module.get_union_descriptor(mir_val_type)
           if all_ref_union_descriptor?(union_desc)
             union_type_id = builder.emit(MIR::UnionTypeIdGet.new(builder.next_id, obj))
-            if matching_type_ids.size == 1
-              expected = builder.const_int(matching_type_ids[0].to_i64, TypeRef::INT32)
-              return builder.eq(union_type_id, expected)
-            else
-              first_expected = builder.const_int(matching_type_ids[0].to_i64, TypeRef::INT32)
-              result = builder.eq(union_type_id, first_expected)
-              matching_type_ids[1..].each do |tid|
-                expected = builder.const_int(tid.to_i64, TypeRef::INT32)
-                check = builder.eq(union_type_id, expected)
-                result = builder.bit_or(result, check, TypeRef::BOOL)
-              end
-              return result
-            end
+            return type_id_matches.call(union_type_id)
+          end
+
+          # Mixed unions like `Nil | Symbol` still expose their payload pointer
+          # through `get_value(...)`. Runtime subclass checks on that payload
+          # must reject the nil variant before loading an object header from it.
+          has_nil_variant = union_desc.variants.any? do |variant|
+            variant.type_ref == TypeRef::NIL || variant.type_ref == TypeRef::VOID
+          end
+          has_ref_payload = union_desc.variants.any? do |variant|
+            next false if variant.type_ref == TypeRef::NIL || variant.type_ref == TypeRef::VOID
+            variant_desc = @mir_module.type_registry.get(variant.type_ref)
+            variant.type_ref == TypeRef::POINTER ||
+              (variant_desc && (variant_desc.kind.reference? || variant_desc.kind.struct? || variant_desc.kind.array?))
+          end
+
+          if has_nil_variant && has_ref_payload
+            null_val = builder.const_int(0_i64, TypeRef::POINTER)
+            not_nil = builder.ne(obj, null_val)
+            type_id_ptr = builder.gep(obj, [0_u32], TypeRef::POINTER)
+            loaded_type_id = builder.load(type_id_ptr, TypeRef::INT32)
+            return builder.bit_and(not_nil, type_id_matches.call(loaded_type_id), TypeRef::BOOL)
           end
         end
       end
@@ -3575,20 +3600,7 @@ module Crystal
       loaded_type_id = builder.load(type_id_ptr, TypeRef::INT32)
 
       # Compare against all matching type_ids with OR chain
-      if matching_type_ids.size == 1
-        expected = builder.const_int(matching_type_ids[0].to_i64, TypeRef::INT32)
-        builder.eq(loaded_type_id, expected)
-      else
-        # Multiple possible type_ids — OR chain
-        first_expected = builder.const_int(matching_type_ids[0].to_i64, TypeRef::INT32)
-        result = builder.eq(loaded_type_id, first_expected)
-        matching_type_ids[1..].each do |tid|
-          expected = builder.const_int(tid.to_i64, TypeRef::INT32)
-          check = builder.eq(loaded_type_id, expected)
-          result = builder.bit_or(result, check, TypeRef::BOOL)
-        end
-        result
-      end
+      type_id_matches.call(loaded_type_id)
     end
 
     # ─────────────────────────────────────────────────────────────────────────
