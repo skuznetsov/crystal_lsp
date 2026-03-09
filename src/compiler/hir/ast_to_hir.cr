@@ -7291,6 +7291,18 @@ module Crystal::HIR
       end
 
       max_index = block.body.empty? ? -1 : block.body.max_of(&.index)
+
+      # When lowering a block from a callsite, the fallback arena is the caller's
+      # arena and therefore the most specific candidate for the block literal.
+      # Scanning unrelated def-arenas from the same file first can accidentally
+      # match a larger arena with the same span and reinterpret block body indexes
+      # against foreign nodes.
+      if (max_index < 0 || max_index < fallback.size) &&
+         span_fits_source?(fallback, block.span)
+        store_block_arena(block_id, fallback)
+        return fallback
+      end
+
       refresh_unique_def_arenas!
 
       i = 0
@@ -7315,13 +7327,6 @@ module Crystal::HIR
           end
           i += 1
         end
-      end
-
-      if !@unique_def_arenas.has_key?(fallback.object_id) &&
-         (max_index < 0 || max_index < fallback.size) &&
-         span_fits_source?(fallback, block.span)
-        store_block_arena(block_id, fallback)
-        return fallback
       end
 
       nil

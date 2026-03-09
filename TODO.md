@@ -96,6 +96,84 @@ closure cells, Tuple ptr/value confusion.
     `[]?` fix and restores `stage1 -> stage2`, but does not yet move the older
     active `stage2 -> stage3` frontier.
 
+### Current checkpoint (2026-03-09 method-yield block arena fix)
+
+- Verified a new root cause behind the long-running `String.build` / class-method
+  `yield` family:
+  - the failure is not specific to `String.build`, not specific to `: self`, and
+    not specific to `String::Builder`;
+  - tiny controls showed the real split:
+    - top-level `def drive; yield 7; 99; end` correctly prints `hit=7 / 99`,
+    - class and instance methods with the same body printed only `99`,
+    - mutable-object controls (`Counter`, `String::Builder`) likewise lost all
+      block-side effects inside methods while the top-level variant stayed green.
+- Direct debug proof from a temporary env-gated probe in `inline_block_body`:
+  - stale class-method call:
+    - `callee=Outer.drive$block old=16 chosen=514 body=10,11 nodes=NumberNode,BinaryNode`
+    - `result=Bool`
+  - top-level control:
+    - `callee=drive$block old=14 chosen=14 body=8,9 nodes=CallNode,IdentifierNode`
+    - `result=Int32`
+  - after the fix, both class and instance methods flip to the correct caller
+    arena:
+    - class: `chosen=16 body=10,11 nodes=CallNode,IdentifierNode`
+    - instance: `chosen=17 body=11,12 nodes=CallNode,IdentifierNode`
+    - runtime output becomes `hit=7 / 99`.
+- Root cause:
+  - `resolve_arena_for_block(...)` scanned unrelated def-arenas from the same
+    source file before the caller fallback arena;
+  - for top-level block literals passed into methods, the first span-compatible
+    def-arena could be a larger foreign arena from the same file, so inline
+    block lowering reinterpreted the block body indexes against unrelated AST
+    nodes;
+  - prioritizing the caller fallback arena before global def-arena scanning fixes
+    the block-body lookup while preserving the existing cache path.
+- New oracle:
+  - `bash regression_tests/method_yield_block_arena_repro.sh /private/tmp/stage1_rel_idxq_ec_fix_20260309`
+    -> `reproduced`
+  - `bash regression_tests/method_yield_block_arena_repro.sh /private/tmp/stage1_dbg_method_yield_fix_20260309`
+    -> `not reproduced`
+  - `bash regression_tests/method_yield_block_arena_repro.sh /private/tmp/stage1_rel_method_yield_fix_20260309`
+    -> `not reproduced`
+- Adjacent control:
+  - a class-method `String::Builder` wrapper now works again on fresh debug and
+    release stage1:
+    - `puts Outer.build_string(64) { |io| io << "hello" << " world" }`
+      -> `hello world`
+- Fresh verification:
+  - `stage1 debug`:
+    - `/usr/bin/time -p scripts/build_stage1_original_cached.sh debug /private/tmp/stage1_dbg_method_yield_fix_20260309`
+      -> `real 9.06`
+  - `stage1 --release`:
+    - `/usr/bin/time -p scripts/build_stage1_original_cached.sh release /private/tmp/stage1_rel_method_yield_fix_20260309`
+      -> `real 428.93`
+  - broad adversary:
+    - `/usr/bin/time -p regression_tests/run_all.sh /private/tmp/stage1_rel_method_yield_fix_20260309`
+      -> `67 passed, 0 failed`, `real 348.80`
+  - `stage2 --release`:
+    - `/usr/bin/time -p scripts/build_stage2_release.sh /private/tmp/stage1_rel_method_yield_fix_20260309 /private/tmp/stage2_rel_method_yield_fix_20260309`
+      -> `real 195.03`
+  - current observed speedup:
+    - `428.93 / 195.03 ~= 2.20x`
+- Boundary after the fix:
+  - `stage1 -> stage2` remains green on a fresh release pair;
+  - the older active `stage2` oracle still reproduces on the fresh stage2:
+    - `bash regression_tests/nilable_abstract_union_nil_negative_repro.sh /private/tmp/stage2_rel_method_yield_fix_20260309`
+      -> `reproduced: compiler crashed on nil abstract-union negative case`
+  - the new method-yield oracle is green on fresh stage1 but still crashes the
+    fresh stage2 during compilation:
+    - `bash regression_tests/method_yield_block_arena_repro.sh /private/tmp/stage2_rel_method_yield_fix_20260309`
+      -> `compile_rc: 139`
+  - guarded `stage2 -> stage3` via `scripts/run_safe.sh` is still red with
+    `exit 139`, after req-scanning through:
+    `prelude.cr`, `lib_c.cr`, `macros.cr`, `object.cr`, `crystal/once.cr`,
+    `comparable.cr`, `exception.cr`, `exception/call_stack.cr`,
+    `exception/call_stack/{stackwalk,null,libunwind}.cr`, `system_error.cr`,
+    and into `iterable.cr`;
+  - so this checkpoint is a verified compiler fix that restores a real
+    method/block lowering invariant and keeps `stage1 -> stage2` green, but it
+    does not yet clear the older stage2-only crash family.
+
 ### Current checkpoint (2026-03-09 nilable `[]?` callsite reselection)
 
 - Verified a new root cause behind the fresh self-hosted `stage2` crash family
