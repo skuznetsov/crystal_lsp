@@ -22385,7 +22385,12 @@ module Crystal::HIR
           modules_to_check.each do |mod_name|
             base_module = strip_generic_args(mod_name)
             visited = Set(String).new
-            if find_module_def_recursive(base_module, method_name, effective_arg_count, visited, arg_types)
+            typed_lookup_arg_types = if NILABLE_QUERY_METHODS.includes?(method_name) && !arg_types.empty?
+                                       arg_types
+                                     else
+                                       nil
+                                     end
+            if find_module_def_recursive(base_module, method_name, effective_arg_count, visited, typed_lookup_arg_types)
               debug_hook("method.resolve", "base=#{base_method_name} resolved=#{mangled_name} reason=module_deferred_match")
               return cache_method_resolution(cache_key, mangled_name)
             end
@@ -38098,7 +38103,12 @@ module Crystal::HIR
               next if module_base == skip_mod || module_name == skip_mod
             end
             visited = Set(String).new
-            if found = find_module_def_recursive(module_base, method_name, args.size, visited, arg_types)
+            typed_lookup_arg_types = if NILABLE_QUERY_METHODS.includes?(method_name) && !arg_types.empty?
+                                       arg_types
+                                     else
+                                       nil
+                                     end
+            if found = find_module_def_recursive(module_base, method_name, args.size, visited, typed_lookup_arg_types)
               actual_func_def = found[0]
               def_arena = found[1]
               if params = actual_func_def.params
@@ -45939,11 +45949,15 @@ module Crystal::HIR
                   expected_param_count = callsite.types.size
                 end
               end
-              deferred_call_arg_types = @pending_arg_types[name]?.try(&.types) ||
-                                        @pending_arg_types[target_name]?.try(&.types)
-              if deferred_call_arg_types.nil? && suffix
-                parsed_suffix_types = parse_types_from_suffix(strip_mangled_suffix_flags(suffix))
-                deferred_call_arg_types = parsed_suffix_types unless parsed_suffix_types.empty?
+              deferred_call_arg_types = nil
+              if NILABLE_QUERY_METHODS.includes?(method_base)
+                deferred_call_arg_types = @pending_arg_types[name]?.try(&.types) ||
+                                          @pending_arg_types[target_name]?.try(&.types)
+                if deferred_call_arg_types.nil? && suffix
+                  parsed_suffix_types = parse_types_from_suffix(strip_mangled_suffix_flags(suffix))
+                  deferred_call_arg_types = parsed_suffix_types unless parsed_suffix_types.empty?
+                end
+                deferred_call_arg_types = nil if deferred_call_arg_types.try(&.empty?)
               end
               included.each do |module_name|
                 base_module = strip_generic_args(module_name)

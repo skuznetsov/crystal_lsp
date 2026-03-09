@@ -22,6 +22,80 @@ closure cells, Tuple ptr/value confusion.
 - [ ] **Phase 5: FIX RC-3** — String.build block lowering
 - [ ] **Phase 6: RE-ENABLE RTA + BOOTSTRAP** — stage0→stage1→stage2→stage3 + benchmark
 
+### Current checkpoint (2026-03-09 fast-float accessor link regression narrowing)
+
+- Verified that the first `dd7819e9` nilable-query fix was real but too broad:
+  - the focused `[]?` oracle stayed green, yet fresh `stage1 -> stage2 --release`
+    regressed at link with undefined `_ec` and `_ptr`;
+  - the regression is reproducible on a tiny source independent of bootstrap:
+    `puts Float::FastFloat.to_f64?("1.0", true, true)`;
+  - raw LLVM from the bad release stage1
+    `/private/tmp/stage1_rel_idxq_narrow_20260309 --emit llvm-ir --no-link`
+    proved the broken lowering directly:
+    - `call i32 @ec(ptr null)`
+    - `call ptr @ptr(ptr null)`
+    - plus fallback declarations `declare i32 @ec(...)` / `declare ptr @ptr(...)`;
+  - `DEBUG_CALL_TRACE=ec` on the same bad compiler showed the source-level
+    misresolution point:
+    - `[CALL_TRACE] stage=before_lower_function method=ec actual=ec primary=ec return=0`
+    so `ret.ec` had degraded to a bare symbol before LLVM emission.
+- Root cause:
+  - the previous arg-type-aware `find_module_def_recursive(...)` propagation was
+    too wide; it affected unrelated zero-arg member lookup, not just the
+    `NILABLE_QUERY_METHODS` branch it was meant to stabilize;
+  - narrowing that typed deferred-lookup path to nilable query methods with real
+    call arguments keeps the verified `[]?` fix while stopping zero-arg member
+    accessors like `ret.ec` / `ret.ptr` from degrading into bare extern names.
+- Final corrective fix on the current worktree:
+  - only pass `call_arg_types` into deferred module lookup when the active
+    method is in `NILABLE_QUERY_METHODS` **and** the call actually has args;
+  - keep the post-lowering target reselection logic only for the verified
+    nilable-query branch.
+- Focused oracles:
+  - existing oracle still green:
+    - `bash regression_tests/nilable_array_index_query_repro.sh /private/tmp/stage1_rel_idxq_ec_fix_20260309`
+      -> `compile_rc: 0`, `run_rc: 0`, `stdout: true`, `not reproduced`
+  - new oracle:
+    - `bash regression_tests/fast_float_accessor_link_regression_repro.sh /private/tmp/stage1_rel_idxq_narrow_20260309`
+      -> `reproduced: Float::FastFloat accessors regressed to bare _ec/_ptr link symbols`
+    - `bash regression_tests/fast_float_accessor_link_regression_repro.sh /private/tmp/stage1_rel_idxq_ec_fix_20260309`
+      -> `not reproduced`
+  - adjacent control:
+    - direct compile of `puts Float::FastFloat.to_f64?("1.0", true, true)` on
+      `/private/tmp/stage1_rel_idxq_ec_fix_20260309` now links again
+      (`compile_rc: 0`); it still crashes at runtime, but that runtime issue
+      also exists on the stale pre-regression baseline and is therefore a
+      separate older bug, not this link regression.
+- Fresh verification:
+  - `stage1 debug`:
+    - `/usr/bin/time -p scripts/build_stage1_original_cached.sh debug /private/tmp/stage1_dbg_idxq_ec_fix_20260309`
+      -> fast gate green
+  - `stage1 --release`:
+    - `/usr/bin/time -p scripts/build_stage1_original_cached.sh release /private/tmp/stage1_rel_idxq_ec_fix_20260309`
+      -> `real 436.67`
+  - broad adversary:
+    - `/usr/bin/time -p regression_tests/run_all.sh /private/tmp/stage1_rel_idxq_ec_fix_20260309`
+      -> `67 passed, 0 failed`, `real 290.08`
+  - `stage2 --release`:
+    - `/usr/bin/time -p scripts/build_stage2_release.sh /private/tmp/stage1_rel_idxq_ec_fix_20260309 /private/tmp/stage2_rel_idxq_ec_fix_20260309`
+      -> `real 210.21`
+  - current observed speedup:
+    - `436.67 / 210.21 ~= 2.08x`
+- Boundary after the fix:
+  - `stage1 -> stage2` is green again on a fresh release pair;
+  - the previous active `stage2` oracle still reproduces on the fresh stage2:
+    - `bash regression_tests/nilable_abstract_union_nil_negative_repro.sh /private/tmp/stage2_rel_idxq_ec_fix_20260309`
+      -> `reproduced: compiler crashed on nil abstract-union negative case`
+  - guarded `stage2 -> stage3` via `scripts/run_safe.sh` is still red with
+    `exit 139`, after req-scanning through:
+    `prelude.cr`, `lib_c.cr`, `macros.cr`, `object.cr`, `crystal/once.cr`,
+    `comparable.cr`, `exception.cr`, `exception/call_stack.cr`,
+    `exception/call_stack/{stackwalk,null,libunwind}.cr`, `system_error.cr`,
+    and into `iterable.cr`;
+  - so this checkpoint removes a fresh regression introduced by the first
+    `[]?` fix and restores `stage1 -> stage2`, but does not yet move the older
+    active `stage2 -> stage3` frontier.
+
 ### Current checkpoint (2026-03-09 nilable `[]?` callsite reselection)
 
 - Verified a new root cause behind the fresh self-hosted `stage2` crash family
