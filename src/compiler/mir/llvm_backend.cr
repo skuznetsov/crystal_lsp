@@ -13470,8 +13470,9 @@ module Crystal::MIR
           @value_types[inst.id] = resolved_union_type if resolved_union_type
         else
           # If the MIR type is a tuple or StaticArray, preserve it even if ABI uses ptr.
-          if tuple_type = @module.type_registry.get(inst.type)
-            if tuple_type.kind.tuple? || tuple_type.name.starts_with?("StaticArray(")
+          if logical_type = @module.type_registry.get(inst.type)
+            if logical_type.kind.tuple? || logical_type.name.starts_with?("StaticArray(") ||
+               (logical_type.kind.union? && @type_mapper.is_all_ref_union?(inst.type))
               @value_types[inst.id] = inst.type
             else
               actual_type_ref = case return_type
@@ -15060,7 +15061,6 @@ module Crystal::MIR
                    end
       union_type_is_union = union_type.ends_with?(".union")
       base_name = name.lstrip('%')
-
       # value_ref can degrade a cross-block union value to ptr via fromslot casts.
       # For union type_id checks we need the raw union struct value.
       if union_type_is_union

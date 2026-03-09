@@ -342,13 +342,18 @@ module Crystal
         # Calculate total size (struct: just ivars, class: 4-byte i32 type_id header + ivars)
         total_size = info.size.to_u64
 
-        # Create type in registry, or get existing type by name (for built-in types like String)
-        # First check if a type with this name already exists (e.g., String as primitive)
-        mir_type = @mir_module.type_registry.get_by_name(class_name)
+        # Create type in registry, or canonicalize an existing placeholder.
+        # Union registration runs before class registration and may seed a
+        # temporary Struct slot for class variants that are not yet in the
+        # registry. If we keep that stale kind, all-ref unions like `Nil | Base`
+        # degrade to non-all-ref and `is_a?`/dispatch lose runtime type_ids.
+        mir_type = @mir_module.type_registry.get(mir_type_ref) ||
+                   @mir_module.type_registry.get_by_name(class_name)
         if mir_type
-          # Update size from class_info if it has ivars (e.g., String primitive registered with
-          # size=8 but actual class_info has size=12 after ivar discovery)
-          if total_size > mir_type.size && !info.ivars.empty?
+          mir_type.kind = type_kind
+          mir_type.name = class_name
+          mir_type.alignment = pointer_word_align_u32
+          if total_size > 0 && (mir_type.size == 0 || total_size > mir_type.size || !info.ivars.empty?)
             mir_type.size = total_size
           end
         else
@@ -3536,6 +3541,31 @@ module Crystal
         subclasses_for(check_name).each do |sub_name|
           if sub_mir_type = @mir_module.type_registry.get_by_name(sub_name)
             matching_type_ids << sub_mir_type.id unless matching_type_ids.includes?(sub_mir_type.id)
+          end
+        end
+      end
+
+      # All-ref unions (for example `Base | Nil`) are lowered as nullable raw
+      # pointers, so their runtime type_id must be recovered through
+      # UnionTypeIdGet instead of treating the union value itself as a plain
+      # object pointer load.
+      if mir_val_type && is_union_type?(mir_val_type)
+        if union_desc = @mir_module.get_union_descriptor(mir_val_type)
+          if all_ref_union_descriptor?(union_desc)
+            union_type_id = builder.emit(MIR::UnionTypeIdGet.new(builder.next_id, obj))
+            if matching_type_ids.size == 1
+              expected = builder.const_int(matching_type_ids[0].to_i64, TypeRef::INT32)
+              return builder.eq(union_type_id, expected)
+            else
+              first_expected = builder.const_int(matching_type_ids[0].to_i64, TypeRef::INT32)
+              result = builder.eq(union_type_id, first_expected)
+              matching_type_ids[1..].each do |tid|
+                expected = builder.const_int(tid.to_i64, TypeRef::INT32)
+                check = builder.eq(union_type_id, expected)
+                result = builder.bit_or(result, check, TypeRef::BOOL)
+              end
+              return result
+            end
           end
         end
       end

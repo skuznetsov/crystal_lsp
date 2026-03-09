@@ -22,6 +22,73 @@ closure cells, Tuple ptr/value confusion.
 - [ ] **Phase 5: FIX RC-3** — String.build block lowering
 - [ ] **Phase 6: RE-ENABLE RTA + BOOTSTRAP** — stage0→stage1→stage2→stage3 + benchmark
 
+### Current checkpoint (2026-03-08 nilable abstract-union runtime typecheck fix)
+
+- Verified a real multi-layer root cause behind the stale
+  nilable abstract-union `is_a?` / `case` failures:
+  - focused oracle:
+    - `bash regression_tests/nilable_abstract_union_typecheck_repro.sh /private/tmp/stage1_rel_value_key_hash_fix_20260308`
+      -> `reproduced: nilable abstract union typecheck lost concrete runtime type`
+    - `bash regression_tests/nilable_abstract_union_typecheck_repro.sh /private/tmp/stage1_rel_nilable_union_typecheck_fix_20260308`
+      -> `not reproduced`
+  - fresh stage2 propagation:
+    - `bash regression_tests/stage2_top_level_do_block_hash_repro.sh /private/tmp/stage2_rel_nilable_union_typecheck_fix_20260308`
+      -> `not reproduced: compiler reached expected name-resolution error`
+    - the same old tiny stage2 blocker still reproduces on the stale stage2 baseline,
+      so this fix really moved the self-hosted frontier.
+- Root cause was not a single bad `UnionIs` helper:
+  - in HIR, type-check and unwrap sites were using broad
+    `get_union_variant_id(...)` fallback, so checks like `x : Base?; x.is_a?(Sub)`
+    could collapse to the single non-nil union member instead of preserving a
+    runtime subclass check;
+  - in MIR/LLVM, generic call results for all-ref unions (`Nil | Base`) were
+    losing their logical union type and being recorded as plain `Pointer`,
+    which made later runtime type-id checks degrade to null/non-null `0/1`
+    instead of loading the object header type-id.
+- Final compiler-only fix:
+  - `src/compiler/hir/ast_to_hir.cr`
+    - add strict `get_union_member_variant_id(...)` for direct union members only,
+      and switch `is_a?`, `case`, unwrap, and narrowing sites to that stricter helper;
+  - `src/compiler/mir/hir_to_mir.cr`
+    - lower `IsA` on all-ref unions through `UnionTypeIdGet` instead of raw
+      object-pointer header loads;
+  - `src/compiler/mir/llvm_backend.cr`
+    - preserve logical all-ref union return types in `@value_types` for generic
+      call results even when the ABI return type is `ptr`.
+- Fresh verification:
+  - `stage1 --release`:
+    - `/usr/bin/time -l scripts/build_stage1_original_release.sh /private/tmp/stage1_rel_nilable_union_typecheck_fix_20260308`
+      -> `real 445.31`
+  - focused/adversary checks on the fresh release stage1:
+    - `bash regression_tests/nilable_abstract_union_typecheck_repro.sh /private/tmp/stage1_rel_nilable_union_typecheck_fix_20260308`
+      -> `not reproduced`
+    - targeted positive control:
+      - `lookup : Symb? = A.new`, `case x when A then exit 0`
+      - `run_status: 0`
+    - targeted negative `nil` control still segfaults on both fresh and stale
+      stage1 release compilers, so that broader runtime bug is pre-existing and
+      not introduced by this fix
+    - broad regression:
+      - `/usr/bin/time -p regression_tests/run_all.sh /private/tmp/stage1_rel_nilable_union_typecheck_fix_20260308`
+        -> `67 passed, 0 failed`, `real 309.21`
+  - `stage2 --release`:
+    - `/usr/bin/time -l scripts/build_stage2_release.sh /private/tmp/stage1_rel_nilable_union_typecheck_fix_20260308 /private/tmp/stage2_rel_nilable_union_typecheck_fix_20260308`
+      -> `real 227.88`
+- Boundary / new frontier:
+  - `stage1 -> stage2` remains green with the new fix;
+  - current measured speedup is `445.31 / 227.88 ~= 1.95x`;
+  - the old top-level `do ... end` / `Bytes` string-pool crash is removed on
+    the fresh stage2;
+  - guarded `stage2 -> stage3` is still red:
+    - `scripts/timeout_sample_lldb.sh -t 60 -m 12288 --no-series -s 3 -l 8 -o <tmpdir> -- /private/tmp/stage2_rel_nilable_union_typecheck_fix_20260308 src/crystal_v2.cr --release -o /tmp/stage3_rel_nilable_union_typecheck_fix_20260308`
+      -> `status 139`
+      after parsing/req-scanning through `prelude.cr`, `lib_c.cr`, `macros.cr`,
+      `object.cr`, `crystal/once.cr`, `comparable.cr`, `exception.cr`, and into
+      `exception/call_stack.cr`;
+  - the fresh stage2 still crashes compiling the new nilable-union oracle, so
+    the current fix removes one real self-hosted blocker-family but does not yet
+    clear the final stage3 corridor.
+
 ### Current checkpoint (2026-03-08 value-key hash delegate self-host fix)
 
 - Verified a new real self-hosted stage2 root cause behind the tiny

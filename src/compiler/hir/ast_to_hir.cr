@@ -31964,6 +31964,61 @@ module Crystal::HIR
       -1
     end
 
+    # Get variant type_id only when `value_type` is an actual direct member of
+    # `union_type`. Unlike `get_union_variant_id`, this must not use broad
+    # pointer-like/base-name fallback because type-checks like `x : Base?; x.is_a?(Sub)`
+    # need runtime subclass checks, not "single non-nil union member" shortcuts.
+    private def get_union_member_variant_id(union_type : TypeRef, value_type : TypeRef) : Int32
+      mir_union_ref = hir_to_mir_type_ref(union_type)
+      if descriptor = @union_descriptors[mir_union_ref]?
+        mir_value_ref = hir_to_mir_type_ref(value_type)
+
+        descriptor.variants.each do |variant|
+          if variant.type_ref == mir_value_ref
+            return variant.type_id
+          end
+        end
+
+        if value_type == TypeRef::NIL || value_type == TypeRef::VOID
+          descriptor.variants.each do |variant|
+            if variant.type_ref == MIR::TypeRef::NIL || variant.type_ref == MIR::TypeRef::VOID ||
+               variant.full_name == "Nil" || variant.full_name == "Void"
+              return variant.type_id
+            end
+          end
+        end
+
+        value_name = get_type_name_from_ref(value_type)
+        unless value_name.empty?
+          descriptor.variants.each do |variant|
+            if variant.full_name == value_name
+              return variant.type_id
+            end
+          end
+        end
+      end
+
+      if type_desc = @module.get_type_descriptor(union_type)
+        if type_desc.kind == TypeKind::Union
+          variant_names = split_union_type_name(type_desc.name)
+          value_name = get_type_name_from_ref(value_type)
+          nil_like = value_type == TypeRef::NIL || value_type == TypeRef::VOID ||
+                     value_name == "Nil" || value_name == "Void"
+
+          variant_names.each_with_index do |variant_name, idx|
+            if nil_like
+              return idx if variant_name == "Nil" || variant_name == "Void"
+              next
+            end
+
+            return idx if variant_name == value_name
+          end
+        end
+      end
+
+      -1
+    end
+
     private def pointer_like_union_variant_id(union_type : TypeRef) : Int32?
       mir_union_ref = hir_to_mir_type_ref(union_type)
       descriptor = @union_descriptors[mir_union_ref]?
@@ -39554,7 +39609,7 @@ module Crystal::HIR
         next if local_type == target_type
 
         if is_union_type?(local_type)
-          variant_id = get_union_variant_id(local_type, target_type)
+          variant_id = get_union_member_variant_id(local_type, target_type)
           if variant_id >= 0
             unwrap = UnionUnwrap.new(ctx.next_id, target_type, local_id, variant_id, false)
             ctx.emit(unwrap)
@@ -39628,7 +39683,7 @@ module Crystal::HIR
 
       value_type = ctx.type_of(value_id)
       if is_union_type?(value_type)
-        variant_id = get_union_variant_id(value_type, check_type)
+        variant_id = get_union_member_variant_id(value_type, check_type)
         if variant_id >= 0
           union_is = UnionIs.new(ctx.next_id, value_id, variant_id, value_type)
           ctx.emit(union_is)
@@ -42257,7 +42312,7 @@ module Crystal::HIR
               fl.id
             end
           else
-            vid = get_union_variant_id(subject_type, cond_type)
+            vid = get_union_member_variant_id(subject_type, cond_type)
             if vid >= 0
               uis = UnionIs.new(ctx.next_id, subject_id, vid)
               ctx.emit(uis)
@@ -42293,7 +42348,7 @@ module Crystal::HIR
           subject_type = ctx.type_of(subject_id)
           # If subject is union type, use UnionIs
           if is_union_type?(subject_type)
-            variant_id = get_union_variant_id(subject_type, check_type)
+            variant_id = get_union_member_variant_id(subject_type, check_type)
             if variant_id >= 0
               union_is = UnionIs.new(ctx.next_id, subject_id, variant_id, subject_type)
               ctx.emit(union_is)
@@ -42384,7 +42439,7 @@ module Crystal::HIR
 
           # If subject is union type, use UnionIs
           if is_union_type?(subject_type)
-            variant_id = get_union_variant_id(subject_type, check_type)
+            variant_id = get_union_member_variant_id(subject_type, check_type)
             if variant_id >= 0
               union_is = UnionIs.new(ctx.next_id, subject_id, variant_id, subject_type)
               ctx.emit(union_is)
@@ -42687,7 +42742,7 @@ module Crystal::HIR
 
           # If subject is union type, use UnionIs
           if is_union_type?(subject_type)
-            variant_id = get_union_variant_id(subject_type, check_type)
+            variant_id = get_union_member_variant_id(subject_type, check_type)
             if variant_id >= 0
               union_is = UnionIs.new(ctx.next_id, subject_id, variant_id, subject_type)
               ctx.emit(union_is)
@@ -54846,7 +54901,7 @@ module Crystal::HIR
       # as a variant, unwrap it. This handles cases where if/elsif/else creates spurious
       # Nil | T union types when the function always returns T.
       if is_union_or_nilable_type?(value_type) && !is_union_or_nilable_type?(target_type)
-        variant_id = get_union_variant_id(value_type, target_type)
+        variant_id = get_union_member_variant_id(value_type, target_type)
         if variant_id >= 0
           unwrap = UnionUnwrap.new(ctx.next_id, target_type, value_id, variant_id)
           ctx.emit(unwrap)
@@ -65992,7 +66047,7 @@ module Crystal::HIR
       # Check if value is union type - use UnionUnwrap instead of Cast
       value_type = ctx.type_of(value_id)
       if is_union_type?(value_type)
-        variant_id = get_union_variant_id(value_type, target_type)
+        variant_id = get_union_member_variant_id(value_type, target_type)
         if variant_id >= 0
           # Unsafe unwrap - assumes type_id matches (caller should have checked with is_a?)
           unwrap = UnionUnwrap.new(ctx.next_id, target_type, value_id, variant_id, safe: false)
@@ -66037,7 +66092,7 @@ module Crystal::HIR
       value_type = ctx.type_of(value_id)
       if is_union_type?(value_type)
         # Get the variant_type_id for the check_type within this union
-        variant_id = get_union_variant_id(value_type, check_type)
+        variant_id = get_union_member_variant_id(value_type, check_type)
         if variant_id >= 0
           union_is = UnionIs.new(ctx.next_id, value_id, variant_id)
           ctx.emit(union_is)
