@@ -22,6 +22,59 @@ closure cells, Tuple ptr/value confusion.
 - [ ] **Phase 5: FIX RC-3** — String.build block lowering
 - [ ] **Phase 6: RE-ENABLE RTA + BOOTSTRAP** — stage0→stage1→stage2→stage3 + benchmark
 
+### Current checkpoint (2026-03-09 named constructor initialize fallback)
+
+- Verified a real compiler-only root cause behind the named/default `.new`
+  wrapper crash family:
+  - `reorder_named_args(...)` only tried the `.new -> #initialize` fallback when
+    a `new` def had already been found and then failed the named-arg match;
+  - for ordinary auto-generated constructors there is no explicit `new` def, so
+    named calls like `Shape.new("foo", 7, scope: "scope")` skipped the
+    `#initialize` parameter/default map entirely and kept the raw 3-arg call shape;
+  - that stale shape later materialized `Shape$Dnew$$String_Int32_String`, which
+    bound the third argument to `params` instead of required named `scope:` and
+    then crashed after printing only `foo / 7 / 5 / true`.
+- Final fix on the current worktree:
+  - always attempt `#initialize` fallback for named `.new` calls inside
+    `reorder_named_args(...)`, even when no explicit `new` def exists;
+  - keep named-call metadata in pending callsite signatures so deferred `.new`
+    lowering does not silently erase named-arg semantics.
+- Focused oracle:
+  - stale release stage1:
+    - `bash regression_tests/named_constructor_initialize_fallback_repro.sh /private/tmp/stage1_rel_late_ivar_layout_fix2_20260309`
+      -> `reproduced: named constructor call bound against raw .new arity instead of initialize signature`
+  - fresh debug stage1:
+    - `/usr/bin/time -p scripts/build_stage1_original_debug.sh /private/tmp/stage1_dbg_named_reorder_fix_20260309`
+      -> `real 8.49`
+    - manual probe on `/private/tmp/stage1_dbg_named_reorder_fix_20260309`
+      emitted only `Shape$Dnew$$String_Int32_Array$LInt32$R_Nil$_$OR$_String_String_Nil$_$OR$_Array$LString$R_Bool`
+      and runtime output `foo / 7 / 0 / true / scope / true / false`
+  - fresh release stage1:
+    - `/usr/bin/time -p scripts/build_stage1_original_release.sh /private/tmp/stage1_rel_named_ctor_fix_20260309`
+      -> `real 419.14`
+    - `bash regression_tests/named_constructor_initialize_fallback_repro.sh /private/tmp/stage1_rel_named_ctor_fix_20260309`
+      -> `not reproduced`
+  - broad adversary:
+    - `/usr/bin/time -p regression_tests/run_all.sh /private/tmp/stage1_rel_named_ctor_fix_20260309`
+      -> `67 passed, 0 failed`, `real 284.06`
+- Fresh bootstrap boundary on the same worktree:
+  - `stage2 --release`:
+    - `/usr/bin/time -p scripts/build_stage2_release.sh /private/tmp/stage1_rel_named_ctor_fix_20260309 /private/tmp/stage2_rel_named_ctor_fix_20260309`
+      -> `real 215.43`
+  - current observed speedup:
+    - `419.14 / 215.43 ~= 1.95x`
+  - active self-hosted frontier is unchanged by this fix:
+    - `bash regression_tests/nilable_abstract_union_nil_negative_repro.sh /private/tmp/stage2_rel_named_ctor_fix_20260309`
+      -> `reproduced: compiler crashed on nil abstract-union negative case`
+    - guarded `stage2 -> stage3` via `scripts/run_safe.sh` still exits `139`
+      after parsing/req-scanning through `prelude.cr`, `lib_c.cr`, `macros.cr`,
+      `object.cr`, `crystal/once.cr`, `comparable.cr`, `exception.cr`, and into
+      `exception/call_stack.cr`.
+- Open items from this checkpoint:
+  - return to the active fresh stage2 blocker on
+    `nilable_abstract_union_nil_negative_repro.sh`;
+  - then retry guarded `stage2 -> stage3` and refresh the benchmark delta.
+
 ### Current checkpoint (2026-03-09 late-typed ivar layout realignment)
 
 - Verified a real compiler/runtime root cause behind the staged

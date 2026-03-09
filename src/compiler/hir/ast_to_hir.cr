@@ -376,7 +376,7 @@ module Crystal::HIR
       end
     end
 
-    private record CallsiteArgs, types : Array(TypeRef), literals : Array(Bool)?, enum_names : Array(String?)?
+    private record CallsiteArgs, types : Array(TypeRef), literals : Array(Bool)?, enum_names : Array(String?)?, has_named_args : Bool = false
 
     private class InitParamsCapture
       property params : Array({String, TypeRef})
@@ -44065,6 +44065,7 @@ module Crystal::HIR
       arg_literals : Array(Bool)? = nil,
       enum_names : Array(String?)? = nil,
       has_block : Bool = false,
+      has_named_args : Bool = false,
     ) : Nil
       return if name.empty?
       base_key = base_callsite_key(name)
@@ -44074,7 +44075,8 @@ module Crystal::HIR
       callsite = CallsiteArgs.new(
         arg_types.dup,
         arg_literals ? arg_literals.dup : nil,
-        enum_names ? enum_names.dup : nil
+        enum_names ? enum_names.dup : nil,
+        has_named_args
       )
       @pending_arg_types[name] = callsite
       return if base_key.empty?
@@ -44093,7 +44095,7 @@ module Crystal::HIR
         seen_by_arity[arg_types.size] = new_set
         new_set
       end
-      callsite_key = "#{arg_types.map(&.id).join(",")}|#{literal_key}|#{has_block ? 1 : 0}"
+      callsite_key = "#{arg_types.map(&.id).join(",")}|#{literal_key}|#{has_block ? 1 : 0}|#{has_named_args ? 1 : 0}"
       return if seen_bucket.includes?(callsite_key)
       seen_bucket.add(callsite_key)
       by_arity = @pending_arg_types_by_arity[base_key]? || begin
@@ -44109,21 +44111,21 @@ module Crystal::HIR
         literal_payload = arg_literals ? arg_literals.join(",") : "nil"
         debug_hook(
           "callsite.args",
-          "name=#{name} types=#{arg_types.map(&.id).join(",")} literals=#{literal_payload}"
+          "name=#{name} types=#{arg_types.map(&.id).join(",")} literals=#{literal_payload} named=#{has_named_args}"
         )
       end
       if debug_hook_filter_match?(name)
         literal_payload = arg_literals ? arg_literals.join(",") : "nil"
         debug_hook(
           "callsite.args",
-          "name=#{name} types=#{arg_types.map(&.id).join(",")} literals=#{literal_payload}"
+          "name=#{name} types=#{arg_types.map(&.id).join(",")} literals=#{literal_payload} named=#{has_named_args}"
         )
       end
       if debug_hook_filter_match?(name)
         literal_payload = arg_literals ? arg_literals.join(",") : "nil"
         debug_hook(
           "callsite.args",
-          "name=#{name} types=#{arg_types.map(&.id).join(",")} literals=#{literal_payload}"
+          "name=#{name} types=#{arg_types.map(&.id).join(",")} literals=#{literal_payload} named=#{has_named_args}"
         )
       end
       if env_get("DEBUG_FROM_IO_CALLSITE") && name.includes?("from_io")
@@ -46995,10 +46997,9 @@ module Crystal::HIR
                       expects_block_new = suffix == "block" || suffix.ends_with?("_block")
                     end
                     matched : Tuple(String, CrystalV2::Compiler::Frontend::DefNode)? = nil
-                    call_has_named_new = false
+                    call_has_named_new = callsite_args ? callsite_args.has_named_args : false
                     if exact_def = @function_defs[target_for_lower]?
                       exact_stats = function_param_stats(target_for_lower, exact_def)
-                      call_has_named_new = exact_stats.has_named_only
                       param_count, required, has_splat, has_double_splat, skip =
                         effective_arity_stats_for_call(exact_stats, call_has_named_new)
                       exact_matches = !skip &&
@@ -49021,6 +49022,7 @@ module Crystal::HIR
             if class_info = @class_info[class_name_str]?
               call_arg_types = infer_arg_types_for_call(call_args, @current_class)
               call_has_splat = call_args.any? { |arg_expr| call_arena[arg_expr].is_a?(CrystalV2::Compiler::Frontend::SplatNode) }
+              call_has_named_args = node.named_args.try(&.empty?) == false
               if call_has_splat
                 expanded_types = [] of TypeRef
                 call_args.each_with_index do |arg_expr, i|
@@ -49043,7 +49045,14 @@ module Crystal::HIR
                   call_arg_types = expanded_types
                 end
               end
-              generate_allocator(class_name_str, class_info, call_arg_types)
+              # Named-arg constructor calls need reorder_named_args/apply_default_args
+              # before the overload shape is known. Generating allocator overloads
+              # from the raw source-order arg list can materialize a stale `.new`
+              # wrapper (e.g. treating a required named `scope:` arg as the third
+              # positional init param).
+              unless call_has_named_args
+                generate_allocator(class_name_str, class_info, call_arg_types)
+              end
             end
           end
         else
@@ -51790,7 +51799,7 @@ module Crystal::HIR
       # lower would see only the broad def name (e.g. `tuple_size$Tuple`) instead of
       # the concrete callsite args.
       if callsite_arg_types.any? { |t| t != TypeRef::VOID }
-        remember_callsite_arg_types(mangled_method_name, callsite_arg_types, callsite_arg_literals, callsite_arg_enum_names, has_block_call)
+        remember_callsite_arg_types(mangled_method_name, callsite_arg_types, callsite_arg_literals, callsite_arg_enum_names, has_block_call, has_named_args)
       end
 
       # Try to infer return type using mangled name first, fallback to base name
@@ -53620,9 +53629,9 @@ module Crystal::HIR
         end
       end
       # Lazily lower target function bodies (avoid full stdlib lowering).
-      remember_callsite_arg_types(primary_mangled_name, callsite_arg_types, callsite_arg_literals, callsite_arg_enum_names, has_block_call)
+      remember_callsite_arg_types(primary_mangled_name, callsite_arg_types, callsite_arg_literals, callsite_arg_enum_names, has_block_call, has_named_args)
       if mangled_method_name != primary_mangled_name
-        remember_callsite_arg_types(mangled_method_name, callsite_arg_types, callsite_arg_literals, callsite_arg_enum_names, has_block_call)
+        remember_callsite_arg_types(mangled_method_name, callsite_arg_types, callsite_arg_literals, callsite_arg_enum_names, has_block_call, has_named_args)
       end
       if receiver_id
         receiver_type = ctx.type_of(receiver_id)
@@ -56036,9 +56045,9 @@ module Crystal::HIR
       # When looking up `new` and the found def doesn't match any named args,
       # fall back to `initialize` overloads. In Crystal, `new` is auto-generated
       # from `initialize`, but our compiler may only have the `initialize` def.
-      if func_def && !named_args.empty? && func_name.ends_with?("new")
+      if !named_args.empty? && func_name.ends_with?("new")
         has_match = false
-        if params = func_def.params
+        if func_def && (params = func_def.params)
           named_args.each do |na|
             arg_name = String.new(na.name)
             params.each do |p|
