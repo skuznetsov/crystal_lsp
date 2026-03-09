@@ -21557,9 +21557,18 @@ module Crystal::HIR
       has_block : Bool,
     ) : Bool
       return false if has_block
+      return false if reserves_allocator_base_name?(base_name, member)
       return true if full_name == base_name
       return false if @function_defs.has_key?(base_name)
       def_params_untyped?(member)
+    end
+
+    private def reserves_allocator_base_name?(
+      base_name : String,
+      member : CrystalV2::Compiler::Frontend::DefNode,
+    ) : Bool
+      return false unless base_name.ends_with?(".new")
+      count_non_block_params(member) > 0
     end
 
     private def prefer_non_yield_base_name(
@@ -21567,6 +21576,7 @@ module Crystal::HIR
       member : CrystalV2::Compiler::Frontend::DefNode,
       member_arena : CrystalV2::Compiler::Frontend::ArenaLike,
     ) : Nil
+      return if reserves_allocator_base_name?(base_name, member)
       return unless existing = @function_defs[base_name]?
       existing_arena = @function_def_arenas[base_name]? || member_arena
       return unless def_contains_yield?(existing, existing_arena)
@@ -21580,6 +21590,7 @@ module Crystal::HIR
       member : CrystalV2::Compiler::Frontend::DefNode,
       member_arena : CrystalV2::Compiler::Frontend::ArenaLike,
     ) : Nil
+      return if reserves_allocator_base_name?(base_name, member)
       return unless existing = @function_defs[base_name]?
       existing_params = count_non_block_params(existing)
       member_params = count_non_block_params(member)

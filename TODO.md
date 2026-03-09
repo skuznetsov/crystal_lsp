@@ -22,6 +22,70 @@ closure cells, Tuple ptr/value confusion.
 - [ ] **Phase 5: FIX RC-3** — String.build block lowering
 - [ ] **Phase 6: RE-ENABLE RTA + BOOTSTRAP** — stage0→stage1→stage2→stage3 + benchmark
 
+### Current checkpoint (2026-03-09 allocator `.new` base-name preservation)
+
+- Verified that the reduced fresh `stage2` no-prelude crash was not another
+  allocator-size/layout bug:
+  - stale `/private/tmp/stage2_rel_finalinfo_invalidate_fix_20260309`
+    disassembly for `_Set$LString$R$Dnew` showed the unsuffixed zero-arg symbol
+    executing the `Indexable(String)` constructor body directly, including
+    `__vdispatch__Indexable$Hsize$$T2307` and
+    `__vdispatch__Indexable$Hunsafe_fetch$$Int32$$T2307`;
+  - the same stale binary still also contained the real suffixed overload
+    `_Set$LString$R$Dnew$$Indexable$LString$R`, proving the bug was base-name
+    hijack, not missing overload emission;
+  - a stage1-generated runtime control `Set(String).new` stayed green, so this
+    was a self-hosted HIR registration issue rather than a generic Set runtime
+    bug.
+- Root cause:
+  - explicit argful `.new` overloads were still allowed to claim the bare
+    `.new` base name during HIR registration/re-assertion;
+  - on self-hosted stage2 that let `def self.new(other : Indexable(T))`
+    overwrite the allocator-shaped zero-arg entrypoint, so early compiler code
+    like `Set(String).new` entered the `Indexable` body and crashed before
+    reaching user code.
+- Corrective fix on the current worktree:
+  - add `reserves_allocator_base_name?(...)` in
+    `src/compiler/hir/ast_to_hir.cr`;
+  - block argful `.new` defs from claiming the bare base name in both
+    `should_register_base_name?` and the later `prefer_non_yield_base_name` /
+    `prefer_lower_arity_base_name` re-assert paths.
+- New oracle:
+  - `bash regression_tests/stage2_set_zeroarg_new_hijack_repro.sh /private/tmp/stage2_rel_finalinfo_invalidate_fix_20260309`
+    -> `reproduced: bare Set(String).new was hijacked by Indexable overload lowering`
+  - `bash regression_tests/stage2_set_zeroarg_new_hijack_repro.sh /private/tmp/stage2_rel_new_base_fix_20260309`
+    -> `not reproduced`
+- Fresh verification:
+  - `stage1 debug`:
+    - `/usr/bin/time -p scripts/build_stage1_original_debug.sh /private/tmp/stage1_dbg_new_base_fix_20260309`
+      -> `real 9.47`
+  - `stage1 --release`:
+    - `/usr/bin/time -p scripts/build_stage1_original_release.sh /private/tmp/stage1_rel_new_base_fix_20260309`
+      -> `real 454.95`
+  - `stage2 --release`:
+    - `/usr/bin/time -p scripts/build_stage2_release.sh /private/tmp/stage1_rel_new_base_fix_20260309 /private/tmp/stage2_rel_new_base_fix_20260309`
+      -> `real 200.56`
+  - broad adversary:
+    - `regression_tests/run_all.sh /private/tmp/stage1_rel_new_base_fix_20260309`
+      -> `67 passed, 0 failed`
+      -> `real 271.26`
+  - current observed speedup:
+    - `454.95 / 200.56 ~= 2.27x`
+- Boundary after the fix:
+  - `stage1 -> stage2` stays green on the fresh release pair;
+  - the specific self-hosted `Set(String).new` constructor-hijack family is now
+    removed by direct binary proof;
+  - the older active frontier remains:
+    - `bash regression_tests/nilable_abstract_union_nil_negative_repro.sh /private/tmp/stage2_rel_new_base_fix_20260309`
+      -> still reproduces compiler crash
+    - guarded `stage2 -> stage3`:
+      - `/usr/bin/time -p scripts/timeout_sample_lldb.sh -t 600 -m 24576 --no-series --no-lldb -o /tmp/stage3_rel_new_base_fix_probe_20260309 -- scripts/build_stage2_release.sh /private/tmp/stage2_rel_new_base_fix_20260309 /private/tmp/stage3_rel_new_base_fix_20260309`
+      - `status 139`, `real 1.07`
+      - command log still dies behind the same later
+        `exception/call_stack -> system_error -> iterable` corridor
+    - so this checkpoint removes one real HIR overload-registration bug without
+    yet clearing the broader stage2/stage3 stability branch.
+
 ### Current checkpoint (2026-03-09 alloc metadata prepass for forward tuple consumers)
 
 - Verified that the stale range-slice runtime crash on fresh stage1-generated
