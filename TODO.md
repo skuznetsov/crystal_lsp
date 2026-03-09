@@ -22,6 +22,72 @@ closure cells, Tuple ptr/value confusion.
 - [ ] **Phase 5: FIX RC-3** — String.build block lowering
 - [ ] **Phase 6: RE-ENABLE RTA + BOOTSTRAP** — stage0→stage1→stage2→stage3 + benchmark
 
+### Current checkpoint (2026-03-09 frontend node_kind virtual dispatch)
+
+- Verified a real compiler/frontend root cause behind the narrow
+  `Frontend.node_kind(node : Node)` misdispatch family:
+  - the earlier broad "Frontend RTTI collapse" theory was too wide for current
+    `HEAD`; focused runtime probes proved `base.is_a?(MacroIfNode)` and
+    `case base when MacroIfNode` both already worked on abstract `Node` values;
+  - the failing surface was narrower: helper calls
+    `Frontend.node_kind(base)` on abstract-typed `Frontend::Node` values could
+    choose the wrong overload path, while direct type checks still succeeded;
+  - source inspection in `src/compiler/frontend/ast.cr` confirmed the design
+    hole: `abstract class Node` declared `span` but had no virtual `node_kind`
+    contract, `Frontend.node_kind(...)` relied on a long overload list over
+    concrete subclasses, and `SplatNode#node_kind` returned nonexistent
+    `NodeKind::Splat` even though the helper path already mapped splat to
+    `NodeKind::Unary`.
+- Final fix on the current worktree:
+  - add `abstract def node_kind : NodeKind` to `Frontend::Node`;
+  - add a base helper fallback `Frontend.node_kind(node : Node) = node.node_kind`;
+  - align `SplatNode#node_kind` with the lightweight enum by returning
+    `NodeKind::Unary`.
+- Focused oracle:
+  - new oracle:
+    - `bash regression_tests/frontend_node_kind_virtual_dispatch_repro.sh /private/tmp/stage1_rel_bool_primitive_fix_20260309`
+      -> `reproduced` on the stale source state
+    - fresh debug stage1 `/private/tmp/stage1_dbg_node_kind_virtual_fix_20260309`:
+      same oracle -> `not reproduced`
+    - fresh release stage1 `/private/tmp/stage1_rel_node_kind_virtual_fix_20260309`:
+      same oracle -> `not reproduced`
+  - exact fresh expected stdout for both direct and arena-backed probes:
+    - `MacroIf`
+    - `MacroIf`
+    - `true`
+    - `true`
+- Fresh verification:
+  - `stage1 debug`:
+    - `/usr/bin/time -p scripts/build_stage1_original_debug.sh /private/tmp/stage1_dbg_node_kind_virtual_fix_20260309`
+      -> `real 10.28`
+  - `stage1 --release`:
+    - `/usr/bin/time -p scripts/build_stage1_original_release.sh /private/tmp/stage1_rel_node_kind_virtual_fix_20260309`
+      -> `real 417.99`
+  - broad adversary:
+    - `/usr/bin/time -p regression_tests/run_all.sh /private/tmp/stage1_rel_node_kind_virtual_fix_20260309`
+      -> `67 passed, 0 failed`, `real 218.92`
+  - `stage2 --release`:
+    - `/usr/bin/time -p scripts/build_stage2_release.sh /private/tmp/stage1_rel_node_kind_virtual_fix_20260309 /private/tmp/stage2_rel_node_kind_virtual_fix_20260309`
+      -> `real 208.83`
+  - current observed speedup:
+    - `417.99 / 208.83 ~= 2.00x`
+- Boundary after the fix:
+  - `stage1 -> stage2` remains green on a fresh release pair;
+  - this fix does **not** clear the active self-hosted frontier:
+    - `bash regression_tests/nilable_abstract_union_nil_negative_repro.sh /private/tmp/stage2_rel_node_kind_virtual_fix_20260309`
+      -> `reproduced: compiler crashed on nil abstract-union negative case`
+    - guarded `stage2 -> stage3` via `scripts/run_safe.sh` still exits `139`
+      in `real 0.61` after parsing/req-scanning through `prelude.cr`,
+      `lib_c.cr`, `macros.cr`, `object.cr`, `crystal/once.cr`,
+      `comparable.cr`, `exception.cr`, `exception/call_stack.cr`,
+      `exception/call_stack/libunwind.cr`, and into `iterable.cr`.
+- Separate residual finding:
+  - even on the fresh patched stage1, a local parser/helper probe that requires
+    `bootstrap_shims + frontend/lexer + frontend/parser` and parses a top-level
+    `MacroIfNode` still segfaults at runtime; that deeper parsed-helper crash is
+    a separate frontier and should not be conflated with the verified
+    `node_kind` dispatch fix.
+
 ### Current checkpoint (2026-03-09 bool primitive binary override)
 
 - Verified a real compiler/backend root cause behind the stale

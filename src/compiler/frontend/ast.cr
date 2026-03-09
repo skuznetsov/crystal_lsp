@@ -9,7 +9,10 @@ module CrystalV2
       # Uses vtable dispatch instead of 94-type union
       abstract class Node
         abstract def span : Span
-        # Each subclass defines node_kind method returning its kind
+        # Keep a virtual kind contract on the abstract base so callers with a
+        # static `Node` type don't need fragile overload dispatch across every
+        # concrete subclass.
+        abstract def node_kind : NodeKind
       end
 
       struct ExprId
@@ -640,7 +643,9 @@ module CrystalV2
       class SplatNode < Node
         getter span : Span
         def node_kind : NodeKind
-          NodeKind::Splat
+          # There is no dedicated NodeKind::Splat in the lightweight enum; keep
+          # instance dispatch aligned with the helper overload semantics below.
+          NodeKind::Unary
         end
 
         getter expr : ExprId
@@ -1911,6 +1916,9 @@ module CrystalV2
       # This allows gradual migration from .kind checks to pattern matching
       # ============================================================================
 
+      def self.node_kind(node : Node) : NodeKind
+        node.node_kind
+      end
 
       def self.node_kind(node : NumberNode) : NodeKind
         NodeKind::Number
