@@ -1531,6 +1531,25 @@ module Crystal::HIR
       @functions_by_name[name]?
     end
 
+    def remove_function(name : String) : Bool
+      func = @functions_by_name.delete(name)
+      return false unless func
+
+      @functions.delete(func)
+
+      base_name = if dollar = name.index('$')
+                    name.byte_slice(0, dollar)
+                  else
+                    name
+                  end
+      if funcs = @functions_by_base_name[base_name]?
+        funcs.delete(func)
+        @functions_by_base_name.delete(base_name) if funcs.empty?
+      end
+
+      true
+    end
+
     def functions_by_base_name(base_name : String) : Array(Function)?
       @functions_by_base_name[base_name]?
     end

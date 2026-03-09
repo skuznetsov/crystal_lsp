@@ -22,7 +22,75 @@ closure cells, Tuple ptr/value confusion.
 - [ ] **Phase 5: FIX RC-3** — String.build block lowering
 - [ ] **Phase 6: RE-ENABLE RTA + BOOTSTRAP** — stage0→stage1→stage2→stage3 + benchmark
 
-### Current checkpoint (2026-03-09 frontend node_kind virtual dispatch)
+### Current checkpoint (2026-03-09 late layout invalidation)
+
+- Verified a new root cause behind the latest self-hosted `stage2` crash family:
+  - the earlier "Hash/Set ABI" and "Set lowering" explanations were too narrow;
+    fresh LLDB stacks on stale `stage2` showed two different top frames for tiny
+    repros:
+    - `Hash(String, Set(String))#find_entry_with_index(String)` from
+      `AstToHir#record_nested_type_names`
+    - `Hash(String, Nil)#find_entry_with_index(String)` from
+      `AstToHir#type_cache_key`
+  - source inspection in `src/compiler/hir/ast_to_hir.cr` showed why one binary
+    could crash in multiple unrelated-looking layout-sensitive containers:
+    class layouts were still allowed to mutate during lowering via
+    `realign_class_info_ivars(...)` and late ivar insertion paths, but already
+    lowered methods for the same class were kept alive with stale field offsets;
+  - `cli.cr` already does `register_class` / `fixup_inherited_ivars` before
+    `lower_main`, so the remaining split-brain state had to come from these
+    later lowering-time layout mutations, not from pre-fixup lazy lowering.
+- Final fix on the current worktree:
+  - add `HIR::Module#remove_function(name)` in `src/compiler/hir/hir.cr`;
+  - add `invalidate_lowered_layout_functions(class_name)` in
+    `src/compiler/hir/ast_to_hir.cr`;
+  - call invalidation after every late class-layout mutation:
+    - after `realign_class_info_ivars(...)`
+    - after both late "new ivar appended" assignment-lowering branches;
+  - invalidation removes already emitted methods for the affected class and
+    clears associated lowering/pending/yield state so they are re-lowered with
+    the new layout instead of reusing stale offsets.
+- Focused oracles:
+  - new oracle:
+    - `bash regression_tests/stage2_no_prelude_min_crash_repro.sh /private/tmp/stage2_rel_node_kind_virtual_fix_20260309`
+      -> `reproduced` on stale `stage2`
+    - `bash regression_tests/stage2_no_prelude_min_crash_repro.sh /private/tmp/stage1_rel_layout_invalidate_fix_20260309`
+      -> `not reproduced`
+    - `bash regression_tests/stage2_no_prelude_min_crash_repro.sh /private/tmp/stage2_rel_layout_invalidate_fix_20260309`
+      -> still `reproduced`, so the fix moves the self-bootstrap frontier but
+         does not fully stabilize `stage2` as a user compiler yet;
+  - adversary:
+    - `bash regression_tests/nilable_abstract_union_nil_negative_repro.sh /private/tmp/stage1_rel_layout_invalidate_fix_20260309`
+      -> `not reproduced`
+    - same oracle on fresh `stage2`
+      `/private/tmp/stage2_rel_layout_invalidate_fix_20260309`
+      -> still `reproduced: compiler crashed...`
+- Fresh verification:
+  - `stage1 debug`:
+    - `/usr/bin/time -p scripts/build_stage1_original_debug.sh /private/tmp/stage1_dbg_layout_invalidate_fix_20260309`
+      -> `real 8.46`
+  - `stage1 --release`:
+    - `/usr/bin/time -p scripts/build_stage1_original_release.sh /private/tmp/stage1_rel_layout_invalidate_fix_20260309`
+      -> `real 417.48`
+  - broad adversary:
+    - `/usr/bin/time -p regression_tests/run_all.sh /private/tmp/stage1_rel_layout_invalidate_fix_20260309`
+      -> `67 passed, 0 failed`, `real 283.55`
+  - `stage2 --release`:
+    - `/usr/bin/time -p scripts/build_stage2_release.sh /private/tmp/stage1_rel_layout_invalidate_fix_20260309 /private/tmp/stage2_rel_layout_invalidate_fix_20260309`
+      -> `real 209.26`
+  - current observed speedup:
+    - `417.48 / 209.26 ~= 1.99x`
+- Boundary after the fix:
+  - `stage1 -> stage2` remains green on a fresh release pair and the old early
+    crash corridor is clearly moved;
+  - guarded `stage2 -> stage3` via `scripts/run_safe.sh` still exits `139`, but
+    now only after req-scanning well past `exception/call_stack.cr`, including:
+    `exception/call_stack/stackwalk.cr`, `null.cr`, `libunwind.cr`,
+    `system_error.cr`, and into `iterable.cr`;
+  - the remaining active frontier is therefore later than before and is no
+    longer well explained by the old stale-layout branch alone.
+
+### Earlier checkpoint (2026-03-09 frontend node_kind virtual dispatch)
 
 - Verified a real compiler/frontend root cause behind the narrow
   `Frontend.node_kind(node : Node)` misdispatch family:

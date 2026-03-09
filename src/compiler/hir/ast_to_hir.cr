@@ -17014,7 +17014,35 @@ module Crystal::HIR
       align_class_ivars(class_name)
       aligned = @class_info[class_name].not_nil!
       bump_class_info_version
+      invalidate_lowered_layout_functions(class_name)
       aligned
+    end
+
+    private def invalidate_lowered_layout_functions(class_name : String) : Nil
+      owner_base = strip_generic_args(class_name)
+      invalidated = 0
+      @module.functions.dup.each do |func|
+        name = func.name
+        next unless @module.has_function_with_body?(name)
+        next if function_state(name).in_progress?
+
+        owner = method_owner_from_name(name)
+        next if owner.empty?
+        owner_stripped = strip_generic_args(owner)
+        next unless owner == class_name || owner == owner_base || owner_stripped == class_name || owner_stripped == owner_base
+
+        next unless @module.remove_function(name)
+        @function_lowering_states.delete(name)
+        @pending_function_queue.delete(name)
+        @yield_functions.delete(name)
+        @yield_return_functions.delete(name)
+        @yield_return_checked.delete(name)
+        invalidated += 1
+      end
+
+      if invalidated > 0 && env_has?("DEBUG_IVAR_REG")
+        STDERR.puts "[LAYOUT_INVALIDATE] class=#{class_name} funcs=#{invalidated}"
+      end
     end
 
     private def fixup_class_inherited_ivars(class_name : String, fixed : Set(String))
@@ -63983,6 +64011,7 @@ module Crystal::HIR
               )
               @class_info_by_type_id[class_info.type_ref.id] = @class_info[class_name]
               bump_class_info_version
+              invalidate_lowered_layout_functions(class_name)
               ivar_type = value_type
               ivar_offset = new_offset
             end
@@ -64602,6 +64631,7 @@ module Crystal::HIR
               )
               @class_info_by_type_id[class_info.type_ref.id] = @class_info[class_name]
               bump_class_info_version
+              invalidate_lowered_layout_functions(class_name)
               ivar_type = value_type
               ivar_offset = new_offset
             end
