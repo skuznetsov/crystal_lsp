@@ -22,6 +22,74 @@ closure cells, Tuple ptr/value confusion.
 - [ ] **Phase 5: FIX RC-3** — String.build block lowering
 - [ ] **Phase 6: RE-ENABLE RTA + BOOTSTRAP** — stage0→stage1→stage2→stage3 + benchmark
 
+### Current checkpoint (2026-03-09 explicit `parse_macro_body(false)` for macro definitions)
+
+- Verified that the fresh stage2 `%value` macro-body parser failure was not caused by
+  broken `Token::Kind` comparisons:
+  - a tiny runtime control `tmp/token_kind_runtime_probe.cr` built with fresh
+    stage1 release still reports:
+    - `cmp_same=true`
+    - `cmp_diff=false`
+    - `case=percent`
+  - so enum presentation/value methods remain suspicious in generated binaries,
+    but the active `%value` parser failure sits elsewhere.
+- Focused stale reproducer:
+  - new oracle `regression_tests/stage2_macro_percent_body_repro.sh`
+  - stale `/private/tmp/stage2_rel_inline_return_fix_20260309` reports:
+    - `reproduced: macro body %value was rejected before parse_macro_body lowering`
+    - parser error `unexpected 78` at `%value = @iterator.next`
+- Temporary env-gated parser traces localized the failure:
+  - `parse_macro_definition` reaches:
+    - `name=wrapped_next`
+    - `before_body token=78 line=8`
+  - but the old bare call `parse_macro_body` did not reach the first trace point
+    inside `parse_macro_body(...)` on self-hosted stage2;
+  - replacing that bare call with `parse_macro_body(false)` immediately changes
+    behavior, and the focused oracle turns green on the resulting clean stage2.
+- Root cause:
+  - self-hosted stage2 currently miscompiles the default-arg wrapper path for
+    `parse_macro_body(stop_on_branch : Bool = false)`;
+  - `parse_macro_definition` and `parse_macro_verbatim_control` called the bare
+    wrapper entrypoint, so `%value` macro bodies were rejected before the real
+    body parser ran;
+  - explicitly passing `false` bypasses the broken wrapper and restores the real
+    parser path.
+- Corrective fix on the current worktree:
+  - in `src/compiler/frontend/parser.cr`, call:
+    - `parse_macro_body(false)` from `parse_macro_definition`
+    - `parse_macro_body(false)` from `parse_macro_verbatim_control`
+- Fresh verification:
+  - `stage1 --release`:
+    - `/usr/bin/time -p scripts/build_stage1_original_release.sh /private/tmp/stage1_rel_macro_body_fix_20260309`
+      -> `real 452.75`
+  - broad adversary:
+    - `regression_tests/run_all.sh /private/tmp/stage1_rel_macro_body_fix_20260309`
+      -> `67 passed, 0 failed`
+      -> `real 275.05`
+  - `stage2 --release`:
+    - `/usr/bin/time -p scripts/build_stage2_release.sh /private/tmp/stage1_rel_macro_body_fix_20260309 /private/tmp/stage2_rel_macro_body_fix_20260309`
+      -> `real 127.50`
+  - focused stale-vs-fresh oracle:
+    - `regression_tests/stage2_macro_percent_body_repro.sh /private/tmp/stage2_rel_macro_body_fix_20260309`
+      -> `not reproduced`
+  - current observed speedup:
+    - `452.75 / 127.50 ~= 3.55x`
+- Boundary after the fix:
+  - `stage1 -> stage2` stays green on the fresh release pair;
+  - the specific stale `%value` macro-body parser failure is removed on fresh
+    self-hosted stage2;
+  - stage2 is still not generally stable on normal-prelude compiles:
+    - `puts 1` on fresh `/private/tmp/stage2_rel_macro_body_fix_20260309`
+      still exits `139` after parsing `prelude.cr`, `lib_c.cr`, and `macros.cr`;
+    - `regression_tests/nilable_abstract_union_nil_negative_repro.sh /private/tmp/stage2_rel_macro_body_fix_20260309`
+      still reproduces;
+    - guarded `stage2 -> stage3`:
+      - `/usr/bin/time -p scripts/timeout_sample_lldb.sh -t 600 -m 24576 --no-series --no-lldb -o /tmp/stage3_rel_macro_body_fix_probe_20260309 -- scripts/build_stage2_release.sh /private/tmp/stage2_rel_macro_body_fix_20260309 /private/tmp/stage3_rel_macro_body_fix_20260309`
+      - `status 139`, `real 1.07`
+      - command log now stops during `src/stdlib/macros.cr`
+  - so this checkpoint removes one real self-hosted parser-wrapper bug but does
+    not yet clear stable stage2/stage3.
+
 ### Current checkpoint (2026-03-09 inline yield non-local return preservation)
 
 - Verified that the stale generic `upto` non-local return loss on fresh

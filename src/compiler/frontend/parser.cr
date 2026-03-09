@@ -1864,7 +1864,7 @@ module CrystalV2
             # Allow immediate separators after header (e.g., `struct X; end`)
             skip_statement_end
 
-            pieces = parse_macro_body
+            pieces = parse_macro_body(false)
             trim_left = false
             trim_right = false
             # Allow trailing separators before 'end'
@@ -14072,7 +14072,7 @@ current_token.kind == Token::Kind::Identifier &&
 
           # Parse the macro body - it will consume {% end %} automatically
           # parse_macro_body handles the {% end %} internally and adds it to pieces
-          pieces = parse_macro_body
+          pieces = parse_macro_body(false)
           macro_trim_left = false
           macro_trim_right = false
 
