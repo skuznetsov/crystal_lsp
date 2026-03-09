@@ -22,6 +22,57 @@ closure cells, Tuple ptr/value confusion.
 - [ ] **Phase 5: FIX RC-3** — String.build block lowering
 - [ ] **Phase 6: RE-ENABLE RTA + BOOTSTRAP** — stage0→stage1→stage2→stage3 + benchmark
 
+### Current checkpoint (2026-03-09 composite-union variant canonicalization)
+
+- Verified a real compiler-only root cause behind the `ModuleNode#body.not_nil!` /
+  `Array(ExprId)?` crash family:
+  - parser shape is correct on the focused frontend repro; the bug is later in HIR
+    union construction, not in AST creation;
+  - `create_union_type(...)` could intern a provisional raw union under unresolved
+    composite names such as `Nil | Array(ExprId)` while `@union_in_progress` was active;
+  - later descriptor registration and union helper lookup happened only under the
+    canonical fully qualified name
+    `Nil | Array(CrystalV2::Compiler::Frontend::ExprId)`;
+  - `not_nil!` / union unwrap on `ModuleNode#body : Array(ExprId)?` could therefore
+    see a live union `TypeRef` with no descriptor even though the canonical union
+    already existed.
+- Final fix on the current worktree:
+  - in `create_union_type(...)`, canonicalize non-trivial non-union variant names
+    (for example `Array(ExprId)`) through `builtin_type_ref_for(...)` or
+    `type_ref_for_name(...)` before the union-in-progress bookkeeping path can cache
+    a provisional raw union name.
+- Focused oracle:
+  - stale release stage1:
+    - `bash regression_tests/module_body_not_nil_exprid_runtime_repro.sh /private/tmp/stage1_rel_named_ctor_fix_20260309`
+      -> `reproduced: module body nilable array kept a raw provisional ExprId union`
+  - fresh release stage1:
+    - `/usr/bin/time -p scripts/build_stage1_original_release.sh /private/tmp/stage1_rel_union_canon_fix_20260309`
+      -> `real 418.67`
+    - `bash regression_tests/module_body_not_nil_exprid_runtime_repro.sh /private/tmp/stage1_rel_union_canon_fix_20260309`
+      -> `not reproduced`
+  - broad adversary on the same release binary:
+    - `/usr/bin/time -p regression_tests/run_all.sh /private/tmp/stage1_rel_union_canon_fix_20260309`
+      -> `67 passed, 0 failed`, `real 290.93`
+- Fresh bootstrap boundary on the same worktree:
+  - `stage2 --release`:
+    - `/usr/bin/time -p scripts/build_stage2_release.sh /private/tmp/stage1_rel_union_canon_fix_20260309 /private/tmp/stage2_rel_union_canon_fix_20260309`
+      -> `real 209.37`
+  - current observed speedup:
+    - `418.67 / 209.37 ~= 2.00x`
+  - this is a real stage1/runtime correctness fix, but it does **not** clear the
+    active self-hosted frontier:
+    - `bash regression_tests/module_body_not_nil_exprid_runtime_repro.sh /private/tmp/stage2_rel_union_canon_fix_20260309`
+      -> compile-time `status 139` before user-code execution
+    - `bash regression_tests/nilable_abstract_union_nil_negative_repro.sh /private/tmp/stage2_rel_union_canon_fix_20260309`
+      -> `reproduced: compiler crashed on nil abstract-union negative case`
+    - guarded `stage2 -> stage3` via `scripts/run_safe.sh` still exits `139`
+      after the existing `prelude.cr` -> `exception/call_stack.cr` corridor.
+- Open items from this checkpoint:
+  - commit the verified composite-union canonicalization fix + oracle;
+  - keep the active frontier on the fresh stage2 compile crash for
+    `nilable_abstract_union_nil_negative_repro.sh`;
+  - then retry guarded `stage2 -> stage3` and refresh the benchmark delta.
+
 ### Current checkpoint (2026-03-09 named constructor initialize fallback)
 
 - Verified a real compiler-only root cause behind the named/default `.new`

@@ -68461,6 +68461,20 @@ module Crystal::HIR
             resolved = mapped
           end
         end
+        # Canonicalize composite type expressions (for example Array(ExprId))
+        # before union-in-progress bookkeeping. Otherwise a provisional union can
+        # be interned under the raw unresolved name and never get a descriptor.
+        if !resolved.empty? && !simple_identifier_token?(resolved) && !resolved.includes?('|')
+          if builtin_ref = builtin_type_ref_for(resolved)
+            resolved = get_type_name_from_ref(builtin_ref)
+          else
+            composite_ref = type_ref_for_name(resolved)
+            if composite_ref != TypeRef::VOID
+              canonical = get_type_name_from_ref(composite_ref)
+              resolved = canonical unless canonical == "Unknown" || canonical.empty?
+            end
+          end
+        end
         absolute ? "::#{resolved}" : resolved
       end
       resolved_variant_names.reject!(&.empty?)
