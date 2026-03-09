@@ -21538,6 +21538,9 @@ module Crystal::HIR
       if BUILTIN_TYPE_NAMES.includes?(type_name) ||
          @top_level_type_names.includes?(type_name) ||
          @top_level_class_kinds.has_key?(type_name)
+        if shadow = resolve_nested_builtin_shadow(type_name)
+          return shadow
+        end
         if current = @current_class
           current_base = if info = split_generic_base_and_args(current)
                            info.base
@@ -27874,17 +27877,16 @@ module Crystal::HIR
                        else
                          namespace
                        end
-      nested = @nested_type_names[namespace_base]? || @nested_type_names[namespace]?
-
-      candidate = "#{namespace}::#{name}"
-      if nested && nested.includes?(name)
-        return candidate if namespace_base == namespace
-        return "#{namespace_base}::#{name}"
-      end
-      return candidate if type_name_exists?(candidate)
-      if namespace_base != namespace
-        base_candidate = "#{namespace_base}::#{name}"
-        return base_candidate if type_name_exists?(base_candidate)
+      base = namespace_base
+      loop do
+        if (nested = @nested_type_names[base]?) && nested.includes?(name)
+          return "#{base}::#{name}"
+        end
+        candidate = "#{base}::#{name}"
+        return candidate if type_name_exists?(candidate)
+        idx = base.rindex("::")
+        break unless idx
+        base = base[0, idx]
       end
       nil
     end
@@ -27953,10 +27955,10 @@ module Crystal::HIR
           STDERR.puts "[DEBUG_TOP_LEVEL] name=#{name} current=#{@current_class || ""} top_level=#{@top_level_type_names.includes?(name)}"
         end
       end
-      if primitive_self_type(name) || LIBC_TYPE_ALIASES.has_key?(name) || builtin_alias_target?(name)
+      if primitive_self_type(name) || LIBC_TYPE_ALIASES.has_key?(name)
         return name
       end
-      if BUILTIN_TYPE_NAMES.includes?(name)
+      if builtin_alias_target?(name) || BUILTIN_TYPE_NAMES.includes?(name)
         if shadow = resolve_nested_builtin_shadow(name)
           return shadow
         end
@@ -28438,7 +28440,13 @@ module Crystal::HIR
     # and nested type hints without deep namespace walks or repeated type_name_exists? calls.
     private def resolve_class_name_in_signature_context(name : String) : String?
       return name if name.empty?
-      if primitive_self_type(name) || LIBC_TYPE_ALIASES.has_key?(name) || builtin_alias_target?(name)
+      if primitive_self_type(name) || LIBC_TYPE_ALIASES.has_key?(name)
+        return name
+      end
+      if builtin_alias_target?(name) || BUILTIN_TYPE_NAMES.includes?(name)
+        if shadow = resolve_nested_builtin_shadow(name)
+          return shadow
+        end
         return name
       end
       if name == "Int" || name == "Float" || name == "Number" || name == "Atomic"

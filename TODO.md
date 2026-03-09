@@ -22,6 +22,56 @@ closure cells, Tuple ptr/value confusion.
 - [ ] **Phase 5: FIX RC-3** — String.build block lowering
 - [ ] **Phase 6: RE-ENABLE RTA + BOOTSTRAP** — stage0→stage1→stage2→stage3 + benchmark
 
+### Current checkpoint (2026-03-09 namespaced builtin-shadow fix)
+
+- Verified a real compiler-only root cause behind the stale self-hosted
+  `Semantic::Symbol`/`SymbolTable` crash family:
+  - fast signature collection was treating short builtin-like names as top-level
+    without walking owner namespace chains;
+  - general class-name resolution did the same via an early `builtin_alias_target?`
+    return before checking nested builtin shadows;
+  - as a result, namespaced user/compiler classes such as `M::Symbol` or
+    `CrystalV2::Compiler::Semantic::Symbol` could degrade back to builtin `Symbol`
+    during param ABI mangling, inheritance/super resolution, and class layout.
+- Focused oracle:
+  - `bash regression_tests/namespaced_symbol_shadow_runtime_repro.sh /private/tmp/stage1_rel_symbol_shadow_sigfix3_20260309`
+    -> `not reproduced`
+  - stale behavior before the fix:
+    - LLVM emitted `@M$CCSymbolTable$Hdefine$$String_Symbol(..., i32 %symbol)`
+    - subclass layout collapsed to `%M$CCMethodSymbol = type { ptr, i32 }`
+    - super-init lowered to dead stub `@Symbol$Hinitialize$$String_super`
+    - runtime segfaulted after printing only `false`
+  - fresh behavior after the fix:
+    - LLVM emits `@M$CCSymbolTable$Hdefine$$String_M$CCSymbol(..., ptr %symbol)`
+    - subclass layout is `%M$CCMethodSymbol = type { ptr, ptr, i32 }`
+    - super-init lowers to `@M$CCSymbol$Hinitialize$$String`
+    - runtime prints `false / foo / Nil | M::Symbol / true / 123`
+- Fresh release bootstrap boundary on the same uncommitted checkpoint:
+  - `stage1 --release`:
+    - `/usr/bin/time -p scripts/build_stage1_original_release.sh /private/tmp/stage1_rel_symbol_shadow_sigfix3_20260309`
+      -> `real 442.86`
+  - `stage2 --release`:
+    - guarded `/usr/bin/time -p scripts/build_stage2_release.sh ...`
+      -> `real 239.86`
+  - old tiny stage2 blocker is gone:
+    - bare `def foo; end` under `--no-prelude --no-codegen`
+      on `/private/tmp/stage2_rel_symbol_shadow_sigfix3_20260309`
+      -> `Parsed 1 top-level expressions`, `exit 0`
+  - current active stage2 blocker remains:
+    - `bash regression_tests/nilable_abstract_union_nil_negative_repro.sh /private/tmp/stage2_rel_symbol_shadow_sigfix3_20260309`
+      -> `reproduced: compiler crashed on nil abstract-union negative case`
+  - guarded `stage2 -> stage3` is still red:
+    - `/private/tmp/stage2_rel_symbol_shadow_sigfix3_20260309 src/crystal_v2.cr --release ...`
+      -> `status 139`
+      after parsing/req-scanning through `prelude.cr`, `lib_c.cr`, `macros.cr`,
+      `object.cr`, `crystal/once.cr`, `comparable.cr`, `exception.cr`,
+      and into `exception/call_stack.cr`
+- Open items from this checkpoint:
+  - run broad adversary on the fresh release stage1 binary and then commit the fix;
+  - root-cause the remaining fresh stage2 compile crash on
+    `nilable_abstract_union_nil_negative_repro.sh`;
+  - then retry guarded `stage2 -> stage3` and refresh the benchmark delta.
+
 ### Current checkpoint (2026-03-09 mixed nil-union guard + parent `super` RTA retention)
 
 - Verified two separate real fixes on the current branch:
