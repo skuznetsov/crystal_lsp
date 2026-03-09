@@ -22,6 +22,67 @@ closure cells, Tuple ptr/value confusion.
 - [ ] **Phase 5: FIX RC-3** — String.build block lowering
 - [ ] **Phase 6: RE-ENABLE RTA + BOOTSTRAP** — stage0→stage1→stage2→stage3 + benchmark
 
+### Current checkpoint (2026-03-09 Slice(UInt8) `Hash#key_hash` stage2 no-codegen fix)
+
+- Verified that the reduced fresh `stage2` blocker behind the `class Outer; end`
+  `--no-codegen` abort was a `StringPool` hash path, not another parser/arena bug:
+  - direct LLDB on stale `/private/tmp/stage2_rel_method_yield_fix_20260309`
+    localized the reduced repro to:
+    `StringPool#intern_string -> Hash(Slice(UInt8), String)#upsert -> __vdispatch__Object#hash`;
+  - healthy stage1 LLVM for a tiny `Hash(Bytes, String)` probe showed the intended
+    specialization directly:
+    `Hash$LSlice$LUInt8$R$C$_String$R$Hkey_hash$$Slice$LUInt8$R`
+    calls `Slice$LUInt8$R$Hhash$$Crystal$CCHasher`;
+  - `Slice(UInt8)#hash` itself is just `Crystal::Hasher#bytes(self)`.
+- Root cause:
+  - the existing concrete-value `Hash#key_hash` bypass depended on generic
+    `Slice(UInt8)#hash` materialization already existing in the lowered module;
+  - on the fresh self-hosted stage2 no-codegen path, that order dependency could
+    still fail in `StringPool` hot paths, falling back to generic `Object#hash`
+    for `Slice(UInt8)` keys.
+- Corrective fix on the current worktree:
+  - add a dedicated LLVM override for `Hash#key_hash` with `Slice(UInt8)` keys;
+  - use the canonical `Crystal::Hasher#bytes(Slice(UInt8))` path directly,
+    removing the generic-materialization dependency without changing semantics.
+- New oracle:
+  - `bash regression_tests/stage2_no_codegen_class_string_pool_hash_repro.sh /private/tmp/stage2_rel_method_yield_fix_20260309`
+    -> `reproduced: compiler crashed on class/module no-codegen StringPool hash path`
+  - `bash regression_tests/stage2_no_codegen_class_string_pool_hash_repro.sh /private/tmp/stage2_rel_slice_u8_keyhash_fix_20260309`
+    -> `not reproduced`
+- Fresh verification:
+  - `stage1 debug` smoke:
+    - `/opt/homebrew/bin/crystal build src/crystal_v2.cr -o /private/tmp/stage1_dbg_slice_keyhash_fix_20260309`
+      -> build ok
+    - fresh debug LLVM for a tiny `Hash(Bytes, String)` probe still emits the
+      healthy delegate form
+      `Hash(... )#key_hash -> Slice(UInt8)#hash(Hasher)`, so the new override
+      only acts as the self-hosted fallback branch
+  - `stage1 --release`:
+    - `/opt/homebrew/bin/crystal build src/crystal_v2.cr --release -o /private/tmp/stage1_rel_slice_u8_keyhash_fix_20260309`
+      -> `7:21.02` (`441.02s`)
+  - `stage2 --release`:
+    - `/private/tmp/stage1_rel_slice_u8_keyhash_fix_20260309 build src/crystal_v2.cr --release -o /private/tmp/stage2_rel_slice_u8_keyhash_fix_20260309`
+      -> `3:13.95` (`193.95s`)
+  - broad adversary:
+    - `regression_tests/run_all.sh /private/tmp/stage1_rel_slice_u8_keyhash_fix_20260309`
+      -> `67 passed, 0 failed`
+  - current observed speedup:
+    - `441.02 / 193.95 ~= 2.27x`
+- Boundary after the fix:
+  - `stage1 -> stage2` stays green on a fresh release pair;
+  - the reduced fresh stage2 blocker is gone:
+    - `class Outer; end --no-codegen` now exits `0` on
+      `/private/tmp/stage2_rel_slice_u8_keyhash_fix_20260309`
+  - the older active stage2/stage3 frontier remains:
+    - `bash regression_tests/nilable_abstract_union_nil_negative_repro.sh /private/tmp/stage2_rel_slice_u8_keyhash_fix_20260309`
+      -> `reproduced: compiler crashed on nil abstract-union negative case`
+    - guarded `stage2 -> stage3` via `scripts/run_safe.sh` still exits `139`
+      after req-scanning through `exception/call_stack/{stackwalk,null,libunwind}.cr`,
+      `system_error.cr`, and into `iterable.cr`;
+  - so this checkpoint is a verified stage2-stability improvement that removes
+    the `StringPool`/no-codegen class crash family, but it does not yet clear
+    the older nilable/diagnostic crash corridor.
+
 ### Current checkpoint (2026-03-09 fast-float accessor link regression narrowing)
 
 - Verified that the first `dd7819e9` nilable-query fix was real but too broad:

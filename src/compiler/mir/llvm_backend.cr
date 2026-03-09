@@ -5987,6 +5987,33 @@ module Crystal::MIR
         return true
       end
 
+      # Hash#key_hash for Slice(UInt8) keys — avoid depending on whether the
+      # generic Slice(UInt8)#hash method was materialized before StringPool hot
+      # paths instantiate Hash(Slice(UInt8), String). The canonical hash is
+      # Hasher#bytes(self), so call it directly.
+      if mangled.ends_with?("$Hkey_hash$$Slice$LUInt8$R") && mangled.includes?("Hash$L")
+        emit_raw "; #{mangled} — direct Slice(UInt8) hash override (bypass generic hash materialization)\n"
+        emit_raw "define i32 @#{mangled}(ptr %self, ptr %key) {\n"
+        emit_raw "entry:\n"
+        emit_raw "  %key_null = icmp eq ptr %key, null\n"
+        emit_raw "  br i1 %key_null, label %ret_null_hash, label %do_hash\n"
+        emit_raw "ret_null_hash:\n"
+        emit_raw "  ret i32 0\n"
+        emit_raw "do_hash:\n"
+        emit_raw "  %hasher = call ptr @Crystal$CCHasher$Dnew(i64 0, i64 0)\n"
+        emit_raw "  %hasher2 = call ptr @Crystal$CCHasher$Hbytes$$Slice$LUInt8$R(ptr %hasher, ptr %key)\n"
+        emit_raw "  %hash64 = call i64 @Crystal$CCHasher$Hresult(ptr %hasher2)\n"
+        emit_raw "  %hash32 = trunc i64 %hash64 to i32\n"
+        emit_raw "  %is_zero = icmp eq i32 %hash32, 0\n"
+        emit_raw "  br i1 %is_zero, label %ret_max, label %ret_hash\n"
+        emit_raw "ret_max:\n"
+        emit_raw "  ret i32 -1\n"
+        emit_raw "ret_hash:\n"
+        emit_raw "  ret i32 %hash32\n"
+        emit_raw "}\n\n"
+        return true
+      end
+
       # Hash#key_hash for HIR::TypeRef keys — struct with single id : UInt32 at offset 0.
       # Structs are heap-allocated and passed by pointer; vdispatch fails because structs lack type_id.
       # Fix: load the id field and hash it as UInt32.
