@@ -1617,6 +1617,18 @@ module Crystal::HIR
         normalized.split(" | ").map(&.strip).reject(&.empty?)
       end
 
+      normalize_direct_callee = ->(name : String) do
+        # `lower_super` tags ordinary parent calls as `<name>_super` so later MIR
+        # lowering can skip virtual dispatch. Reachability must still retain the
+        # real parent body; otherwise RTA discards it and MIR falls back to an
+        # unresolved extern stub for the synthetic `_super` name.
+        if name.ends_with?("_super") && !func_by_name.has_key?(name)
+          name[0, name.bytesize - 6]
+        else
+          name
+        end
+      end
+
       # ── RTA Phase 1: Collect instantiated types from ALL functions ──
       # Scan every function for Allocate instructions to build the set of
       # types that can actually exist at runtime. This is conservative
@@ -1908,10 +1920,11 @@ module Crystal::HIR
               end
               next
             end
-            next unless func_by_name.has_key?(callee)
-            next if reachable.includes?(callee)
-            reachable << callee
-            worklist << callee
+            direct_callee = normalize_direct_callee.call(callee)
+            next unless func_by_name.has_key?(direct_callee)
+            next if reachable.includes?(direct_callee)
+            reachable << direct_callee
+            worklist << direct_callee
           end
         end
       end
