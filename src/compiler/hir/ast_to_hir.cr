@@ -60837,8 +60837,10 @@ module Crystal::HIR
                              @arena = old_arena
                            end
                            if ycb = yield_cont_block
-                             ctx.terminate(Jump.new(ycb))
-                             ctx.switch_to_block(ycb)
+                             unless ctx.get_block(ctx.current_block).terminator
+                               ctx.terminate(Jump.new(ycb))
+                               ctx.switch_to_block(ycb)
+                             end
                            end
                            block_body_lr
                          ensure

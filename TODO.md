@@ -22,6 +22,70 @@ closure cells, Tuple ptr/value confusion.
 - [ ] **Phase 5: FIX RC-3** — String.build block lowering
 - [ ] **Phase 6: RE-ENABLE RTA + BOOTSTRAP** — stage0→stage1→stage2→stage3 + benchmark
 
+### Current checkpoint (2026-03-09 inline yield non-local return preservation)
+
+- Verified that the stale generic `upto` non-local return loss on fresh
+  stage1-generated binaries was not a backend or MIR-only bug:
+  - the new focused oracle
+    `regression_tests/generic_upto_nonlocal_return_repro.sh` reproduces on
+    stale stage1 with stdout `-1`, while original Crystal reports
+    `not reproduced` with stdout `300`;
+  - temporary HIR probes showed `inline_block_body(...)` did create a real
+    `Return` while lowering the inlined block body, but final HIR/MIR for
+    `C#foo$UInt8` retained only the fallthrough `ret -1`;
+  - so the return was being erased after block lowering but before MIR/codegen.
+- Root cause:
+  - in `src/compiler/hir/ast_to_hir.cr`, `inline_block_body(...)`
+    unconditionally appended `Jump.new(yield_cont_block)` even when the current
+    block had already been terminated by a real non-local `return`;
+  - that silently overwrote the block terminator and erased both early-return
+    semantics and block-side effects for this inlined-yield family.
+- Corrective fix on the current worktree:
+  - only emit the yield-continuation jump when the current block has no
+    terminator yet.
+- New oracle:
+  - `bash regression_tests/generic_upto_nonlocal_return_repro.sh /private/tmp/stage1_rel_inline_return_fix_20260309`
+    -> `not reproduced`
+- Fresh verification:
+  - `stage1 debug`:
+    - `/usr/bin/time -p scripts/build_stage1_original_debug.sh /private/tmp/stage1_dbg_inline_return_fix_20260309`
+      -> `real 9.52`
+  - `stage1 --release`:
+    - `/usr/bin/time -p scripts/build_stage1_original_release.sh /private/tmp/stage1_rel_inline_return_fix_20260309`
+      -> `real 446.65`
+  - `stage2 --release`:
+    - `/usr/bin/time -p scripts/build_stage2_release.sh /private/tmp/stage1_rel_inline_return_fix_20260309 /private/tmp/stage2_rel_inline_return_fix_20260309`
+      -> `real 125.88`
+  - broad adversary:
+    - `regression_tests/run_all.sh /private/tmp/stage1_rel_inline_return_fix_20260309`
+      -> `67 passed, 0 failed`
+      -> `real 349.20`
+  - adjacent controls on fresh stage1:
+    - `bash regression_tests/method_yield_block_arena_repro.sh /private/tmp/stage1_rel_inline_return_fix_20260309`
+      -> `not reproduced`
+    - `bash regression_tests/nilable_array_index_query_repro.sh /private/tmp/stage1_dbg_inline_return_fix_20260309`
+      -> `not reproduced`
+  - current observed speedup:
+    - `446.65 / 125.88 ~= 3.55x`
+- Boundary after the fix:
+  - `stage1 -> stage2` stays green on the fresh release pair;
+  - the stale generic inlined-yield non-local-return family is removed on
+    fresh stage1;
+  - self-hosted stage2 remains unstable:
+    - `bash regression_tests/generic_upto_nonlocal_return_repro.sh /private/tmp/stage2_rel_inline_return_fix_20260309`
+      -> compile-time `status 139`
+    - `bash regression_tests/method_yield_block_arena_repro.sh /private/tmp/stage2_rel_inline_return_fix_20260309`
+      -> compile-time `status 139`
+    - `bash regression_tests/nilable_abstract_union_nil_negative_repro.sh /private/tmp/stage2_rel_inline_return_fix_20260309`
+      -> `reproduced: compiler crashed on nil abstract-union negative case`
+  - guarded `stage2 -> stage3` is still red:
+    - `/usr/bin/time -p scripts/timeout_sample_lldb.sh -t 600 -m 24576 --no-series --no-lldb -o /tmp/stage3_rel_inline_return_fix_probe_20260309 -- scripts/build_stage2_release.sh /private/tmp/stage2_rel_inline_return_fix_20260309 /private/tmp/stage3_rel_inline_return_fix_20260309`
+      -> `status 139`, `real 1.07`
+      -> command log still dies behind the same
+        `exception/call_stack -> system_error -> iterable` corridor
+  - so this checkpoint removes one real HIR inline-control-flow bug and
+    improves the fresh release pair, but does not yet clear stable stage2/stage3.
+
 ### Current checkpoint (2026-03-09 allocator `.new` base-name preservation)
 
 - Verified that the reduced fresh `stage2` no-prelude crash was not another
