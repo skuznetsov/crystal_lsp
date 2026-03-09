@@ -22385,7 +22385,7 @@ module Crystal::HIR
           modules_to_check.each do |mod_name|
             base_module = strip_generic_args(mod_name)
             visited = Set(String).new
-            if find_module_def_recursive(base_module, method_name, effective_arg_count, visited)
+            if find_module_def_recursive(base_module, method_name, effective_arg_count, visited, arg_types)
               debug_hook("method.resolve", "base=#{base_method_name} resolved=#{mangled_name} reason=module_deferred_match")
               return cache_method_resolution(cache_key, mangled_name)
             end
@@ -22519,6 +22519,10 @@ module Crystal::HIR
             end
             debug_hook("method.resolve", "base=#{base_method_name} resolved=#{resolved} reason=ancestor_typed_overload")
             return cache_method_resolution(cache_key, resolved)
+          end
+          if NILABLE_QUERY_METHODS.includes?(method_name)
+            debug_hook("method.resolve", "base=#{base_method_name} resolved=#{mangled_name} reason=query_preserve_callsite")
+            return cache_method_resolution(cache_key, mangled_name)
           end
         end
         if resolved = resolve_untyped_overload(base_method_name, effective_arg_count, has_block_call, call_has_named_args)
@@ -38094,7 +38098,7 @@ module Crystal::HIR
               next if module_base == skip_mod || module_name == skip_mod
             end
             visited = Set(String).new
-            if found = find_module_def_recursive(module_base, method_name, args.size, visited)
+            if found = find_module_def_recursive(module_base, method_name, args.size, visited, arg_types)
               actual_func_def = found[0]
               def_arena = found[1]
               if params = actual_func_def.params
@@ -44707,9 +44711,11 @@ module Crystal::HIR
       method_base : String,
       expected_param_count : Int32,
       visited : Set(String),
+      call_arg_types : Array(TypeRef)? = nil,
       expects_block : Bool? = nil,
     ) : Tuple(CrystalV2::Compiler::Frontend::DefNode, CrystalV2::Compiler::Frontend::ArenaLike)?
       ensure_module_def_lookup_cache
+      types_key = call_arg_types ? call_arg_types.map(&.id).join("_") : ""
       block_mode = if expects_block.nil?
                      "any"
                    elsif expects_block
@@ -44717,7 +44723,7 @@ module Crystal::HIR
                    else
                      "noblock"
                    end
-      cache_key = "#{module_name}##{method_base}@#{expected_param_count}@#{block_mode}"
+      cache_key = "#{module_name}##{method_base}@#{expected_param_count}@#{block_mode}@#{types_key}"
       if @module_def_lookup_cache.has_key?(cache_key)
         return @module_def_lookup_cache[cache_key]
       end
@@ -44794,6 +44800,9 @@ module Crystal::HIR
                                 (has_splat_param || expected_param_count <= actual_param_count)
                             end
               if arity_match
+                if call_arg_types
+                  next unless params_compatible_with_args?(member, call_arg_types, module_name)
+                end
                 result = {member, mod_arena}
                 @module_def_lookup_cache[cache_key] = result
                 return result
@@ -44815,7 +44824,7 @@ module Crystal::HIR
             when CrystalV2::Compiler::Frontend::IncludeNode
               include_name = resolve_path_like_name(member.target)
               next unless include_name
-              if found = find_module_def_recursive(include_name, method_base, expected_param_count, visited, expects_block)
+              if found = find_module_def_recursive(include_name, method_base, expected_param_count, visited, call_arg_types, expects_block)
                 @module_def_lookup_cache[cache_key] = found
                 return found
               end
@@ -45930,13 +45939,19 @@ module Crystal::HIR
                   expected_param_count = callsite.types.size
                 end
               end
+              deferred_call_arg_types = @pending_arg_types[name]?.try(&.types) ||
+                                        @pending_arg_types[target_name]?.try(&.types)
+              if deferred_call_arg_types.nil? && suffix
+                parsed_suffix_types = parse_types_from_suffix(strip_mangled_suffix_flags(suffix))
+                deferred_call_arg_types = parsed_suffix_types unless parsed_suffix_types.empty?
+              end
               included.each do |module_name|
                 base_module = strip_generic_args(module_name)
                 visited = Set(String).new
                 if env_has?("DEBUG_YIELD_SKIP") && name.includes?("byte_range")
                   STDERR.puts "[BYTE_RANGE_FIND_MOD] module=#{base_module} method=#{method_base} expected_params=#{expected_param_count}"
                 end
-                if found = find_module_def_recursive(base_module, method_base, expected_param_count, visited, expects_block)
+                if found = find_module_def_recursive(base_module, method_base, expected_param_count, visited, deferred_call_arg_types, expects_block)
                   func_def = found[0]
                   arena = found[1]
                   if env_has?("DEBUG_YIELD_SKIP") && name.includes?("byte_range")
@@ -51219,8 +51234,11 @@ module Crystal::HIR
           end
         end
       end
-      if !has_unknown_arg_types && arg_types.any? { |t| t != TypeRef::VOID }
+      desired_mangled_name = mangled_method_name
+      if !has_unknown_arg_types && arg_types.any? { |t| t != TypeRef::VOID } &&
+         NILABLE_QUERY_METHODS.includes?(method_name)
         desired_mangled = mangle_function_name(base_method_name, arg_types, has_block_call)
+        desired_mangled_name = desired_mangled unless desired_mangled.empty?
         if desired_mangled != mangled_method_name &&
            (@function_types.has_key?(desired_mangled) || @function_defs.has_key?(desired_mangled) || @module.has_function?(desired_mangled))
           mangled_method_name = desired_mangled
@@ -51257,7 +51275,7 @@ module Crystal::HIR
           end
         end
       end
-      primary_mangled_name = mangled_method_name
+      primary_mangled_name = desired_mangled_name
       receiver_name = ""
       if receiver_id
         if desc = @module.get_type_descriptor(ctx.type_of(receiver_id))
@@ -53698,6 +53716,9 @@ module Crystal::HIR
         if mangled_method_name != primary_mangled_name
           lower_function_if_needed(mangled_method_name)
         end
+      end
+      if NILABLE_QUERY_METHODS.includes?(method_name)
+        mangled_method_name = prefer_primary_call_target(mangled_method_name, primary_mangled_name, arg_types)
       end
       if debug_env_filter_match?("DEBUG_CALL_TRACE", method_name, base_method_name, mangled_method_name)
         STDERR.puts "[CALL_TRACE] stage=after_lower_function method=#{method_name} mangled=#{mangled_method_name} primary=#{primary_mangled_name}"

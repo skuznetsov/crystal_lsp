@@ -22,6 +22,72 @@ closure cells, Tuple ptr/value confusion.
 - [ ] **Phase 5: FIX RC-3** — String.build block lowering
 - [ ] **Phase 6: RE-ENABLE RTA + BOOTSTRAP** — stage0→stage1→stage2→stage3 + benchmark
 
+### Current checkpoint (2026-03-09 nilable `[]?` callsite reselection)
+
+- Verified a new root cause behind the fresh self-hosted `stage2` crash family
+  that previously surfaced as `TypeInferenceEngine#children_of ->
+  Indexable.range_to_index_and_count`:
+  - the bug was not in parser sugar; a direct parser probe on
+    `a[0]?` showed the source is already parsed as a `CallNode` over member
+    `"[]?"`, so the stale `Range` path had to appear later during HIR method
+    resolution/lowering;
+  - raw LLVM on the stale release stage1 baseline
+    `/private/tmp/stage1_rel_layout_invalidate_fix_20260309` proved the wrong
+    target directly: the tiny repro `a = [nil] of Int32?; i = 0; x = a[i]?`
+    lowered to `@Array$LNil$_$OR$_Int32$R$H$IDXQ$$Range(...)`, which then called
+    `Indexable$Drange_to_index_and_count$$Range_Int32(...)`;
+  - targeted call tracing showed why: resolution initially landed on the broad
+    `[]?(Range)` shape, then deferred module lowering later materialized the
+    typed callsite target `Array(Nil | Int32)#[]?$Int32`, but the active call
+    target was never reselected after that lowering step;
+  - a first broad post-lowering reselection patch proved the theory but also
+    regressed unrelated calls (`array_concat_string_runtime` and
+    `file_open_block_write`), so the final fix had to stay narrow.
+- Final fix on the current worktree:
+  - teach `find_module_def_recursive(...)` cache and matching logic to include
+    `call_arg_types`, so deferred include/module lookups can prefer parameter
+    shapes compatible with the current callsite;
+  - preserve the original callsite-selected target for
+    `NILABLE_QUERY_METHODS` during early resolution instead of collapsing them
+    back to broad arity-only forms;
+  - after `lower_function_if_needed(...)`, reselect the primary call target only
+    for `NILABLE_QUERY_METHODS`, using the now-materialized typed overload if it
+    exists.
+- Focused oracle:
+  - new oracle:
+    - `bash regression_tests/nilable_array_index_query_repro.sh /private/tmp/stage1_rel_layout_invalidate_fix_20260309`
+      -> `reproduced: nilable Array#[]? misresolved away from the Int32 query overload`
+    - `bash regression_tests/nilable_array_index_query_repro.sh /private/tmp/stage1_dbg_idxq_narrow_20260309`
+      -> `compile_rc: 0`, `run_rc: 0`, `stdout: true`, `not reproduced`
+    - `bash regression_tests/nilable_array_index_query_repro.sh /private/tmp/stage1_rel_idxq_narrow_20260309`
+      -> `compile_rc: 0`, `run_rc: 0`, `stdout: true`, `not reproduced`
+  - adversary / negative controls:
+    - `file_open_block_write.cr` stays green on both fresh debug and release
+      stage1 binaries (`stdout: ok / file_open_block_ok`, exit `0`);
+    - `array_concat_string_runtime.cr` stays green on both fresh debug and
+      release stage1 binaries (`stdout: Stage 1/6 parse ...`, exit `0`);
+    - a real range query control compiled with the fresh release stage1 still
+      prints `false` for `a[(1..2)]?.nil?`, so the narrowed fix did not steal
+      the legitimate `[]?(Range)` path.
+- Fresh verification:
+  - `stage1 debug`:
+    - `/usr/bin/time -p scripts/build_stage1_original_cached.sh debug /private/tmp/stage1_dbg_idxq_narrow_20260309`
+      -> `real 10.62`
+  - `stage1 --release`:
+    - `/usr/bin/time -p scripts/build_stage1_original_cached.sh release /private/tmp/stage1_rel_idxq_narrow_20260309`
+      -> `real 526.54`
+  - broad adversary:
+    - `/usr/bin/time -p regression_tests/run_all.sh /private/tmp/stage1_rel_idxq_narrow_20260309`
+      -> `67 passed, 0 failed`, `real 397.51`
+- Boundary after the fix:
+  - this is a verified stage1/runtime correctness fix for nilable query
+    overload selection;
+  - fresh `stage2 --release` and guarded `stage2 -> stage3` have not yet been
+    rerun on top of this checkpoint, so no new bootstrap claim is made yet;
+  - current release timings on this branch are inflated relative to older
+    checkpoints because the user-modified `src/compiler/cli.cr` still emits
+    unconditional parse/reqscan diagnostics.
+
 ### Current checkpoint (2026-03-09 late layout invalidation)
 
 - Verified a new root cause behind the latest self-hosted `stage2` crash family:
