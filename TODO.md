@@ -22,6 +22,64 @@ closure cells, Tuple ptr/value confusion.
 - [ ] **Phase 5: FIX RC-3** — String.build block lowering
 - [ ] **Phase 6: RE-ENABLE RTA + BOOTSTRAP** — stage0→stage1→stage2→stage3 + benchmark
 
+### Current checkpoint (2026-03-08 value-key hash delegate self-host fix)
+
+- Verified a new real self-hosted stage2 root cause behind the tiny
+  top-level `do ... end` / `exception/call_stack` corridor:
+  - focused oracle:
+    - `bash regression_tests/stage2_top_level_do_block_hash_repro.sh /private/tmp/stage2_rel_exprid_structhash_fix_20260308`
+      -> `status: 139`, `reproduced: compiler crashed while hashing Bytes key during top-level do-block compile`
+    - `bash regression_tests/stage2_top_level_do_block_hash_repro.sh /private/tmp/stage2_rel_value_key_hash_fix_20260308`
+      -> `status: 1`, `not reproduced: compiler reached expected name-resolution error`
+- LLDB on the stale self-hosted stage2 localized the crash to:
+  - `__vdispatch__Object#hash`
+  - `Hash(Slice(UInt8), String)#upsert`
+  - `Frontend::StringPool#intern_string`
+  - `Semantic::NameResolver#resolve_identifier`
+- Root cause is broader than the earlier `ExprId` / compiler-id wrapper case:
+  - generic `Hash#key_hash` lowering still routed concrete value-type keys
+    through `Object#hash` instead of static `K#hash(hasher)`;
+  - the hot blocker instance was `Bytes` (`Slice(UInt8)`) in the frontend
+    string pool while resolving identifiers from top-level `do ... end`;
+  - fresh stage1 runtime checks show the same family affected user-defined
+    value keys too: `struct Point` hash keys now work, while the older tuple-key
+    runtime crash remains a separate residual branch.
+- Final fix in `src/compiler/mir/llvm_backend.cr`:
+  - for concrete value-type hash keys with an emitted concrete
+    `K#hash(Crystal::Hasher)` symbol, emit `Hash#key_hash` as a static delegate
+    to that concrete hash method instead of the broken generic object-dispatch
+    path.
+- Fresh verification:
+  - `stage1 --release`:
+    - `/usr/bin/time -p scripts/build_stage1_original_release.sh /private/tmp/stage1_rel_value_key_hash_fix_20260308`
+      -> `real 457.78`
+  - focused/adversary checks on the fresh stage1 release:
+    - `bash regression_tests/stage2_top_level_do_block_hash_repro.sh /private/tmp/stage1_rel_value_key_hash_fix_20260308`
+      -> `status: 1`, `not reproduced`
+    - fresh `Bytes` runtime repro:
+      - compile `bytes = "foo".to_slice; h = {} of Bytes => String; ...`
+      - `compile_status: 0`, `run_status: 0`, `stdout: ok`
+    - fresh `Point` struct-key runtime repro:
+      - `compile_status: 0`, `run_status: 0`, `stdout: ok`
+    - broad regression:
+      - `/usr/bin/time -p regression_tests/run_all.sh /private/tmp/stage1_rel_value_key_hash_fix_20260308`
+        -> `67 passed, 0 failed`, `real 521.24`
+  - `stage2 --release`:
+    - guarded via `scripts/run_safe.sh /private/tmp/run_stage2_rel_value_key_hash_fix.sh 1200 32768`
+      -> `/private/tmp/stage2_rel_value_key_hash_fix_20260308`, safe `exit 0`, inner `real 238.83`
+- Boundary / new frontier:
+  - `stage1 -> stage2` remains green with the new fix;
+  - current measured speedup is `457.78 / 238.83 ~= 1.92x`;
+  - the old tiny self-hosted `do ... end` crash is removed on fresh stage2;
+  - guarded `stage2 -> stage3` is still red:
+    - `scripts/run_safe.sh /private/tmp/run_stage3_rel_value_key_hash_fix.sh 1200 49152`
+      -> `status 139`
+      after `REQSCAN` enters `src/stdlib/exception/call_stack.cr` but before
+      `REQSCAN_DONE`;
+  - so this fix removes one real active stage2 blocker-family in
+    `StringPool(Bytes)` / value-key hash dispatch, but broader tuple/value-key
+    crash branches still remain and the final stage3 blocker is not yet cleared.
+
 ### Current checkpoint (2026-03-08 `ExprId` wrapper-hash self-host fix)
 
 - Verified a new real self-hosted stage2 root cause behind the tiny

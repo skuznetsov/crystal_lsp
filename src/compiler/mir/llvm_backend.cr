@@ -5719,12 +5719,22 @@ module Crystal::MIR
         return true
       end
 
-      # Hash#key_hash for integer-like scalar keys — bypass broken Object#hash vdispatch.
-      # Generic lowering still instantiates alias-specific symbol names (e.g. HIR::ValueId)
-      # that miss the old suffix-only overrides and fall back to Object#hash on raw ints.
+      # Hash#key_hash for concrete value keys — bypass broken generic Object#hash dispatch.
+      # Self-hosted stage2 still routes wrapper/struct keys (Bytes, tuple keys, etc.)
+      # through Object#hash, which crashes or loops in compiler/runtime hot paths.
       if mangled.includes?("$Hkey_hash$$") && mangled.includes?("Hash$L") && func.params.size >= 2
         key_type_ref = func.params[1].type
         key_llvm_type = @type_mapper.llvm_type(key_type_ref)
+        if target = concrete_value_key_hash_delegate_target(mangled, key_type_ref)
+          emit_concrete_key_hash_delegate_override(
+            mangled,
+            key_llvm_type,
+            target,
+            note: "delegate value-type Hash key hashing to static #{target}"
+          )
+          return true
+        end
+
         if compiler_i32_wrapper_key_hash?(mangled)
           emit_struct_i32_field_key_hash_override(
             mangled,
@@ -6843,6 +6853,21 @@ module Crystal::MIR
       }.any? { |suffix| mangled.ends_with?(suffix) }
     end
 
+    private def concrete_value_key_hash_delegate_target(mangled : String, key_type_ref : TypeRef) : String?
+      return nil unless key_type = @module.type_registry.get(key_type_ref)
+      return nil unless key_type.kind.struct? || key_type.kind.tuple?
+
+      key_suffix = mangled.split("$Hkey_hash$$", 2)[1]?
+      return nil if key_suffix.nil? || key_suffix.empty?
+
+      target = "#{key_suffix}$Hhash$$Crystal$CCHasher"
+      if func = @module.functions.find { |f| mangle_function_name(f.name) == target }
+        return mangle_function_name(func.name)
+      end
+
+      nil
+    end
+
     private def emit_direct_integer_key_hash_override(mangled : String, key_llvm_type : String, *, signed : Bool, note : String) : Nil
       emit_raw "; #{mangled} — #{note}\n"
       emit_raw "define i32 @#{mangled}(ptr %self, #{key_llvm_type} %key) {\n"
@@ -6877,6 +6902,23 @@ module Crystal::MIR
       key_i32 = emit_struct_i32_field0_cast(key_llvm_type)
       emit_raw "  %key64 = sext i32 #{key_i32} to i64\n"
       emit_raw "  %hasher2 = call ptr @Crystal$CCHasher$Hpermute$$UInt64(ptr %hasher, i64 %key64)\n"
+      emit_raw "  %hash64 = call i64 @Crystal$CCHasher$Hresult(ptr %hasher2)\n"
+      emit_raw "  %hash32 = trunc i64 %hash64 to i32\n"
+      emit_raw "  %is_zero = icmp eq i32 %hash32, 0\n"
+      emit_raw "  br i1 %is_zero, label %ret_max, label %ret_hash\n"
+      emit_raw "ret_max:\n"
+      emit_raw "  ret i32 -1\n"
+      emit_raw "ret_hash:\n"
+      emit_raw "  ret i32 %hash32\n"
+      emit_raw "}\n\n"
+    end
+
+    private def emit_concrete_key_hash_delegate_override(mangled : String, key_llvm_type : String, target : String, *, note : String) : Nil
+      emit_raw "; #{mangled} — #{note}\n"
+      emit_raw "define i32 @#{mangled}(ptr %self, #{key_llvm_type} %key) {\n"
+      emit_raw "entry:\n"
+      emit_raw "  %hasher = call ptr @Crystal$CCHasher$Dnew(i64 0, i64 0)\n"
+      emit_raw "  %hasher2 = call ptr @#{target}(#{key_llvm_type} %key, ptr %hasher)\n"
       emit_raw "  %hash64 = call i64 @Crystal$CCHasher$Hresult(ptr %hasher2)\n"
       emit_raw "  %hash32 = trunc i64 %hash64 to i32\n"
       emit_raw "  %is_zero = icmp eq i32 %hash32, 0\n"
