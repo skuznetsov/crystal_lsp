@@ -8198,21 +8198,35 @@ module Crystal::HIR
               param_type = inferred if inferred && inferred != TypeRef::VOID
             end
           end
-            if idx = ivar_index_by_name[ivar_name]?
-              existing = ivars[idx]
-              if existing.type == TypeRef::VOID && param_type != TypeRef::VOID
-                ivars[idx] = IVarInfo.new(ivar_name, param_type, existing.offset)
-              elsif param_type == TypeRef::VOID && existing.type != TypeRef::VOID
-                param_type = existing.type
+          if idx = ivar_index_by_name[ivar_name]?
+            existing = ivars[idx]
+            if existing.type == TypeRef::VOID && param_type != TypeRef::VOID
+              layout_owner = owner_name || @current_class
+              layout_info = layout_owner ? @class_info[layout_owner]? : nil
+              ivars[idx] = IVarInfo.new(
+                ivar_name,
+                param_type,
+                existing.offset,
+                default_expr_id: existing.default_expr_id,
+                default_arena: existing.default_arena
+              )
+              realign_registered_ivars(
+                ivars,
+                offset_ptr,
+                layout_info ? layout_info.is_struct : false,
+                layout_owner ? layout_owner.starts_with?("LibC::") || layout_owner.includes?("::Lib") : false
+              )
+            elsif param_type == TypeRef::VOID && existing.type != TypeRef::VOID
+              param_type = existing.type
             elsif param_type == TypeRef::NIL && existing.type != TypeRef::VOID && existing.type != TypeRef::NIL
               # `@ivar = nil` default: use the declared ivar type (e.g., Foo?) not Nil
               param_type = existing.type
             end
-            else
-              ivars << IVarInfo.new(ivar_name, param_type, offset_ptr.value)
-              ivar_index_by_name[ivar_name] = ivars.size - 1
-              offset_ptr.value += field_storage_size(param_type)
-            end
+          else
+            ivars << IVarInfo.new(ivar_name, param_type, offset_ptr.value)
+            ivar_index_by_name[ivar_name] = ivars.size - 1
+            offset_ptr.value += field_storage_size(param_type)
+          end
           if owner_name && (ta = param.type_annotation)
             type_name = String.new(ta)
             resolved = resolve_type_alias_chain(resolve_type_name_in_context(type_name))
@@ -8241,7 +8255,42 @@ module Crystal::HIR
       init_params
     end
 
-      private def annotation_type_ref(type_name : String, owner_name : String? = nil) : TypeRef
+    private def realign_registered_ivars(
+      ivars : Array(IVarInfo),
+      offset_ref : Pointer(Int32),
+      is_struct : Bool,
+      is_c_struct : Bool,
+    ) : Nil
+      return if ivars.empty?
+
+      offset = is_struct ? 0 : 4
+      new_ivars = Array(IVarInfo).new(ivars.size)
+      ivar_idx = 0
+      while ivar_idx < ivars.size
+        ivar = ivars[ivar_idx]
+        offset = align_offset(offset, type_alignment(ivar.type, is_c_struct))
+        new_ivars << IVarInfo.new(
+          ivar.name,
+          ivar.type,
+          offset,
+          default_expr_id: ivar.default_expr_id,
+          default_arena: ivar.default_arena
+        )
+        offset += field_storage_size(ivar.type, is_c_struct)
+        ivar_idx += 1
+      end
+
+      max_align = new_ivars.max_of { |ivar| type_alignment(ivar.type, is_c_struct) }
+      offset = align_offset(offset, max_align)
+
+      ivars.clear
+      new_ivars.each do |ivar|
+        ivars << ivar
+      end
+      offset_ref.value = offset
+    end
+
+    private def annotation_type_ref(type_name : String, owner_name : String? = nil) : TypeRef
         cache_key = {type_name, owner_name, @module_defs_cache_version, @resolved_type_name_cache_epoch}
         if cached = @annotation_type_ref_cache[cache_key]?
           return cached
@@ -15859,6 +15908,9 @@ module Crystal::HIR
                     default_expr_id: resolved_default_expr,
                     default_arena: resolved_default_arena
                   )
+                  if existing.type == TypeRef::VOID && resolved_type != TypeRef::VOID
+                    realign_registered_ivars(ivars, pointerof(offset), is_struct, is_c_struct)
+                  end
                 end
                 if debug_filter = env_get("DEBUG_CLASS_IVAR_DECL")
                   if debug_filter == "1" || class_name.includes?(debug_filter)
@@ -16941,6 +16993,28 @@ module Crystal::HIR
         offset, info.is_struct, info.parent_name)
       @class_info[class_name] = new_info
       @class_info_by_type_id[info.type_ref.id] = new_info
+    end
+
+    private def realign_class_info_ivars(
+      class_name : String,
+      class_info : ClassInfo,
+      ivars : Array(IVarInfo),
+    ) : ClassInfo
+      updated_info = ClassInfo.new(
+        class_info.name,
+        class_info.type_ref,
+        ivars,
+        class_info.class_vars,
+        class_info.size,
+        class_info.is_struct,
+        class_info.parent_name
+      )
+      @class_info[class_name] = updated_info
+      @class_info_by_type_id[class_info.type_ref.id] = updated_info
+      align_class_ivars(class_name)
+      aligned = @class_info[class_name].not_nil!
+      bump_class_info_version
+      aligned
     end
 
     private def fixup_class_inherited_ivars(class_name : String, fixed : Set(String))
@@ -25472,7 +25546,22 @@ module Crystal::HIR
           if inferred != TypeRef::VOID
             if idx = ivars.index { |iv| iv.name == ivar_name }
               if ivars[idx].type == TypeRef::VOID
-                ivars[idx] = IVarInfo.new(ivar_name, inferred, ivars[idx].offset)
+                existing = ivars[idx]
+                layout_owner = @current_class
+                layout_info = layout_owner ? @class_info[layout_owner]? : nil
+                ivars[idx] = IVarInfo.new(
+                  ivar_name,
+                  inferred,
+                  existing.offset,
+                  default_expr_id: existing.default_expr_id,
+                  default_arena: existing.default_arena
+                )
+                realign_registered_ivars(
+                  ivars,
+                  offset_ref,
+                  layout_info ? layout_info.is_struct : false,
+                  layout_owner ? layout_owner.starts_with?("LibC::") || layout_owner.includes?("::Lib") : false
+                )
                 if class_name = @current_class
                   update_getter_return_types_for_ivar(class_name, ivar_name, inferred)
                 end
@@ -63839,8 +63928,27 @@ module Crystal::HIR
               end
               if merged_type != existing.type
                 # Avoid widening ivar layouts after offsets are fixed (union may increase size).
-                if existing.type == TypeRef::VOID || type_size(merged_type) == type_size(existing.type)
-                  ivars[idx] = IVarInfo.new(name, merged_type, existing.offset)
+                if existing.type == TypeRef::VOID
+                  ivars[idx] = IVarInfo.new(
+                    name,
+                    merged_type,
+                    existing.offset,
+                    default_expr_id: existing.default_expr_id,
+                    default_arena: existing.default_arena
+                  )
+                  class_info = realign_class_info_ivars(class_name, class_info, ivars)
+                  updated = class_info.ivars[idx]
+                  ivar_type = updated.type
+                  ivar_offset = updated.offset
+                  update_getter_return_types_for_ivar(class_name, name, merged_type)
+                elsif type_size(merged_type) == type_size(existing.type)
+                  ivars[idx] = IVarInfo.new(
+                    name,
+                    merged_type,
+                    existing.offset,
+                    default_expr_id: existing.default_expr_id,
+                    default_arena: existing.default_arena
+                  )
                   ivar_type = merged_type
                 else
                   ivar_type = existing.type
@@ -64439,8 +64547,27 @@ module Crystal::HIR
                 merged_type = union_type_for_values(existing.type, value_type)
               end
               if merged_type != existing.type
-                if existing.type == TypeRef::VOID || type_size(merged_type) == type_size(existing.type)
-                  ivars[idx] = IVarInfo.new(name, merged_type, existing.offset)
+                if existing.type == TypeRef::VOID
+                  ivars[idx] = IVarInfo.new(
+                    name,
+                    merged_type,
+                    existing.offset,
+                    default_expr_id: existing.default_expr_id,
+                    default_arena: existing.default_arena
+                  )
+                  class_info = realign_class_info_ivars(class_name, class_info, ivars)
+                  updated = class_info.ivars[idx]
+                  ivar_type = updated.type
+                  ivar_offset = updated.offset
+                  update_getter_return_types_for_ivar(class_name, name, merged_type)
+                elsif type_size(merged_type) == type_size(existing.type)
+                  ivars[idx] = IVarInfo.new(
+                    name,
+                    merged_type,
+                    existing.offset,
+                    default_expr_id: existing.default_expr_id,
+                    default_arena: existing.default_arena
+                  )
                   ivar_type = merged_type
                 else
                   ivar_type = existing.type

@@ -22,6 +22,54 @@ closure cells, Tuple ptr/value confusion.
 - [ ] **Phase 5: FIX RC-3** — String.build block lowering
 - [ ] **Phase 6: RE-ENABLE RTA + BOOTSTRAP** — stage0→stage1→stage2→stage3 + benchmark
 
+### Current checkpoint (2026-03-09 late-typed ivar layout realignment)
+
+- Verified a real compiler/runtime root cause behind the staged
+  untyped-getter mislayout family:
+  - accessor-backed ivars can be registered as `TypeRef::VOID` placeholders;
+  - a registration-only realignment patch was insufficient because the live
+    named-arg repro (`@first = first`) does not materialize concrete ivar types
+    during `infer_ivars_from_body(...)`;
+  - the decisive late materialization happens during actual lowering in
+    `lower_assign(...)` / `assign_value_to_target(...)`, where the old code
+    updated `existing.type` but preserved `existing.offset`.
+- Final fix on the current worktree:
+  - add `realign_registered_ivars(...)` for registration-time `VOID -> concrete`
+    ivar upgrades (initialize params/body and typed ivar merge);
+  - add `realign_class_info_ivars(...)` for lowering-time `VOID -> concrete`
+    ivar upgrades, and update getter return types when those late upgrades land.
+- Focused oracle:
+  - `bash regression_tests/untyped_getter_ivar_layout_runtime_repro.sh /private/tmp/stage1_rel_symbol_shadow_sigfix3_20260309`
+    -> `reproduced: late-typed getter ivars kept stale field offsets`
+  - same oracle on fresh release stage1
+    `/private/tmp/stage1_rel_late_ivar_layout_fix2_20260309`
+    -> `not reproduced`
+- Fresh release verification:
+  - `stage1 --release`:
+    - `/usr/bin/time -p scripts/build_stage1_original_release.sh /private/tmp/stage1_rel_late_ivar_layout_fix2_20260309`
+      -> `real 420.06`
+  - broad adversary:
+    - `/usr/bin/time -p regression_tests/run_all.sh /private/tmp/stage1_rel_late_ivar_layout_fix2_20260309`
+      -> `67 passed, 0 failed`, `real 282.68`
+  - `stage2 --release`:
+    - `/usr/bin/time -p scripts/build_stage2_release.sh /private/tmp/stage1_rel_late_ivar_layout_fix2_20260309 /private/tmp/stage2_rel_late_ivar_layout_fix2_20260309`
+      -> `real 215.20`
+- Boundary after the fix:
+  - `stage1 -> stage2` remains green and the current observed speedup is
+    `420.06 / 215.20 ~= 1.95x`;
+  - this fix does **not** clear the current self-hosted frontier:
+    - `bash regression_tests/nilable_abstract_union_nil_negative_repro.sh /private/tmp/stage2_rel_late_ivar_layout_fix2_20260309`
+      -> `reproduced: compiler crashed on nil abstract-union negative case`
+    - guarded `stage2 -> stage3` via `scripts/run_safe.sh` still exits `139`
+      after parsing/req-scanning through `prelude.cr`, `lib_c.cr`, `macros.cr`,
+      `object.cr`, `crystal/once.cr`, `comparable.cr`, `exception.cr`, and into
+      `exception/call_stack.cr`.
+- Open items from this checkpoint:
+  - commit the verified late-typed ivar layout fix + oracle;
+  - root-cause the remaining fresh stage2 compile crash on
+    `nilable_abstract_union_nil_negative_repro.sh`;
+  - then retry guarded `stage2 -> stage3` and refresh the benchmark delta.
+
 ### Current checkpoint (2026-03-09 namespaced builtin-shadow fix)
 
 - Verified a real compiler-only root cause behind the stale self-hosted
