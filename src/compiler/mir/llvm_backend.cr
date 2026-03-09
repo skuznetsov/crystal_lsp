@@ -6989,7 +6989,8 @@ module Crystal::MIR
       # Operator mangling: $GT = >, $LT = <, $GE = >=, $LE = <=, $EQ = ==,
       # $NE = !=, $ADD = +, $SUB = -, $MUL = *, $AND = &, $OR = |, $XOR = ^,
       # $SHL = <<, $SHR = >>
-      int_types = {"Int8" => {"i8", true}, "Int16" => {"i16", true}, "Int32" => {"i32", true},
+      int_types = {"Bool" => {"i1", false},
+                   "Int8" => {"i8", true}, "Int16" => {"i16", true}, "Int32" => {"i32", true},
                    "Int64" => {"i64", true}, "Int128" => {"i128", true},
                    "UInt8" => {"i8", false}, "UInt16" => {"i16", false}, "UInt32" => {"i32", false},
                    "UInt64" => {"i64", false}, "UInt128" => {"i128", false}}
@@ -16011,6 +16012,18 @@ module Crystal::MIR
           is_static_array = true
         end
       end
+      normalized_index = index
+      unless is_static_array
+        # Crystal Array supports negative indices counting from the end.
+        # Direct buffer GEP must normalize them before indexing.
+        emit "%#{base_name}.size_addr = getelementptr i8, ptr #{array_ptr}, i32 4"
+        emit "%#{base_name}.size = load i32, ptr %#{base_name}.size_addr"
+        emit "%#{base_name}.idx_neg = icmp slt i32 #{index}, 0"
+        emit "%#{base_name}.idx_fixed = add i32 #{index}, %#{base_name}.size"
+        emit "%#{base_name}.idx_final = select i1 %#{base_name}.idx_neg, i32 %#{base_name}.idx_fixed, i32 #{index}"
+        normalized_index = "%#{base_name}.idx_final"
+      end
+
       if is_static_array
         # StaticArray stores elements inline at offset 0
         emit "%#{base_name}.elem_ptr = getelementptr #{element_type}, ptr #{array_ptr}, i32 #{index}"
@@ -16020,7 +16033,7 @@ module Crystal::MIR
         emit "%#{base_name}.buf_addr = getelementptr i8, ptr #{array_ptr}, i32 16"
         emit "%#{base_name}.buf = load ptr, ptr %#{base_name}.buf_addr"
         # Get element from buffer
-        emit "%#{base_name}.elem_ptr = getelementptr #{element_type}, ptr %#{base_name}.buf, i32 #{index}"
+        emit "%#{base_name}.elem_ptr = getelementptr #{element_type}, ptr %#{base_name}.buf, i32 #{normalized_index}"
         emit "#{name} = load #{element_type}, ptr %#{base_name}.elem_ptr"
       end
 
@@ -16223,6 +16236,18 @@ module Crystal::MIR
         end
       end
 
+      normalized_index = index
+      unless is_static_array
+        # Crystal Array supports negative indices counting from the end.
+        # Direct buffer GEP must normalize them before indexing.
+        emit "%#{base_name}.size_addr = getelementptr i8, ptr #{array_ptr}, i32 4"
+        emit "%#{base_name}.size = load i32, ptr %#{base_name}.size_addr"
+        emit "%#{base_name}.idx_neg = icmp slt i32 #{index}, 0"
+        emit "%#{base_name}.idx_fixed = add i32 #{index}, %#{base_name}.size"
+        emit "%#{base_name}.idx_final = select i1 %#{base_name}.idx_neg, i32 %#{base_name}.idx_fixed, i32 #{index}"
+        normalized_index = "%#{base_name}.idx_final"
+      end
+
       if is_static_array
         # StaticArray stores elements inline at offset 0
         emit "%#{base_name}.elem_ptr = getelementptr #{element_type}, ptr #{array_ptr}, i32 #{index}"
@@ -16232,7 +16257,7 @@ module Crystal::MIR
         emit "%#{base_name}.buf_addr = getelementptr i8, ptr #{array_ptr}, i32 16"
         emit "%#{base_name}.buf = load ptr, ptr %#{base_name}.buf_addr"
         # Set element in buffer
-        emit "%#{base_name}.elem_ptr = getelementptr #{element_type}, ptr %#{base_name}.buf, i32 #{index}"
+        emit "%#{base_name}.elem_ptr = getelementptr #{element_type}, ptr %#{base_name}.buf, i32 #{normalized_index}"
         emit "store #{element_type} #{value}, ptr %#{base_name}.elem_ptr"
       end
     end

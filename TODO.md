@@ -22,6 +22,71 @@ closure cells, Tuple ptr/value confusion.
 - [ ] **Phase 5: FIX RC-3** — String.build block lowering
 - [ ] **Phase 6: RE-ENABLE RTA + BOOTSTRAP** — stage0→stage1→stage2→stage3 + benchmark
 
+### Current checkpoint (2026-03-09 bool primitive binary override)
+
+- Verified a real compiler/backend root cause behind the stale
+  `macro_condition_flag_scanner_repro` / raw macro-condition branch family:
+  - the earlier `MiniFlagScanner` symptom was not a broken identifier scan;
+    focused probes proved `read_identifier`, `case ident when "flag?"`, and
+    `@flags.includes?(flag_name)` all worked on fresh stage1 builds;
+  - raw LLVM on a minimal `def direct_true : Bool?; true end` repro showed the
+    return union itself was also correct (`type_id = 2`, `payload = 1`);
+  - the actual failure was lower in the stack: `Bool#==` compiled to a dead stub
+    `define i1 @Bool$H$EQ$$Bool(i1 %self, i1 %other) { ret i1 0 }`, so all
+    `cond == true` / `cond == false` checks collapsed to false even when `cond`
+    already held a real boolean;
+  - source-side confirmation: `src/stdlib/primitives.cr` declares `Bool#==` and
+    `Bool#!=` as `@[Primitive(:binary)]`, but `emit_primitive_binary_override(...)`
+    only covered integer primitive receivers, so missing Bool binaries fell
+    through to the generic zero-return stub path.
+- Final fix on the current worktree:
+  - extend `emit_primitive_binary_override(...)` to cover `Bool` (`i1`) together
+    with the existing primitive binary override family.
+- Focused oracles:
+  - new root-cause oracle:
+    - stale release stage1 `/private/tmp/stage1_rel_union_canon_fix_20260309`:
+      `bash regression_tests/bool_primitive_binary_runtime_repro.sh /private/tmp/stage1_rel_union_canon_fix_20260309`
+      -> `reproduced: Bool primitive binary methods fell back to zero-return stubs`
+    - fresh debug stage1 `/private/tmp/stage1_dbg_bool_primitive_fix_20260309`:
+      same oracle -> `not reproduced`
+    - fresh release stage1 `/private/tmp/stage1_rel_bool_primitive_fix_20260309`:
+      same oracle -> `not reproduced`
+  - adjacent symptom oracle:
+    - fresh debug stage1:
+      `bash regression_tests/macro_condition_flag_scanner_repro.sh /private/tmp/stage1_dbg_bool_primitive_fix_20260309`
+      -> `stdout: true`, `not reproduced`
+    - fresh release stage1:
+      `bash regression_tests/macro_condition_flag_scanner_repro.sh /private/tmp/stage1_rel_bool_primitive_fix_20260309`
+      -> `stdout: true`, `not reproduced`
+- Fresh release verification:
+  - `stage1 --release`:
+    - `/usr/bin/time -p scripts/build_stage1_original_release.sh /private/tmp/stage1_rel_bool_primitive_fix_20260309`
+      -> `real 415.89`
+  - broad adversary:
+    - `/usr/bin/time -p regression_tests/run_all.sh /private/tmp/stage1_rel_bool_primitive_fix_20260309`
+      -> `67 passed, 0 failed`, `real 283.34`
+  - `stage2 --release`:
+    - `/usr/bin/time -p scripts/build_stage2_release.sh /private/tmp/stage1_rel_bool_primitive_fix_20260309 /private/tmp/stage2_rel_bool_primitive_fix_20260309`
+      -> `real 207.79`
+- Boundary after the fix:
+  - `stage1 -> stage2` remains green, with observed speedup
+    `415.89 / 207.79 ~= 2.00x`;
+  - this fix is a real self-hosted boundary shift, not just a stage1 nicety:
+    fresh `stage2 --release` now parses/reqscans well past the old
+    `exception/call_stack.cr` corridor and through large portions of the compiler
+    source tree before later crashing;
+  - `stage2 -> stage3` is still red, but the fresh signature changed again:
+    guarded stage3 now reaches `src/stdlib/exception/call_stack.cr` with
+    `exprs=26` and incorrectly selects `exception/call_stack/stackwalk.cr`
+    (the Windows branch) before segfaulting, so the next active frontier is
+    compound macro-condition / host-flag evaluation, not the earlier simple
+    `flag?(:name)` scanner bug.
+- Open items from this checkpoint:
+  - commit the verified Bool primitive override + focused oracle(s);
+  - root-cause fresh stage3 misselection of
+    `flag?(:win32) && !flag?(:gnu)` / related compound macro conditions;
+  - then retry guarded `stage2 -> stage3` and refresh the benchmark delta.
+
 ### Current checkpoint (2026-03-09 composite-union variant canonicalization)
 
 - Verified a real compiler-only root cause behind the `ModuleNode#body.not_nil!` /
