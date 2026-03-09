@@ -22,6 +22,63 @@ closure cells, Tuple ptr/value confusion.
 - [ ] **Phase 5: FIX RC-3** — String.build block lowering
 - [ ] **Phase 6: RE-ENABLE RTA + BOOTSTRAP** — stage0→stage1→stage2→stage3 + benchmark
 
+### Current checkpoint (2026-03-09 allocator invalidation after late layout growth)
+
+- Verified that the reduced fresh `stage2` crash on `X = 1` with
+  `--no-prelude --no-codegen` was an allocator/layout mismatch inside
+  `Crystal::HIR::AstToHir`, not another parser or `Array#dup` bug:
+  - direct LLDB on stale `/private/tmp/stage2_rel_slice_u8_keyhash_fix_20260309`
+    localized the fault to
+    `AstToHir#flush_pending_monomorphizations -> Array(Tuple(...))#dup`
+    with `self + 0x780` used as the queue slot;
+  - disassembly then showed stale `AstToHir$Dnew` still allocating only
+    `0x200` bytes via `calloc`, while fresh lowered methods were already reading
+    fields at offsets around `0x780`;
+  - memory inspection at the crashing receiver confirmed the tail region past
+    `0x200` was zero/unallocated, so the `dup` crash was only the first read of
+    stale post-layout-growth offsets.
+- Root cause:
+  - late layout changes already invalidated lowered methods, but did not clear
+    allocator-generation state;
+  - `generate_allocator(...)` therefore reused a stale `.new` size after class
+    layout growth, while freshly re-lowered methods used larger ivar offsets.
+- Corrective fix on the current worktree:
+  - when `invalidate_lowered_layout_functions(...)` fires, also clear
+    `@generated_allocators` and `@deferred_allocators` for both `class_name` and
+    `owner_base`;
+  - this forces allocator regeneration on the next lowering pass and realigns
+    object size with the new layout.
+- Fresh verification:
+  - `stage1 debug`:
+    - `/usr/bin/time -p scripts/build_stage1_original_debug.sh /private/tmp/stage1_dbg_allocator_invalidate_fix_20260309`
+      -> `real 9.12`
+  - `stage1 --release`:
+    - `/usr/bin/time -p scripts/build_stage1_original_release.sh /private/tmp/stage1_rel_allocator_invalidate_fix_20260309`
+      -> `real 453.32`
+  - `stage2 --release`:
+    - `/usr/bin/time -p scripts/build_stage2_release.sh /private/tmp/stage1_rel_allocator_invalidate_fix_20260309 /private/tmp/stage2_rel_allocator_invalidate_fix_20260309`
+      -> `real 198.90`
+  - broad adversary:
+    - `regression_tests/run_all.sh /private/tmp/stage1_rel_allocator_invalidate_fix_20260309`
+      -> `67 passed, 0 failed`
+  - focused oracle:
+    - `bash regression_tests/stage2_no_prelude_min_crash_repro.sh /private/tmp/stage2_rel_allocator_invalidate_fix_20260309`
+      -> `not reproduced`
+  - current observed speedup:
+    - `453.32 / 198.90 ~= 2.28x`
+- Boundary after the fix:
+  - `stage1 -> stage2` stays green on a fresh release pair;
+  - the reduced fresh `stage2` no-prelude crash is gone;
+  - guarded `stage2 -> stage3` via `scripts/run_safe.sh` is still red with
+    `exit 139`, after req-scanning through
+    `exception/call_stack/{stackwalk,null,libunwind}.cr`, `system_error.cr`,
+    and `iterable.cr`;
+  - the older stage2-only blocker also remains:
+    - `bash regression_tests/nilable_abstract_union_nil_negative_repro.sh /private/tmp/stage2_rel_allocator_invalidate_fix_20260309`
+      -> `reproduced: compiler crashed on nil abstract-union negative case`
+  - so this checkpoint removes one stale allocator/layout family and narrows the
+    remaining frontier back to the nilable-abstract-union corridor.
+
 ### Current checkpoint (2026-03-09 Slice(UInt8) `Hash#key_hash` stage2 no-codegen fix)
 
 - Verified that the reduced fresh `stage2` blocker behind the `class Outer; end`

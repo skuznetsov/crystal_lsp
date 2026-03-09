@@ -17045,8 +17045,18 @@ module Crystal::HIR
         invalidated += 1
       end
 
+      invalidate_generated_allocator_state(class_name, owner_base)
+
       if invalidated > 0 && env_has?("DEBUG_IVAR_REG")
         STDERR.puts "[LAYOUT_INVALIDATE] class=#{class_name} funcs=#{invalidated}"
+      end
+    end
+
+    private def invalidate_generated_allocator_state(class_name : String, owner_base : String) : Nil
+      [class_name, owner_base].uniq.each do |owner|
+        next if owner.empty?
+        @generated_allocators.delete(owner)
+        @deferred_allocators.delete(owner)
       end
     end
 
