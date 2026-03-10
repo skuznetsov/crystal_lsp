@@ -1984,7 +1984,27 @@ module Crystal
       elsif ENV.has_key?("DEBUG_CALLS")
         STDERR.puts "[UNRESOLVED_CALL] #{call.method_name} in #{@current_lowering_func_name}"
       end
-      builder.extern_call(call.method_name, args, convert_type(call.type))
+      extern_return_type = convert_type(call.type)
+      # Fix: class methods (containing '.') on struct types that return a primitive
+      # type are likely factory methods (e.g., MacroPiece.control) whose return type
+      # was incorrectly inferred as the first parameter type instead of the struct type.
+      # Override to use the struct's TypeRef (which maps to ptr in LLVM).
+      if dot_idx = call.method_name.index('.')
+        hir_ret_is_primitive = call.type.id <= 17_u32  # HIR primitive type IDs: 0-17
+        if hir_ret_is_primitive
+          class_name = call.method_name[0, dot_idx]
+          # Strip type suffix (e.g., "$Int32_String_Bool" from specialization)
+          if dollar_idx = class_name.index('$')
+            class_name = class_name[0, dollar_idx]
+          end
+          if struct_type = @mir_module.type_registry.get_by_name(class_name)
+            if struct_type.kind.struct?
+              extern_return_type = TypeRef.new(struct_type.id)
+            end
+          end
+        end
+      end
+      builder.extern_call(call.method_name, args, extern_return_type)
     end
 
     private def extract_method_suffix_loose(full_name : String) : String?

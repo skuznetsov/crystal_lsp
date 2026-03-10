@@ -45530,6 +45530,26 @@ module Crystal::HIR
             target_name = base_name if func_def
             lookup_branch = "base_name" if func_def
           end
+          # When suffix types don't match for CLASS METHODS (e.g., enum Int32 vs Kind,
+          # Nil vs Nil|ExprId), try to find a compatible overload by base name.
+          # Only for class methods (separator '.') to avoid cascading resolution
+          # for instance methods which would explode compilation time.
+          unless func_def
+            if name_parts.separator == '.'
+              overloads = function_def_overloads(base_name)
+              if overloads.size == 1
+                # Single overload: use it directly (type-suffix mismatch likely due to
+                # enum→Int32 or nullable type coercion at the call site).
+                overload_name = overloads.first
+                if overload_def = @function_defs[overload_name]?
+                  func_def = overload_def
+                  arena = @function_def_arenas[overload_name]
+                  target_name = name  # Keep requested name for the HIR function
+                  lookup_branch = "single_overload_fallback"
+                end
+              end
+            end
+          end
         end
         # If still not found, try monomorphizing a generic owner and retry.
         unless func_def
