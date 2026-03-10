@@ -53139,6 +53139,15 @@ module Crystal::HIR
           src_id = is_from ? args[0] : receiver_id
           count_id = args[1]
 
+          # Ensure count is Int32 — callers may pass union-typed or UInt64 values
+          count_type = ctx.type_of(count_id)
+          if count_type != TypeRef::INT32 && count_type != TypeRef::VOID
+            cast = Cast.new(ctx.next_id, TypeRef::INT32, count_id, TypeRef::INT32)
+            ctx.emit(cast)
+            ctx.register_type(cast.id, TypeRef::INT32)
+            count_id = cast.id
+          end
+
           elem_size_lit = Literal.new(ctx.next_id, TypeRef::INT32, elem_size)
           ctx.emit(elem_size_lit)
           ctx.register_type(elem_size_lit.id, TypeRef::INT32)

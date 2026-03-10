@@ -7464,6 +7464,28 @@ module Crystal::MIR
         return
       end
 
+      # ClassName.set_crystal_type_id(ptr) — primitive: store type_id at offset 0
+      # The generic Object.set_crystal_type_id body calls crystal_instance_type_id
+      # (a primitive V2 doesn't implement), so we must intercept and emit correct code.
+      if mangled_name.includes?("$Dset_crystal_type_id") && return_type == "ptr" && param_types.size >= 1
+        # Extract class name from mangled name: "String$Dset_crystal_type_id$$..." -> "String"
+        class_name = mangled_name.split("$Dset_crystal_type_id").first.gsub("$CC", "::")
+        type_id = 0_i32
+        if mir_type = @module.type_registry.get_by_name(class_name)
+          type_id = mir_type.id.to_i32
+        elsif known_id = type_ref_id_for_type_name(class_name)
+          type_id = known_id
+        end
+        # Get the pointer parameter name (first param after removing type prefix)
+        ptr_param = param_types.last.split(' ').last  # e.g., "%arg0" or "%ptr"
+        emit_raw "define #{return_type} @#{mangled_name}(#{param_types.join(", ")}) {\n"
+        emit_raw "entry:\n"
+        emit_raw "  store i32 #{type_id}, ptr #{ptr_param}\n"
+        emit_raw "  ret ptr #{ptr_param}\n"
+        emit_raw "}\n\n"
+        return
+      end
+
       # Reference#object_id — primitive: return value identity as UInt64
       if mangled_name.ends_with?("$Hobject_id") && return_type == "i64" && param_types.size == 1
         self_llvm_type = param_types[0].split(' ').first
@@ -13784,6 +13806,17 @@ module Crystal::MIR
           return dst_val
         end
 
+        # Union → scalar: extract payload from union (e.g., Nil|Int32|UInt8 → i32)
+        if actual_type.includes?(".union") && !expected_type.includes?(".union")
+          src_ptr = "%u2s_cast.#{c}.ptr"
+          pay_ptr = "%u2s_cast.#{c}.pay"
+          emit "#{src_ptr} = alloca #{actual_type}, align 8"
+          emit "store #{actual_type} #{normalize_union_value(value, actual_type)}, ptr #{src_ptr}"
+          emit "#{pay_ptr} = getelementptr #{actual_type}, ptr #{src_ptr}, i32 0, i32 1"
+          emit "#{cast_name} = load #{expected_type}, ptr #{pay_ptr}, align 4"
+          return cast_name
+        end
+
         if actual_type == "ptr" && expected_type.starts_with?('i')
           emit "#{cast_name} = ptrtoint ptr #{value} to #{expected_type}"
           return cast_name
@@ -14364,6 +14397,9 @@ module Crystal::MIR
         "execl"     => ["ptr", "ptr"],
         "execle"    => ["ptr", "ptr"],
         "execlp"    => ["ptr", "ptr"],
+        # crystal runtime helpers
+        "__crystal_v2_ptr_copy" => ["ptr", "ptr", "i32", "i32"],
+        "__crystal_v2_ptr_move" => ["ptr", "ptr", "i32", "i32"],
       } of String => Array(String)
       fixed_sig = varargs_signatures[mangled_extern_name]?
 
