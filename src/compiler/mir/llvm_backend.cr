@@ -9008,9 +9008,26 @@ module Crystal::MIR
         # Pre-emit an int->ptr view for ptr phis that consume integer-typed slots.
         # This keeps phi incoming values in predecessor blocks and avoids
         # dominance/type issues when ptr values are spill-encoded as integers.
-        # Always emit for int-typed slots — V2 heap-allocates structs so many
-        # Call results are ptr at LLVM level but typed as Int32/etc in MIR.
-        if llvm_type.starts_with?('i') &&
+        # Emit when:
+        # 1. Value is declared as POINTER type, OR
+        # 2. Value comes from a Call whose callee actually returns ptr
+        #    (V2 heap-allocates structs → Call returns ptr but MIR may say i32/etc)
+        declared_val_type = @value_types[val_id]?
+        is_ptr_value = declared_val_type == TypeRef::POINTER
+        if !is_ptr_value && llvm_type.starts_with?('i') && !llvm_type.includes?(".union")
+          if def_inst = find_def_inst(val_id)
+            if def_inst.is_a?(Call)
+              callee_func = @func_by_id[def_inst.callee]?
+              if callee_func
+                callee_mangled = mangle_function_name(callee_func.name)
+                callee_ret = @emitted_function_return_types[callee_mangled]?
+                is_ptr_value = true if callee_ret == "ptr"
+              end
+            end
+          end
+        end
+        if is_ptr_value &&
+           llvm_type.starts_with?('i') &&
            !llvm_type.includes?(".union")
           ptr_view = "%#{load_name}.ptr"
           emit "#{ptr_view} = inttoptr #{llvm_type} %#{load_name} to ptr"
@@ -11697,10 +11714,27 @@ module Crystal::MIR
         # but the slot was allocated with the prepass type. The load will use the slot type.
         slot_llvm_type = @cross_block_slot_types[val]?
         declared_val_type = @value_types[val]?
+        # Check if value is actually a pointer stored as int:
+        # 1. Declared as POINTER type, OR
+        # 2. Defined by a Call whose callee returns ptr
+        is_ptr_stored_as_int = declared_val_type == TypeRef::POINTER
+        if !is_ptr_stored_as_int && slot_llvm_type && slot_llvm_type.starts_with?('i') && !slot_llvm_type.includes?(".union")
+          if def_inst = find_def_inst(val)
+            if def_inst.is_a?(Call)
+              callee_func = @func_by_id[def_inst.callee]?
+              if callee_func
+                callee_mangled = mangle_function_name(callee_func.name)
+                callee_ret = @emitted_function_return_types[callee_mangled]?
+                is_ptr_stored_as_int = true if callee_ret == "ptr"
+              end
+            end
+          end
+        end
         # Check type compatibility:
         # - Same type: use the load directly
         # - Both ptr: compatible
         # - Both int (same size): compatible
+        # - Int slot with ptr-returning Call, ptr phi: use inttoptr bridge
         # - Union slot, primitive phi: extract payload from union
         # - Otherwise: let the type mismatch handling kick in
         is_compatible = if slot_llvm_type.nil?
@@ -11710,11 +11744,9 @@ module Crystal::MIR
                         elsif slot_llvm_type == "ptr" && phi_type == "ptr"
                           true
                         elsif phi_type == "ptr" &&
+                              is_ptr_stored_as_int &&
                               slot_llvm_type.starts_with?('i') &&
                               !slot_llvm_type.includes?(".union")
-                          # V2 heap-allocates structs, so Call results may be ptr
-                          # at LLVM level but typed as Int32/etc in MIR. Always
-                          # allow int-slot → ptr-phi via the .ptr inttoptr view.
                           true
                         elsif slot_llvm_type.starts_with?('i') && phi_type.starts_with?('i') &&
                               !slot_llvm_type.includes?(".union") && !phi_type.includes?(".union")
@@ -11725,6 +11757,7 @@ module Crystal::MIR
                         end
         if is_compatible
           if phi_type == "ptr" &&
+             is_ptr_stored_as_int &&
              slot_llvm_type &&
              slot_llvm_type.starts_with?('i') &&
              !slot_llvm_type.includes?(".union")
@@ -11769,8 +11802,8 @@ module Crystal::MIR
       incoming_pairs = inst.incoming
       missing_preds = [] of BlockId
       if current_block_id = @current_block_id
-        if block = @current_func_blocks[current_block_id]?
-          preds = block.predecessors
+        if cur_block = @current_func_blocks[current_block_id]?
+          preds = cur_block.predecessors
           if preds.any?
             # Double-validate predecessors: check both computed preds AND
             # that the block's terminator actually targets us. This catches
@@ -11908,10 +11941,18 @@ module Crystal::MIR
               if extract_info = @phi_union_to_ptr_extracts[{block, val}]?
                 "[%#{extract_info[0]}, %#{block_name.call(block)}]"
               else
+                if ENV["CRYSTAL_V2_NULL_PHI_TRACE"]?
+                  STDERR.puts "[NULL_PHI] func=#{@current_func_name} phi=#{name} val=r#{val} type=#{val_type_str} def=? reason=prepass_union_no_extract block=#{block}"
+                end
                 "[null, %#{block_name.call(block)}]"
               end
             elsif val_type_str && val_type_str.starts_with?('i') && !val_type_str.includes?(".union")
               # Int value can't be used in ptr phi - use null
+              if ENV["CRYSTAL_V2_NULL_PHI_TRACE"]?
+                def_inst_trace = find_def_inst(val)
+                def_kind = def_inst_trace ? def_inst_trace.class.name.split("::").last : "?"
+                STDERR.puts "[NULL_PHI] func=#{@current_func_name} phi=#{name} val=r#{val} type=#{val_type_str} def=#{def_kind} reason=prepass_int_in_ptr_phi block=#{block}"
+              end
               "[null, %#{block_name.call(block)}]"
           else
             # Check if value was emitted before using value_ref
@@ -11919,6 +11960,11 @@ module Crystal::MIR
             val_is_const = @constant_values.has_key?(val)
             if !val_emitted && !val_is_const
               # Undefined value in prepass ptr phi - use null
+              if ENV["CRYSTAL_V2_NULL_PHI_TRACE"]?
+                def_inst_trace = find_def_inst(val)
+                def_kind = def_inst_trace ? def_inst_trace.class.name.split("::").last : "?"
+                STDERR.puts "[NULL_PHI] func=#{@current_func_name} phi=#{name} val=r#{val} type=#{val_type_str} def=#{def_kind} reason=prepass_undef_in_ptr_phi block=#{block}"
+              end
               "[null, %#{block_name.call(block)}]"
             else
               ref = value_ref(val)
@@ -11934,18 +11980,13 @@ module Crystal::MIR
         return
       end
 
-      # Void type phi nodes are invalid in LLVM - emit as ptr with null values
+      # Void type phi nodes are invalid in LLVM - resolve as ptr phi
+      # The prepass already marks void phis as POINTER in @value_types.
+      # Instead of emitting all-null, resolve incoming values properly.
       if phi_type == "void"
-        # Emit as ptr phi with null values so the register exists for downstream use
-        incoming = incoming_pairs.map do |(block, val)|
-          "[null, %#{block_name.call(block)}]"
-        end
-        append_missing.call(incoming, "ptr")
-        emit "#{name} = phi ptr #{incoming.join(", ")}"
-        record_emitted_type(name, "ptr")
+        phi_type = "ptr"
         @value_types[inst.id] = TypeRef::POINTER
-        @in_phi_mode = false
-        return
+        # Fall through to the normal ptr phi handling below
       end
 
       is_int_type = phi_type.starts_with?('i') && phi_type != "i1" && !phi_type.includes?(".union")
@@ -12121,16 +12162,27 @@ module Crystal::MIR
               if extract_info = @phi_union_to_ptr_extracts[{block, val}]?
                 "[%#{extract_info[0]}, %#{block_name.call(block)}]"
               else
+                if ENV["CRYSTAL_V2_NULL_PHI_TRACE"]?
+                  STDERR.puts "[NULL_PHI] func=#{@current_func_name} phi=#{name} val=r#{val} type=#{val_type_str} def=? reason=union_no_extract block=#{block}"
+                end
                 "[null, %#{block_name.call(block)}]"
               end
             elsif val_type_str && val_type_str.starts_with?('i') && !val_type_str.includes?(".union")
               # Int value in ptr phi - use null
+              if ENV["CRYSTAL_V2_NULL_PHI_TRACE"]?
+                def_inst_trace = find_def_inst(val)
+                def_kind = def_inst_trace ? def_inst_trace.class.name.split("::").last : "?"
+                STDERR.puts "[NULL_PHI] func=#{@current_func_name} phi=#{name} val=r#{val} type=#{val_type_str} def=#{def_kind} reason=int_in_ptr_phi block=#{block}"
+              end
               "[null, %#{block_name.call(block)}]"
             elsif val_type_str == "float" || val_type_str == "double"
               # Float/double value in ptr phi - use null
               "[null, %#{block_name.call(block)}]"
             elsif val_type_str == "void"
               # Void value (from void call) can't be used in ptr phi - use null
+              if ENV["CRYSTAL_V2_NULL_PHI_TRACE"]?
+                STDERR.puts "[NULL_PHI] func=#{@current_func_name} phi=#{name} val=r#{val} type=void reason=void_in_ptr_phi block=#{block}"
+              end
               "[null, %#{block_name.call(block)}]"
             else
               # Check if value was emitted before using value_ref
@@ -12138,6 +12190,11 @@ module Crystal::MIR
               val_is_const = @constant_values.has_key?(val)
               if !val_emitted && !val_is_const
                 # Undefined value in ptr phi - use null
+                if ENV["CRYSTAL_V2_NULL_PHI_TRACE"]?
+                  def_inst_trace = find_def_inst(val)
+                  def_kind = def_inst_trace ? def_inst_trace.class.name.split("::").last : "?"
+                  STDERR.puts "[NULL_PHI] func=#{@current_func_name} phi=#{name} val=r#{val} type=#{val_type_str} def=#{def_kind} reason=undef_in_ptr_phi block=#{block}"
+                end
                 "[null, %#{block_name.call(block)}]"
               else
                 ref = value_ref(val)
@@ -12271,6 +12328,11 @@ module Crystal::MIR
 
         if (!val_emitted || is_void_value) && !val_is_const && !is_forward_ref
           # Truly undefined value - use safe default based on phi type
+          if ENV["CRYSTAL_V2_NULL_PHI_TRACE"]? && is_ptr_type
+            def_kind = def_inst ? def_inst.class.name.split("::").last : "?"
+            val_t = val_type_for_void ? @type_mapper.llvm_type(val_type_for_void) : "nil"
+            STDERR.puts "[NULL_PHI] func=#{@current_func_name} phi=#{name} val=r#{val} type=#{val_t} def=#{def_kind} reason=generic_undef_ptr emitted=#{val_emitted} void=#{is_void_value} const=#{val_is_const} fwdref=#{is_forward_ref} block=#{block}"
+          end
           if is_union_type
             "[zeroinitializer, %#{block_name.call(block)}]"
           elsif is_ptr_type
@@ -12292,6 +12354,10 @@ module Crystal::MIR
           if fwd_val_type_str && fwd_val_type_str != phi_type &&
              !(fwd_val_type_str == "ptr" && phi_type == "ptr")
             # Type mismatch — use safe default
+            if ENV["CRYSTAL_V2_NULL_PHI_TRACE"]? && is_ptr_type
+              def_kind = def_inst ? def_inst.class.name.split("::").last : "?"
+              STDERR.puts "[NULL_PHI] func=#{@current_func_name} phi=#{name} val=r#{val} type=#{fwd_val_type_str} def=#{def_kind} reason=fwd_type_mismatch_ptr block=#{block}"
+            end
             if is_union_type
               "[zeroinitializer, %#{block_name.call(block)}]"
             elsif is_ptr_type
@@ -12347,6 +12413,10 @@ module Crystal::MIR
             end
           elsif is_ptr_type && val_type_str && val_type_str.starts_with?('i') && !val_type_str.includes?(".union")
             # Int flowing into ptr phi - use null (type mismatch from MIR)
+            if ENV["CRYSTAL_V2_NULL_PHI_TRACE"]?
+              def_kind = def_inst ? def_inst.class.name.split("::").last : "?"
+              STDERR.puts "[NULL_PHI] func=#{@current_func_name} phi=#{name} val=r#{val} type=#{val_type_str} def=#{def_kind} reason=generic_int_in_ptr block=#{block}"
+            end
             "[null, %#{block_name.call(block)}]"
           elsif is_float_type && (val_type_str == "ptr" || val_type_str == "void")
             # Ptr/void flowing into float phi - use 0.0 (type mismatch from MIR)
@@ -12371,6 +12441,10 @@ module Crystal::MIR
               ref = "zeroinitializer"
             elsif (ref == "0" || ref.starts_with?("%r")) && is_ptr_type && val_type_str && val_type_str.starts_with?('i')
               # Int value flowing into ptr phi
+              if ENV["CRYSTAL_V2_NULL_PHI_TRACE"]?
+                def_kind = def_inst ? def_inst.class.name.split("::").last : "?"
+                STDERR.puts "[NULL_PHI] func=#{@current_func_name} phi=#{name} val=r#{val} type=#{val_type_str} def=#{def_kind} reason=generic_valueref_int_to_ptr ref=#{ref} block=#{block}"
+              end
               ref = "null"
             end
             "[#{ref}, %#{block_name.call(block)}]"

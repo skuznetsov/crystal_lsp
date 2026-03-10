@@ -45860,14 +45860,21 @@ module Crystal::HIR
             # may coerce arguments to wrong types (e.g., Math.min(Int32,Int32) -> Float32)
             best_untyped_key : String? = nil
             first_key : String? = nil
+            expected_arity = name_parts.suffix ? suffix_param_count(name_parts.suffix.not_nil!) : 0
             overload_keys.each do |key|
               # Check keys that start with mangled_prefix OR the base name itself (generic)
               unless key.starts_with?(mangled_prefix) || key == base_name
                 next
               end
-              first_key ||= key
               def_node = @function_defs[key]?
               next unless def_node
+              # Arity guard: don't pick a 0-param method for a call that expects args
+              # e.g., Type#hash (0 params) should not match Type#hash$Crystal::Hasher (1 param)
+              candidate_arity = count_non_block_params(def_node)
+              if expected_arity > 0 && candidate_arity < expected_arity
+                next
+              end
+              first_key ||= key
               # Check if this overload has all untyped params
               has_all_untyped = true
               if params = def_node.params
