@@ -912,9 +912,15 @@ module Crystal::MIR
         emit_raw @zero_struct_global_decls.to_s
       end
 
+      # Pre-register symbol name strings so they get included in string constants
+      @module.symbol_names.each { |name| get_or_create_string_global(name) }
+
       # Emit string constants at end (LLVM allows globals anywhere)
       STDERR.puts "  [LLVM] emit_string_constants..." if @progress
       emit_string_constants
+
+      # Emit symbol table for symbol_to_s (after string constants so globals are defined)
+      emit_symbol_table
 
       # Emit varargs stubs for bare iterator methods not already defined
       emit_bare_iterator_stubs
@@ -2017,6 +2023,17 @@ module Crystal::MIR
           emit_raw "#{global_name} = private unnamed_addr constant [#{len} x i8] c\"#{escaped}\\00\", align 1\n"
         end
       end
+    end
+
+    private def emit_symbol_table
+      sym_names = @module.symbol_names
+      return if sym_names.empty?
+
+      emit_raw "\n; Symbol table for symbol_to_s\n"
+      # Each entry is a pointer to a Crystal String constant (already emitted via get_or_create_string_global)
+      sym_globals = sym_names.map { |name| get_or_create_string_global(name) }
+      ptrs = sym_globals.map { |g| "ptr #{g}" }.join(", ")
+      emit_raw "@.symbol_table = private unnamed_addr constant [#{sym_names.size} x ptr] [#{ptrs}], align 8\n"
     end
 
     private def module_singleton_global_for(type_ref : TypeRef) : String
@@ -6477,10 +6494,31 @@ module Crystal::MIR
         return true
       end
 
+      # ── Symbol#to_s primitive ──
+      # Looks up the symbol integer value in the global symbol table.
+      mangled = mangle_function_name(func.name)
+      if mangled == "Symbol$Hto_s" && !@module.symbol_names.empty?
+        n = @module.symbol_names.size
+        emit_raw "; Symbol#to_s — symbol table lookup\n"
+        emit_raw "define ptr @#{mangled}(i32 %self) {\n"
+        emit_raw "entry:\n"
+        emit_raw "  %in_range = icmp ult i32 %self, #{n}\n"
+        emit_raw "  br i1 %in_range, label %lookup, label %ret_empty\n"
+        emit_raw "lookup:\n"
+        emit_raw "  %idx = zext i32 %self to i64\n"
+        emit_raw "  %ptr = getelementptr [#{n} x ptr], ptr @.symbol_table, i64 0, i64 %idx\n"
+        emit_raw "  %str = load ptr, ptr %ptr\n"
+        emit_raw "  ret ptr %str\n"
+        emit_raw "ret_empty:\n"
+        emit_raw "  ret ptr @.str.empty\n"
+        emit_raw "}\n\n"
+        @emitted_functions << mangled
+        return true
+      end
+
       # ── Primitive integer/float binary operations ──
       # Crystal defines these via @[Primitive(:binary)] with empty bodies.
       # Our compiler compiles them to trivial stubs (ret 0). Override with correct ops.
-      mangled = mangle_function_name(func.name)
       if emit_primitive_binary_override(func, mangled)
         return true
       end
@@ -7020,7 +7058,8 @@ module Crystal::MIR
                    "Int8" => {"i8", true}, "Int16" => {"i16", true}, "Int32" => {"i32", true},
                    "Int64" => {"i64", true}, "Int128" => {"i128", true},
                    "UInt8" => {"i8", false}, "UInt16" => {"i16", false}, "UInt32" => {"i32", false},
-                   "UInt64" => {"i64", false}, "UInt128" => {"i128", false}}
+                   "UInt64" => {"i64", false}, "UInt128" => {"i128", false},
+                   "Symbol" => {"i32", false}}
 
       # Check if this is a trivial function (2 blocks or less, no meaningful operations)
       is_trivial = func.blocks.size <= 3 && func.blocks.all? { |b| b.instructions.size <= 2 }
@@ -15622,8 +15661,18 @@ module Crystal::MIR
           end
         end
         if union_desc = @module.get_union_descriptor(tuple_type_ref)
-          if tuple_variant = union_desc.variants.find { |v| (t = @module.type_registry.get(v.type_ref)) && t.kind.tuple? }
-            tuple_type_ref = tuple_variant.type_ref
+          best_variant_ref = nil
+          best_variant_size = 0_u64
+          union_desc.variants.each do |v|
+            if t = @module.type_registry.get(v.type_ref)
+              if t.kind.tuple? && t.size >= best_variant_size
+                best_variant_size = t.size
+                best_variant_ref = v.type_ref
+              end
+            end
+          end
+          if best_variant_ref
+            tuple_type_ref = best_variant_ref
           end
         end
         if tuple_type = @module.type_registry.get(tuple_type_ref)
@@ -15788,8 +15837,18 @@ module Crystal::MIR
           end
         end
         if union_desc = @module.get_union_descriptor(tuple_type_ref)
-          if tuple_variant = union_desc.variants.find { |v| (t = @module.type_registry.get(v.type_ref)) && t.kind.tuple? }
-            tuple_type_ref = tuple_variant.type_ref
+          best_variant_ref = nil
+          best_variant_size = 0_u64
+          union_desc.variants.each do |v|
+            if t = @module.type_registry.get(v.type_ref)
+              if t.kind.tuple? && t.size >= best_variant_size
+                best_variant_size = t.size
+                best_variant_ref = v.type_ref
+              end
+            end
+          end
+          if best_variant_ref
+            tuple_type_ref = best_variant_ref
           end
         end
         if tuple_type = @module.type_registry.get(tuple_type_ref)
@@ -15828,6 +15887,16 @@ module Crystal::MIR
                   byte_offset += elem_size
                 end
                 emit "%#{base_name}.elem_ptr = getelementptr i8, ptr #{array_ptr}, i32 #{byte_offset}"
+                # Override element_type from the tuple's actual element type.
+                # The MIR instruction's element_type may be wrong when the source
+                # is a union-of-tuples (e.g., i32 instead of ptr for a struct field).
+                # Only override for types stored as pointers (reference/struct/tuple/array),
+                # NOT for unions (stored inline) or primitives/enums.
+                target_elem = elements[idx_const]
+                target_needs_ptr = !(target_elem.kind.primitive? || target_elem.kind.enum? || target_elem.kind.union?)
+                if target_needs_ptr && element_type != "ptr"
+                  element_type = "ptr"
+                end
               else
                 # Index exceeds detected tuple element count — type tracking mismatch.
                 # Fall back to byte-level GEP using element size.
@@ -15841,7 +15910,13 @@ module Crystal::MIR
                 emit "%#{base_name}.elem_ptr = getelementptr i8, ptr #{array_ptr}, i64 #{byte_offset}"
               end
               emit "#{name} = load #{element_type}, ptr %#{base_name}.elem_ptr"
-              @value_types[inst.id] = inst.element_type
+              # Track the actual element type — if we overrode to ptr, register as
+              # POINTER so downstream code doesn't try inttoptr on an already-ptr value.
+              if element_type == "ptr" && @type_mapper.llvm_type(inst.element_type) != "ptr"
+                @value_types[inst.id] = TypeRef::POINTER
+              else
+                @value_types[inst.id] = inst.element_type
+              end
               return
             else
               # Variable (runtime) index on a Tuple.

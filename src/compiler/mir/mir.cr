@@ -1873,6 +1873,9 @@ module Crystal::MIR
 
     @next_function_id : FunctionId = 0_u32
     @function_map : Hash(String, Function)
+    # Symbol table: maps symbol name -> integer ID for :symbol_to_s lookup
+    getter symbol_names : Array(String)
+    @symbol_name_to_id : Hash(String, Int32)
 
     def initialize(@name : String = "main")
       @functions = [] of Function
@@ -1882,6 +1885,20 @@ module Crystal::MIR
       @extern_globals = {} of String => TypeRef
       @union_descriptors = {} of TypeRef => UnionDescriptor
       @module_type_refs = Set(TypeRef).new
+      @symbol_names = [] of String
+      @symbol_name_to_id = {} of String => Int32
+    end
+
+    # Register a symbol name and return its integer ID.
+    def intern_symbol(name : String) : Int32
+      if id = @symbol_name_to_id[name]?
+        id
+      else
+        id = @symbol_names.size.to_i32
+        @symbol_names << name
+        @symbol_name_to_id[name] = id
+        id
+      end
     end
 
     # Register a union type with full descriptor for debug info

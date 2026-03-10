@@ -37520,6 +37520,8 @@ module Crystal::HIR
 
     private def lower_symbol(ctx : LoweringContext, node : CrystalV2::Compiler::Frontend::SymbolNode) : ValueId
       str = String.new(node.name)
+      # Strip leading ':' if present — symbol_to_s returns the name without the colon
+      str = str.lstrip(':')
       lit = Literal.new(ctx.next_id, TypeRef::SYMBOL, str)
       ctx.emit(lit)
       lit.id

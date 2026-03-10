@@ -329,7 +329,8 @@ module Crystal
         case class_name
         when "Int8", "Int16", "Int32", "Int64", "Int128",
              "UInt8", "UInt16", "UInt32", "UInt64", "UInt128",
-             "Float32", "Float64", "Bool", "Char", "Nil", "Void"
+             "Float32", "Float64", "Bool", "Char", "Nil", "Void",
+             "Symbol"
           next
         end
 
@@ -1076,7 +1077,13 @@ module Crystal
       when Bool
         builder.const_bool(v)
       when String
-        builder.const_string(v)
+        if lit.type == HIR::TypeRef::SYMBOL
+          # Symbol literal: intern the name and emit as i32 constant
+          sym_id = @mir_module.intern_symbol(v)
+          builder.const_int(sym_id.to_i64, TypeRef::SYMBOL)
+        else
+          builder.const_string(v)
+        end
       when Char
         # Char as i32
         builder.const_int(v.ord.to_i64, TypeRef::CHAR)
