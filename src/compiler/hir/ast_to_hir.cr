@@ -1743,6 +1743,11 @@ module Crystal::HIR
         @function_defs_processed_for_overloads = @function_defs.size
         @function_defs_cache_size = @function_defs.size
         @function_def_overloads_cache_size = @function_defs_cache_size
+        # Record the arena active when this def was first registered so that later
+        # body inference uses the correct arena (ExprIds are arena-specific indices).
+        set_function_def_arena_if_missing(name, @arena)
+        base = strip_type_suffix(name)
+        set_function_def_arena_if_missing(base, @arena) if base != name
       end
       if !is_new && old_def != def_node
         # Def entry was replaced under the same key (happens in deferred/lazy paths).
