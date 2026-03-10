@@ -2273,7 +2273,15 @@ module CrystalV2
           end
           path_node = arena[node.path]
           if path_node.is_a?(Frontend::StringNode)
-            req_path = String.new(path_node.value)
+            raw_path = path_node.value
+            req_path = String.new(raw_path)
+            if env_enabled?("DEBUG_REQ_PATH_SHAPE")
+              span = path_node.span
+              raw_size = raw_path.size
+              first_byte = raw_size > 0 ? raw_path[0].to_i : -1
+              STDERR.puts "[REQ_PATH_SHAPE] expr=#{expr_id.index} path_expr=#{node.path.index} raw_size=#{raw_size} first=#{first_byte} span=#{span.start_offset}..#{span.end_offset} req=#{req_path.inspect}"
+              STDERR.flush
+            end
             if options.verbose
               log(options, out_io, "    [req-path] #{req_path}")
             end
@@ -2944,9 +2952,9 @@ module CrystalV2
         return true if cond_text.empty?
 
         if cond_text.starts_with?("if ")
-          evaluate_macro_condition_text(cond_text.lstrip("if").strip, flags) == true
+          evaluate_macro_condition_text(cond_text.lchop("if").strip, flags) == true
         elsif cond_text.starts_with?("unless ")
-          cond = evaluate_macro_condition_text(cond_text.lstrip("unless").strip, flags)
+          cond = evaluate_macro_condition_text(cond_text.lchop("unless").strip, flags)
           cond.nil? ? false : !cond
         else
           false
@@ -2988,7 +2996,8 @@ module CrystalV2
             active = branch_active
           when Frontend::MacroPiece::Kind::ControlElseIf
             next if control_stack.empty?
-            parent_active, branch_taken, _ = control_stack[-1]
+            last_idx = control_stack.size - 1
+            parent_active, branch_taken, _ = control_stack[last_idx]
             cond_expr = piece.expr
             cond = cond_expr ? evaluate_macro_condition(arena, cond_expr, flags) : nil
             take = !branch_taken && cond == true
@@ -3000,13 +3009,14 @@ module CrystalV2
                               parent_active
                             end
             branch_taken = true if cond == true
-            control_stack[-1] = {parent_active, branch_taken, branch_active}
+            control_stack[last_idx] = {parent_active, branch_taken, branch_active}
             active = branch_active
           when Frontend::MacroPiece::Kind::ControlElse
             next if control_stack.empty?
-            parent_active, branch_taken, _ = control_stack[-1]
+            last_idx = control_stack.size - 1
+            parent_active, branch_taken, _ = control_stack[last_idx]
             branch_active = parent_active && !branch_taken
-            control_stack[-1] = {parent_active, true, branch_active}
+            control_stack[last_idx] = {parent_active, true, branch_active}
             active = branch_active
           when Frontend::MacroPiece::Kind::ControlEnd
             if control_stack.empty?
@@ -3257,7 +3267,8 @@ module CrystalV2
             active = branch_active
           when Frontend::MacroPiece::Kind::ControlElseIf
             next if control_stack.empty?
-            parent_active, branch_taken, _ = control_stack[-1]
+            last_idx = control_stack.size - 1
+            parent_active, branch_taken, _ = control_stack[last_idx]
             cond_expr = piece.expr
             cond = cond_expr ? evaluate_macro_condition(arena, cond_expr, flags) : nil
             take = !branch_taken && cond == true
@@ -3269,13 +3280,14 @@ module CrystalV2
                               parent_active
                             end
             branch_taken = true if cond == true
-            control_stack[-1] = {parent_active, branch_taken, branch_active}
+            control_stack[last_idx] = {parent_active, branch_taken, branch_active}
             active = branch_active
           when Frontend::MacroPiece::Kind::ControlElse
             next if control_stack.empty?
-            parent_active, branch_taken, _ = control_stack[-1]
+            last_idx = control_stack.size - 1
+            parent_active, branch_taken, _ = control_stack[last_idx]
             branch_active = parent_active && !branch_taken
-            control_stack[-1] = {parent_active, true, branch_active}
+            control_stack[last_idx] = {parent_active, true, branch_active}
             active = branch_active
           when Frontend::MacroPiece::Kind::ControlEnd
             if control_stack.empty?
@@ -3350,7 +3362,8 @@ module CrystalV2
             active = branch_active
           when Frontend::MacroPiece::Kind::ControlElseIf
             next if control_stack.empty?
-            parent_active, branch_taken, _ = control_stack[-1]
+            last_idx = control_stack.size - 1
+            parent_active, branch_taken, _ = control_stack[last_idx]
             cond_expr = piece.expr
             cond = cond_expr ? evaluate_macro_condition(arena, cond_expr, flags) : nil
             take = !branch_taken && cond == true
@@ -3362,13 +3375,14 @@ module CrystalV2
                               parent_active
                             end
             branch_taken = true if cond == true
-            control_stack[-1] = {parent_active, branch_taken, branch_active}
+            control_stack[last_idx] = {parent_active, branch_taken, branch_active}
             active = branch_active
           when Frontend::MacroPiece::Kind::ControlElse
             next if control_stack.empty?
-            parent_active, branch_taken, _ = control_stack[-1]
+            last_idx = control_stack.size - 1
+            parent_active, branch_taken, _ = control_stack[last_idx]
             branch_active = parent_active && !branch_taken
-            control_stack[-1] = {parent_active, true, branch_active}
+            control_stack[last_idx] = {parent_active, true, branch_active}
             active = branch_active
           when Frontend::MacroPiece::Kind::ControlEnd
             if control_stack.empty?
@@ -3537,16 +3551,16 @@ module CrystalV2
             if tag.starts_with?("skip_file")
               cond_text = tag.sub(/^skip_file/, "").strip
               skip = if cond_text.starts_with?("if ")
-                       evaluate_macro_condition_text(cond_text.lstrip("if").strip, flags)
+                       evaluate_macro_condition_text(cond_text.lchop("if").strip, flags)
                      elsif cond_text.starts_with?("unless ")
-                       val = evaluate_macro_condition_text(cond_text.lstrip("unless").strip, flags)
+                       val = evaluate_macro_condition_text(cond_text.lchop("unless").strip, flags)
                        val.nil? ? nil : !val
                      else
                        true
                      end
               return [] of String if skip == true
             elsif tag.starts_with?("if ")
-              cond = evaluate_macro_condition_text(tag.lstrip("if").strip, flags)
+              cond = evaluate_macro_condition_text(tag.lchop("if").strip, flags)
               parent_active = active
               branch_active = if cond == true
                                 parent_active
@@ -3559,7 +3573,7 @@ module CrystalV2
               control_stack << {parent_active, branch_taken, branch_active}
               active = branch_active
             elsif tag.starts_with?("unless ")
-              cond = evaluate_macro_condition_text(tag.lstrip("unless").strip, flags)
+              cond = evaluate_macro_condition_text(tag.lchop("unless").strip, flags)
               cond = cond.nil? ? nil : !cond
               parent_active = active
               branch_active = if cond == true
@@ -3574,8 +3588,9 @@ module CrystalV2
               active = branch_active
             elsif tag.starts_with?("elsif ")
               next if control_stack.empty?
-              parent_active, branch_taken, _ = control_stack[-1]
-              cond = evaluate_macro_condition_text(tag.lstrip("elsif").strip, flags)
+              last_idx = control_stack.size - 1
+              parent_active, branch_taken, _ = control_stack[last_idx]
+              cond = evaluate_macro_condition_text(tag.lchop("elsif").strip, flags)
               take = !branch_taken && cond == true
               branch_active = if cond == false
                                 false
@@ -3585,13 +3600,14 @@ module CrystalV2
                                 parent_active
                               end
               branch_taken = true if cond == true
-              control_stack[-1] = {parent_active, branch_taken, branch_active}
+              control_stack[last_idx] = {parent_active, branch_taken, branch_active}
               active = branch_active
             elsif tag == "else"
               next if control_stack.empty?
-              parent_active, branch_taken, _ = control_stack[-1]
+              last_idx = control_stack.size - 1
+              parent_active, branch_taken, _ = control_stack[last_idx]
               branch_active = parent_active && !branch_taken
-              control_stack[-1] = {parent_active, true, branch_active}
+              control_stack[last_idx] = {parent_active, true, branch_active}
               active = branch_active
             elsif tag == "end"
               if control_stack.empty?
