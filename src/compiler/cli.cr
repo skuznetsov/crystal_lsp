@@ -1815,6 +1815,9 @@ module CrystalV2
             clang_cmd = "clang #{opt_flag} #{lto_flag} #{pgo_flags.join(" ")} -o #{options.output} #{opt_ll_file}"
             clang_cmd += " #{runtime_stub}" if File.exists?(runtime_stub)
             clang_cmd += " #{link_flags_str}" unless link_flags_str.empty?
+            if extra = ENV["CRYSTAL_V2_EXTRA_LINK_FLAGS"]?
+              clang_cmd += " #{extra}"
+            end
             clang_cmd += " 2>&1"
 
             log(options, out_io, "  $ #{clang_cmd}")
@@ -1827,6 +1830,9 @@ module CrystalV2
           else
             link_cmd = "cc -o #{options.output} #{link_objs.join(" ")}"
             link_cmd += " #{link_flags_str}" unless link_flags_str.empty?
+            if extra = ENV["CRYSTAL_V2_EXTRA_LINK_FLAGS"]?
+              link_cmd += " #{extra}"
+            end
             link_cmd += " 2>&1"
             log(options, out_io, "  $ #{link_cmd}")
             link_result = `#{link_cmd}`
@@ -3481,6 +3487,7 @@ module CrystalV2
         segment_start = 0
         bytes = text.to_slice
         size = bytes.size
+        # STDERR.puts "[MACRO_RAW] size=#{size} text=#{text[0, {size, 80}.min].inspect}"
         in_line_comment = false
         in_string = false
         in_char = false

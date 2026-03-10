@@ -2069,14 +2069,23 @@ module Crystal::HIR
         base_key = name_parts.base
 
         # Tier 2: check parent class cache (shared across all overloads of same method)
-        if @parent_class_for_method.has_key?(base_key)
+        cache_hit = @parent_class_for_method.has_key?(base_key)
+        if cache_hit
           if found_parent = @parent_class_for_method[base_key]
             # Direct lookup in the known parent class — skip chain walk entirely
             result = find_method_in_parent_via_index(found_parent, method, suffix)
           end
-          # If cached as nil: no parent has this method, result stays nil
-        else
-          # Full parent chain walk (first time for this base method)
+          # If cached as nil: no parent has this method, result stays nil.
+        end
+
+        # Fall through to full parent chain walk when:
+        # 1. Cache not populated yet (first time for this base method), OR
+        # 2. Cache hit but no result AND we have a suffix — different overloads
+        #    (e.g. hash() vs hash(Crystal::Hasher)) may come from DIFFERENT
+        #    ancestors (Object vs Number). The cache was set by a different
+        #    overload and doesn't apply to this one.
+        if result.nil? && (!cache_hit || suffix)
+          # Full parent chain walk
           found_parent_name : String? = nil
 
           # Use pre-computed parent chain to avoid repeated @class_info lookups
@@ -2138,8 +2147,12 @@ module Crystal::HIR
             break if result
           end
 
-          # Store parent class for all future overloads of this method
-          @parent_class_for_method[base_key] = found_parent_name
+          # Only update the cache when it wasn't already set.
+          # When falling through due to suffix mismatch, don't overwrite
+          # the cached parent — it's correct for the no-suffix case.
+          unless cache_hit
+            @parent_class_for_method[base_key] = found_parent_name
+          end
         end
       end
 
@@ -11773,6 +11786,10 @@ module Crystal::HIR
     private def bump_class_info_version : Nil
       @class_info_version += 1
       clear_receiver_specialization_caches
+      # Parent chain cache depends on class_info — invalidate when hierarchy changes
+      @parent_chains.clear
+      @parent_lookup_cache.clear
+      @parent_class_for_method.clear
     end
 
     @[AlwaysInline]
@@ -46193,12 +46210,19 @@ module Crystal::HIR
               method_short = method_part
               use_object_target = method_short == "in?"
               object_base = "Object##{method_part}"
+              expected_arity = name_parts.suffix ? suffix_param_count(name_parts.suffix.not_nil!) : 0
               if candidate = @function_defs[object_base]?
-                func_def = candidate
-                arena = @function_def_arenas[object_base]
-                target_name = use_object_target ? object_base : (name.includes?('$') ? name : base_name)
-                lookup_branch = "object_fallback"
-              elsif (suffix = name_parts.suffix)
+                # Guard: don't pick Object's no-arg method for a call that has args.
+                # e.g., Object#hash (0 params) should not match SomeType#hash$Crystal::Hasher (1 param).
+                candidate_arity = candidate.params.try { |ps| ps.count { |p| !p.is_block && !named_only_separator?(p) } } || 0
+                if expected_arity == 0 || candidate_arity >= expected_arity
+                  func_def = candidate
+                  arena = @function_def_arenas[object_base]
+                  target_name = use_object_target ? object_base : (name.includes?('$') ? name : base_name)
+                  lookup_branch = "object_fallback"
+                end
+              end
+              if !func_def && (suffix = name_parts.suffix)
                 object_mangled = "#{object_base}$#{suffix}"
                 if candidate = @function_defs[object_mangled]?
                   func_def = candidate
