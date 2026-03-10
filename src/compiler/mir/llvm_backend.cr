@@ -6710,9 +6710,11 @@ module Crystal::MIR
         emit_raw "  ret #{ret_type} zeroinitializer\n"
         emit_raw "}\n\n"
         return true
-      elsif mangled == "Regex$CCMatchData$Hbyte_begin$$Int32"
+      elsif mangled == "Regex$CCMatchData$Hbyte_begin$$Int32" ||
+            mangled == "Regex$CCMatchData$Hbyte_begin$$arity1"
         # Regex::MatchData#byte_begin(n : Int32) : Int32
         # Reads ovector[n*2] from MatchData. MatchData layout: ovector ptr at offset 40.
+        # The arity1 variant is the default-argument version (n=0) — same signature.
         emit_raw "; Regex::MatchData#byte_begin — PCRE2 runtime override\n"
         emit_raw "define i32 @#{mangled}(ptr %self, i32 %n) {\n"
         emit_raw "entry:\n"
@@ -9006,9 +9008,9 @@ module Crystal::MIR
         # Pre-emit an int->ptr view for ptr phis that consume integer-typed slots.
         # This keeps phi incoming values in predecessor blocks and avoids
         # dominance/type issues when ptr values are spill-encoded as integers.
-        declared_val_type = @value_types[val_id]?
-        if declared_val_type == TypeRef::POINTER &&
-           llvm_type.starts_with?('i') &&
+        # Always emit for int-typed slots — V2 heap-allocates structs so many
+        # Call results are ptr at LLVM level but typed as Int32/etc in MIR.
+        if llvm_type.starts_with?('i') &&
            !llvm_type.includes?(".union")
           ptr_view = "%#{load_name}.ptr"
           emit "#{ptr_view} = inttoptr #{llvm_type} %#{load_name} to ptr"
@@ -11708,9 +11710,11 @@ module Crystal::MIR
                         elsif slot_llvm_type == "ptr" && phi_type == "ptr"
                           true
                         elsif phi_type == "ptr" &&
-                              declared_val_type == TypeRef::POINTER &&
                               slot_llvm_type.starts_with?('i') &&
                               !slot_llvm_type.includes?(".union")
+                          # V2 heap-allocates structs, so Call results may be ptr
+                          # at LLVM level but typed as Int32/etc in MIR. Always
+                          # allow int-slot → ptr-phi via the .ptr inttoptr view.
                           true
                         elsif slot_llvm_type.starts_with?('i') && phi_type.starts_with?('i') &&
                               !slot_llvm_type.includes?(".union") && !phi_type.includes?(".union")
@@ -11721,7 +11725,6 @@ module Crystal::MIR
                         end
         if is_compatible
           if phi_type == "ptr" &&
-             declared_val_type == TypeRef::POINTER &&
              slot_llvm_type &&
              slot_llvm_type.starts_with?('i') &&
              !slot_llvm_type.includes?(".union")
