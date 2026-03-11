@@ -2587,9 +2587,6 @@ module CrystalV2
           pending_annotations.clear
         when Frontend::ClassNode
           class_nodes << {node, arena}
-          if pending_annotation_has?(pending_annotations, "Acyclic")
-            acyclic_types << String.new(node.name)
-          end
           pending_annotations.clear
         when Frontend::ModuleNode
           module_nodes << {node, arena}
@@ -3989,10 +3986,13 @@ module CrystalV2
 
       private def pending_annotation_has?(
         pending_annotations : Array(Tuple(Frontend::AnnotationNode, Frontend::ArenaLike)),
+        arena : Frontend::ArenaLike,
         name : String
       ) : Bool
-        pending_annotations.any? do |ann_node, ann_arena|
-          annotation_name_from_expr(ann_arena, ann_node.name) == name
+        pending_annotations.any? do |ann_node, _ann_arena|
+          # Use the caller's arena instead of stored ann_arena to avoid
+          # null arena issues in self-hosted builds (union tuple storage)
+          annotation_name_from_expr(arena, ann_node.name) == name
         end
       end
 
