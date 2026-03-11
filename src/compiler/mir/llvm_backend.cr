@@ -7004,9 +7004,37 @@ module Crystal::MIR
       key_suffix = mangled.split("$Hkey_hash$$", 2)[1]?
       return nil if key_suffix.nil? || key_suffix.empty?
 
+      # Try exact specific hash(hasher) for this type
       target = "#{key_suffix}$Hhash$$Crystal$CCHasher"
       if func = @module.functions.find { |f| mangle_function_name(f.name) == target }
         return mangle_function_name(func.name)
+      end
+
+      # For tuple types, try the generic Tuple#hash(Crystal::Hasher)
+      if key_type.kind.tuple?
+        generic_target = "Tuple$Hhash$$Crystal$CCHasher"
+        if func = @module.functions.find { |f| mangle_function_name(f.name) == generic_target }
+          return mangle_function_name(func.name)
+        end
+      end
+
+      # For named tuple types, try the generic NamedTuple#hash(Crystal::Hasher)
+      if key_type.name.starts_with?("NamedTuple(")
+        generic_target = "NamedTuple$Hhash$$Crystal$CCHasher"
+        if func = @module.functions.find { |f| mangle_function_name(f.name) == generic_target }
+          return mangle_function_name(func.name)
+        end
+      end
+
+      # Try stripping type parameters from name to find base type hash
+      # e.g. Foo(Bar) -> Foo$Hhash$$Crystal$CCHasher
+      base_name = key_type.name.split("(", 2).first
+      if base_name != key_type.name
+        base_mangled = base_name.gsub("::", "$CC")
+        base_target = "#{base_mangled}$Hhash$$Crystal$CCHasher"
+        if func = @module.functions.find { |f| mangle_function_name(f.name) == base_target }
+          return mangle_function_name(func.name)
+        end
       end
 
       nil

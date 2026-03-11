@@ -1387,7 +1387,43 @@ module Crystal
         @inline_struct_ptrs << field.id
         field_ptr
       else
-        builder.load(field_ptr, convert_type(field.type))
+        field_mir_type = convert_type(field.type)
+
+        # Check if the actual field storage type (from class layout) is a wider union
+        # than the FieldGet result type. This happens when type widening expands a
+        # declared type (e.g., ArenaLike = 3 variants, all-ref → ptr) to a wider union
+        # (e.g., 6 variants, non-all-ref → {i32, [N x i32]}). The FieldGet uses the
+        # narrow type but the field actually stores the wider union struct.
+        # In that case, load from the payload offset instead of the field base.
+        actual_load_type = field_mir_type
+        if obj_hir_type = @hir_value_types[field.object]?
+          obj_mir_type = convert_type(obj_hir_type)
+          if mir_type = @mir_module.type_registry.get(obj_mir_type)
+            if fields = mir_type.fields
+              if found_field = fields.find { |f| f.name == field.field_name && f.offset == field.field_offset.to_u32 }
+                if found_field.type_ref != field_mir_type
+                  if actual_type = @mir_module.type_registry.get(found_field.type_ref)
+                    if actual_type.kind.union?
+                      # The field stores a non-all-ref union struct but FieldGet wants
+                      # a narrower type (ptr-backed all-ref union or plain reference).
+                      # Only adjust if the actual field is NOT an all-ref union (those
+                      # are already stored as ptr and don't need offset adjustment).
+                      actual_descriptor = @mir_module.get_union_descriptor(found_field.type_ref)
+                      if actual_descriptor && !all_ref_union_descriptor?(actual_descriptor)
+                        # GEP past the union header to the payload and load from there.
+                        # The LLVM union type is {i32, [N x i32]} with payload at offset 4
+                        # (sizeof(i32) header).
+                        field_ptr = builder.gep(obj_ptr, [(field.field_offset.to_u32 + 4_u32)], TypeRef::POINTER)
+                      end
+                    end
+                  end
+                end
+              end
+            end
+          end
+        end
+
+        builder.load(field_ptr, actual_load_type)
       end
     end
 
@@ -4321,9 +4357,24 @@ module Crystal
         cond = get_value(term.condition)
         then_block = mir_block_for(term.then_block)
         else_block = mir_block_for(term.else_block)
+        if ENV["DEBUG_BRANCH_LOWER"]? && @current_hir_func.try(&.name).try(&.includes?("upsert"))
+          # Trace what HIR value the condition is
+          hir_val : HIR::Value? = nil
+          @current_hir_func.try do |f|
+            f.blocks.each do |blk|
+              blk.instructions.each do |inst|
+                hir_val = inst if inst.id == term.condition
+              end
+            end
+          end
+          STDERR.puts "[BRANCH_LOWER] func=#{@current_hir_func.try(&.name)} cond_hir=#{term.condition.to_u32} cond_mir=#{cond.to_u32} then=#{then_block} else=#{else_block} hir_val_class=#{hir_val.class.name} hir_val=#{hir_val}"
+        end
         builder.branch(cond, then_block, else_block)
       when HIR::Jump
         target = mir_block_for(term.target)
+        if ENV["DEBUG_BRANCH_LOWER"]? && @current_hir_func.try(&.name).try(&.includes?("upsert"))
+          STDERR.puts "[JUMP_LOWER] func=#{@current_hir_func.try(&.name)} target=#{target}"
+        end
         builder.jump(target)
       when HIR::Switch
         value = get_value(term.value)

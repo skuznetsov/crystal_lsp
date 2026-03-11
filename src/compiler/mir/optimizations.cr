@@ -1869,6 +1869,9 @@ module Crystal::MIR
           cond_value = constants[cond_id]?
           next unless cond_value.is_a?(Bool)
 
+          if ENV["MIR_PEEPHOLE_DEBUG"]?
+            STDERR.puts "[MIR_PEEPHOLE] Branch→Jump: func=#{@function.name} block=#{block.id} cond_id=#{cond_id.to_u32} cond_value=#{cond_value} then=#{term.then_block} else=#{term.else_block}"
+          end
           target = cond_value ? term.then_block : term.else_block
           block.terminator = Jump.new(target)
           @simplified += 1

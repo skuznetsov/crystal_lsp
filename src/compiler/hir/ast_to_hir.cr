@@ -18753,6 +18753,7 @@ module Crystal::HIR
       buffer_ptr = malloc_call.id
 
       # Build args for internal 3-arg allocator: Slice.new(pointer, size, read_only=false)
+      STDERR.puts "[LITERAL_FALSE_L18756]" if ENV["DEBUG_LITERAL_FALSE"]?
       false_lit = Literal.new(ctx.next_id, TypeRef::BOOL, false)
       ctx.emit(false_lit)
       ctx.register_type(false_lit.id, TypeRef::BOOL)
@@ -39742,34 +39743,44 @@ module Crystal::HIR
       when CrystalV2::Compiler::Frontend::CallNode
         callee_node = @arena[node.callee]
         if callee_node.is_a?(CrystalV2::Compiler::Frontend::MemberAccessNode) &&
-           String.new(callee_node.member) == "nil?" &&
            node.args.empty?
-          recv_node = @arena[callee_node.object]
-          recv_type : TypeRef? = nil
-          case recv_node
-          when CrystalV2::Compiler::Frontend::IdentifierNode
-            if local_id = ctx.lookup_local(String.new(recv_node.name))
-              recv_type = ctx.type_of(local_id)
+          callee_member = String.new(callee_node.member)
+          is_nil_check = callee_member == "nil?"
+          is_null_check = callee_member == "null?"
+          if is_nil_check || is_null_check
+            recv_node = @arena[callee_node.object]
+            recv_type : TypeRef? = nil
+            case recv_node
+            when CrystalV2::Compiler::Frontend::IdentifierNode
+              if local_id = ctx.lookup_local(String.new(recv_node.name))
+                recv_type = ctx.type_of(local_id)
+              end
+            when CrystalV2::Compiler::Frontend::InstanceVarNode
+              recv_type = static_instance_var_type_ref(String.new(recv_node.name))
             end
-          when CrystalV2::Compiler::Frontend::InstanceVarNode
-            recv_type = static_instance_var_type_ref(String.new(recv_node.name))
-          end
 
-          return nil unless recv_type
-          return true if recv_type == TypeRef::NIL
-          # Non-union, non-nil type => cannot be nil.
-          unless is_union_type?(recv_type)
-            return false
+            return nil unless recv_type
+
+            # null? on Pointer types: cannot be statically determined (pointer may be null)
+            if is_null_check
+              return nil
+            end
+
+            return true if recv_type == TypeRef::NIL
+            # Non-union, non-nil type => cannot be nil.
+            unless is_union_type?(recv_type)
+              return false
+            end
+            # Union without Nil variant => cannot be nil.
+            return false if get_union_variant_id(recv_type, TypeRef::NIL) < 0
+            # Nilable union => unknown at compile time.
+            return nil
           end
-          # Union without Nil variant => cannot be nil.
-          return false if get_union_variant_id(recv_type, TypeRef::NIL) < 0
-          # Nilable union => unknown at compile time.
-          return nil
         end
         nil
       when CrystalV2::Compiler::Frontend::MemberAccessNode
-        # Some nil? predicates are represented as bare member access nodes.
-        return nil unless String.new(node.member) == "nil?"
+        member_str = String.new(node.member)
+        return nil unless member_str == "nil?" || member_str == "null?"
 
         recv_node = @arena[node.object]
         recv_type2 : TypeRef? = nil
@@ -39783,6 +39794,12 @@ module Crystal::HIR
         end
 
         return nil unless recv_type2
+
+        # null? on Pointer types: cannot be statically determined
+        if member_str == "null?"
+          return nil  # Always dynamic — let lower_member_access emit the actual null check
+        end
+
         return true if recv_type2 == TypeRef::NIL
         unless is_union_type?(recv_type2)
           return false
@@ -40011,6 +40028,7 @@ module Crystal::HIR
 
     private def combine_boolean_checks(ctx : LoweringContext, checks : Array(ValueId)) : ValueId
       if checks.empty?
+        STDERR.puts "[LITERAL_FALSE_L40015]" if ENV["DEBUG_LITERAL_FALSE"]?
         lit = Literal.new(ctx.next_id, TypeRef::BOOL, false)
         ctx.emit(lit)
         return lit.id
@@ -40088,6 +40106,7 @@ module Crystal::HIR
       end
 
       if value_type == TypeRef::NIL || value_type == TypeRef::VOID
+        STDERR.puts "[LITERAL_FALSE_L40093]" if ENV["DEBUG_LITERAL_FALSE"]?
         lit = Literal.new(ctx.next_id, TypeRef::BOOL, false)
         ctx.emit(lit)
         return lit.id
@@ -42565,6 +42584,7 @@ module Crystal::HIR
               ctx.register_type(uis.id, TypeRef::BOOL)
               uis.id
             else
+              STDERR.puts "[LITERAL_FALSE_L42571]" if ENV["DEBUG_LITERAL_FALSE"]?
               fl = Literal.new(ctx.next_id, TypeRef::BOOL, false)
               ctx.emit(fl)
               fl.id
@@ -42585,6 +42605,7 @@ module Crystal::HIR
               ctx.emit(ao)
               ao.id
             else
+              STDERR.puts "[LITERAL_FALSE_L42592]" if ENV["DEBUG_LITERAL_FALSE"]?
               fl = Literal.new(ctx.next_id, TypeRef::BOOL, false)
               ctx.emit(fl)
               fl.id
@@ -42849,6 +42870,7 @@ module Crystal::HIR
               return lit.id
             else
               # Non-nilable type: nil? is always false
+              STDERR.puts "[LITERAL_FALSE_L42857]" if ENV["DEBUG_LITERAL_FALSE"]?
               lit = Literal.new(ctx.next_id, TypeRef::BOOL, false)
               ctx.emit(lit)
               ctx.register_type(lit.id, TypeRef::BOOL)
@@ -42970,6 +42992,7 @@ module Crystal::HIR
                 ctx.register_type(lit.id, TypeRef::BOOL)
                 return lit.id
               else
+                STDERR.puts "[LITERAL_FALSE_L42979]" if ENV["DEBUG_LITERAL_FALSE"]?
                 lit = Literal.new(ctx.next_id, TypeRef::BOOL, false)
                 ctx.emit(lit)
                 ctx.register_type(lit.id, TypeRef::BOOL)
@@ -50298,6 +50321,7 @@ module Crystal::HIR
           ctx.register_type(eq_check.id, TypeRef::BOOL)
           return eq_check.id
         else
+          STDERR.puts "[LITERAL_FALSE_L50308]" if ENV["DEBUG_LITERAL_FALSE"]?
           lit = Literal.new(ctx.next_id, TypeRef::BOOL, false)
           ctx.emit(lit)
           return lit.id
@@ -62288,7 +62312,6 @@ module Crystal::HIR
     private def lower_member_access(ctx : LoweringContext, node : CrystalV2::Compiler::Frontend::MemberAccessNode) : ValueId
       obj_node = @arena[node.object]
       member_name = String.new(node.member)
-
       # Proc#call intercept for zero-arg calls (parsed as MemberAccessNode, not CallNode)
       if member_name == "call"
         proc_recv_id = lower_expr(ctx, node.object)
@@ -62985,6 +63008,36 @@ module Crystal::HIR
           ctx.register_type(eq_check.id, TypeRef::BOOL)
           return eq_check.id
         else
+          lit = Literal.new(ctx.next_id, TypeRef::BOOL, false)
+          ctx.emit(lit)
+          return lit.id
+        end
+      end
+
+      # Handle null? intrinsic — Pointer#null? checks if pointer is zero.
+      # When V2 widens @entries from Pointer to a non-Pointer type (e.g. Array),
+      # the Pointer intrinsic at line 52784 doesn't fire. We handle it here:
+      # emit ptrtoint == 0 for any reference/pointer type since they're all pointers at LLVM level.
+      if member_name == "null?"
+        recv_desc = @module.get_type_descriptor(receiver_type)
+        # Any heap-allocated or pointer-like type is a raw pointer at LLVM level.
+        # Also handle Union kind — if null? is called on a union, the runtime value
+        # is either a discriminated union struct or (for all-ref unions) a bare pointer.
+        # In both cases, treat as potentially null-checkable pointer.
+        is_ref = receiver_type == TypeRef::POINTER ||
+                 (recv_desc && !recv_desc.kind.primitive? && recv_desc.kind != MIR::TypeKind::Enum)
+        if is_ref
+          addr = Cast.new(ctx.next_id, TypeRef::UINT64, object_id, TypeRef::UINT64)
+          ctx.emit(addr)
+          ctx.register_type(addr.id, TypeRef::UINT64)
+          zero = Literal.new(ctx.next_id, TypeRef::UINT64, 0_i64)
+          ctx.emit(zero)
+          cmp = BinaryOperation.new(ctx.next_id, TypeRef::BOOL, BinaryOp::Eq, addr.id, zero.id)
+          ctx.emit(cmp)
+          ctx.register_type(cmp.id, TypeRef::BOOL)
+          return cmp.id
+        else
+          # Non-reference types can't be null
           lit = Literal.new(ctx.next_id, TypeRef::BOOL, false)
           ctx.emit(lit)
           return lit.id
@@ -69041,6 +69094,7 @@ module Crystal::HIR
       if nil_variant_id < 0
         # Fallback: if we can't resolve a union variant, conservatively return false.
         # This should be rare (union descriptors are registered during AST->HIR conversion).
+        STDERR.puts "[LITERAL_FALSE_L69053]" if ENV["DEBUG_LITERAL_FALSE"]?
         lit = Literal.new(ctx.next_id, TypeRef::BOOL, false)
         ctx.emit(lit)
         return lit.id
