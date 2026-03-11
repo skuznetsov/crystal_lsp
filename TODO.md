@@ -22,6 +22,44 @@ closure cells, Tuple ptr/value confusion.
 - [ ] **Phase 5: FIX RC-3** — String.build block lowering
 - [ ] **Phase 6: RE-ENABLE RTA + BOOTSTRAP** — stage0→stage1→stage2→stage3 + benchmark
 
+### Current checkpoint (2026-03-11 string-pool ownership fix for self-hosted parser names)
+
+- Verified a distinct self-hosted corruption class in `Frontend::StringPool`:
+  - `src/compiler/frontend/string_pool.cr` stored the caller-provided
+    `Slice(UInt8)` as the canonical interned value;
+  - that is unsafe for parser-built names created from temporary `String`
+    objects (`String.build`, percent-literal words, setter names, etc.).
+- Corrective change on the current worktree:
+  - `StringPool` now owns a canonical `String` for each entry and returns
+    slices from that owned string instead of retaining external slice memory.
+- New focused oracle:
+  - `regression_tests/stage2_method_name_corruption_repro.sh`
+  - it runs self-hosted stage2 with `DEBUG_METHOD_REGISTER_FILTER=1` and fails
+    only if the old corrupted `WinError.{% end` family appears again.
+- Fresh verification on the clean release pair built before later experiments:
+  - `stage1 --release`:
+    - `/usr/bin/time -p scripts/build_stage1_original_release.sh /private/tmp/stage1_rel_string_pool_own_20260311`
+      -> `real 386.63`
+  - `stage2 --release`:
+    - `/usr/bin/time -p scripts/build_stage2_release.sh /private/tmp/stage1_rel_string_pool_own_20260311 /private/tmp/stage2_rel_string_pool_own_20260311`
+      -> `real 234.09`
+  - focused corruption oracle:
+    - `bash regression_tests/stage2_method_name_corruption_repro.sh /private/tmp/stage2_rel_string_pool_own_20260311`
+      -> `not reproduced`
+      -> compiler still exits `139`, but no corrupted `{% end` method names are present
+  - adjacent focused control:
+    - `bash regression_tests/stage2_parse_prelude_nocodegen_repro.sh /private/tmp/stage2_rel_string_pool_own_20260311`
+      -> `PASS`
+- Boundary after the fix:
+  - bogus self-hosted method registrations for `Errno` / `WinError` are gone;
+  - stage2 still is not generally stable:
+    - `bash regression_tests/stage2_basic_sanity_crash_repro.sh /private/tmp/stage2_rel_string_pool_own_20260311`
+      -> `reproduced non-zero failure: exit 138`
+    - `bash scripts/stage2_minimal_compile_repro.sh /private/tmp/stage2_rel_string_pool_own_20260311`
+      -> `failed (exit 138)`
+  - so this checkpoint closes one real parser/string-lifetime corruption class
+    without yet clearing stable stage2/stage3 bootstrap.
+
 ### Current checkpoint (2026-03-09 explicit `parse_macro_body(false)` for macro definitions)
 
 - Verified that the fresh stage2 `%value` macro-body parser failure was not caused by

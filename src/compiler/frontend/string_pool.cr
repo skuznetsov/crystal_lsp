@@ -27,21 +27,16 @@ module CrystalV2
       #
       # ## Lifetime Management
       #
-      # StringPool does NOT copy slices - it assumes input slices have sufficient
-      # lifetime (either from source @rope or from @processed_strings array).
-      # This is safe because:
-      # - Lexer slices come from @rope.bytes (lives entire lexer lifetime)
-      # - Parser slices come from tokens (which reference lexer slices)
-      # - Processed strings stored in @processed_strings (lives entire lexer lifetime)
+      # StringPool owns the canonical String for each entry. That keeps returned
+      # slices valid even when callers intern temporary Strings or short-lived
+      # Slice(UInt8) views.
       #
       class StringPool
-        # Hash mapping string content to canonical slice
-        @pool : Hash(String, Slice(UInt8))
-        @string_cache : Hash(Slice(UInt8), String)
+        # Hash mapping string content to an owned canonical String.
+        @pool : Hash(String, String)
 
         def initialize
-          @pool = {} of String => Slice(UInt8)
-          @string_cache = {} of Slice(UInt8) => String
+          @pool = {} of String => String
         end
 
         # Intern a slice, returning canonical copy
@@ -58,40 +53,21 @@ module CrystalV2
         # canonical1.object_id == canonical2.object_id  # => true
         # ```
         def intern(slice : Slice(UInt8)) : Slice(UInt8)
-          # Convert to string for hash key
-          str = String.new(slice)
-
-          # Return cached if exists
-          if cached = @pool[str]?
-            return cached
-          end
-
-          # Store this slice as canonical
-          @pool[str] = slice
-          slice
+          intern_string(String.new(slice)).to_slice
         end
 
         # Intern a slice and return a canonical String (no repeated allocations).
-        #
-        # The slice bytes must remain valid for the duration of the pool.
         def intern_string(slice : Slice(UInt8)) : String
-          if cached = @string_cache[slice]?
-            return cached
-          end
-          str = String.new(slice)
-          @string_cache[slice] = str
-          @pool[str] = slice unless @pool.has_key?(str)
-          str
+          intern_string(String.new(slice))
         end
 
         # Intern a String value and return a canonical String.
         def intern_string(str : String) : String
-          slice = str.to_slice
-          if cached = @string_cache[slice]?
+          if cached = @pool[str]?
             return cached
           end
-          @string_cache[slice] = str
-          @pool[str] = slice unless @pool.has_key?(str)
+
+          @pool[str] = str
           str
         end
 
