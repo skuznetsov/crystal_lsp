@@ -20081,9 +20081,19 @@ module Crystal::HIR
                 needs_repair = !span_fits_source?(method_arena, node.span)
               end
               if needs_repair
-                repaired_arena = resolve_arena_for_def(node, method_arena)
+                # When the stored arena is too small, try @arena (current file context)
+                # before expensive resolve_arena_for_def. The current @arena is often
+                # correct — e.g., when lowering Fiber#initialize(Void*, Thread) while
+                # processing fiber.cr, the base_name may have been registered with a
+                # small macro-expansion arena from a different overload.
+                if arena_from_stored && max_index < @arena.size && arena_fits_def?(@arena, node)
+                  repaired_arena = @arena
+                else
+                  repaired_arena = resolve_arena_for_def(node, method_arena)
+                end
                 if repaired_arena != method_arena
                   method_arena = repaired_arena
+                  arena_from_stored = true
                   set_function_def_arena(full_name, repaired_arena)
                   if debug_env_filter_match?("DEBUG_METHOD_ARENA_USE", class_name, method_name, full_name)
                     path = source_path_for(repaired_arena) || "(unknown)"
