@@ -3487,7 +3487,7 @@ module CrystalV2
         segment_start = 0
         bytes = text.to_slice
         size = bytes.size
-        # STDERR.puts "[MACRO_RAW] size=#{size} text=#{text[0, {size, 80}.min].inspect}"
+        # STDERR.puts "[MACRO_RAW] size=#{size} ptr=#{text.to_unsafe.address} text=#{text[0, {size, 80}.min].inspect}"
         in_line_comment = false
         in_string = false
         in_char = false

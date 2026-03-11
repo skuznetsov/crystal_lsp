@@ -13109,12 +13109,13 @@ module Crystal::HIR
 
     private def register_enum_methods(node : CrystalV2::Compiler::Frontend::EnumNode, enum_name : String)
       return unless body = node.body
+      saved_arena = @arena
 
       body.each do |expr_id|
         member = unwrap_visibility_member(@arena[expr_id])
         case member
         when CrystalV2::Compiler::Frontend::DefNode
-          register_type_method_from_def(member, enum_name)
+          register_type_method_from_def(member, enum_name, saved_arena)
         when CrystalV2::Compiler::Frontend::MacroDefNode
           register_macro(member, enum_name)
         when CrystalV2::Compiler::Frontend::MacroIfNode
@@ -13153,7 +13154,7 @@ module Crystal::HIR
               member = unwrap_visibility_member(@arena[expr_id])
               next unless member.is_a?(CrystalV2::Compiler::Frontend::DefNode)
               next if member.receiver # skip class methods
-              register_type_method_from_def(member, enum_name)
+              register_type_method_from_def(member, enum_name, @arena)
             end
           end
         end
@@ -13379,7 +13380,7 @@ module Crystal::HIR
       members[member_name] = value unless members.has_key?(member_name)
     end
 
-    private def register_type_method_from_def(member : CrystalV2::Compiler::Frontend::DefNode, type_name : String)
+    private def register_type_method_from_def(member : CrystalV2::Compiler::Frontend::DefNode, type_name : String, known_arena : CrystalV2::Compiler::Frontend::ArenaLike? = nil)
       method_name = String.new(member.name)
       is_class_method = if recv = member.receiver
                           String.new(recv) == "self"
@@ -13391,7 +13392,15 @@ module Crystal::HIR
                   else
                     "#{type_name}##{method_name}"
                   end
-      member_arena = if arena_fits_def?(@arena, member)
+      # Use known_arena if provided (caller guarantees correctness, e.g., when the
+      # member was just accessed from that arena). Otherwise, prefer the already-stored
+      # arena, then @arena, then resolve.
+      stored_arena = @function_def_arenas[base_name]?
+      member_arena = if known_arena
+                       known_arena
+                     elsif stored_arena && arena_fits_def?(stored_arena, member)
+                       stored_arena
+                     elsif arena_fits_def?(@arena, member)
                        @arena
                      else
                        resolve_arena_for_def(member, @arena)
@@ -13570,7 +13579,7 @@ module Crystal::HIR
                   expr_node = @arena[expr_id]
                   case expr_node
                   when CrystalV2::Compiler::Frontend::DefNode
-                    register_type_method_from_def(expr_node, enum_name)
+                    register_type_method_from_def(expr_node, enum_name, @arena)
                   when CrystalV2::Compiler::Frontend::MacroIfNode
                     process_macro_if_in_enum(expr_node, enum_name)
                   when CrystalV2::Compiler::Frontend::MacroLiteralNode
@@ -13611,7 +13620,7 @@ module Crystal::HIR
       when CrystalV2::Compiler::Frontend::MacroLiteralNode
         process_macro_literal_in_enum(body_node, enum_name)
       when CrystalV2::Compiler::Frontend::DefNode
-        register_type_method_from_def(body_node, enum_name)
+        register_type_method_from_def(body_node, enum_name, @arena)
       when CrystalV2::Compiler::Frontend::MacroIfNode
         process_macro_if_in_enum(body_node, enum_name)
       end
@@ -13626,7 +13635,7 @@ module Crystal::HIR
               expr_node = @arena[expr_id]
               case expr_node
               when CrystalV2::Compiler::Frontend::DefNode
-                register_type_method_from_def(expr_node, enum_name)
+                register_type_method_from_def(expr_node, enum_name, @arena)
               when CrystalV2::Compiler::Frontend::MacroIfNode
                 process_macro_if_in_enum(expr_node, enum_name)
               when CrystalV2::Compiler::Frontend::MacroLiteralNode
@@ -13646,7 +13655,7 @@ module Crystal::HIR
             expr_node = @arena[expr_id]
             case expr_node
             when CrystalV2::Compiler::Frontend::DefNode
-              register_type_method_from_def(expr_node, enum_name)
+              register_type_method_from_def(expr_node, enum_name, @arena)
             when CrystalV2::Compiler::Frontend::MacroIfNode
               process_macro_if_in_enum(expr_node, enum_name)
             when CrystalV2::Compiler::Frontend::MacroLiteralNode
@@ -13667,7 +13676,7 @@ module Crystal::HIR
               expr_node = @arena[expr_id]
               case expr_node
               when CrystalV2::Compiler::Frontend::DefNode
-                register_type_method_from_def(expr_node, enum_name)
+                register_type_method_from_def(expr_node, enum_name, @arena)
               when CrystalV2::Compiler::Frontend::MacroIfNode
                 process_macro_if_in_enum(expr_node, enum_name)
               when CrystalV2::Compiler::Frontend::MacroLiteralNode
@@ -20036,18 +20045,42 @@ module Crystal::HIR
             # base_name fallback because base_name is derived from node.name (e.g., "reverse!")
             # but we want the arena for the super method. The base_name might incorrectly
             # point to the child class's method arena instead of the parent's.
-            method_arena = if full_name_override.nil?
-                             @function_def_arenas[full_name]? || @function_def_arenas[base_name]? || @arena
-                           else
-                             @function_def_arenas[full_name]? || @arena
+            arena_from_stored = false
+            method_arena = begin
+                             # For super calls (full_name_override set), prefer full_name only
+                             # to avoid child class base_name shadowing parent arena.
+                             # But still fall back to base_name if full_name not found.
+                             stored = @function_def_arenas[full_name]?
+                             if stored.nil? && full_name_override.nil?
+                               stored = @function_def_arenas[base_name]?
+                             end
+                             # For typed variants (e.g., $Int32), also try base_name
+                             # since the arena is registered under the base method name.
+                             if stored.nil? && full_name != base_name
+                               stored = @function_def_arenas[base_name]?
+                             end
+                             if stored
+                               arena_from_stored = true
+                               stored
+                             else
+                               @arena
+                             end
                            end
             # Repair stale arena mappings for lazily-specialized names.
             # If a typed call-site name was previously mapped to the caller arena,
             # expression IDs in the Def body become out-of-bounds and lower_expr
             # can silently degenerate into invalid calls (e.g. dropped args).
+            # Only repair when the body max_index exceeds arena size (hard failure).
+            # Don't repair on span_fits_source? failure alone when the arena was
+            # explicitly stored — macro-containing defs can have spans that exceed
+            # the source bytesize but still use correct ExprId indices.
             if !body.empty?
               max_index = body_max_index_for_def(node)
-              if max_index >= method_arena.size || !span_fits_source?(method_arena, node.span)
+              needs_repair = max_index >= method_arena.size
+              if !needs_repair && !arena_from_stored
+                needs_repair = !span_fits_source?(method_arena, node.span)
+              end
+              if needs_repair
                 repaired_arena = resolve_arena_for_def(node, method_arena)
                 if repaired_arena != method_arena
                   method_arena = repaired_arena
