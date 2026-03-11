@@ -10171,6 +10171,40 @@ module Crystal::MIR
       # Union types can't store raw integer literals like 0/null.
       val = normalize_union_value(val, val_type_str)
 
+      # When a narrow all-ref union (stored as ptr) is written to a wider
+      # non-all-ref union field (stored as struct), the value is just a ptr
+      # but the destination expects { i32 type_id, [payload] }. Detect this
+      # via the optional field_type annotation and construct the union struct.
+      field_type_ref = inst.field_type
+      if field_type_ref
+        field_type_str = @type_mapper.llvm_type(field_type_ref)
+        final_emitted = @emitted_value_types[val]? || val_type_str
+        if field_type_str.includes?(".union") && (final_emitted == "ptr" || val_type_str == "ptr")
+          base = "r#{inst.id}.ptr2union"
+          ptr_val = val
+          # Normalize: if val is "0" or literal, use null
+          ptr_val = "null" if ptr_val == "0"
+          # Read type_id from the object header (or 0 for null)
+          emit "%#{base}.is_null = icmp eq ptr #{ptr_val}, null"
+          emit "%#{base}.null_tid_ptr = alloca i32, align 4"
+          emit "store i32 0, ptr %#{base}.null_tid_ptr"
+          emit "%#{base}.safe_tid_ptr = select i1 %#{base}.is_null, ptr %#{base}.null_tid_ptr, ptr #{ptr_val}"
+          emit "%#{base}.obj_tid = load i32, ptr %#{base}.safe_tid_ptr"
+          emit "%#{base}.type_id = select i1 %#{base}.is_null, i32 0, i32 %#{base}.obj_tid"
+          # Build the union struct: { i32 type_id, [payload] }
+          emit "%#{base}.tmp = alloca #{field_type_str}, align 8"
+          emit "store #{field_type_str} zeroinitializer, ptr %#{base}.tmp"
+          emit "%#{base}.tid_ptr = getelementptr #{field_type_str}, ptr %#{base}.tmp, i32 0, i32 0"
+          emit "store i32 %#{base}.type_id, ptr %#{base}.tid_ptr"
+          emit "%#{base}.payload_ptr = getelementptr #{field_type_str}, ptr %#{base}.tmp, i32 0, i32 1"
+          emit "store ptr #{ptr_val}, ptr %#{base}.payload_ptr"
+          emit "%#{base}.val = load #{field_type_str}, ptr %#{base}.tmp"
+          val = "%#{base}.val"
+          val_type_str = field_type_str
+          record_emitted_type(val, val_type_str)
+        end
+      end
+
       # Final safety: if the store type is a union struct but the value's
       # emitted type is "ptr" (e.g., payload was extracted from union by value_ref),
       # use "ptr" to avoid LLVM type mismatch.

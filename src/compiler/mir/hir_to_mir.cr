@@ -1439,7 +1439,38 @@ module Crystal
         return value
       end
 
-      builder.store(field_ptr, value)
+      # Look up the actual field type from the object's class layout.
+      # The FieldSet may carry a declared type (e.g. 3-variant all-ref union → ptr)
+      # while the class layout has a wider type (e.g. 6-variant non-all-ref union → struct).
+      actual_field_type = field_mir_type
+      if obj_hir_type = @hir_value_types[field.object]?
+        obj_mir_type = convert_type(obj_hir_type)
+        if mir_type = @mir_module.type_registry.get(obj_mir_type)
+          if fields = mir_type.fields
+            # Match by both field name and offset for safety
+            if found_field = fields.find { |f| f.name == field.field_name && f.offset == field.field_offset.to_u32 }
+              if found_field.type_ref != field_mir_type
+                # Only override if the actual field type is a union type (non-all-ref)
+                # This prevents incorrect overrides for fields where types differ
+                # due to type aliasing but are actually compatible
+                if actual_type = @mir_module.type_registry.get(found_field.type_ref)
+                  if actual_type.kind.union?
+                    actual_field_type = found_field.type_ref
+                  end
+                end
+              end
+            end
+          end
+        end
+      end
+
+      # Create store with optional field_type annotation so the LLVM backend
+      # can detect ptr→union-struct mismatches and construct the proper
+      # tagged union value when a narrow all-ref union is stored to a wider
+      # non-all-ref union field.
+      store_inst = MIR::Store.new(builder.next_id, field_ptr, value)
+      store_inst.field_type = actual_field_type
+      builder.emit(store_inst)
       value
     end
 

@@ -849,6 +849,11 @@ module Crystal::MIR
   class Store < Value
     getter ptr : ValueId
     getter value : ValueId
+    # Optional: the declared type of the destination field (when storing to a
+    # class/struct ivar). Used by the LLVM backend to detect when a narrow
+    # all-ref union (ptr) is stored into a wider non-all-ref union (struct),
+    # so it can construct the proper tagged union struct.
+    property field_type : TypeRef?
 
     def initialize(id : ValueId, @ptr : ValueId, @value : ValueId)
       super(id, TypeRef::VOID)

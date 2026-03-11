@@ -4612,10 +4612,11 @@ module Crystal::HIR
       node : CrystalV2::Compiler::Frontend::LibNode,
       annotations : Array(Tuple(CrystalV2::Compiler::Frontend::AnnotationNode, CrystalV2::Compiler::Frontend::ArenaLike))? = nil,
     )
-      if annotations
+      if annotations && !annotations.empty?
         old_arena = @arena
         annotations.each do |annotation_node, annotation_arena|
-          @arena = annotation_arena
+          # Use @arena (set by caller) instead of annotation_arena to avoid
+          # null union pointer from tuple storage in self-hosted builds
           register_link_libraries_from_annotation(annotation_node)
         end
         @arena = old_arena
@@ -21951,8 +21952,18 @@ module Crystal::HIR
       variants = split_union_type_name(type_name)
       return nil if variants.empty?
 
-      # Prefer non-nil variants when selecting a concrete method target.
-      ordered = variants.sort_by { |v| v == "Nil" ? 1 : 0 }
+      # Prefer concrete (non-Nil, non-Pointer, non-String) variants when
+      # selecting a method target.  Bare "Pointer" / "String" often appear
+      # in widened union types from type inference; their [] stubs are
+      # dead-code that returns null — concrete arena/class variants are the
+      # correct dispatch targets.
+      ordered = variants.sort_by { |v|
+        case v
+        when "Nil"                                then 2
+        when "Pointer", "String"                  then 1
+        else                                           0
+        end
+      }
       ordered.each do |variant|
         resolved_variant = resolve_type_alias_chain(variant)
         if type_param_like?(resolved_variant)
@@ -52886,15 +52897,36 @@ module Crystal::HIR
         receiver_type = ctx.type_of(receiver_id)
         recv_type_desc = @module.get_type_descriptor(receiver_type)
         if recv_type_desc && recv_type_desc.kind == TypeKind::Union
-          if unwrapped = unwrap_pointer_union(ctx, receiver_id, receiver_type)
-            receiver_id, receiver_type = unwrapped
-            recv_type_desc = @module.get_type_descriptor(receiver_type)
+          # For [] calls, only unwrap to Pointer if the union doesn't also
+          # contain class types that have their own [] methods.  Otherwise
+          # unions like (AstArena | Pointer | String) get mis-lowered as
+          # PointerLoad instead of a method call.
+          should_unwrap = method_name == "value"
+          unless should_unwrap
+            variants = split_union_type_name(recv_type_desc.name)
+            has_class_variant = variants.any? { |v|
+              !v.starts_with?("Pointer") && v != "Nil" &&
+                (vd = @module.get_type_descriptor(type_ref_for_name(v))) &&
+                (vd.kind == TypeKind::Class || vd.kind == TypeKind::Struct ||
+                 vd.kind == TypeKind::Array || vd.kind == TypeKind::Hash)
+            }
+            should_unwrap = !has_class_variant
+          end
+          if should_unwrap
+            if unwrapped = unwrap_pointer_union(ctx, receiver_id, receiver_type)
+              receiver_id, receiver_type = unwrapped
+              recv_type_desc = @module.get_type_descriptor(receiver_type)
+            end
           end
         end
         is_pointer_type = receiver_type == TypeRef::POINTER ||
                           (recv_type_desc && recv_type_desc.kind == TypeKind::Pointer)
-        if env_has?("DEBUG_PTR_VALUE")
-          STDERR.puts "[DEBUG_PTR_VALUE] method=#{method_name} receiver_type.id=#{receiver_type.id} desc=#{recv_type_desc.try(&.name)} is_pointer=#{is_pointer_type}"
+        # Guard: when receiver is TypeRef::POINTER but has no Pointer(...) descriptor,
+        # it is likely an all-ref union stored as a raw ptr (e.g. ArenaLike).
+        # Don't lower [] as PointerLoad — fall through to method call resolution.
+        if is_pointer_type && method_name == "[]" &&
+           !(recv_type_desc && recv_type_desc.name.starts_with?("Pointer"))
+          is_pointer_type = false
         end
         if is_pointer_type
           index_id = if method_name == "[]" && args.size == 1
@@ -61531,14 +61563,30 @@ module Crystal::HIR
       object_type = ctx.type_of(object_id)
       type_desc = @module.get_type_descriptor(object_type)
       if type_desc && type_desc.kind == TypeKind::Union
-        if unwrapped = unwrap_pointer_union(ctx, object_id, object_type)
-          object_id, object_type = unwrapped
-          type_desc = @module.get_type_descriptor(object_type)
+        # Only unwrap to Pointer when the union is truly a Pointer|Nil union.
+        # If the union contains class/struct variants with their own [] methods
+        # (e.g. ArenaLike = AstArena|PageArena|VirtualArena), unwrapping to
+        # Pointer would mis-dispatch to Pointer#[] (a dead-code stub).
+        variants = split_union_type_name(type_desc.name)
+        has_class_variant = variants.any? { |v|
+          !v.starts_with?("Pointer") && v != "Nil" && v != "String" &&
+            (vd = @module.get_type_descriptor(type_ref_for_name(v))) &&
+            (vd.kind == TypeKind::Class || vd.kind == TypeKind::Struct ||
+             vd.kind == TypeKind::Array || vd.kind == TypeKind::Hash)
+        }
+        unless has_class_variant
+          if unwrapped = unwrap_pointer_union(ctx, object_id, object_type)
+            object_id, object_type = unwrapped
+            type_desc = @module.get_type_descriptor(object_type)
+          end
         end
       end
-      is_pointer_type = object_type == TypeRef::POINTER ||
-                        (type_desc && type_desc.kind == TypeKind::Pointer) ||
-                        (type_desc && type_desc.name.starts_with?("Pointer"))
+      # TypeRef::POINTER without a Pointer(...) descriptor is likely an all-ref
+      # union (e.g. ArenaLike) stored as a raw ptr — not a real Pointer(T).
+      # Only treat as pointer when the descriptor explicitly confirms it.
+      is_pointer_type = type_desc != nil &&
+                        (type_desc.not_nil!.kind == TypeKind::Pointer ||
+                         type_desc.not_nil!.name.starts_with?("Pointer"))
       if is_pointer_type && index_ids.size == 1
         # Pointer indexing: ptr[i] -> PointerLoad with index
         # Extract element type from Pointer(T) if available
