@@ -855,7 +855,10 @@ module CrystalV2
         stage2_debug("[STAGE2_DEBUG] hir setup maps ready size=#{sources_by_arena.size}", err_io)
         hir_converter = HIR::AstToHir.new(first_arena, input_file, sources_by_arena, paths_by_arena, main_arenas)
         stage2_debug("[STAGE2_DEBUG] hir converter created", err_io)
-        link_libs.each { |lib_name| hir_converter.module.add_link_library(lib_name) }
+        hir_mod = hir_converter.module
+        STDERR.puts "[DEBUG_STAGE1] hir_converter=#{hir_converter.object_id} module=#{hir_mod.object_id} link_libs=#{link_libs.size}"
+        STDERR.flush
+        link_libs.each { |lib_name| hir_mod.add_link_library(lib_name) }
         stage2_debug("[STAGE2_DEBUG] hir link libs attached", err_io)
         stage2_debug("[STAGE2_DEBUG] top-level collection init", err_io)
 
@@ -1281,6 +1284,9 @@ module CrystalV2
         log(options, out_io, "  Functions: #{hir_module.functions.size}")
         timings["hir"] = (Time.instant - hir_start).total_milliseconds if options.stats
         timings["hir_funcs"] = hir_module.functions.size.to_f if options.stats
+
+        # Final allocator flush: regenerate any .new functions invalidated during lowering
+        hir_converter.flush_deferred_allocators
 
         # Reduce later phases by keeping only functions reachable from entrypoints.
         reachable = hir_module.reachable_function_names(["__crystal_main", "main"])
@@ -3487,7 +3493,7 @@ module CrystalV2
         segment_start = 0
         bytes = text.to_slice
         size = bytes.size
-        # STDERR.puts "[MACRO_RAW] size=#{size} ptr=#{text.to_unsafe.address} text=#{text[0, {size, 80}.min].inspect}"
+        # STDERR.puts "[MACRO_RAW] size=#{size}"
         in_line_comment = false
         in_string = false
         in_char = false

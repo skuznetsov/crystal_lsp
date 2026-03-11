@@ -1937,10 +1937,32 @@ module Crystal::HIR
                   end
                 end
               end
+              # For virtual .new$Params calls, also ensure the base .new allocator
+              # is reachable — it has the alloc+init body that stubs need to delegate to.
+              if method_base == "new" && (dnew_idx = callee.index(".new$"))
+                base_new = callee[0, dnew_idx + 4]
+                if func_by_name.has_key?(base_new) && !reachable.includes?(base_new)
+                  reachable << base_new
+                  worklist << base_new
+                end
+              end
               next
             end
             direct_callee = normalize_direct_callee.call(callee)
-            next unless func_by_name.has_key?(direct_callee)
+            unless func_by_name.has_key?(direct_callee)
+              # If this is a parameterized .new (e.g. Foo.new$Bar_Baz),
+              # try the base .new (Foo.new) which has the real allocator body
+              if (dnew_idx = direct_callee.index(".new$"))
+                base_new = direct_callee[0, dnew_idx + 4] # keep up to ".new"
+                if func_by_name.has_key?(base_new)
+                  direct_callee = base_new
+                else
+                  next
+                end
+              else
+                next
+              end
+            end
             next if reachable.includes?(direct_callee)
             reachable << direct_callee
             worklist << direct_callee

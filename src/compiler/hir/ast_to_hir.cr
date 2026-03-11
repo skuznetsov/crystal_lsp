@@ -16935,6 +16935,8 @@ module Crystal::HIR
     # we can generate them with the correct ivar info.
     def flush_deferred_allocators : Nil
       return if @deferred_allocators.empty?
+      has_ast = @deferred_allocators.any? { |n| n.includes?("AstToHir") }
+      STDERR.puts "[ALLOC_FLUSH] deferred=#{@deferred_allocators.size} has_AstToHir=#{has_ast}" if has_ast
       count = 0
       deferred_copy = @deferred_allocators.dup
       @deferred_allocators.clear
@@ -17086,8 +17088,15 @@ module Crystal::HIR
     private def invalidate_generated_allocator_state(class_name : String, owner_base : String) : Nil
       [class_name, owner_base].uniq.each do |owner|
         next if owner.empty?
-        @generated_allocators.delete(owner)
-        @deferred_allocators.delete(owner)
+        was_generated = @generated_allocators.delete(owner)
+        was_deferred = @deferred_allocators.includes?(owner)
+        # If the allocator was generated or was already deferred for regeneration,
+        # keep it in the deferred set so the final flush regenerates it.
+        if was_generated || was_deferred
+          @deferred_allocators << owner  # Set.add is idempotent
+        else
+          @deferred_allocators.delete(owner)
+        end
       end
     end
 
@@ -18025,7 +18034,7 @@ module Crystal::HIR
       # until class is fully registered so field defaults are properly evaluated.
       # When force=true (from flush_deferred_allocators), generate anyway.
       if !force && class_info.ivars.empty? && !class_info.is_struct
-        STDERR.puts "[ALLOC_DEFER] #{class_name}: deferred (empty ivars)" if class_name.includes?("Scheduler")
+        STDERR.puts "[ALLOC_DEFER] #{class_name}: deferred (empty ivars)" if class_name.includes?("Scheduler") || class_name.includes?("AstToHir")
         @deferred_allocators << class_name
         return
       end
@@ -18295,6 +18304,9 @@ module Crystal::HIR
 
       base_name = allocator_new_name_for(class_name)
       overload_name = mangle_function_name(base_name, call_arg_types)
+      if class_name == "Crystal::HIR::AstToHir"
+        STDERR.puts "[ALLOC_OVERLOAD] class=#{class_name} base=#{base_name} overload=#{overload_name} same=#{overload_name == base_name} exists=#{@module.has_function?(overload_name)}"
+      end
       return if overload_name == base_name
       return if @module.has_function?(overload_name)
 
@@ -18329,6 +18341,9 @@ module Crystal::HIR
       # In that case, keep generating the allocator overload for this concrete shape.
       if explicit_match = lookup_function_def_for_call(base_name, call_arg_types.size, false, call_arg_types, false, call_has_named_args)
         explicit_name, explicit_def = explicit_match
+        if class_name == "Crystal::HIR::AstToHir"
+          STDERR.puts "[ALLOC_OVERLOAD_EXPLICIT] class=#{class_name} explicit_match=#{explicit_name} → BLOCKED"
+        end
         allow_allocator_overload = false
 
         if base_name.ends_with?(".new") && def_has_untyped_regular_param?(explicit_def)
