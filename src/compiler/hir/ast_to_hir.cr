@@ -4610,16 +4610,12 @@ module Crystal::HIR
     # e.g., lib LibC ... end
     def register_lib(
       node : CrystalV2::Compiler::Frontend::LibNode,
-      annotations : Array(Tuple(CrystalV2::Compiler::Frontend::AnnotationNode, CrystalV2::Compiler::Frontend::ArenaLike))? = nil,
+      annotations : Array(CrystalV2::Compiler::Frontend::AnnotationNode)? = nil,
     )
       if annotations && !annotations.empty?
-        old_arena = @arena
-        annotations.each do |annotation_node, annotation_arena|
-          # Use @arena (set by caller) instead of annotation_arena to avoid
-          # null union pointer from tuple storage in self-hosted builds
+        annotations.each do |annotation_node|
           register_link_libraries_from_annotation(annotation_node)
         end
-        @arena = old_arena
       end
 
       lib_name = String.new(node.name)

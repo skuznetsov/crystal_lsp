@@ -120,6 +120,19 @@ module CrystalV2
         end
       end
 
+      private class LibEntry
+        getter node : Frontend::LibNode
+        getter arena : Frontend::ArenaLike
+        getter annotations : Array(Frontend::AnnotationNode)
+
+        def initialize(
+          @node : Frontend::LibNode,
+          @arena : Frontend::ArenaLike,
+          @annotations : Array(Frontend::AnnotationNode)
+        )
+        end
+      end
+
       def initialize(@args : Array(String))
       end
 
@@ -869,7 +882,7 @@ module CrystalV2
         enum_nodes = [] of Tuple(Frontend::EnumNode, Frontend::ArenaLike)
         macro_nodes = [] of MacroEntry
         alias_nodes = [] of Tuple(Frontend::AliasNode, Frontend::ArenaLike)
-        lib_nodes = [] of Tuple(Frontend::LibNode, Frontend::ArenaLike, Array(Tuple(Frontend::AnnotationNode, Frontend::ArenaLike)))
+        lib_nodes = [] of LibEntry
         constant_exprs = [] of Tuple(Frontend::ExprId, Frontend::ArenaLike)
         main_exprs = [] of UInt64
         acyclic_types = Set(String).new
@@ -890,7 +903,7 @@ module CrystalV2
             source
           end
           unless skip_file_directive?(safe_source, flags)
-            pending_annotations = [] of Tuple(Frontend::AnnotationNode, Frontend::ArenaLike)
+            pending_annotations = [] of Frontend::AnnotationNode
             expr_i = 0
             while expr_i < exprs.size
               expr_id = exprs.unsafe_fetch(expr_i)
@@ -961,8 +974,8 @@ module CrystalV2
         end
         i = 0
         while i < lib_nodes.size
-          node, _, _ = lib_nodes.unsafe_fetch(i)
-          top_level_type_names.add(String.new(node.name))
+          entry = lib_nodes.unsafe_fetch(i)
+          top_level_type_names.add(String.new(entry.node.name))
           i += 1
         end
         unless top_level_type_names.empty?
@@ -1087,7 +1100,10 @@ module CrystalV2
         end
         log(options, out_io, "  Pass 1: Registering types...")
         log(options, out_io, "    Libs: #{lib_nodes.size}")
-        lib_nodes.each { |n, a, annotations| hir_converter.arena = a; hir_converter.register_lib(n, annotations) }
+        lib_nodes.each do |entry|
+          hir_converter.arena = entry.arena
+          hir_converter.register_lib(entry.node, entry.annotations)
+        end
         log(options, out_io, "    Enums: #{enum_nodes.size}")
         enum_nodes.each { |n, a| hir_converter.arena = a; hir_converter.register_enum(n) }
         enum_count = enum_nodes.size
@@ -2558,10 +2574,10 @@ module CrystalV2
         enum_nodes : Array(Tuple(Frontend::EnumNode, Frontend::ArenaLike)),
         macro_nodes : Array(MacroEntry),
         alias_nodes : Array(Tuple(Frontend::AliasNode, Frontend::ArenaLike)),
-        lib_nodes : Array(Tuple(Frontend::LibNode, Frontend::ArenaLike, Array(Tuple(Frontend::AnnotationNode, Frontend::ArenaLike)))),
+        lib_nodes : Array(LibEntry),
         constant_exprs : Array(Tuple(Frontend::ExprId, Frontend::ArenaLike)),
         main_exprs : Array(UInt64),
-        pending_annotations : Array(Tuple(Frontend::AnnotationNode, Frontend::ArenaLike)),
+        pending_annotations : Array(Frontend::AnnotationNode),
         acyclic_types : Set(String),
         flags : Set(String),
         sources_by_arena : Hash(Frontend::ArenaLike, String),
@@ -2605,10 +2621,10 @@ module CrystalV2
           alias_nodes << {node, arena}
           pending_annotations.clear
         when Frontend::LibNode
-          lib_nodes << {node, arena, pending_annotations.dup}
+          lib_nodes << LibEntry.new(node, arena, pending_annotations.dup)
           pending_annotations.clear
         when Frontend::AnnotationNode
-          pending_annotations << {node, arena}
+          pending_annotations << node
         when Frontend::RequireNode
           # Skip - already processed
         when Frontend::MacroExpressionNode
@@ -2754,10 +2770,10 @@ module CrystalV2
         enum_nodes : Array(Tuple(Frontend::EnumNode, Frontend::ArenaLike)),
         macro_nodes : Array(MacroEntry),
         alias_nodes : Array(Tuple(Frontend::AliasNode, Frontend::ArenaLike)),
-        lib_nodes : Array(Tuple(Frontend::LibNode, Frontend::ArenaLike, Array(Tuple(Frontend::AnnotationNode, Frontend::ArenaLike)))),
+        lib_nodes : Array(LibEntry),
         constant_exprs : Array(Tuple(Frontend::ExprId, Frontend::ArenaLike)),
         main_exprs : Array(UInt64),
-        pending_annotations : Array(Tuple(Frontend::AnnotationNode, Frontend::ArenaLike)),
+        pending_annotations : Array(Frontend::AnnotationNode),
         acyclic_types : Set(String),
         flags : Set(String),
         sources_by_arena : Hash(Frontend::ArenaLike, String),
@@ -3985,15 +4001,11 @@ module CrystalV2
       end
 
       private def pending_annotation_has?(
-        pending_annotations : Array(Tuple(Frontend::AnnotationNode, Frontend::ArenaLike)),
+        pending_annotations : Array(Frontend::AnnotationNode),
         arena : Frontend::ArenaLike,
         name : String
       ) : Bool
-        pending_annotations.any? do |ann_node, _ann_arena|
-          # Use the caller's arena instead of stored ann_arena to avoid
-          # null arena issues in self-hosted builds (union tuple storage)
-          annotation_name_from_expr(arena, ann_node.name) == name
-        end
+        pending_annotations.any? { |ann_node| annotation_name_from_expr(arena, ann_node.name) == name }
       end
 
       private def valid_mm_mode?(mode : String) : Bool

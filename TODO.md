@@ -60,6 +60,59 @@ closure cells, Tuple ptr/value confusion.
   - so this checkpoint closes one real parser/string-lifetime corruption class
     without yet clearing stable stage2/stage3 bootstrap.
 
+### Current checkpoint (2026-03-11 lib top-level storage hardening for self-hosted stage2 build)
+
+- Critical reassessment of the remaining arena work shifted the next fix out of
+  `HIR::AstToHir` heuristics and up into `CLI` top-level collection:
+  - the codebase already contained explicit self-hosted evidence that
+    `ArenaLike` carried inside tuple/value storage is fragile in V2-generated
+    binaries (`ParsedUnit` / `MacroEntry` are reference types for this reason,
+    and commit `507c1a45` already removed one `Tuple(AnnotationNode, ArenaLike)`
+    crash path);
+  - meanwhile `lib_nodes` still stored
+    `Tuple(LibNode, ArenaLike, Array(Tuple(AnnotationNode, ArenaLike)))`, and
+    `pending_annotations` still stored `Tuple(AnnotationNode, ArenaLike)`.
+- Corrective change on the current worktree:
+  - `src/compiler/cli.cr`
+    - introduce reference-type `LibEntry`;
+    - store `lib_nodes` as `Array(LibEntry)` instead of tuple payloads;
+    - store `pending_annotations` as `Array(AnnotationNode)` only, because the
+      downstream `register_lib(...)` path no longer needs per-annotation arenas;
+  - `src/compiler/hir/ast_to_hir.cr`
+    - simplify `register_lib(...)` to accept
+      `Array(AnnotationNode)?` instead of tupled arena payloads.
+- Fresh verification:
+  - `stage1 debug`:
+    - `/usr/bin/time -p scripts/build_stage1_original_debug.sh /private/tmp/stage1_dbg_lib_entry_fix_20260311`
+      -> `real 11.36`
+  - `stage2 debug` under safety wrapper:
+    - `scripts/timeout_sample_lldb.sh -t 1800 -m 24576 --no-series --no-lldb -o /tmp/stage2_dbg_lib_entry_fix_20260311_run -- scripts/build_stage2_debug.sh /private/tmp/stage1_dbg_lib_entry_fix_20260311 /private/tmp/stage2_dbg_lib_entry_fix_20260311`
+      -> `status=0`
+      -> produced `/private/tmp/stage2_dbg_lib_entry_fix_20260311`
+  - focused runtime controls on the fresh stage2 debug binary:
+    - `bash scripts/stage2_minimal_compile_repro.sh /private/tmp/stage2_dbg_lib_entry_fix_20260311`
+      -> still exits `138`, but only after full `prelude.cr` require scan and
+         after parsing the target `puts 1` file
+    - `bash regression_tests/stage2_basic_sanity_crash_repro.sh /private/tmp/stage2_dbg_lib_entry_fix_20260311`
+      -> still reproduces `exit 138`, again only after full prelude parse and
+         target-file parse
+    - `bash regression_tests/stage2_method_name_corruption_repro.sh /private/tmp/stage2_dbg_lib_entry_fix_20260311`
+      -> `not reproduced`
+      -> compiler exit status `138`
+  - fresh LLDB boundary on the new stage2 debug binary:
+    - `PageArena#[]`
+    - `AstToHir#register_lib`
+    - `CLI#compile`
+- Boundary after the fix:
+  - this patch is a verified bootstrap-build improvement:
+    - fresh self-hosted `stage2 debug` now builds successfully from the current
+      tree;
+  - but it is not yet a full runtime stabilization:
+    - the remaining crash still sits in `register_lib`, only much later than
+      before, after full prelude loading and target parse;
+  - so the next task is to identify which `lib` still selects or carries the
+    wrong body arena on the fresh stage2 runtime path.
+
 ### Current checkpoint (2026-03-09 explicit `parse_macro_body(false)` for macro definitions)
 
 - Verified that the fresh stage2 `%value` macro-body parser failure was not caused by
