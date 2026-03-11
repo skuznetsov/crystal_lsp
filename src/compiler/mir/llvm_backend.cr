@@ -553,6 +553,9 @@ module Crystal::MIR
     # Phi predecessor conversions: for fixed-type values (params, ExternCalls) that need
     # type conversion for phi compatibility. Maps (pred_block, value_id) -> (converted_name, from_bits, to_bits)
     @phi_predecessor_conversions : Hash({BlockId, ValueId}, {String, Int32, Int32}) = {} of {BlockId, ValueId} => {String, Int32, Int32}
+    # Phi int-to-ptr conversions: for int values (Call/ExternCall results) used in ptr phis
+    # Maps (pred_block, value_id) -> converted_name
+    @phi_int_to_ptr : Hash({BlockId, ValueId}, String) = {} of {BlockId, ValueId} => String
     # Phi predecessor union wraps: for ptr/void values that must be wrapped into union before phi
     # Maps (pred_block, value_id) -> (wrapped_name, union_type_ref, variant_type_id)
     @phi_predecessor_union_wraps : Hash({BlockId, ValueId}, {String, TypeRef, Int32}) = {} of {BlockId, ValueId} => {String, TypeRef, Int32}
@@ -7531,6 +7534,8 @@ module Crystal::MIR
       prepass_collect_phi_predecessor_union_wraps(func)
       # Prepass: identify which union values need reinterpretation to a different union type for phi nodes
       prepass_collect_phi_union_to_union_converts(func)
+      # Prepass: identify int values (Call/ExternCall results) used in ptr phi nodes
+      prepass_collect_phi_int_to_ptr(func)
       # Prepass: identify which union incoming values need ptr payload extraction
       # in predecessor blocks for ptr-emitted phi nodes.
       prepass_collect_phi_union_to_ptr_extracts(func)
@@ -7828,6 +7833,39 @@ module Crystal::MIR
               conv_name = "r#{val_id}.conv.#{pred_block_id}"
               @phi_predecessor_conversions[{pred_block_id, val_id}] = {conv_name, val_bits, phi_bits}
             end
+          end
+        end
+      end
+    end
+
+    # Prepass: identify int values that flow into ptr phis and need inttoptr conversion.
+    # V2 heap-allocates structs, so Call/ExternCall results typed as int may be pointers.
+    private def prepass_collect_phi_int_to_ptr(func : Function)
+      @phi_int_to_ptr.clear
+
+      func.blocks.each do |block|
+        block.instructions.each do |inst|
+          next unless inst.is_a?(Phi)
+          phi = inst
+
+          # Check if this phi resolves to ptr type
+          phi_llvm_type = @value_types[phi.id]? ? @type_mapper.llvm_type(@value_types[phi.id].not_nil!) : @type_mapper.llvm_type(phi.type)
+          is_ptr_phi = phi_llvm_type == "ptr" || phi_llvm_type == "void"
+
+          next unless is_ptr_phi
+
+          phi.incoming.each do |(pred_block_id, val_id)|
+            next if @phi_int_to_ptr.has_key?({pred_block_id, val_id})
+            # Skip values that already have cross-block slots (handled by prepass bridge)
+            next if @cross_block_slots.has_key?(val_id)
+
+            val_type = @value_types[val_id]?
+            next unless val_type
+            val_llvm = @type_mapper.llvm_type(val_type)
+            next unless val_llvm.starts_with?('i') && !val_llvm.includes?(".union")
+
+            conv_name = "r#{val_id}.i2p.#{pred_block_id}"
+            @phi_int_to_ptr[{pred_block_id, val_id}] = conv_name
           end
         end
       end
@@ -8896,6 +8934,7 @@ module Crystal::MIR
       @zext_value_names.clear
       @phi_nil_incoming_blocks.clear
       @phi_predecessor_conversions.clear
+      @phi_int_to_ptr.clear
       @cond_counter = 0  # Reset for each function
 
       func.params.each do |param|
@@ -8974,6 +9013,8 @@ module Crystal::MIR
       emit_phi_predecessor_conversions(block)
       # Emit union wraps for ptr/void values used in successor union phi nodes
       emit_phi_predecessor_union_wraps(block)
+      # Emit inttoptr for int values used in ptr phi nodes
+      emit_phi_int_to_ptr(block)
       # Emit union-to-ptr extractions for union values used in successor ptr phi nodes
       emit_phi_union_to_ptr_extracts(block)
       # Emit union-to-union reinterpretations for union values used in successor union phi nodes with different type
@@ -9005,29 +9046,11 @@ module Crystal::MIR
         llvm_type = @cross_block_slot_types[val_id]? || "i64"
         emit "%#{load_name} = load #{llvm_type}, ptr %#{slot_name}"
         record_emitted_type("%#{load_name}", llvm_type)
-        # Pre-emit an int->ptr view for ptr phis that consume integer-typed slots.
-        # This keeps phi incoming values in predecessor blocks and avoids
-        # dominance/type issues when ptr values are spill-encoded as integers.
-        # Emit when:
-        # 1. Value is declared as POINTER type, OR
-        # 2. Value comes from a Call whose callee actually returns ptr
-        #    (V2 heap-allocates structs → Call returns ptr but MIR may say i32/etc)
-        declared_val_type = @value_types[val_id]?
-        is_ptr_value = declared_val_type == TypeRef::POINTER
-        if !is_ptr_value && llvm_type.starts_with?('i') && !llvm_type.includes?(".union")
-          if def_inst = find_def_inst(val_id)
-            if def_inst.is_a?(Call)
-              callee_func = @func_by_id[def_inst.callee]?
-              if callee_func
-                callee_mangled = mangle_function_name(callee_func.name)
-                callee_ret = @emitted_function_return_types[callee_mangled]?
-                is_ptr_value = true if callee_ret == "ptr"
-              end
-            end
-          end
-        end
-        if is_ptr_value &&
-           llvm_type.starts_with?('i') &&
+        # Always emit an int->ptr view for int-typed cross-block loads.
+        # V2 heap-allocates structs, so many Call/ExternCall results are
+        # pointers stored as integers. The .ptr view is harmless if unused
+        # but essential for ptr phi nodes that consume these values.
+        if llvm_type.starts_with?('i') &&
            !llvm_type.includes?(".union")
           ptr_view = "%#{load_name}.ptr"
           emit "#{ptr_view} = inttoptr #{llvm_type} %#{load_name} to ptr"
@@ -9075,6 +9098,23 @@ module Crystal::MIR
           # Narrowing: use trunc
           emit "%#{conv_name} = trunc i#{actual_bits} #{val_ref} to i#{to_bits}"
         end
+      end
+    end
+
+    # Emit inttoptr conversions in predecessor blocks for int values used in ptr phis.
+    private def emit_phi_int_to_ptr(block : BasicBlock)
+      @phi_int_to_ptr.each do |(key, conv_name)|
+        pred_block_id, val_id = key
+        next unless pred_block_id == block.id
+
+        val_ref = value_ref(val_id)
+        val_type = @value_types[val_id]?
+        val_llvm = val_type ? @type_mapper.llvm_type(val_type) : "i64"
+        # Use actual emitted type if available (may differ from @value_types)
+        actual_type = @emitted_value_types[val_ref]?
+        val_llvm = actual_type if actual_type && actual_type.starts_with?('i') && !actual_type.includes?('.')
+        emit "%#{conv_name} = inttoptr #{val_llvm} #{val_ref} to ptr"
+        record_emitted_type("%#{conv_name}", "ptr")
       end
     end
 
@@ -11707,34 +11747,23 @@ module Crystal::MIR
           # fall through to normal handling
         end
       end
+      # Check for int-to-ptr conversion (int values flowing into ptr phis)
+      if phi_type == "ptr"
+        if i2p_name = @phi_int_to_ptr[{block, val}]?
+          return "%#{i2p_name}"
+        end
+      end
       # Check for predecessor-loaded value (for cross-block SSA fix)
       if pred_load_name = @phi_predecessor_loads[{block, val}]?
         # CRITICAL: Use the SLOT ALLOCATION TYPE, not @value_types[val]
         # @value_types may be updated during emission (e.g., nil constant → ptr),
         # but the slot was allocated with the prepass type. The load will use the slot type.
         slot_llvm_type = @cross_block_slot_types[val]?
-        declared_val_type = @value_types[val]?
-        # Check if value is actually a pointer stored as int:
-        # 1. Declared as POINTER type, OR
-        # 2. Defined by a Call whose callee returns ptr
-        is_ptr_stored_as_int = declared_val_type == TypeRef::POINTER
-        if !is_ptr_stored_as_int && slot_llvm_type && slot_llvm_type.starts_with?('i') && !slot_llvm_type.includes?(".union")
-          if def_inst = find_def_inst(val)
-            if def_inst.is_a?(Call)
-              callee_func = @func_by_id[def_inst.callee]?
-              if callee_func
-                callee_mangled = mangle_function_name(callee_func.name)
-                callee_ret = @emitted_function_return_types[callee_mangled]?
-                is_ptr_stored_as_int = true if callee_ret == "ptr"
-              end
-            end
-          end
-        end
         # Check type compatibility:
         # - Same type: use the load directly
         # - Both ptr: compatible
         # - Both int (same size): compatible
-        # - Int slot with ptr-returning Call, ptr phi: use inttoptr bridge
+        # - Int slot + ptr phi: use inttoptr bridge (.ptr view always emitted)
         # - Union slot, primitive phi: extract payload from union
         # - Otherwise: let the type mismatch handling kick in
         is_compatible = if slot_llvm_type.nil?
@@ -11744,7 +11773,6 @@ module Crystal::MIR
                         elsif slot_llvm_type == "ptr" && phi_type == "ptr"
                           true
                         elsif phi_type == "ptr" &&
-                              is_ptr_stored_as_int &&
                               slot_llvm_type.starts_with?('i') &&
                               !slot_llvm_type.includes?(".union")
                           true
@@ -11757,7 +11785,6 @@ module Crystal::MIR
                         end
         if is_compatible
           if phi_type == "ptr" &&
-             is_ptr_stored_as_int &&
              slot_llvm_type &&
              slot_llvm_type.starts_with?('i') &&
              !slot_llvm_type.includes?(".union")
