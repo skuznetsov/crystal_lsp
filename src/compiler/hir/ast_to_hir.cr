@@ -7296,6 +7296,113 @@ module Crystal::HIR
       span_fits_source?(arena, func_def.span)
     end
 
+    private def arena_fits_body_ids?(
+      arena : CrystalV2::Compiler::Frontend::ArenaLike,
+      body : Array(ExprId)?,
+      span : CrystalV2::Compiler::Frontend::Span,
+    ) : Bool
+      max_index = if body && !body.empty?
+                    body.max_of(&.index)
+                  else
+                    -1
+                  end
+      return false if max_index >= 0 && max_index >= arena.size
+      span_fits_source?(arena, span)
+    end
+
+    private def with_resolved_body_arena(
+      body : Array(ExprId)?,
+      span : CrystalV2::Compiler::Frontend::Span,
+      fallback : CrystalV2::Compiler::Frontend::ArenaLike,
+      &
+    )
+      return with_arena(fallback) { yield } if arena_fits_body_ids?(fallback, body, span)
+
+      fallback_path = source_path_for(fallback)
+      best_kind = 0_i8
+      best_index = -1
+      best_size = Int32::MAX
+
+      if fallback_path
+        i = 0
+        while i < @main_arenas.size
+          candidate = @main_arenas.unsafe_fetch(i)
+          if source_path_for(candidate) == fallback_path &&
+             arena_fits_body_ids?(candidate, body, span)
+            size = candidate.size
+            if size < best_size
+              best_kind = 1_i8
+              best_index = i
+              best_size = size
+            end
+          end
+          i += 1
+        end
+
+        if arenas = @inline_arenas
+          i = 0
+          while i < arenas.size
+            candidate = arenas.unsafe_fetch(i)
+            if source_path_for(candidate) == fallback_path &&
+               arena_fits_body_ids?(candidate, body, span)
+              size = candidate.size
+              if size < best_size
+                best_kind = 2_i8
+                best_index = i
+                best_size = size
+              end
+            end
+            i += 1
+          end
+        end
+      end
+
+      if best_index < 0
+        i = 0
+        while i < @main_arenas.size
+          candidate = @main_arenas.unsafe_fetch(i)
+          if arena_fits_body_ids?(candidate, body, span)
+            size = candidate.size
+            if size < best_size
+              best_kind = 1_i8
+              best_index = i
+              best_size = size
+            end
+          end
+          i += 1
+        end
+
+        if arenas = @inline_arenas
+          i = 0
+          while i < arenas.size
+            candidate = arenas.unsafe_fetch(i)
+            if arena_fits_body_ids?(candidate, body, span)
+              size = candidate.size
+              if size < best_size
+                best_kind = 2_i8
+                best_index = i
+                best_size = size
+              end
+            end
+            i += 1
+          end
+        end
+      end
+
+      case best_kind
+      when 1_i8
+        with_arena(@main_arenas.unsafe_fetch(best_index)) { yield }
+      when 2_i8
+        if arenas = @inline_arenas
+          with_arena(arenas.unsafe_fetch(best_index)) { yield }
+        else
+          with_arena(fallback) { yield }
+        end
+      else
+        with_arena(fallback) { yield }
+      end
+    end
+
     private def resolve_arena_for_block(
       block : CrystalV2::Compiler::Frontend::BlockNode,
       fallback : CrystalV2::Compiler::Frontend::ArenaLike,
@@ -15563,13 +15670,27 @@ module Crystal::HIR
 
     # Register a class with a specific name (for nested classes like Foo::Bar)
     def register_class_with_name(node : CrystalV2::Compiler::Frontend::ClassNode, class_name : String)
+      if arena_fits_body_ids?(@arena, node.body, node.span)
+        register_class_with_name_in_current_arena(node, class_name)
+        return
+      end
+
+      with_resolved_body_arena(node.body, node.span, @arena) do
+        register_class_with_name_in_current_arena(node, class_name)
+      end
+    end
+
+    private def register_class_with_name_in_current_arena(
+      node : CrystalV2::Compiler::Frontend::ClassNode,
+      class_name : String,
+    )
       class_name = resolve_class_name_for_definition(class_name)
       old_class = @current_class
       old_override = @current_namespace_override
       @current_class = class_name
       begin
         if env_get("DEBUG_TYPE_PATH") && class_name.includes?('/')
-          current_path = @paths_by_arena[@arena]? || "(unknown)"
+          current_path = source_path_for(@arena) || "(unknown)"
           STDERR.puts "[TYPE_PATH_CLASS] name=#{class_name} file=#{File.basename(current_path)} span=#{node.span.start_line}:#{node.span.start_column}"
         end
         if env_get("DEBUG_WUINT128") && class_name.includes?("UInt128")
@@ -15598,7 +15719,7 @@ module Crystal::HIR
             # so additional methods (e.g., Range#bsearch) are not lost.
             new_body_size = node.body.try(&.size) || 0
             if env_has?("DEBUG_GENERIC_TEMPLATE")
-              current_path = @paths_by_arena[@arena]? || "(unknown)"
+              current_path = source_path_for(@arena) || "(unknown)"
               STDERR.puts "[GENERIC_TEMPLATE] #{class_name}: body_size=#{new_body_size} file=#{File.basename(current_path)}"
             end
             param_names = type_params.map { |p| String.new(p) }

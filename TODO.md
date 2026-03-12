@@ -22,6 +22,67 @@ closure cells, Tuple ptr/value confusion.
 - [ ] **Phase 5: FIX RC-3** — String.build block lowering
 - [ ] **Phase 6: RE-ENABLE RTA + BOOTSTRAP** — stage0→stage1→stage2→stage3 + benchmark
 
+### Current checkpoint (2026-03-12 class-arena fast path for tiny self-hosted lib struct HIR crash)
+
+- Verified that the tiny no-prelude `lib LibX; struct Foo; a : Int; b : Long; end; end`
+  crash on fresh self-hosted `stage2` was no longer best explained by a bad
+  `TypeDeclarationNode -> Frontend::Node` downgrade.
+- Critical reassessment of the last diagnostic step showed a narrower and more
+  useful signal:
+  - the temporary `DEBUG_NESTED_TYPES_FETCH` probe moved the crash earlier into
+    `arena_map_key -> VirtualArena#object_id -> path_for_arena ->
+    record_nested_type_names`, before the first `@arena[expr_id]`;
+  - that means the active failure in this corridor was already a bad
+    `ArenaLike` transport into `record_nested_type_names`, not just a wrong
+    body index inside an otherwise-correct arena.
+- Corrective change on the current worktree:
+  - `src/compiler/hir/ast_to_hir.cr`
+    - `register_class_with_name(...)` now takes a current-arena fast path:
+      if the current `@arena` already fits the class body ids, it calls
+      `register_class_with_name_in_current_arena(...)` directly and skips the
+      unnecessary arena-switch round-trip entirely;
+    - if the current `@arena` does not fit, it now falls back through the new
+      `with_resolved_body_arena(...)` helper instead of inlining another
+      ad-hoc `ArenaLike` transport.
+  - `regression_tests/stage2_type_decl_node_identity_repro.sh`
+    - the focused oracle no longer relies on `DEBUG_CLASS_ARENA` and
+      `.class.name`-based generic-node signatures, because that intermediate
+      diagnostic proved misleading on fresh self-hosted binaries;
+    - it now uses the real signal for this corridor: whether the tiny
+      `LibX::Foo` file compiles successfully through HIR under `--no-prelude`.
+- Fresh verification on the current debug pair:
+  - `stage1 debug`:
+    - `/usr/bin/time -p scripts/build_stage1_original_debug.sh /private/tmp/stage1_dbg_class_current_fastpath_20260312`
+      -> `real 9.11`
+  - broad stage1 adversary:
+    - `regression_tests/run_all.sh /private/tmp/stage1_dbg_class_current_fastpath_20260312`
+      -> `68 passed, 0 failed`
+  - guarded `stage2 debug` self-build:
+    - `scripts/timeout_sample_lldb.sh -t 1800 -m 24576 --no-series --no-lldb -o /tmp/stage2_dbg_class_current_fastpath_20260312_run -- scripts/build_stage2_debug.sh /private/tmp/stage1_dbg_class_current_fastpath_20260312 /private/tmp/stage2_dbg_class_current_fastpath_20260312`
+      -> `status=0`
+      -> produced `/private/tmp/stage2_dbg_class_current_fastpath_20260312`
+  - focused tiny oracle on the fresh stage2:
+    - `env CRYSTAL_V2_STOP_AFTER_HIR=1 /private/tmp/stage2_dbg_class_current_fastpath_20260312 --no-prelude /tmp/lib_struct_trace_20260312.cr -o /tmp/lib_struct_trace_class_current_fastpath.stage2.out`
+      -> `status=0`
+  - updated regression oracle brackets old/new binaries cleanly:
+    - `bash regression_tests/stage2_type_decl_node_identity_repro.sh /private/tmp/stage2_dbg_nested_fetch_20260312`
+      -> `reproduced: stage2 crashed on the tiny LibX::Foo no-prelude HIR oracle`
+    - `bash regression_tests/stage2_type_decl_node_identity_repro.sh /private/tmp/stage2_dbg_class_current_fastpath_20260312`
+      -> `not reproduced`
+  - adjacent old-signature control stays green:
+    - `bash regression_tests/stage2_lib_struct_bodyless_repro.sh /private/tmp/stage2_dbg_class_current_fastpath_20260312`
+      -> `not reproduced`
+- Boundary after the fix:
+  - this change clears the tiny self-hosted `LibX::Foo` `register_class /
+    record_nested_type_names` crash corridor;
+  - it does **not** yet stabilize general stage2 compilation:
+    - `bash scripts/stage2_minimal_compile_repro.sh /private/tmp/stage2_dbg_class_current_fastpath_20260312`
+      still exits `138` after full prelude parsing and target-file parsing;
+  - next task:
+    - capture the new post-fix `stage2_minimal_compile_repro` stack and continue
+      from that later frontier instead of returning to the stale generic-node
+      `.class.name` oracle.
+
 ### Current checkpoint (2026-03-12 type-declaration round-trip removal for self-hosted lib struct bodies)
 
 - Verified that the stale `LibC::Pthread*` empty-body corruption was not an
