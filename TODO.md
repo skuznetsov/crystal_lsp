@@ -22,6 +22,57 @@ closure cells, Tuple ptr/value confusion.
 - [ ] **Phase 5: FIX RC-3** — String.build block lowering
 - [ ] **Phase 6: RE-ENABLE RTA + BOOTSTRAP** — stage0→stage1→stage2→stage3 + benchmark
 
+### Current checkpoint (2026-03-12 type-declaration round-trip removal for self-hosted lib struct bodies)
+
+- Verified that the stale `LibC::Pthread*` empty-body corruption was not an
+  arena-selection bug after all; it was a self-hosted parser failure inside
+  `parse_type_declaration_from_identifier(...)`.
+- Root cause on the current worktree:
+  - the parser created an `IdentifierNode`, pulled it back out of `@arena`,
+    then called dynamic `Frontend.node_literal(var_node)` just to recover the
+    original identifier text for `TypeDeclarationNode.new(...)`;
+  - on fresh self-hosted stage2, that extra arena round-trip was unstable in
+    struct/union member declarations:
+    traced runs showed `a : Int` / `__sig : Long` reached
+    `parse_type_annotation(...)`, but member expressions degraded from
+    `TypeDeclarationNode` into generic `Frontend::Node`, and before the fix the
+    older frontier was even worse (`expr=invalid`, `body=0`).
+- Corrective change on the current worktree:
+  - `src/compiler/frontend/parser.cr`
+    - in `parse_type_declaration_from_identifier(...)`, stop round-tripping
+      through `@arena[var]` and `Frontend.node_literal(...)`;
+    - use the already-available `identifier_token.slice` (interned once) as the
+      `TypeDeclarationNode` name directly.
+- Focused verification on the clean debug pair:
+  - `stage1 debug`:
+    - `/usr/bin/time -p scripts/build_stage1_original_debug.sh /private/tmp/stage1_dbg_type_decl_roundtrip_clean_20260312`
+      -> `real 9.73`
+  - broad adversary on that fresh stage1:
+    - `regression_tests/run_all.sh /private/tmp/stage1_dbg_type_decl_roundtrip_clean_20260312`
+      -> `68 passed, 0 failed`
+  - `stage2 debug` guarded self-build:
+    - `scripts/timeout_sample_lldb.sh -t 1800 -m 24576 --no-series --no-lldb -o /tmp/stage2_dbg_type_decl_roundtrip_clean_20260312_run -- scripts/build_stage2_debug.sh /private/tmp/stage1_dbg_type_decl_roundtrip_clean_20260312 /private/tmp/stage2_dbg_type_decl_roundtrip_clean_20260312`
+      -> `status=0`
+      -> produced `/private/tmp/stage2_dbg_type_decl_roundtrip_clean_20260312`
+  - focused old-signature oracle on the fresh stage2:
+    - `bash regression_tests/stage2_lib_struct_bodyless_repro.sh /private/tmp/stage2_dbg_type_decl_roundtrip_clean_20260312`
+      -> `not reproduced (compiler exited 138 after the old signature disappeared)`
+  - direct clean control on the same stage2:
+    - `env DEBUG_LIB_CLASS_REPAIR=LibC::PthreadAttrT CRYSTAL_V2_STOP_AFTER_HIR=1 /private/tmp/stage2_dbg_type_decl_roundtrip_clean_20260312 --no-prelude src/stdlib/lib_c/aarch64-darwin/c/sys/types.cr -o /tmp/sys_types.roundtripclean.stage2`
+      -> exits `138`, but the log contains no `[LIB_CLASS_REPAIR] ... body=0`
+         lines anymore.
+- Boundary after the fix:
+  - the old `LibC::Pthread*` bodyless parser corruption class is gone on the
+    clean self-hosted stage2 binary;
+  - general stage2 stability is not yet fixed:
+    - `bash scripts/stage2_minimal_compile_repro.sh /private/tmp/stage2_dbg_type_decl_roundtrip_clean_20260312`
+      still exits `138`;
+  - traced diagnostics show the next frontier is narrower:
+    - struct member declarations now survive as two body entries, but on traced
+      stage2 they still degrade from proper `TypeDeclarationNode` values into
+      generic `Frontend::Node`, so the next task is type-identity stabilization
+      for those parsed member nodes rather than another body-loss workaround.
+
 ### Current checkpoint (2026-03-12 standalone lib-struct body-loss oracle on `sys/types.cr`)
 
 - Verified that the current bootstrap blocker is now a standalone stage2 parser /

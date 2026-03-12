@@ -1631,9 +1631,7 @@ module CrystalV2
         # Called from parse_prefix when identifier followed by " : " (space + colon)
         private def parse_type_declaration_from_identifier(identifier_token : Token) : ExprId
           var_span = identifier_token.span
-
-          # Create var node (Identifier)
-          var = @arena.add_typed(IdentifierNode.new(var_span, @string_pool.intern(identifier_token.slice)))
+          var_name = @string_pool.intern(identifier_token.slice)
 
           # Skip whitespace and consume ':'
           skip_whitespace_and_optional_newlines
@@ -1660,22 +1658,13 @@ module CrystalV2
             return PREFIX_ERROR if value.invalid?
           end
 
-          # Create TypeDeclarationNode
-          # Extract name from var node (should be Identifier)
-          var_node = @arena[var]
-          var_literal = Frontend.node_literal(var_node)
-          unless var_literal
-            @diagnostics << Diagnostic.new("Type declaration variable must be a simple identifier", var_span)
-            return PREFIX_ERROR
-          end
-
           type_span = type_end_token ? type_start_token.span.cover(type_end_token.span) : type_start_token.span
           value_span = value ? @arena[value].span : type_span
           full_span = var_span.cover(value_span)
 
           @arena.add_typed(TypeDeclarationNode.new(
             full_span,
-            var_literal,
+            var_name,
             declared_type_slice,
             value
           ))

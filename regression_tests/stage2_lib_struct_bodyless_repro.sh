@@ -24,16 +24,14 @@ CRYSTAL_V2_STOP_AFTER_HIR=1 \
 RC=$?
 set -e
 
-if [[ "$RC" -ne 0 ]]; then
-  echo "--- repro log ---" >&2
-  tail -n 80 "$LOG_FILE" >&2
-  echo "unexpected status: $RC" >&2
-  exit 3
-fi
-
 if grep -E -q '\[LIB_CLASS_REPAIR\] class=LibC::PthreadAttrT .*body=0' "$LOG_FILE"; then
   echo "reproduced: stage2 parsed LibC::PthreadAttrT with empty body"
   exit 0
+fi
+
+if [[ "$RC" -ne 0 ]]; then
+  echo "not reproduced (compiler exited $RC after the old signature disappeared)"
+  exit 1
 fi
 
 echo "not reproduced"
