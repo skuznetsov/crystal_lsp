@@ -73,6 +73,43 @@ closure cells, Tuple ptr/value confusion.
       generic `Frontend::Node`, so the next task is type-identity stabilization
       for those parsed member nodes rather than another body-loss workaround.
 
+### Current checkpoint (2026-03-12 minimal lib-struct type-identity oracle)
+
+- Verified that the remaining self-hosted `lib struct` failure has an even
+  smaller oracle than `sys/types.cr`: it reproduces on a tiny no-prelude file
+  containing only:
+  - `lib LibX`
+  - `struct Foo`
+  - two field declarations `a : Int` and `b : Long`
+- New focused oracle:
+  - `regression_tests/stage2_type_decl_node_identity_repro.sh`
+  - it runs `--no-prelude` with:
+    - `CRYSTAL_V2_STOP_AFTER_HIR=1`
+    - `DEBUG_CLASS_ARENA=LibX::Foo`
+  - and reports failure only if the compiler logs
+    `first=CrystalV2::Compiler::Frontend::Node:last=CrystalV2::Compiler::Frontend::Node`
+    for `LibX::Foo`.
+- Fresh verification on the current debug pair:
+  - fresh stage1 `/private/tmp/stage1_dbg_parser_source_retain_20260312`:
+    - direct run on `/tmp/lib_struct_minimal2_20260312.cr` exits `0`
+    - logs `first=TypeDeclarationNode:last=TypeDeclarationNode`
+  - fresh self-hosted stage2 `/private/tmp/stage2_dbg_parser_source_retain_20260312`:
+    - direct run on the same file exits `138`
+    - logs `first=CrystalV2::Compiler::Frontend::Node:last=CrystalV2::Compiler::Frontend::Node`
+  - full-prelude control on the same stage2 still matches that signature on the
+    real stdlib culprit:
+    - `DEBUG_CLASS_ARENA=LibC::PthreadAttrT ... puts 1`
+      still reaches `LibC::PthreadAttrT` with `size=39` and
+      `first=...Node:last=...Node`
+- Refutation learned during this checkpoint:
+  - a one-line parser hygiene experiment that re-retained `@source` after
+    pre-sizing `AstArena` is plausible as a separate lifetime fix, but it did
+    not change this oracle or the general `puts 1` crash corridor, so it is not
+    the active root-cause fix here.
+- Next task:
+  - find why self-hosted stage2 constructs generic `Frontend::Node` objects in
+    place of `TypeDeclarationNode` for `lib struct` field declarations.
+
 ### Current checkpoint (2026-03-12 standalone lib-struct body-loss oracle on `sys/types.cr`)
 
 - Verified that the current bootstrap blocker is now a standalone stage2 parser /
