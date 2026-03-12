@@ -22,6 +22,37 @@ closure cells, Tuple ptr/value confusion.
 - [ ] **Phase 5: FIX RC-3** — String.build block lowering
 - [ ] **Phase 6: RE-ENABLE RTA + BOOTSTRAP** — stage0→stage1→stage2→stage3 + benchmark
 
+### Current checkpoint (2026-03-12 standalone lib-struct body-loss oracle on `sys/types.cr`)
+
+- Verified that the current bootstrap blocker is now a standalone stage2 parser /
+  AST corruption case, not just generic `register_lib` noise during full-prelude
+  compiles.
+- New focused oracle:
+  - `regression_tests/stage2_lib_struct_bodyless_repro.sh`
+  - it runs the compiler with:
+    - `--no-prelude src/stdlib/lib_c/aarch64-darwin/c/sys/types.cr`
+    - `CRYSTAL_V2_STOP_AFTER_HIR=1`
+    - `DEBUG_LIB_CLASS_REPAIR=LibC::PthreadAttrT`
+  - and reports failure only if self-hosted stage2 logs
+    `LibC::PthreadAttrT` with `body=0`.
+- Fresh verification on the current debug pair:
+  - `bash regression_tests/stage2_lib_struct_bodyless_repro.sh /private/tmp/stage1_dbg_lib_class_repair_trace_20260312`
+    -> `not reproduced`
+  - `bash regression_tests/stage2_lib_struct_bodyless_repro.sh /private/tmp/stage2_dbg_lib_class_repair_trace_20260312`
+    -> `reproduced: stage2 parsed LibC::PthreadAttrT with empty body`
+- Boundary after the oracle:
+  - the failure is reproducible in isolation on
+    `src/stdlib/lib_c/aarch64-darwin/c/sys/types.cr`;
+  - the active bad set currently includes five pthread structs:
+    `PthreadAttrT`, `PthreadCondT`, `PthreadCondattrT`,
+    `PthreadMutexT`, and `PthreadMutexattrT`;
+  - cached full-file lib reparse does not repair them, because the reparsed
+    full-file AST under fresh stage2 already reports those structs with
+    `body=0`.
+- Next task:
+  - inspect the frontend parser / AST construction path for `lib struct` bodies
+    on this file directly instead of adding another arena-selection heuristic.
+
 ### Current checkpoint (2026-03-11 string-pool ownership fix for self-hosted parser names)
 
 - Verified a distinct self-hosted corruption class in `Frontend::StringPool`:
