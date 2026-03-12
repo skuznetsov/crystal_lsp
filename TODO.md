@@ -22,6 +22,40 @@ closure cells, Tuple ptr/value confusion.
 - [ ] **Phase 5: FIX RC-3** — String.build block lowering
 - [ ] **Phase 6: RE-ENABLE RTA + BOOTSTRAP** — stage0→stage1→stage2→stage3 + benchmark
 
+### Current checkpoint (2026-03-12 focused Errno enum-method no-prelude oracle)
+
+- Verified that the post-`LibX::Foo` frontier has a faster focused oracle than
+  full `puts 1`: `src/stdlib/errno.cr` under `--no-prelude` with
+  `CRYSTAL_V2_STOP_AFTER_HIR=1`.
+- New focused regression:
+  - `regression_tests/stage2_errno_unsafe_message_repro.sh`
+  - it enables `DEBUG_ENUM_ARENA=Errno` and `DEBUG_DEF_ARENA=Errno`, then
+    reports failure only when the compiler reaches `Errno#unsafe_message`,
+    never reaches `Errno.value`, and still logs generic
+    `Frontend::Node` body candidates.
+- Fresh verification on the current verified class-fastpath pair:
+  - `bash regression_tests/stage2_errno_unsafe_message_repro.sh /private/tmp/stage1_dbg_class_current_fastpath_20260312`
+    -> `not reproduced`
+  - `bash regression_tests/stage2_errno_unsafe_message_repro.sh /private/tmp/stage2_dbg_class_current_fastpath_20260312`
+    -> `reproduced: stage2 corrupted Errno#unsafe_message before reaching Errno.value`
+- Diagnostic boundary learned:
+  - the active enum frontier is now narrower than generic enum registration:
+    fresh stage2 reaches `Errno` member extraction, then dies during method
+    registration / return-type inference for `Errno#unsafe_message`;
+  - the selected/current `Errno` arenas still claim `fit=true`, but their
+    first/last body entries for `Errno#message` and `Errno#unsafe_message`
+    are already generic `CrystalV2::Compiler::Frontend::Node`;
+  - a broad def-level source reparse experiment was explicitly refuted on
+    2026-03-12:
+    - fresh `stage1 debug` still built (`real 9.72`);
+    - fresh `stage2 debug` also built, but much more slowly (about `8m52s`);
+    - the new fresh stage2 still reproduced both the focused `Errno` oracle
+      and `scripts/stage2_minimal_compile_repro.sh`.
+- Next task:
+  - repair the `Errno` / enum method body carrier itself, or change enum
+    recovery so it stops trusting the current corrupt snippet/current-arena
+    path, instead of adding another broad def-level reparse.
+
 ### Current checkpoint (2026-03-12 class-arena fast path for tiny self-hosted lib struct HIR crash)
 
 - Verified that the tiny no-prelude `lib LibX; struct Foo; a : Int; b : Long; end; end`
