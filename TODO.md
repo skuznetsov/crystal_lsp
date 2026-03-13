@@ -63,6 +63,29 @@ closure cells, Tuple ptr/value confusion.
   - the active frontier has moved deeper into `parse_macro_body_until_branch /
     parse_macro_body` for the body of that same `{% for %}` block.
 
+### Current checkpoint (2026-03-12 minimal nested enum-macro oracle for the stage2 parser drop)
+
+- Verified a smaller self-hosted parser oracle that reproduces the same
+  `Errno`-class nested macro failure without depending on stdlib files:
+  - `regression_tests/stage2_enum_nested_macro_repro.sh`
+  - it generates a tiny `--no-prelude` file with:
+    - an enum-level outer `{% for value in %w(A B) %}`
+    - an inner `{% if true %}` body that emits `{{value.id}} = 1`
+    - and a later `def self.value` containing another `{% if true %}`
+- Fresh verification:
+  - `bash regression_tests/stage2_enum_nested_macro_repro.sh /private/tmp/stage1_dbg_macro_body_dead_checks_20260312`
+    -> `not reproduced (compiler kept the enum macro body intact)`
+  - `bash regression_tests/stage2_enum_nested_macro_repro.sh /private/tmp/stage2_dbg_macro_branch_whitespace_fix_20260312`
+    -> `reproduced: stage2 dropped the outer enum macro body and resumed on the inner if`
+- Diagnostic boundary learned:
+  - the active parser failure no longer requires full `src/stdlib/errno.cr`;
+  - the same self-hosted signature now reproduces on a tiny standalone enum:
+    stage2 logs `entry=macro invalid=1 current=10:if` and `count=0`, while the
+    stable stage1 logs `MacroFor` + `Def` in the enum body.
+- This oracle is now the preferred cheap reproducer for the nested `% for` /
+  inner `% if` parser bug while the full `Errno` path stays useful as a
+  second-level confirmation.
+
 ### Current checkpoint (2026-03-12 macro-body invalid-check removal moves Errno past parse)
 
 - Verified a narrower self-hosted parser fix in macro control callers:

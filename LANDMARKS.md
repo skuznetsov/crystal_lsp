@@ -3,6 +3,23 @@
 Updated: 2026-03-12
 Context: compiler/bootstrap/stage2-stability
 
+[LM-163|repro]: the current nested enum macro parser failure now has a small
+standalone oracle that does not depend on full `src/stdlib/errno.cr`. The new
+script `regression_tests/stage2_enum_nested_macro_repro.sh` generates a tiny
+`--no-prelude` enum with an outer `{% for value in %w(A B) %}`, an inner
+`{% if true %}` that emits `{{value.id}} = 1`, and a later `def self.value`
+containing another `{% if true %}`. It cleanly brackets known binaries:
+`/private/tmp/stage1_dbg_macro_body_dead_checks_20260312` reports
+`not reproduced (compiler kept the enum macro body intact)`, while
+`/private/tmp/stage2_dbg_macro_branch_whitespace_fix_20260312` reports
+`reproduced: stage2 dropped the outer enum macro body and resumed on the inner if`.
+The corresponding parser traces match the old `Errno` signature exactly: bad
+stage2 logs `[ENUM_PARSE_DROP] ... current=10:if` and
+`[ENUM_PARSE_BODY] ... count=0`, while stable stage1 logs `MacroFor` plus the
+later `Def` inside the enum body. Boundary: future parser experiments can now
+use this tiny standalone file as the primary falsifier before paying for full
+`errno.cr` or bootstrap runs. {F/G/R: 0.97/0.86/0.97} [verified]
+
 [LM-162|verify]: the fresh self-hosted `Errno` macro-body parse crash after the
 `%w(...)` splitter was another caller-side dead-check bug, not a deeper body
 parser collapse. The key local observation was that
