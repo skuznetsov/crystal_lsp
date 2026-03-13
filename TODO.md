@@ -22,6 +22,64 @@ closure cells, Tuple ptr/value confusion.
 - [ ] **Phase 5: FIX RC-3** — String.build block lowering
 - [ ] **Phase 6: RE-ENABLE RTA + BOOTSTRAP** — stage0→stage1→stage2→stage3 + benchmark
 
+### Current checkpoint (2026-03-13 tiny `AstArena` + `LibNode` oracle isolates the live stage2 crash below `AstToHir`)
+
+- Added a new smaller self-hosted compiler oracle:
+  - `regression_tests/stage2_astarena_libnode_repro.sh`
+  - source:
+    ```crystal
+    require "<repo>/src/compiler/bootstrap_shims"
+    require "<repo>/src/compiler/frontend/ast"
+
+    span = CrystalV2::Compiler::Frontend::Span.zero
+    arena = CrystalV2::Compiler::Frontend::AstArena.new
+    body = [CrystalV2::Compiler::Frontend::ExprId.new(7)]
+    id = arena.add_typed(
+      CrystalV2::Compiler::Frontend::LibNode.new(
+        span,
+        "__MacroContext__".to_slice,
+        body
+      )
+    )
+    base = arena[id]
+    ```
+  - it then checks the structural readback only:
+    - `base.node_kind == Lib`
+    - `Frontend.node_kind(base) == Lib`
+    - `base.is_a?(LibNode) == true`
+    - `base.name == "__MacroContext__"`
+    - `base.body.size == 1`
+- Why this matters:
+  - the older `stage2_ast_to_hir_ctor_probe_repro.sh` still required compiling
+    `src/compiler/hir/ast_to_hir.cr`, so the frontier was mixed with larger
+    parser/HIR noise;
+  - this new oracle depends only on `bootstrap_shims` + `frontend/ast.cr`;
+  - exact stage1 still compiles and runs it cleanly, while the broken fresh
+    self-hosted stage2 now crashes compiling that same tiny source with `138`;
+  - that narrows the active corridor below `AstToHir` and below the earlier
+    lib-macro reparsing experiments, toward frontend node storage/readback or
+    lower codegen/runtime for `AstArena` + `TypedNode`.
+- Fresh verification on the exact pair:
+  - stage1 control:
+    - `bash regression_tests/stage2_astarena_libnode_repro.sh /private/tmp/stage1_dbg_lib_parse_return_trace_20260313`
+      -> `not reproduced (AstArena stored and read back LibNode structurally)`
+  - self-hosted stage2 repro:
+    - `bash regression_tests/stage2_astarena_libnode_repro.sh /private/tmp/stage2_dbg_lib_macro_parse_reason_20260313`
+      -> `reproduced: compiler crashed while compiling the direct AstArena LibNode probe`
+  - direct stage1-built runtime output from the probe:
+    - `Lib`
+    - `Lib`
+    - `true`
+    - `true`
+    - `__MacroContext__`
+    - `1`
+- New frontier:
+  - the live blocker is now better modeled as a lower-level self-hosted
+    frontend storage/codegen/runtime corridor than as another
+    `parse_macro_literal_lib_body`-only problem;
+  - this new probe is the cheapest current falsifier before returning to the
+    larger `AstToHir` and full-bootstrap paths.
+
 ### Current checkpoint (2026-03-13 tiny lib alias oracle proves self-hosted `parse_lib` body corruption)
 
 - Added a new primary mini-oracle:

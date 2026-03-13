@@ -3,6 +3,28 @@
 Updated: 2026-03-13
 Context: compiler/bootstrap/stage2-stability
 
+[LM-172|repro]: there is now a smaller self-hosted compiler oracle below the
+older direct `AstToHir` probe: compiling a tiny program that only requires
+`src/compiler/bootstrap_shims` and `src/compiler/frontend/ast`, stores a
+`LibNode` into `AstArena`, and then checks structural readback. The new script
+`regression_tests/stage2_astarena_libnode_repro.sh` expects the compiled binary
+to print `Lib`, `Lib`, `true`, `true`, `__MacroContext__`, `1`, which confirms
+that `AstArena[id]` still behaves structurally as `LibNode` even though
+`class.name` is known to be unreliable on generated code. The exact stage1
+control `/private/tmp/stage1_dbg_lib_parse_return_trace_20260313` reports
+`not reproduced (AstArena stored and read back LibNode structurally)`, while
+the exact broken self-hosted stage2
+`/private/tmp/stage2_dbg_lib_macro_parse_reason_20260313` reports
+`reproduced: compiler crashed while compiling the direct AstArena LibNode probe`
+with `exit 138`. This is a stronger boundary reduction than the older direct
+`AstToHir` constructor oracle because it removes `ast_to_hir.cr` and most HIR
+setup from the repro path; the live blocker now looks lower-level, around
+frontend node storage/readback or codegen/runtime for `AstArena` + `TypedNode`,
+not just `parse_macro_literal_lib_body` or `register_lib`. Boundary: this
+oracle does not yet identify the exact failing primitive, only that the crash
+already reproduces before `AstToHir` is needed. {F/G/R: 0.97/0.87/0.97}
+[verified]
+
 [LM-170|repro]: the strongest current late-stage bootstrap hypothesis now has a
 cheap standalone runtime oracle: stage1-generated code corrupts abstract-value
 hash lookup/iteration identity, which closely matches the self-hosted
