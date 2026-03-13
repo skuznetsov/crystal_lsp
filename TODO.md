@@ -69,6 +69,50 @@ closure cells, Tuple ptr/value confusion.
     new alias-only oracle as the cheapest falsifier before any larger
     `LibC`/prelude/bootstrap runs.
 
+### Current checkpoint (2026-03-13 tiny no-prelude lib oracle isolates a second post-HIR self-hosted stage2 blocker)
+
+- Added another focused mini-oracle:
+  - `regression_tests/stage2_no_prelude_lib_min_repro.sh`
+  - source:
+    ```crystal
+    lib __MacroContext__
+      alias Long = Int64
+      alias ULong = UInt64
+    end
+    ```
+  - it runs `STAGE2_DEBUG=1 --no-prelude --no-link` and reports failure only
+    when the compiler crashes after reaching the tiny lib frontier markers.
+- Why this matters:
+  - the larger `LibC` frontier still looked partially tied to macro-if/lib-body
+    transport;
+  - but the same fresh self-hosted stage2 now also crashes on a trivial
+    no-prelude `lib` file, while the matching stage1 survives cleanly;
+  - that proves there is a second, more general self-hosted blocker beyond the
+    current `LibC` prelude path.
+- Fresh verification on the exact pair:
+  - stage1 control:
+    - `bash regression_tests/stage2_no_prelude_lib_min_repro.sh /private/tmp/stage1_dbg_lib_macro_if_sanitized_20260313`
+      -> `not reproduced (compiler survived the tiny no-prelude lib compile)`
+  - fresh stage2 repro:
+    - `bash regression_tests/stage2_no_prelude_lib_min_repro.sh /private/tmp/stage2_dbg_const_literal_entry_trace_20260313`
+      -> `reproduced: stage2 crashed after pass3 setup on the tiny no-prelude lib compile`
+- Narrowed boundary from the traced fresh stage2:
+  - `CRYSTAL_V2_MIR_SETUP_TRACE=1` shows the tiny no-prelude lib compile getting
+    through:
+    - `class_info size=0`
+    - `globals.to_set done count=0`
+    - `constant_literals size=1`
+    - `constant_literals scan start`
+  - then it crashes before the first entry inside `constant_literal_values.each`
+    can be printed;
+  - so the active late blocker is now best modeled as `Hash(String, MacroValue)`
+    iterator startup or a corrupt constant-literal map, not `class_info`,
+    `globals.to_set`, or the earlier `LibC` macro-if body path.
+- Next useful branch:
+  - keep using the tiny no-prelude lib oracle as the cheapest falsifier;
+  - inspect `constant_literal_values` insertion/iteration and shared hash
+    runtime behavior before returning to heavier full-prelude/bootstrap runs.
+
 ### Current checkpoint (2026-03-13 CLI manual `%w/%i` split moves the old top-level macro collection frontier)
 
 - Verified a narrower CLI-side fix in `src/compiler/cli.cr`:

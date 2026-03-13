@@ -3,6 +3,28 @@
 Updated: 2026-03-13
 Context: compiler/bootstrap/stage2-stability
 
+[LM-169|repro]: a fresh self-hosted stage2 now has a second tiny oracle that
+is independent of the noisy full-prelude `LibC` path: the compiler crashes on a
+trivial no-prelude lib file even though the matching stage1 survives cleanly.
+The new script `regression_tests/stage2_no_prelude_lib_min_repro.sh` uses only
+`lib __MacroContext__; alias Long = Int64; alias ULong = UInt64; end` under
+`STAGE2_DEBUG=1 --no-prelude --no-link`. It cleanly brackets the current exact
+pair: stage1 `/private/tmp/stage1_dbg_lib_macro_if_sanitized_20260313`
+reports `not reproduced (compiler survived the tiny no-prelude lib compile)`,
+while fresh self-hosted stage2
+`/private/tmp/stage2_dbg_const_literal_entry_trace_20260313` reports
+`reproduced: stage2 crashed after pass3 setup on the tiny no-prelude lib compile`.
+The stronger traced boundary is that `CRYSTAL_V2_MIR_SETUP_TRACE=1` on that
+fresh stage2 gets through `class_info size=0`, `globals.to_set done count=0`,
+and `constant_literals size=1`, prints `constant_literals scan start`, and then
+dies before the first entry inside `constant_literal_values.each` can be
+printed. That refutes the narrower `class_info` / `to_set` sub-hypotheses and
+points the active late blocker at `Hash(String, MacroValue)` iterator startup
+or a corrupt constant-literal map. Boundary: this does not eliminate the older
+full-prelude `LibC` frontier yet, but it proves stage2 still has at least one
+general post-HIR self-hosted blocker even without prelude noise. {F/G/R:
+0.97/0.84/0.97} [verified]
+
 [LM-168|repro]: the fresh self-hosted `LibC`/`register_lib` crash family is no
 longer best modeled as only a HIR arena-transport problem; there is now a tiny
 frontend oracle showing that `parse_lib` body members are already corrupted to
