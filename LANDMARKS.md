@@ -3,6 +3,32 @@
 Updated: 2026-03-13
 Context: compiler/bootstrap/stage2-stability
 
+[LM-165|verify]: the stale self-hosted `%w/%i` HIR crash in
+`AstToHir#macro_word_list_from_source` is a real, isolated frontier and it can
+be moved with a narrow splitter change instead of another parser patch. The
+fresh baseline stage2 `/private/tmp/stage2_dbg_macro_body_until_branch_explicit_20260313`
+still crashes on the tiny nested enum `%w(A B)` reproducer with
+`String#bytesize -> String#split -> AstToHir#macro_word_list_from_source ->
+extract_enum_members_from_macro_for -> register_enum`. Replacing only
+`inner.split(/\s+/).reject(&.empty?)` with a byte-wise
+`split_macro_word_list_inner(...)` scanner in
+`src/compiler/hir/ast_to_hir.cr` is enough to move that signature. The new
+oracle `regression_tests/stage2_macro_word_list_hir_repro.sh` brackets the old
+and fresh binaries cleanly: the stale stage2 reports
+`reproduced: stage2 still crashes in macro_word_list_from_source while expanding enum %w(...)`,
+while fresh exact stage2 `/private/tmp/stage2_dbg_macro_word_inner_split_20260313`
+reports `not reproduced (compiler moved past macro_word_list_from_source into later enum method inference)`;
+the fresh exact stage1 control `/private/tmp/stage1_dbg_macro_word_inner_split_20260313`
+is also `not reproduced`. Fresh debug stage1 builds in `9.63s`, fresh guarded
+self-hosted stage2 builds successfully in `516.96s`, and direct no-debug LLDB
+on the fresh stage2 shows the new boundary for both the tiny repro and
+`src/stdlib/errno.cr`:
+`PageArena#[] -> node_for_return_infer -> collect_return_types ->
+infer_concrete_return_type_from_body -> register_type_method_from_def ->
+register_enum_methods -> register_enum`. Boundary: the old macro-word
+extraction crash is gone, but stage2 still dies later in enum-method return
+inference / arena transport. {F/G/R: 0.96/0.79/0.97} [verified]
+
 [LM-164|verify]: the fresh self-hosted nested macro parser drop was another
 broken default-arg wrapper path, now for
 `Parser#parse_macro_body_until_branch(stop_on_branch : Bool = true)`. The key

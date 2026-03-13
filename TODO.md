@@ -22,6 +22,53 @@ closure cells, Tuple ptr/value confusion.
 - [ ] **Phase 5: FIX RC-3** — String.build block lowering
 - [ ] **Phase 6: RE-ENABLE RTA + BOOTSTRAP** — stage0→stage1→stage2→stage3 + benchmark
 
+### Current checkpoint (2026-03-13 manual `%w/%i` HIR split removes the stale `macro_word_list_from_source` crash corridor)
+
+- Verified a narrower HIR-side fix in `src/compiler/hir/ast_to_hir.cr`:
+  - `macro_word_list_from_source(...)` no longer calls
+    `inner.split(/\s+/).reject(&.empty?)`;
+  - it now delegates to `split_macro_word_list_inner(...)`, a byte-wise splitter
+    that accumulates the current token in `IO::Memory`, flushes only on
+    whitespace boundaries, and preserves escaped bytes.
+- Why this is the right corridor:
+  - stale fresh stage2 `/private/tmp/stage2_dbg_macro_body_until_branch_explicit_20260313`
+    still crashed on the tiny nested enum repro with:
+    `String#bytesize -> String#split -> AstToHir#macro_word_list_from_source ->
+    extract_enum_members_from_macro_for -> register_enum`;
+  - the new patch is intentionally narrower than the earlier broad source-carrier
+    experiments: it only removes the regex split path from `%w/%i` enum-member
+    extraction, so any frontier shift is strong evidence against the old HIR
+    string-splitting signature.
+- New focused regression:
+  - `regression_tests/stage2_macro_word_list_hir_repro.sh`
+  - it runs the tiny nested enum `%w(A B)` reproducer under batch LLDB and
+    reports failure only when the backtrace still contains
+    `macro_word_list_from_source`.
+- Fresh verification on the exact debug pair:
+  - `stage1 debug`:
+    - `/usr/bin/time -p scripts/timeout_sample_lldb.sh -t 900 -m 24576 --no-series --no-lldb -o /tmp/stage1_dbg_macro_word_inner_split_probe_20260313 -- scripts/build_stage1_original_debug.sh /private/tmp/stage1_dbg_macro_word_inner_split_20260313`
+      -> `real 9.63`
+  - `stage2 debug`:
+    - `/usr/bin/time -p scripts/timeout_sample_lldb.sh -t 900 -m 24576 --no-series --no-lldb -o /tmp/stage2_dbg_macro_word_inner_split_probe_20260313 -- scripts/build_stage2_debug.sh /private/tmp/stage1_dbg_macro_word_inner_split_20260313 /private/tmp/stage2_dbg_macro_word_inner_split_20260313`
+      -> `status=0`
+      -> `real 516.96`
+  - focused oracle:
+    - `bash regression_tests/stage2_macro_word_list_hir_repro.sh /private/tmp/stage2_dbg_macro_body_until_branch_explicit_20260313`
+      -> `reproduced: stage2 still crashes in macro_word_list_from_source while expanding enum %w(...)`
+    - `bash regression_tests/stage2_macro_word_list_hir_repro.sh /private/tmp/stage2_dbg_macro_word_inner_split_20260313`
+      -> `not reproduced (compiler moved past macro_word_list_from_source into later enum method inference)`
+    - `bash regression_tests/stage2_macro_word_list_hir_repro.sh /private/tmp/stage1_dbg_macro_word_inner_split_20260313`
+      -> `not reproduced (compiler moved past the old macro_word_list_from_source crash)`
+- Direct no-debug boundary on the fresh stage2:
+  - tiny nested enum and `src/stdlib/errno.cr` both still exit `138`, but the
+    fresh LLDB stack is now:
+    `PageArena#[] -> node_for_return_infer -> collect_return_types ->
+    infer_concrete_return_type_from_body -> register_type_method_from_def ->
+    register_enum_methods -> register_enum`
+  - this is a real frontier shift: the old `%w/%i` HIR string-splitting crash is
+    gone, and the next blocker is later enum-method return inference / arena
+    transport, not `macro_word_list_from_source`.
+
 ### Current checkpoint (2026-03-13 explicit `parse_macro_body_until_branch` flag removes the stale wrapper path)
 
 - Verified a new self-hosted parser-wrapper fix in `src/compiler/frontend/parser.cr`:

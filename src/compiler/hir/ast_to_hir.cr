@@ -35791,7 +35791,49 @@ module Crystal::HIR
       return nil unless close_delim
       return nil unless text.ends_with?(close_delim.to_s)
       inner = text[3, text.size - 4]
-      inner.split(/\s+/).reject(&.empty?)
+      split_macro_word_list_inner(inner)
+    end
+
+    private def split_macro_word_list_inner(
+      inner : String,
+    ) : Array(String)
+      words = [] of String
+      current = IO::Memory.new
+      i = 0
+      bytesize = inner.bytesize
+
+      while i < bytesize
+        CrystalV2::Compiler::Frontend::Watchdog.check!
+        byte = inner.byte_at(i)
+        char = byte.chr
+
+        if char.ascii_whitespace?
+          unless current.size == 0
+            words << String.new(current.to_slice)
+            current.clear
+          end
+          i += 1
+          next
+        end
+
+        if char == '\\'
+          i += 1
+          if i < bytesize
+            current.write_byte(inner.byte_at(i))
+          end
+          i += 1
+          next
+        end
+
+        current.write_byte(byte)
+        i += 1
+      end
+
+      unless current.size == 0
+        words << String.new(current.to_slice)
+      end
+
+      words
     end
 
     private def macro_word_list_closer(open_delim : Char) : Char?
