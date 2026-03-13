@@ -158,6 +158,39 @@ closure cells, Tuple ptr/value confusion.
   - that hypothesis is much cheaper to attack with the new runtime oracle than
     with another full stage1→stage2 bootstrap cycle.
 
+### Current checkpoint (2026-03-13 direct `AstToHir.new` probe becomes a cheap self-hosted stage2 compile oracle)
+
+- Added another focused oracle:
+  - `regression_tests/stage2_ast_to_hir_ctor_probe_repro.sh`
+  - it compiles a tiny program that directly requires
+    `src/compiler/hir/ast_to_hir`, constructs:
+    - `Frontend::AstArena`
+    - `Crystal::HIR::Module`
+    - `Crystal::HIR::AstToHir.new(...)`
+    and then checks that the resulting runtime binary prints:
+    - `const_lit=0`
+    - `const_types=0`
+- Why this matters:
+  - the standalone runtime probe showed that `AstToHir.new(...)` itself is
+    clean under the current stage1-generated binary;
+  - but the current fresh self-hosted stage2 still crashes while compiling that
+    same tiny direct-constructor file, long before any full bootstrap is needed;
+  - this gives a much cheaper self-hosted compiler oracle than another
+    stage1→stage2 full-compiler build.
+- Fresh verification:
+  - `bash regression_tests/stage2_ast_to_hir_ctor_probe_repro.sh /private/tmp/stage1_dbg_const_map_ids_20260313`
+    -> `not reproduced (direct AstToHir constructor probe stayed clean)`
+  - `bash regression_tests/stage2_ast_to_hir_ctor_probe_repro.sh /private/tmp/stage2_dbg_const_map_ids_20260313`
+    -> `reproduced: compiler crashed while compiling the direct AstToHir constructor probe`
+  - direct stage1-built runtime probe output:
+    - `const_lit=0`
+    - `const_types=0`
+- New frontier:
+  - the active blocker is not “`AstToHir.new` always produces bad state” in
+    isolation;
+  - it now looks more like a self-hosted compile-time corridor triggered while
+    compiling compiler modules that instantiate the same constructor path.
+
 ### Current checkpoint (2026-03-13 CLI manual `%w/%i` split moves the old top-level macro collection frontier)
 
 - Verified a narrower CLI-side fix in `src/compiler/cli.cr`:

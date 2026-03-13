@@ -30,6 +30,28 @@ carrier vs accessor lowering), but it strongly shifts the frontier below HIR
 registration and gives a cheap falsifier for future fixes. {F/G/R:
 0.96/0.83/0.97} [verified]
 
+[LM-171|repro]: there is now a second cheap self-hosted compiler oracle much
+closer to the live `AstToHir` frontier than a full bootstrap: compiling a tiny
+program that directly constructs `Crystal::HIR::AstToHir`. The new script
+`regression_tests/stage2_ast_to_hir_ctor_probe_repro.sh` writes a tiny file
+that requires `src/compiler/hir/ast_to_hir`, constructs `Frontend::AstArena`,
+`Crystal::HIR::Module`, and `Crystal::HIR::AstToHir.new(...)`, then expects the
+resulting runtime binary to print `const_lit=0` and `const_types=0`. The exact
+stage1 control `/private/tmp/stage1_dbg_const_map_ids_20260313` reports
+`not reproduced (direct AstToHir constructor probe stayed clean)`, and the
+direct runtime output from that stage1-built binary is exactly
+`const_lit=0` / `const_types=0`. The exact fresh self-hosted stage2
+`/private/tmp/stage2_dbg_const_map_ids_20260313` instead reports
+`reproduced: compiler crashed while compiling the direct AstToHir constructor probe`.
+This is an important boundary shift: the isolated runtime constructor path is
+clean under stage1-generated code, so the current blocker is not simply
+“`AstToHir.new` always constructs bad state”. The live failure now looks more
+like a self-hosted compile-time corridor that is triggered while compiling
+compiler modules using the same constructor path. Boundary: this oracle does
+not yet identify the exact codegen/runtime mechanism, but it gives a much
+cheaper falsifier than another full stage1→stage2 compiler bootstrap.
+{F/G/R: 0.96/0.82/0.97} [verified]
+
 [LM-169|repro]: a fresh self-hosted stage2 now has a second tiny oracle that
 is independent of the noisy full-prelude `LibC` path: the compiler crashes on a
 trivial no-prelude lib file even though the matching stage1 survives cleanly.
