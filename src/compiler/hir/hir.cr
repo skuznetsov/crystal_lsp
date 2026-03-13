@@ -1312,6 +1312,38 @@ module Crystal::HIR
       register_builtin_primitives
     end
 
+    def bootstrap_reinitialize_runtime_state : Nil
+      @next_function_id = 0_u32
+      @next_type_id = TypeRef::FIRST_USER_TYPE
+      reset_runtime_state
+    end
+
+    private def reset_runtime_state : Nil
+      @functions = [] of Function
+      @functions_by_name = {} of String => Function
+      @functions_by_base_name = {} of String => Array(Function)
+      @types = [] of TypeDescriptor
+      @type_intern = {} of String => TypeRef
+      @strings = [] of String
+      @string_intern = {} of String => StringId
+      @link_libraries = [] of String
+      @extern_functions = [] of ExternFunction
+      @extern_function_names = Set(String).new
+      @extern_functions_by_any_name = {} of String => ExternFunction
+      @extern_functions_by_lib_and_name = {} of Tuple(String, String) => ExternFunction
+      @extern_globals = [] of ExternGlobal
+      @extern_global_names = Set(String).new
+      @extern_globals_by_any_name = {} of String => ExternGlobal
+      @extern_globals_by_lib_and_name = {} of Tuple(String, String) => ExternGlobal
+      @method_effects = {} of String => MethodEffectSummary
+      @class_parents = {} of String => String?
+      @module_includers = {} of String => Array(String)
+      @lib_names = Set(String).new
+      @lib_structs = Set(String).new
+      @primitive_methods = {} of String => String
+      register_builtin_primitives
+    end
+
     private def register_builtin_primitives
       # Crystal defines these via macros in primitives.cr that our compiler can't
       # fully expand. Hardcode them so lower_primitive_call can emit BinaryOp/Cast nodes.

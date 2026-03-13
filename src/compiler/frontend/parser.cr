@@ -870,7 +870,7 @@ module CrystalV2
                 io.write(member_node.member)
                 io << "="
               end
-              setter_slice = @string_pool.intern(setter_name.to_slice)
+              setter_slice = intern_retained_text(setter_name)
 
               # Create setter member access node: obj.prop=
               setter_member = @arena.add_typed(MemberAccessNode.new(
@@ -1255,11 +1255,17 @@ module CrystalV2
             return if tok.kind == Token::Kind::EOF
             if macro_control_start?
               kw = peek_macro_keyword_after_lbracepercent
+              if ENV["DEBUG_MACRO_CTRL"]?
+                STDERR.puts "[MACRO_FF_ENTRY] current=#{current_token.kind}:#{token_text(current_token).inspect} peek=#{peek_token.kind}:#{token_text(peek_token).inspect} kw=#{kw.inspect} depth=#{depth} first=#{first_header}"
+              end
               consume_macro_control_start
               macro_trim_operator?
               skip_macro_whitespace
               kw_token = current_token
               kw_text = token_text(kw_token)
+              if ENV["DEBUG_MACRO_CTRL"]?
+                STDERR.puts "[MACRO_FF_HEADER] token=#{kw_token.kind}:#{kw_text.inspect} kw_peek=#{kw.inspect} depth=#{depth} first=#{first_header}"
+              end
               debug { "fast_forward_percent_block: kw=#{kw_text} depth=#{depth} first=#{first_header}" }
               advance
               skip_macro_whitespace
@@ -1274,6 +1280,9 @@ module CrystalV2
                   depth = 1
                 else
                   # Self-contained statements like {% raise %}, {% skip %} - just return
+                  if ENV["DEBUG_MACRO_CTRL"]?
+                    STDERR.puts "[MACRO_FF_EARLY_RETURN] kw_text=#{kw_text.inspect} kw_peek=#{kw.inspect}"
+                  end
                   debug { "fast_forward_percent_block: self-contained '#{kw_text}', returning early" }
                   skip_whitespace_and_optional_newlines
                   return
@@ -1476,7 +1485,7 @@ module CrystalV2
 
         # Phase 103: Parse type annotation (supports namespaces, generics, unions, suffixes)
         # Examples: Int32, Token::Kind, Array(Int32), Int32 | String, Int32?
-        # Returns: Slice from source covering the entire type (zero-copy!)
+        # Returns: stable slice covering the normalized type text.
         private def parse_type_annotation : Slice(UInt8)
           paren_depth = 0
           bracket_depth = 0
@@ -1486,27 +1495,39 @@ module CrystalV2
 
           loop do
             token = current_token
+            stop_reason = nil.as(String?)
 
             # Stop conditions when not nested in type delimiters
             if paren_depth == 0 && bracket_depth == 0 && brace_depth == 0
               if token.kind == Token::Kind::Newline
                 next_non_trivia = peek_next_non_trivia
-                break unless type_continues_after_newline?(last_type_token, next_non_trivia)
+                unless type_continues_after_newline?(last_type_token, next_non_trivia)
+                  stop_reason = "newline"
+                end
               end
-              break if token.kind == Token::Kind::Eq
-              break if token.kind == Token::Kind::Comma
-              break if operator_token?(token, Token::Kind::RParen)
-              break if token.kind == Token::Kind::EOF
-              break if token.kind == Token::Kind::Semicolon
-              break if token.kind == Token::Kind::RBracket
-              break if token.kind == Token::Kind::RBrace
+              stop_reason ||= "eq" if token.kind == Token::Kind::Eq
+              stop_reason ||= "comma" if token.kind == Token::Kind::Comma
+              stop_reason ||= "rparen" if operator_token?(token, Token::Kind::RParen)
+              stop_reason ||= "eof" if token.kind == Token::Kind::EOF
+              stop_reason ||= "semicolon" if token.kind == Token::Kind::Semicolon
+              stop_reason ||= "rbracket" if token.kind == Token::Kind::RBracket
+              stop_reason ||= "rbrace" if token.kind == Token::Kind::RBrace
               # Stop if we see a '{' after already consuming some type tokens (likely start of body)
-              if token.kind == Token::Kind::LBrace && last_type_token && !last_type_token.kind.in?(Token::Kind::LBrace, Token::Kind::Comma)
-                break
+              if token.kind == Token::Kind::LBrace
+                if prev_type_token = last_type_token
+                  unless prev_type_token.kind.in?(Token::Kind::LBrace, Token::Kind::Comma)
+                    stop_reason ||= "lbrace-after-type"
+                  end
+                end
               end
               if token.kind == Token::Kind::Identifier && slice_eq?(token.slice, "forall")
-                break
+                stop_reason ||= "forall"
               end
+            end
+
+            if stop_reason
+              debug { "parse_type_annotation: stop token=#{token.kind} text=#{token_text(token)} reason=#{stop_reason} buffer_size=#{buffer.size}" }
+              break
             end
 
             # Track delimiter nesting
@@ -1568,6 +1589,7 @@ module CrystalV2
                               false
                             end
 
+            debug { "parse_type_annotation: token=#{token.kind} text=#{token_text(token)} is_type_token=#{is_type_token} buffer_size=#{buffer.size}" }
             break unless is_type_token
 
             if token.kind == Token::Kind::MacroExprStart
@@ -1590,7 +1612,12 @@ module CrystalV2
             end
           end
 
-          buffer.to_slice
+          # The buffer is local, so returning `to_slice` directly can leave
+          # callers with a dangling slice in generated compilers. Retain a
+          # stable String instead.
+          text = String.new(buffer.to_slice)
+          @arena.retain_source(text) unless text.empty?
+          text.to_slice
         end
 
         # Allow multi-line type annotations to continue when:
@@ -1662,12 +1689,20 @@ module CrystalV2
           value_span = value ? @arena[value].span : type_span
           full_span = var_span.cover(value_span)
 
-          @arena.add_typed(TypeDeclarationNode.new(
+          node_id = @arena.add_typed(TypeDeclarationNode.new(
             full_span,
             var_name,
             declared_type_slice,
             value
           ))
+
+          if ENV["DEBUG_TYPE_DECL_NODE"]?
+            stored = @arena[node_id]
+            is_type_decl = stored.is_a?(TypeDeclarationNode) ? 1 : 0
+            STDERR.puts "[TYPE_DECL_NODE] name=#{String.new(var_name)} type=#{String.new(declared_type_slice)} id=#{node_id.index} class=#{stored.class.name} kind=#{Frontend.node_kind(stored)} is_type_decl=#{is_type_decl}"
+          end
+
+          node_id
         end
 
         # Parse type suffixes: ?, *, **, []
@@ -1800,7 +1835,7 @@ module CrystalV2
                   io.write(macro_name_slice)
                   io.write_byte('='.ord.to_u8)
                 end
-                macro_name_slice = @string_pool.intern(setter_name.to_slice)
+                macro_name_slice = intern_retained_text(setter_name)
               end
             else
               # Use case on token kind for non-identifier names
@@ -1980,7 +2015,7 @@ module CrystalV2
                 io.write(method_name_slice)
                 io.write_byte('='.ord.to_u8)
               end
-              method_name_slice = @string_pool.intern(setter_name.to_slice)
+              method_name_slice = intern_retained_text(setter_name)
             end
           when Token::Kind::LBracket
             # [] / []= / []? / []?= operator method names
@@ -2061,7 +2096,7 @@ module CrystalV2
                     io.write(method_name_slice)
                     io.write_byte('='.ord.to_u8)
                   end
-                  method_name_slice = @string_pool.intern(setter_name.to_slice)
+                  method_name_slice = intern_retained_text(setter_name)
                 end
               else
                 emit_unexpected(name_token)
@@ -2770,6 +2805,15 @@ module CrystalV2
         private def slice_without_prefix(slice : Slice(UInt8), bytes : Int32) : Slice(UInt8)
           return slice if slice.size <= bytes
           Slice.new(slice.to_unsafe + bytes, slice.size - bytes)
+        end
+
+        private def retain_text_slice(text : String) : Slice(UInt8)
+          @arena.retain_source(text) unless text.empty?
+          text.to_slice
+        end
+
+        private def intern_retained_text(text : String) : Slice(UInt8)
+          @string_pool.intern(retain_text_slice(text))
         end
 
         # Phase 2: Parse if/elsif/else
@@ -6017,7 +6061,6 @@ module CrystalV2
           # ModuleNode(A, body: [ModuleNode(B, body: [ClassNode(C, ...)])])
           innermost_idx = name_segments.size - 1
           innermost_token = name_segments[innermost_idx]
-
           # Phase 32: Create the innermost ClassNode
           result_id = @arena.add_typed(
             ClassNode.new(
@@ -6257,6 +6300,15 @@ module CrystalV2
 
           consume_newlines
           @lib_depth += 1
+          trace_lib_body = false
+          lib_trace_name = nil.as(String?)
+          if filter = ENV["DEBUG_LIB_PARSE_BODY"]?
+            parsed_name = String.new(name_token.slice)
+            if filter == "1" || parsed_name.includes?(filter)
+              trace_lib_body = true
+              lib_trace_name = parsed_name
+            end
+          end
           begin
             body_ids_b = SmallVec(ExprId, 4).new
             loop do
@@ -6319,6 +6371,15 @@ module CrystalV2
               else
                 expr = parse_statement
               end
+              if trace_lib_body
+                detail = if expr.invalid?
+                           "kind=invalid node_kind=-1 is_alias=0"
+                         else
+                           node = @arena[expr]
+                           "kind=#{node.class.name} node_kind=#{Frontend.node_kind(node).value} is_alias=#{node.is_a?(AliasNode) ? 1 : 0}"
+                         end
+                STDERR.puts "[LIB_PARSE_APPEND] lib=#{lib_trace_name} idx=#{body_ids_b.size + 1} expr=#{expr.index} #{detail} token=#{token.kind}"
+              end
               body_ids_b << expr unless expr.invalid?
               consume_newlines
               # Also consume semicolons as statement terminators in lib context
@@ -6338,13 +6399,27 @@ module CrystalV2
                          lib_token.span
                        end
 
-            return @arena.add_typed(
+            if trace_lib_body
+              snapshot = body_ids_b.to_a.map do |expr_id|
+                node = @arena[expr_id]
+                "#{expr_id.index}:#{node.class.name}:#{Frontend.node_kind(node).value}:#{node.is_a?(AliasNode) ? 1 : 0}"
+              end.join(",")
+              STDERR.puts "[LIB_PARSE_BODY] lib=#{lib_trace_name} count=#{body_ids_b.size} body=#{snapshot}"
+            end
+
+            STDERR.puts "[LIB_PARSE_RETURN] lib=#{lib_trace_name} before_add body_count=#{body_ids_b.size}" if trace_lib_body
+            lib_id = @arena.add_typed(
               LibNode.new(
                 lib_span,
                 name_token.slice,
                 body_ids_b.to_a
               )
             )
+            if trace_lib_body
+              lib_node = @arena[lib_id]
+              STDERR.puts "[LIB_PARSE_RETURN] lib=#{lib_trace_name} lib_id=#{lib_id.index} kind=#{lib_node.class.name} node_kind=#{Frontend.node_kind(lib_node).value} body=#{lib_node.as(LibNode).body.try(&.size) || 0}"
+            end
+            return lib_id
           ensure
             @lib_depth -= 1
           end
@@ -6423,17 +6498,53 @@ module CrystalV2
           # Phase 103G: Parse enum members and methods
           members = [] of EnumMember
           method_bodies_b = SmallVec(ExprId, 4).new # Store method/macro definitions
+          enum_trace_filter = ENV["DEBUG_ENUM_PARSE_BODY"]?
+          enum_trace_name = nil.as(String?)
+          trace_enum_body = false
+          if enum_trace_filter
+            enum_name = String.new(name_token.slice)
+            if enum_trace_filter == "1" || enum_name.includes?(enum_trace_filter)
+              trace_enum_body = true
+              enum_trace_name = enum_name
+            end
+          end
 
           loop do
             skip_statement_end # Allow semicolons between members
             token = current_token
-            break if token.kind == Token::Kind::End
-            break if token.kind == Token::Kind::EOF
+            if trace_enum_body
+              macro_start = macro_control_start?
+              def_start = definition_start?
+              STDERR.puts "[ENUM_PARSE_LOOP] enum=#{enum_trace_name} token=#{token.kind}:#{token_text(token).inspect} peek=#{peek_token.kind}:#{token_text(peek_token).inspect} macro=#{macro_start ? 1 : 0} def=#{def_start ? 1 : 0} members=#{members.size} body=#{method_bodies_b.size}"
+            end
+            if token.kind == Token::Kind::End
+              STDERR.puts "[ENUM_PARSE_BREAK] enum=#{enum_trace_name} reason=end" if trace_enum_body
+              break
+            end
+            if token.kind == Token::Kind::EOF
+              STDERR.puts "[ENUM_PARSE_BREAK] enum=#{enum_trace_name} reason=eof" if trace_enum_body
+              break
+            end
 
             # Allow macro control blocks inside enums (e.g., {% for %})
             if macro_control_start?
               macro_expr = parse_percent_macro_control
-              method_bodies_b << macro_expr unless macro_expr.invalid?
+              if macro_expr.invalid?
+                if trace_enum_body
+                  STDERR.puts "[ENUM_PARSE_DROP] enum=#{enum_trace_name} entry=macro invalid=1 current=#{current_token.kind}:#{token_text(current_token).inspect}"
+                end
+              else
+                method_bodies_b << macro_expr
+                if trace_enum_body
+                  macro_node = @arena[macro_expr]
+                  snapshot = method_bodies_b.to_a.map do |entry_id|
+                    entry_node = @arena[entry_id]
+                    entry_kind = Frontend.node_kind(entry_node)
+                    "#{entry_id.index}:#{entry_kind}"
+                  end.join(",")
+                  STDERR.puts "[ENUM_PARSE_APPEND] enum=#{enum_trace_name} entry=macro id=#{macro_expr.index} kind=#{Frontend.node_kind(macro_node)} snapshot=#{snapshot}"
+                end
+              end
               skip_statement_end
               next
             end
@@ -6457,10 +6568,46 @@ module CrystalV2
                                   emit_unexpected(current_token)
                                   advance
                                   PREFIX_ERROR
-                                end
+              end
 
-              unless definition_expr.invalid?
+              if definition_expr.invalid?
+                if trace_enum_body
+                  STDERR.puts "[ENUM_PARSE_DROP] enum=#{enum_trace_name} entry=definition invalid=1 current=#{current_token.kind}:#{token_text(current_token).inspect}"
+                end
+              else
                 method_bodies_b << definition_expr
+                if trace_enum_body
+                  definition_node = @arena[definition_expr]
+                  entry_name = if def_name = Frontend.node_def_name(definition_node)
+                                 String.new(def_name)
+                               elsif macro_name = Frontend.node_macro_name(definition_node)
+                                 String.new(macro_name)
+                               elsif definition_node.is_a?(VisibilityModifierNode)
+                                 inner = @arena[definition_node.expression]
+                                 if inner_def_name = Frontend.node_def_name(inner)
+                                   String.new(inner_def_name)
+                                 elsif inner_macro_name = Frontend.node_macro_name(inner)
+                                   String.new(inner_macro_name)
+                                 else
+                                   Frontend.node_kind(inner).to_s
+                                 end
+                               else
+                                 Frontend.node_kind(definition_node).to_s
+                               end
+                  snapshot = method_bodies_b.to_a.map do |entry_id|
+                    entry_node = @arena[entry_id]
+                    entry_kind = Frontend.node_kind(entry_node)
+                    entry_label = if label = Frontend.node_def_name(entry_node)
+                                    String.new(label)
+                                  elsif label = Frontend.node_macro_name(entry_node)
+                                    String.new(label)
+                                  else
+                                    entry_kind.to_s
+                                  end
+                    "#{entry_id.index}:#{entry_label}:#{entry_kind}"
+                  end.join(",")
+                  STDERR.puts "[ENUM_PARSE_APPEND] enum=#{enum_trace_name} entry=#{entry_name} id=#{definition_expr.index} kind=#{Frontend.node_kind(definition_node)} snapshot=#{snapshot}"
+                end
               end
 
               skip_statement_end
@@ -6469,6 +6616,9 @@ module CrystalV2
 
             # Enum members must be CONSTANT identifiers (start with uppercase)
             unless token.kind == Token::Kind::Identifier
+              if trace_enum_body
+                STDERR.puts "[ENUM_PARSE_BREAK] enum=#{enum_trace_name} reason=unexpected token=#{token.kind}:#{token_text(token).inspect} peek=#{peek_token.kind}:#{token_text(peek_token).inspect}"
+              end
               emit_unexpected(token)
               break
             end
@@ -6503,6 +6653,9 @@ module CrystalV2
             skip_statement_end
           end
 
+          if trace_enum_body
+            STDERR.puts "[ENUM_PARSE_EXPECT_END] enum=#{enum_trace_name} current=#{current_token.kind}:#{token_text(current_token).inspect}"
+          end
           expect_identifier("end")
           end_token = previous_token
           skip_statement_end
@@ -6514,6 +6667,25 @@ module CrystalV2
                       end
 
           enum_body = method_bodies_b.empty? ? nil : method_bodies_b.to_a
+          if trace_enum_body
+            if enum_body
+              entries = enum_body.map do |expr_id|
+                entry_node = @arena[expr_id]
+                entry_kind = Frontend.node_kind(entry_node)
+                entry_label = if label = Frontend.node_def_name(entry_node)
+                                String.new(label)
+                              elsif label = Frontend.node_macro_name(entry_node)
+                                String.new(label)
+                              else
+                                entry_kind.to_s
+                              end
+                "#{expr_id.index}:#{entry_label}:#{entry_kind}"
+              end.join(",")
+              STDERR.puts "[ENUM_PARSE_BODY] enum=#{enum_trace_name} count=#{enum_body.size} entries=#{entries}"
+            else
+              STDERR.puts "[ENUM_PARSE_BODY] enum=#{enum_trace_name} count=0 entries="
+            end
+          end
 
           @arena.add_typed(
             EnumNode.new(
@@ -6536,6 +6708,15 @@ module CrystalV2
           # Parse alias name
           name_token = parse_constant_name_token
           return PREFIX_ERROR unless name_token
+          trace_alias_parse = false
+          alias_trace_name = nil.as(String?)
+          if filter = ENV["DEBUG_ALIAS_PARSE"]?
+            parsed_name = String.new(name_token.slice)
+            if filter == "1" || parsed_name.includes?(filter)
+              trace_alias_parse = true
+              alias_trace_name = parsed_name
+            end
+          end
           skip_trivia
 
           # Expect '='
@@ -6577,14 +6758,18 @@ module CrystalV2
 
           type_end_token = previous_token || type_start_token
           alias_span = alias_token.span.cover(type_end_token.span)
-
-          @arena.add_typed(
-            AliasNode.new(
-              alias_span,
-              name_token.slice,
-              type_slice
-            )
+          node = AliasNode.new(
+            alias_span,
+            name_token.slice,
+            type_slice
           )
+          STDERR.puts "[ALIAS_PARSE] name=#{alias_trace_name} phase=new kind=#{node.class.name.split("::").last}" if trace_alias_parse
+          expr = @arena.add_typed(node)
+          if trace_alias_parse
+            stored = @arena[expr]
+            STDERR.puts "[ALIAS_PARSE] name=#{alias_trace_name} phase=store expr=#{expr.index} kind=#{stored.class.name.split("::").last} node_kind=#{Frontend.node_kind(stored)} is_alias=#{stored.is_a?(AliasNode) ? 1 : 0}"
+          end
+          expr
         end
 
         # Phase 92: Parse annotation definition
@@ -7371,6 +7556,8 @@ module CrystalV2
             trim_next_left = false
             trim_final = false
             trim_gap = false
+            debug_macro_for = !!ENV["DEBUG_MACRO_FOR"]?
+            debug_macro_for_steps = 0
 
             loop do
               if trim_next_left
@@ -7382,6 +7569,12 @@ module CrystalV2
 
               token = current_token
               break if token.kind == Token::Kind::EOF
+              if debug_macro_for && debug_macro_for_steps < 32
+                macro_start = macro_control_start?
+                keyword = macro_start ? peek_macro_control_keyword : nil
+                STDERR.puts "[MACRO_BODY_STEP] step=#{debug_macro_for_steps} line=#{token.span.start_line + 1} token=#{token.kind}:#{token_text(token).inspect} peek=#{peek_token.kind}:#{token_text(peek_token).inspect} macro=#{macro_start ? 1 : 0} keyword=#{keyword.inspect} stop=#{stop_on_branch ? 1 : 0} control_depth=#{control_depth} block_depth=#{block_depth}"
+              end
+              debug_macro_for_steps += 1
 
               if macro_escape_sequence?
                 buffer_start_token ||= token
@@ -7480,12 +7673,13 @@ module CrystalV2
               end
 
               if macro_control_start?
-                keyword = peek_macro_keyword
-                if ENV["DEBUG_MACRO_BODY"]? && keyword
-                  STDERR.puts "[MACRO_BODY] line=#{token.span.start_line + 1} keyword=#{keyword} control_depth=#{control_depth} block_depth=#{block_depth}"
+                keyword = peek_macro_control_keyword
+                if ENV["DEBUG_MACRO_BODY"]?
+                  STDERR.puts "[MACRO_BODY] line=#{token.span.start_line + 1} token=#{token.kind}:#{token_text(token).inspect} peek=#{peek_token.kind}:#{token_text(peek_token).inspect} keyword=#{keyword.inspect} stop=#{stop_on_branch ? 1 : 0} control_depth=#{control_depth} block_depth=#{block_depth}"
                 end
                 if stop_on_branch && keyword
-                  if control_depth == 0 && block_depth == 0 && (keyword == "elsif" || keyword == "else" || keyword == "end")
+                  if control_depth == 0 && block_depth == 0 &&
+                     keyword.in?(:elsif, :else, :end)
                     break
                   end
                 end
@@ -7499,6 +7693,9 @@ module CrystalV2
                 buffer_start_token = nil
                 buffer_end_token = nil
                 piece, effect, skip_whitespace = parse_macro_control_piece(left_trim)
+                if ENV["DEBUG_MACRO_BODY"]?
+                  STDERR.puts "[MACRO_BODY_PIECE] keyword=#{piece.control_keyword.inspect} kind=#{piece.kind} effect=#{effect} skip_ws=#{skip_whitespace ? 1 : 0} current=#{current_token.kind}:#{token_text(current_token).inspect}"
+                end
                 pieces << piece
 
                 # Special handling for comment blocks - skip content
@@ -12248,10 +12445,11 @@ current_token.kind == Token::Kind::Identifier &&
             if is_variadic
               # Construct *Name by prepending *
               name_slice = current_token.slice
-              combined = Slice(UInt8).new(name_slice.size + 1)
-              combined[0] = '*'.ord.to_u8
-              name_slice.copy_to(combined.to_unsafe + 1, name_slice.size)
-              type_params << combined
+              combined = String.build do |io|
+                io.write_byte('*'.ord.to_u8)
+                io.write(name_slice)
+              end
+              type_params << retain_text_slice(combined)
             else
               type_params << current_token.slice
             end
@@ -12936,22 +13134,38 @@ current_token.kind == Token::Kind::Identifier &&
           end
         end
 
-        # Check if keyword is a macro control keyword (vs expression)
-        # Control keywords: if, unless, for, while, begin, verbatim, else, elsif, end, comment
-        # Expression keywords: everything else (e.g., skip_file, raise, @type, x = 1)
-        private def is_control_keyword?(keyword : String) : Bool
-          case keyword
-          when "if", "unless", "for", "while", "begin", "verbatim",
-               "else", "elsif", "end", "comment"
-            true
+        private def macro_control_keyword_name(keyword : Symbol) : String
+          keyword.to_s
+        end
+
+        private def macro_control_keyword(token : Token) : Symbol?
+          case token.kind
+          when Token::Kind::If
+            :if
+          when Token::Kind::Unless
+            :unless
+          when Token::Kind::For
+            :for
+          when Token::Kind::While
+            :while
+          when Token::Kind::Begin
+            :begin
+          when Token::Kind::Else
+            :else
+          when Token::Kind::Elsif
+            :elsif
+          when Token::Kind::End
+            :end
+          when Token::Kind::Identifier
+            return :verbatim if slice_eq?(token.slice, "verbatim")
+            return :comment if slice_eq?(token.slice, "comment")
+            nil
           else
-            false
+            nil
           end
         end
 
-        # Peek ahead after {% to determine if this is a control or expression
-        # Handles whitespace/newlines like original parser's next_token_skip_space_or_newline
-        private def peek_macro_keyword_after_lbracepercent : String?
+        private def peek_macro_control_keyword_after_lbracepercent : Symbol?
           saved_index = @index
           saved_previous = @previous_token
 
@@ -12964,29 +13178,56 @@ current_token.kind == Token::Kind::Identifier &&
             return nil
           end
 
-          # Skip optional trim token (-)
           if macro_trim_token?(current_token)
             advance
           end
 
-          skip_macro_whitespace # skip whitespace/newlines
+          skip_macro_whitespace
+          keyword = macro_control_keyword(current_token)
 
-          # Handle both identifiers and keyword tokens (for, if, while, etc.)
-          keyword = case current_token.kind
-                    when Token::Kind::Identifier,
-                         Token::Kind::For, Token::Kind::If, Token::Kind::Unless,
-                         Token::Kind::While, Token::Kind::Begin, Token::Kind::End,
-                         Token::Kind::Else, Token::Kind::Elsif
-                      token_text(current_token)
-                    else
-                      nil
-                    end
-
-          # Restore position
           @index = saved_index
           @previous_token = saved_previous
-
           keyword
+        end
+
+        private def peek_macro_control_keyword : Symbol?
+          saved_index = @index
+          saved_previous = @previous_token
+          token = current_token
+
+          if token.kind == Token::Kind::LBracePercent
+            advance
+          elsif token.kind == Token::Kind::LBrace
+            next_token = peek_token
+            unless next_token.kind == Token::Kind::Percent
+              @index = saved_index
+              @previous_token = saved_previous
+              return nil
+            end
+            advance # consume {
+            advance # consume %
+          else
+            return nil
+          end
+
+          if macro_trim_token?(current_token)
+            advance
+          end
+
+          skip_trivia
+          keyword = macro_control_keyword(current_token)
+
+          @index = saved_index
+          @previous_token = saved_previous
+          keyword
+        end
+
+        # Peek ahead after {% to determine if this is a control or expression
+        # Handles whitespace/newlines like original parser's next_token_skip_space_or_newline
+        private def peek_macro_keyword_after_lbracepercent : String?
+          if keyword = peek_macro_control_keyword_after_lbracepercent
+            macro_control_keyword_name(keyword)
+          end
         end
 
         private def macro_terminator_reached?(token : Token)
@@ -13116,32 +13357,9 @@ current_token.kind == Token::Kind::Identifier &&
         end
 
         private def peek_macro_keyword : String?
-          saved_index = @index
-          token = current_token
-
-          if token.kind == Token::Kind::LBracePercent
-            advance
-          elsif token.kind == Token::Kind::LBrace
-            next_token = peek_token
-            unless next_token.kind == Token::Kind::Percent
-              @index = saved_index
-              return nil
-            end
-            advance # consume {
-            advance # consume %
-          else
-            return nil
+          if keyword = peek_macro_control_keyword
+            macro_control_keyword_name(keyword)
           end
-
-          if macro_trim_token?(current_token)
-            advance
-          end
-
-          skip_trivia
-          keyword = token_text(current_token)
-          @index = saved_index
-          @previous_token = nil
-          keyword
         end
 
         private def operator_token?(token : Token, kind : Token::Kind)
@@ -13305,9 +13523,9 @@ current_token.kind == Token::Kind::Identifier &&
             return {MacroPiece.text("", start_token.span), :none, false}
           end
 
-          # Peek ahead to determine if this is a control keyword or expression
-          keyword_peek = peek_macro_keyword_after_lbracepercent
-          handled_as_control = keyword_peek && is_control_keyword?(keyword_peek)
+          # Peek ahead to determine if this is a control keyword or expression.
+          keyword_peek = peek_macro_control_keyword_after_lbracepercent
+          handled_as_control = !keyword_peek.nil?
 
           if handled_as_control
             # BRANCH A: Macro control (if, for, begin, verbatim, etc.)
@@ -13322,22 +13540,23 @@ current_token.kind == Token::Kind::Identifier &&
             skip_macro_whitespace
 
             keyword_token = current_token
-            keyword_index = @index
-            keyword = token_text(keyword_token)
+            keyword_kind = macro_control_keyword(keyword_token)
+            return {MacroPiece.text("", start_token.span), :none, false} unless keyword_kind
+            keyword = macro_control_keyword_name(keyword_kind)
             advance
 
             expr = nil
             iter_vars = nil
             iterable = nil
 
-            case keyword
-            when "for"
+            case keyword_kind
+            when :for
               skip_macro_whitespace
               iter_vars, iterable = parse_macro_for_header
-            when "if", "unless", "while", "elsif"
+            when :if, :unless, :while, :elsif
               skip_macro_whitespace
               expr = parse_macro_control_expression_with_recovery(current_token)
-            when "verbatim"
+            when :verbatim
               # verbatim requires 'do' keyword before %}: {% verbatim do %}
               skip_macro_whitespace
               unless token_text(current_token) == "do"
@@ -13345,7 +13564,7 @@ current_token.kind == Token::Kind::Identifier &&
                 return {MacroPiece.text("", start_token.span), :none, false}
               end
               advance # consume 'do'
-            when "else", "end", "comment", "begin"
+            when :else, :end, :comment, :begin
               # no expression needed
             end
             skip_macro_whitespace
@@ -13381,10 +13600,10 @@ current_token.kind == Token::Kind::Identifier &&
             control_span = start_span.cover(end_span)
             piece = MacroPiece.control(kind, keyword, expr, left_trim, right_trim, iter_vars, iterable, control_span)
 
-            effect = case keyword
-                     when "if", "unless", "for", "while", "comment", "begin", "verbatim"
+            effect = case keyword_kind
+                     when :if, :unless, :for, :while, :comment, :begin, :verbatim
                        :push
-                     when "end"
+                     when :end
                        :pop
                      else
                        :none
@@ -13485,6 +13704,10 @@ current_token.kind == Token::Kind::Identifier &&
         # Called from parse_prefix when seeing {% token sequence.
         # Returns MacroIfNode or MacroForNode when possible; falls back to raw MacroLiteral.
         private def parse_percent_macro_control : ExprId
+          keyword_peek = peek_macro_control_keyword_after_lbracepercent
+          if ENV["DEBUG_MACRO_CTRL"]?
+            STDERR.puts "[MACRO_CTRL_ENTRY] current=#{current_token.kind}:#{token_text(current_token).inspect} peek=#{peek_token.kind}:#{token_text(peek_token).inspect} keyword_peek=#{keyword_peek.inspect}"
+          end
           saved_index = @index
           saved_previous = @previous_token
 
@@ -13498,25 +13721,33 @@ current_token.kind == Token::Kind::Identifier &&
           skip_macro_whitespace # Must skip newlines inside {% %} even outside macro_context
 
           keyword_token = current_token
-          keyword = token_text(keyword_token)
+          keyword_kind = macro_control_keyword(keyword_token)
+          return PREFIX_ERROR unless keyword_kind
+          keyword = macro_control_keyword_name(keyword_kind)
+          if ENV["DEBUG_MACRO_CTRL"]?
+            STDERR.puts "[MACRO_CTRL_MATCH] start=#{start_span.start_offset} keyword_token=#{keyword_token.kind}:#{keyword.inspect}"
+          end
           advance
 
           skip_macro_whitespace # Same: inside {% %} block
 
-          case keyword
-          when "if", "unless"
+          case keyword_kind
+          when :if, :unless
             return parse_macro_if_control(start_span, keyword)
-          when "for"
+          when :for
             return parse_macro_for_control(start_span)
-          when "begin"
+          when :begin
             return parse_macro_begin_control(start_span)
-          when "verbatim"
+          when :verbatim
             return parse_macro_verbatim_control(start_span)
           end
 
           @index = saved_index
           @previous_token = saved_previous
           start_span = current_token.span
+          if ENV["DEBUG_MACRO_CTRL"]?
+            STDERR.puts "[MACRO_CTRL_FALLBACK] start=#{start_span.start_offset} current=#{current_token.kind}:#{token_text(current_token).inspect} keyword_peek=#{keyword_peek.inspect}"
+          end
           fast_forward_percent_block
           end_span = @previous_token ? @previous_token.not_nil!.span : start_span
           block_span = start_span.cover(end_span)
@@ -13699,6 +13930,7 @@ current_token.kind == Token::Kind::Identifier &&
           final_end_span : Span? = nil
 
           loop do
+            skip_macro_whitespace
             branch_start_span = consume_macro_control_start
             unless branch_start_span
               @diagnostics << Diagnostic.new("Expected '{% end %}', '{% elsif %}', or '{% else %}'", current_token.span)
@@ -13737,6 +13969,7 @@ current_token.kind == Token::Kind::Identifier &&
 
               else_body = parse_macro_body_until_branch(true)
 
+              skip_macro_whitespace
               end_start_span = consume_macro_control_start
               unless end_start_span
                 @diagnostics << Diagnostic.new("Expected '{% end %}'", current_token.span)
@@ -13951,14 +14184,29 @@ current_token.kind == Token::Kind::Identifier &&
           end
 
           # Parse body until {% end %}
+          if ENV["DEBUG_MACRO_FOR"]?
+            STDERR.puts "[MACRO_FOR_BODY_CALL] current=#{current_token.kind}:#{token_text(current_token).inspect}"
+          end
           body = parse_macro_body_until_branch(true)
           if ENV["DEBUG_MACRO_FOR"]?
-            body_node = @arena[body]
-            STDERR.puts "[MACRO_FOR_BODY_DONE] id=#{body.index} kind=#{Frontend.node_kind(body_node)} current=#{current_token.kind}:#{token_text(current_token).inspect}"
+            STDERR.puts "[MACRO_FOR_BODY_ASSIGN] current=#{current_token.kind}:#{token_text(current_token).inspect}"
+          end
+          if ENV["DEBUG_MACRO_FOR"]?
+            STDERR.puts "[MACRO_FOR_BODY_DONE] returned=1 current=#{current_token.kind}:#{token_text(current_token).inspect}"
           end
 
           # Expect {% end %}
+          if ENV["DEBUG_MACRO_FOR"]?
+            STDERR.puts "[MACRO_FOR_END_PRE_SKIP] current=#{current_token.kind}:#{token_text(current_token).inspect}"
+          end
+          skip_macro_whitespace
+          if ENV["DEBUG_MACRO_FOR"]?
+            STDERR.puts "[MACRO_FOR_END_POST_SKIP] current=#{current_token.kind}:#{token_text(current_token).inspect}"
+          end
           end_start_span = consume_macro_control_start
+          if ENV["DEBUG_MACRO_FOR"]?
+            STDERR.puts "[MACRO_FOR_END_START] found=#{end_start_span ? 1 : 0} current=#{current_token.kind}:#{token_text(current_token).inspect}"
+          end
           unless end_start_span
             @diagnostics << Diagnostic.new("Expected '{% end %}' to close for loop", current_token.span)
             return PREFIX_ERROR
@@ -13969,6 +14217,9 @@ current_token.kind == Token::Kind::Identifier &&
           end
 
           skip_trivia
+          if ENV["DEBUG_MACRO_FOR"]?
+            STDERR.puts "[MACRO_FOR_END_KEYWORD] current=#{current_token.kind}:#{token_text(current_token).inspect}"
+          end
 
           unless current_token.kind == Token::Kind::End
             @diagnostics << Diagnostic.new("Expected 'end' keyword", current_token.span)
@@ -14047,6 +14298,7 @@ current_token.kind == Token::Kind::Identifier &&
           body = parse_macro_body_until_branch(true)
 
           # Expect {% end %}
+          skip_macro_whitespace
           end_start = consume_macro_control_start
           unless end_start
             @diagnostics << Diagnostic.new("Expected '{% end %}'", current_token.span)
@@ -14175,7 +14427,11 @@ current_token.kind == Token::Kind::Identifier &&
           macro_trim_right = false
           end_span = @previous_token ? @previous_token.not_nil!.span : start_span
           body_span = start_span.cover(end_span)
-          @arena.add_typed(MacroLiteralNode.new(body_span, pieces, macro_trim_left, macro_trim_right))
+          body_id = @arena.add_typed(MacroLiteralNode.new(body_span, pieces, macro_trim_left, macro_trim_right))
+          if ENV["DEBUG_MACRO_FOR"]?
+            STDERR.puts "[MACRO_BODY_UNTIL_BRANCH_RETURN] id=#{body_id.index} current=#{current_token.kind}:#{token_text(current_token).inspect}"
+          end
+          body_id
         end
 
         # Skip an entire nested macro control structure {% ... %}...{% end %}
@@ -14441,7 +14697,7 @@ current_token.kind == Token::Kind::Identifier &&
 
           # Generate temporary variable name
           temp_name = temp_var_name
-          temp_name_slice = Slice(UInt8).new(temp_name.to_unsafe, temp_name.bytesize)
+          temp_name_slice = retain_text_slice(temp_name)
 
           # Create identifier node for temp variable
           temp_var = @arena.add_typed(IdentifierNode.new(
@@ -14738,7 +14994,7 @@ current_token.kind == Token::Kind::Identifier &&
                 MemberAccessNode.new(
                   call_expr_node.span,
                   base,
-                  @string_pool.intern(setter_name_slice.to_slice)
+                  intern_retained_text(setter_name_slice)
                 )
               )
             else

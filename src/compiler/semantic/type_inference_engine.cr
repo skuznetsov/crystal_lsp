@@ -114,14 +114,17 @@ module CrystalV2
           @global_table : SymbolTable? = nil,
           @context : TypeContext = TypeContext.new,
         )
+          # Self-hosted binaries have shown unstable reads through Program#arena.
+          # Type inference only operates on parser-built AstArena programs here.
+          @arena = @program.ast_arena
           @diagnostics = [] of Diagnostic
           @assignments = {} of String => Type        # Track variable assignments: name → type
           @instance_var_types = {} of String => Type # Phase 5A: Track instance variable types
           @flow_narrowings = {} of String => Type    # Phase 95: Flow typing - narrowed types in conditionals
-          @children_cache = Array(Array(ExprId)?).new(@program.arena.size)
-          @identifier_name_cache = Array(String?).new(@program.arena.size)
-          @member_name_cache = Array(String?).new(@program.arena.size)
-          @node_kind_cache = Array(Frontend::NodeKind?).new(@program.arena.size)
+          @children_cache = Array(Array(ExprId)?).new(@arena.size)
+          @identifier_name_cache = Array(String?).new(@arena.size)
+          @member_name_cache = Array(String?).new(@arena.size)
+          @node_kind_cache = Array(Frontend::NodeKind?).new(@arena.size)
           @method_candidates_cache = {} of MethodCandidatesKey => Array(MethodSymbol)
           @parse_type_cache = {} of String => Type
           @class_type_cache = {} of ClassSymbol => ClassType
@@ -152,7 +155,12 @@ module CrystalV2
           debug_hook("infer.start", "roots=#{@program.roots.size}")
           @program.roots.each do |root_id|
             debug_hook("infer.root", "expr_id=#{root_id}")
-            type = infer_expression(root_id)
+            type = begin
+                     infer_expression(root_id)
+                   rescue OverflowError
+                     debug("overflow while inferring root expr #{root_id}") if @debug_enabled
+                     @context.nil_type
+                   end
             @context.set_type(root_id, type)
           end
           debug_hook("infer.finish", "roots=#{@program.roots.size} diagnostics=#{@diagnostics.size}")
@@ -182,7 +190,7 @@ module CrystalV2
             id = ExprId.new(stack_ids.pop)
             visited = stack_visited.pop
             next if @context.get_type(id)
-            node = @program.arena[id]
+            node = @arena[id]
             if !visited
               stack_ids << id.index
               stack_visited << true
@@ -194,7 +202,7 @@ module CrystalV2
                 when 1
                   # Cycle detected; assign nil_type to break it
                   # EXCEPTION: Don't set Nil for IdentifierNode - it needs to check @assignments
-                  child_node = @program.arena[child]
+                  child_node = @arena[child]
                   debug_hook("infer.cycle", "expr_id=#{child} node=#{child_node.class.name}")
                   unless child_node.is_a?(Frontend::IdentifierNode)
                     @context.set_type(child, @context.nil_type)
@@ -229,14 +237,14 @@ module CrystalV2
           end
           if t1 = @context.get_type(expr_id)
             if @debug_enabled
-              node = @program.arena[expr_id]
+              node = @arena[expr_id]
               debug("ITERATIVE SUCCESS: #{last_path_segment(node.class.name)} got type #{t1}")
             end
             return t1
           end
           # Fallback to recursive implementation below
           if @debug_enabled
-            node = @program.arena[expr_id]
+            node = @arena[expr_id]
             debug("FALLBACK TO RECURSIVE: #{last_path_segment(node.class.name)}")
           end
           debug_hook("infer.fallback", "expr_id=#{expr_id}")
@@ -256,7 +264,7 @@ module CrystalV2
           @expr_in_progress.add(expr_idx)
 
           @depth += 1
-          node = @program.arena[expr_id]
+          node = @arena[expr_id]
 
           # Re-check inside the recursive path to catch long-running branches
           Frontend::Watchdog.check!
@@ -500,9 +508,6 @@ module CrystalV2
           # but this ensures ALL expressions have types set, even for nested calls)
           @context.set_type(expr_id, result_type)
           result_type
-        rescue OverflowError
-          debug("overflow while inferring expr #{expr_id}") if @debug_enabled
-          @context.nil_type
         ensure
           @depth -= 1
           @expr_in_progress.delete(expr_id.index)
@@ -523,7 +528,7 @@ module CrystalV2
             end
           else
             # Arena can grow during macro expansion; keep cache aligned.
-            new_size = @program.arena.size
+            new_size = @arena.size
             if new_size > @children_cache.size
               (new_size - @children_cache.size).times { @children_cache << nil }
             end
@@ -949,7 +954,7 @@ module CrystalV2
           idx = expr_id.index
           if idx >= 0
             if idx >= @identifier_name_cache.size
-              new_size = @program.arena.size
+              new_size = @arena.size
               if new_size > @identifier_name_cache.size
                 (new_size - @identifier_name_cache.size).times { @identifier_name_cache << nil }
               end
@@ -967,7 +972,7 @@ module CrystalV2
           idx = expr_id.index
           if idx >= 0
             if idx >= @member_name_cache.size
-              new_size = @program.arena.size
+              new_size = @arena.size
               if new_size > @member_name_cache.size
                 (new_size - @member_name_cache.size).times { @member_name_cache << nil }
               end
@@ -985,7 +990,7 @@ module CrystalV2
           idx = expr_id.index
           if idx >= 0
             if idx >= @node_kind_cache.size
-              new_size = @program.arena.size
+              new_size = @arena.size
               if new_size > @node_kind_cache.size
                 (new_size - @node_kind_cache.size).times { @node_kind_cache << nil }
               end
@@ -1848,14 +1853,14 @@ module CrystalV2
         # Phase 95: Extract variable name and narrowed type from is_a? condition
         # Returns {variable_name, narrowed_type} or nil if not an is_a? check
         private def extract_is_a_narrowing(condition_id : ExprId) : {String, Type}?
-          condition_node = @program.arena[condition_id]
+          condition_node = @arena[condition_id]
 
           # Check if condition is an is_a? expression
           return nil unless condition_node.is_a?(Frontend::IsANode)
 
           # Get the expression being checked
           expr_id = condition_node.expression
-          expr_node = @program.arena[expr_id]
+          expr_node = @arena[expr_id]
 
           # Only narrow if checking a simple variable (identifier)
           return nil unless expr_node.is_a?(Frontend::IdentifierNode)
@@ -1874,14 +1879,14 @@ module CrystalV2
         # narrow to non-nil in then branch.
         # Returns {variable_name, narrowed_type} or nil if not applicable
         private def extract_nil_narrowing(condition_id : ExprId, condition_type : Type) : {String, Type}?
-          condition_node = @program.arena[condition_id]
+          condition_node = @arena[condition_id]
 
           # Only narrow if condition is a simple variable (identifier)
           var_name = case condition_node
                      when Frontend::IdentifierNode
                        intern_name(condition_node.name)
                      when Frontend::AssignNode
-                       target_node = @program.arena[condition_node.target]
+                       target_node = @arena[condition_node.target]
                        return nil unless target_node.is_a?(Frontend::IdentifierNode)
                        intern_name(target_node.name)
                      else
@@ -2206,7 +2211,7 @@ module CrystalV2
           value_type = infer_expression(value_id)
 
           # Get target identifier name
-          target_node = @program.arena[target_id]
+          target_node = @arena[target_id]
 
           # Phase 5A: Check if target is instance variable
           case target_node
@@ -2239,7 +2244,7 @@ module CrystalV2
 
           # Phase 103B: Extract individual types from tuple for each target
           targets.each_with_index do |target_id, idx|
-            target_node = @program.arena[target_id]
+            target_node = @arena[target_id]
             if target_node.is_a?(Frontend::IdentifierNode)
               # Extract type for this position
               element_type = case value_type
@@ -2573,7 +2578,7 @@ module CrystalV2
           type_args = Array(Type).new(node.type_args.size)
           node.type_args.each_with_index do |arg, i|
             if ENV["DEBUG"]?
-              arg_node = @program.arena[arg]
+              arg_node = @arena[arg]
               puts "  arg #{i}: node=#{arg_node.class}"
             end
             inferred = infer_expression(arg)
@@ -2799,7 +2804,7 @@ module CrystalV2
         end
 
         private def append_path_segments(expr_id : ExprId, segments : Array(String))
-          expr = @program.arena[expr_id]
+          expr = @arena[expr_id]
           case expr
           when Frontend::PathNode
             collect_path_segments(expr, segments)
@@ -2904,7 +2909,7 @@ module CrystalV2
         end
 
         private def type_from_type_expr(expr_id : ExprId) : Type?
-          node = @program.arena[expr_id]
+          node = @arena[expr_id]
 
           case node
           when Frontend::PathNode
@@ -2978,7 +2983,7 @@ module CrystalV2
             value_type
             # Phase 15: Tuple indexing
           elsif target_type.is_a?(TupleType)
-            index_node = @program.arena[index_id]
+            index_node = @arena[index_id]
             unless index_node.is_a?(Frontend::NumberNode)
               emit_error("Tuple indexing requires compile-time constant integer", expr_id)
               return @context.nil_type
@@ -2998,7 +3003,7 @@ module CrystalV2
             end
           elsif target_type.is_a?(NamedTupleType)
             # Phase 102: Named tuple symbol access - nt[:key]
-            index_node = @program.arena[index_id]
+            index_node = @arena[index_id]
             key_name = case index_node
             when Frontend::SymbolNode
               # Symbol name may include leading colon, strip it
@@ -3170,7 +3175,7 @@ module CrystalV2
           # NOTE: Block inference is deferred for methods that need special handling
           # (like `try` on union types) where the block parameter type depends on receiver
 
-          callee_node = @program.arena[node.callee]
+          callee_node = @arena[node.callee]
           has_block = call_has_block?(node)
 
           debug("infer_call: callee_node type = #{callee_node.class.name}")
@@ -3338,9 +3343,9 @@ module CrystalV2
               # Find block - can be in node.block or node.args
               map_block_node : Frontend::BlockNode? = nil
               if blk_id = node.block
-                map_block_node = @program.arena[blk_id].as(Frontend::BlockNode)
+                map_block_node = @arena[blk_id].as(Frontend::BlockNode)
               elsif node.args.first?
-                arg_node = @program.arena[node.args.first]
+                arg_node = @arena[node.args.first]
                 if arg_node.is_a?(Frontend::BlockNode)
                   map_block_node = arg_node
                 end
@@ -3355,7 +3360,7 @@ module CrystalV2
                   # Clear cached types
                   block.body.each do |body_id|
                     @context.expression_types.delete(body_id)
-                    body_node = @program.arena[body_id]
+                    body_node = @arena[body_id]
                     case body_node
                     when Frontend::BinaryNode
                       @context.expression_types.delete(body_node.left)
@@ -3415,9 +3420,9 @@ module CrystalV2
               # Short block form &.method is passed as first arg (BlockNode), not via node.block
               block_node : Frontend::BlockNode? = nil
               if blk_id = node.block
-                block_node = @program.arena[blk_id].as(Frontend::BlockNode)
+                block_node = @arena[blk_id].as(Frontend::BlockNode)
               elsif node.args.first?
-                arg_node = @program.arena[node.args.first]
+                arg_node = @arena[node.args.first]
                 if arg_node.is_a?(Frontend::BlockNode)
                   block_node = arg_node
                 end
@@ -3433,7 +3438,7 @@ module CrystalV2
                   block.body.each do |body_id|
                     @context.expression_types.delete(body_id)
                     # Also clear nested expressions that might reference the param
-                    inner_node = @program.arena[body_id]
+                    inner_node = @arena[body_id]
                     if inner_node.is_a?(Frontend::MemberAccessNode)
                       @context.expression_types.delete(inner_node.object)
                     end
@@ -3447,7 +3452,7 @@ module CrystalV2
                 else
                   # Short block form &.method without explicit param
                   if body_id = block.body.first?
-                    body_node = @program.arena[body_id]
+                    body_node = @arena[body_id]
                     if body_node.is_a?(Frontend::MemberAccessNode)
                       member_name = intern_name(body_node.member)
                       if method = lookup_method(non_nil_type, member_name, [] of Type, false)
@@ -3520,7 +3525,7 @@ module CrystalV2
         private def call_has_block?(node : Frontend::CallNode) : Bool
           return true if node.block
           if args = node.args
-            args.any? { |arg_id| @program.arena[arg_id].is_a?(Frontend::BlockNode) }
+            args.any? { |arg_id| @arena[arg_id].is_a?(Frontend::BlockNode) }
           else
             false
           end
@@ -4840,7 +4845,7 @@ module CrystalV2
           end
 
           # Get the method's DefNode to access its body
-          def_node = @program.arena[method.node_id]
+          def_node = @arena[method.node_id]
           unless def_node.is_a?(Frontend::DefNode)
             puts "  ERROR: def_node is not DefNode!" if ENV["DEBUG"]?
             debug_hook("infer.method_body.error", "method=#{method.name} error=not_def_node")
@@ -4907,7 +4912,7 @@ module CrystalV2
           if case_value_id
             case_value_type = infer_expression(case_value_id)
             # Check if case value is a simple identifier (for narrowing)
-            case_value_node = @program.arena[case_value_id]
+            case_value_node = @arena[case_value_id]
             if case_value_node.is_a?(Frontend::IdentifierNode)
               case_var_name = intern_name(case_value_node.name)
             end
@@ -4964,7 +4969,7 @@ module CrystalV2
 
           # Check each condition - any type literal narrows the case value
           conditions.each do |cond_id|
-            cond_node = @program.arena[cond_id]
+            cond_node = @arena[cond_id]
 
             case cond_node
             when Frontend::IdentifierNode
@@ -5051,7 +5056,7 @@ module CrystalV2
         # Phase 97: Collect path segments from PathNode
         private def collect_path_segments_for_type(node : Frontend::PathNode, segments : Array(String))
           if left_id = node.left
-            left_node = @program.arena[left_id]
+            left_node = @arena[left_id]
             case left_node
             when Frontend::PathNode
               collect_path_segments_for_type(left_node, segments)
@@ -5060,7 +5065,7 @@ module CrystalV2
             end
           end
 
-          right_node = @program.arena[node.right]
+          right_node = @arena[node.right]
           case right_node
           when Frontend::IdentifierNode
             segments << intern_name(right_node.name)
@@ -5330,7 +5335,7 @@ module CrystalV2
         private def emit_error(message : String, node_id : ExprId? = nil)
           # Get actual span from node if available
           span = if node_id
-                   node = @program.arena[node_id]
+                   node = @arena[node_id]
                    node.span
                  else
                    # Fallback to dummy span if node not available

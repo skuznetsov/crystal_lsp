@@ -871,6 +871,13 @@ module CrystalV2
         hir_mod.bootstrap_reinitialize_runtime_state
         hir_converter = HIR::AstToHir.new(first_arena, input_file, sources_by_arena, paths_by_arena, main_arenas, hir_module: hir_mod, link_libraries: link_libs)
         stage2_debug("[STAGE2_DEBUG] hir converter created", err_io)
+        const_map_trace = ENV.has_key?("CRYSTAL_V2_CONST_MAP_TRACE")
+        if const_map_trace
+          STDERR.puts "[CONST_MAP] phase=hir_converter_created literals=#{hir_converter.constant_literal_values.size} types=#{hir_converter.constant_types.size}"
+          STDERR.puts "[CONST_MAP] ids_a const_lit=#{hir_converter.debug_const_lit_object_id} const_types=#{hir_converter.debug_const_types_object_id} const_defs=#{hir_converter.debug_const_defs_object_id} nested=#{hir_converter.debug_nested_type_names_object_id}"
+          STDERR.puts "[CONST_MAP] ids_b sources=#{hir_converter.debug_sources_by_arena_object_id} main=#{hir_converter.debug_main_arenas_object_id} lines=#{hir_converter.debug_line_counts_by_arena_object_id} paths=#{hir_converter.debug_paths_by_arena_object_id}"
+          STDERR.puts "[CONST_MAP] ids_c extra=#{hir_converter.debug_extra_sources_by_arena_object_id} links=#{hir_converter.debug_link_libraries_object_id} type_literals=#{hir_converter.debug_type_literals_object_id}"
+        end
         STDERR.puts "[DEBUG_STAGE1] hir_converter=#{hir_converter.object_id} module=#{hir_mod.object_id} link_libs=#{link_libs.size}"
         STDERR.flush
         stage2_debug("[STAGE2_DEBUG] hir link libs attached", err_io)
@@ -933,6 +940,9 @@ module CrystalV2
           arena_i += 1
         end
         stage2_debug("[STAGE2_DEBUG] top-level collection done defs=#{def_nodes.size} classes=#{class_nodes.size} modules=#{module_nodes.size} constants=#{constant_exprs.size} main=#{main_exprs.size}", err_io)
+        if const_map_trace
+          STDERR.puts "[CONST_MAP] phase=top_level_collection_done literals=#{hir_converter.constant_literal_values.size} types=#{hir_converter.constant_types.size}"
+        end
         if debug_profile
           timings["dbg_ms_hir_collect"] = (Time.instant - hir_collect_start.not_nil!).total_milliseconds
           timings["dbg_count_hir_defs"] = def_nodes.size.to_f
@@ -1084,6 +1094,9 @@ module CrystalV2
           i += 1
         end
         stage2_debug("[STAGE2_DEBUG] pre-scan constants done", err_io)
+        if const_map_trace
+          STDERR.puts "[CONST_MAP] phase=pre_scan_done literals=#{hir_converter.constant_literal_values.size} types=#{hir_converter.constant_types.size}"
+        end
 
         # Pass 1: Register types
         if false && ENV.has_key?("DEBUG_NESTED_CLASS")
@@ -1101,13 +1114,30 @@ module CrystalV2
         end
         log(options, out_io, "  Pass 1: Registering types...")
         log(options, out_io, "    Libs: #{lib_nodes.size}")
-        lib_nodes.each do |entry|
+        lib_count = lib_nodes.size
+        stage2_debug("[STAGE2_DEBUG] lib register start count=#{lib_count}", err_io)
+        lib_nodes.each_with_index do |entry, i|
+          if i < 3 || (i % 25 == 0) || i == lib_count - 1
+            stage2_debug("[STAGE2_DEBUG] lib register idx=#{i + 1}/#{lib_count} name=#{String.new(entry.node.name)}", err_io)
+          end
           hir_converter.arena = entry.arena
           hir_converter.register_lib(entry.node, entry.annotations)
         end
+        stage2_debug("[STAGE2_DEBUG] lib register done", err_io)
+        if const_map_trace
+          STDERR.puts "[CONST_MAP] phase=lib_register_done literals=#{hir_converter.constant_literal_values.size} types=#{hir_converter.constant_types.size}"
+        end
         log(options, out_io, "    Enums: #{enum_nodes.size}")
-        enum_nodes.each { |n, a| hir_converter.arena = a; hir_converter.register_enum(n) }
         enum_count = enum_nodes.size
+        stage2_debug("[STAGE2_DEBUG] enum register start count=#{enum_count}", err_io)
+        enum_nodes.each_with_index do |(n, a), i|
+          if i < 3 || (i % 50 == 0) || i == enum_count - 1
+            stage2_debug("[STAGE2_DEBUG] enum register idx=#{i + 1}/#{enum_count} name=#{String.new(n.name)}", err_io)
+          end
+          hir_converter.arena = a
+          hir_converter.register_enum(n)
+        end
+        stage2_debug("[STAGE2_DEBUG] enum register done", err_io)
         stage2_debug("[STAGE2_DEBUG] enum resolve guard count=#{enum_count}", err_io)
         if enum_count > 0
           stage2_debug("[STAGE2_DEBUG] enum resolve call", err_io)
@@ -1135,6 +1165,9 @@ module CrystalV2
           hir_converter.register_alias(n)
         end
         stage2_debug("[STAGE2_DEBUG] alias register done", err_io)
+        if const_map_trace
+          STDERR.puts "[CONST_MAP] phase=alias_register_done literals=#{hir_converter.constant_literal_values.size} types=#{hir_converter.constant_types.size}"
+        end
         log(options, out_io, "    Macros: #{macro_nodes.size}")
         macro_count = macro_nodes.size
         stage2_debug("[STAGE2_DEBUG] macro register start count=#{macro_count}", err_io)
@@ -1149,6 +1182,9 @@ module CrystalV2
           hir_converter.register_macro(n)
         end
         stage2_debug("[STAGE2_DEBUG] macro register done", err_io)
+        if const_map_trace
+          STDERR.puts "[CONST_MAP] phase=macro_register_done literals=#{hir_converter.constant_literal_values.size} types=#{hir_converter.constant_types.size}"
+        end
         STDERR.puts if options.progress
         log(options, out_io, "    Modules: #{module_nodes.size}")
         module_count = module_nodes.size
@@ -1167,6 +1203,9 @@ module CrystalV2
           end
         end
         stage2_debug("[STAGE2_DEBUG] module register done", err_io)
+        if const_map_trace
+          STDERR.puts "[CONST_MAP] phase=module_register_done literals=#{hir_converter.constant_literal_values.size} types=#{hir_converter.constant_types.size}"
+        end
         STDERR.puts if options.progress
         log(options, out_io, "    Classes: #{class_nodes.size}")
         class_count = class_nodes.size
@@ -1180,6 +1219,9 @@ module CrystalV2
           STDERR.print "\r    Registered class #{i+1}/#{class_nodes.size}" if options.progress && (i % 10 == 0 || i == class_nodes.size - 1)
         end
         stage2_debug("[STAGE2_DEBUG] class register done", err_io)
+        if const_map_trace
+          STDERR.puts "[CONST_MAP] phase=class_register_done literals=#{hir_converter.constant_literal_values.size} types=#{hir_converter.constant_types.size}"
+        end
         STDERR.puts if options.progress
 
         constant_count = constant_exprs.size
@@ -1202,6 +1244,9 @@ module CrystalV2
           end
         end
         stage2_debug("[STAGE2_DEBUG] constant register done", err_io)
+        if const_map_trace
+          STDERR.puts "[CONST_MAP] phase=constant_register_done literals=#{hir_converter.constant_literal_values.size} types=#{hir_converter.constant_types.size}"
+        end
 
         # Flush pending monomorphizations now that all templates are registered
         stage2_debug("[STAGE2_DEBUG] flush_pending_monomorphizations start", err_io)
@@ -1231,6 +1276,9 @@ module CrystalV2
           STDERR.print "\r    Registered function #{i+1}/#{def_nodes.size}" if options.progress && (i % 50 == 0 || i == def_nodes.size - 1)
         end
         stage2_debug("[STAGE2_DEBUG] pass2 register_functions done", err_io)
+        if const_map_trace
+          STDERR.puts "[CONST_MAP] phase=register_functions_done literals=#{hir_converter.constant_literal_values.size} types=#{hir_converter.constant_types.size}"
+        end
         STDERR.puts if options.progress
 
         # Fix inherited ivars: ensure subclasses include parent ivars with correct offsets.
@@ -1238,6 +1286,9 @@ module CrystalV2
         stage2_debug("[STAGE2_DEBUG] fixup_inherited_ivars start", err_io)
         hir_converter.fixup_inherited_ivars
         stage2_debug("[STAGE2_DEBUG] fixup_inherited_ivars done", err_io)
+        if const_map_trace
+          STDERR.puts "[CONST_MAP] phase=fixup_inherited_ivars_done literals=#{hir_converter.constant_literal_values.size} types=#{hir_converter.constant_types.size}"
+        end
 
         # Pass 3: Lower bodies (lazy)
         # Only lower top-level expressions; function bodies are lowered on demand.
@@ -1451,17 +1502,31 @@ module CrystalV2
 
         # Register globals from class variables
         globals = [] of Tuple(String, HIR::TypeRef, Int64?)
+        if mir_setup_trace
+          STDERR.puts "[MIR_SETUP] class_info size=#{hir_converter.class_info.size}"
+          STDERR.puts "[MIR_SETUP] class_vars scan start"
+        end
         hir_converter.class_info.each do |class_name, info|
           info.class_vars.each do |cvar|
             global_name = MIR::HIRToMIRLowering.class_var_global_name(class_name, cvar.name)
             globals << {global_name, cvar.type, cvar.initial_value}
           end
         end
+        STDERR.puts "[MIR_SETUP] class_vars scan done globals=#{globals.size}" if mir_setup_trace
 
         # Register lib/module/class constants as globals with initial values
         # Without this, constants like LibC::EVFILT_USER are zero-initialized
+        STDERR.puts "[MIR_SETUP] globals.to_set start count=#{globals.size}" if mir_setup_trace
         registered_globals = globals.map { |g| g[0] }.to_set
+        STDERR.puts "[MIR_SETUP] globals.to_set done count=#{registered_globals.size}" if mir_setup_trace
+        STDERR.puts "[MIR_SETUP] constant_literals size=#{hir_converter.constant_literal_values.size}" if mir_setup_trace
+        STDERR.puts "[MIR_SETUP] constant_literals scan start" if mir_setup_trace
+        const_literal_idx = 0
         hir_converter.constant_literal_values.each do |full_name, macro_value|
+          if mir_setup_trace && const_literal_idx < 4
+            STDERR.puts "[MIR_SETUP] constant_literal idx=#{const_literal_idx} key_class=#{full_name.class.name} key_bytes=#{full_name.bytesize} value_class=#{macro_value.class.name} is_num=#{macro_value.is_a?(CrystalV2::Compiler::Semantic::MacroNumberValue) ? 1 : 0} is_bool=#{macro_value.is_a?(CrystalV2::Compiler::Semantic::MacroBoolValue) ? 1 : 0}"
+          end
+          const_literal_idx += 1
           next unless macro_value.is_a?(CrystalV2::Compiler::Semantic::MacroNumberValue)
           # Skip float constants — they can't be stored as Int64 initial values
           next if macro_value.value.is_a?(Float64)
@@ -1478,6 +1543,7 @@ module CrystalV2
           globals << {global_name, const_type, macro_value.value.as(Int64)}
           registered_globals.add(global_name)
         end
+        STDERR.puts "[MIR_SETUP] constant_literals scan done globals=#{globals.size}" if mir_setup_trace
 
         STDERR.puts "[MIR_SETUP] register_globals count=#{globals.size}" if mir_setup_trace
         mir_lowering.register_globals(globals)

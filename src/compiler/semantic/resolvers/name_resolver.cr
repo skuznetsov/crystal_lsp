@@ -24,7 +24,7 @@ module CrystalV2
         end
 
         def initialize(@program : Program, root_table : SymbolTable)
-          @arena = @program.arena.as(Frontend::AstArena)
+          @arena = @program.ast_arena
           @string_pool = @program.string_pool
           @root_table = root_table
           @identifier_symbols = {} of ExprId => Symbol
@@ -40,80 +40,89 @@ module CrystalV2
           Result.new(@identifier_symbols, @diagnostics)
         end
 
-      private def visit(node_id : ExprId)
-        return if node_id.invalid?
-        node = @arena[node_id]
+        private def visit(node_id : ExprId)
+          return if node_id.invalid?
+          node = @arena[node_id]
 
-        case node
-        when Frontend::IdentifierNode
-          resolve_identifier(node_id, node)
-        when Frontend::InstanceVarNode
-          resolve_instance_var(node_id, node)
-        when Frontend::ClassVarNode
-          resolve_class_var(node_id, node)
-        when Frontend::GlobalNode
-          resolve_global_var(node_id, node)
-        when Frontend::AssignNode
-          # Visit the value first (it may reference existing variables)
-          visit(node.value)
-          # Then handle the target (which declares a new variable if it's an identifier)
-          handle_assign_target(node.target)
-          when Frontend::MemberAccessNode
-            visit(node.object)
-          when Frontend::CallNode
-            if callee_id = node.callee
+          case Frontend.node_kind(node)
+          when Frontend::NodeKind::Identifier
+            resolve_identifier(node_id, node.as(Frontend::IdentifierNode))
+          when Frontend::NodeKind::InstanceVar
+            resolve_instance_var(node_id, node.as(Frontend::InstanceVarNode))
+          when Frontend::NodeKind::ClassVar
+            resolve_class_var(node_id, node.as(Frontend::ClassVarNode))
+          when Frontend::NodeKind::Global
+            resolve_global_var(node_id, node.as(Frontend::GlobalNode))
+          when Frontend::NodeKind::Assign
+            assign = node.as(Frontend::AssignNode)
+            # Visit the value first (it may reference existing variables)
+            visit(assign.value)
+            # Then handle the target (which declares a new variable if it's an identifier)
+            handle_assign_target(assign.target)
+          when Frontend::NodeKind::MemberAccess
+            visit(node.as(Frontend::MemberAccessNode).object)
+          when Frontend::NodeKind::Call
+            call = node.as(Frontend::CallNode)
+            if callee_id = call.callee
               visit(callee_id)
             end
-            node.args.each { |arg| visit(arg) }
-            if block_id = node.block
+            call.args.each { |arg| visit(arg) }
+            if block_id = call.block
               visit(block_id)
             end
-            node.named_args.try &.each { |named| visit(named.value) }
-          when Frontend::UnaryNode
-            visit(node.operand)
-          when Frontend::BinaryNode
-            visit(node.left)
-            visit(node.right)
-          when Frontend::GroupingNode
-            visit(node.expression)
-          when Frontend::MacroExpressionNode
-            visit(node.expression)
-          when Frontend::MacroLiteralNode
-            visit_macro_literal(node)
-          when Frontend::MacroDefNode
+            call.named_args.try &.each { |named| visit(named.value) }
+          when Frontend::NodeKind::Unary
+            visit(node.as(Frontend::UnaryNode).operand)
+          when Frontend::NodeKind::Binary
+            binary = node.as(Frontend::BinaryNode)
+            visit(binary.left)
+            visit(binary.right)
+          when Frontend::NodeKind::Grouping
+            visit(node.as(Frontend::GroupingNode).expression)
+          when Frontend::NodeKind::MacroExpression
+            visit(node.as(Frontend::MacroExpressionNode).expression)
+          when Frontend::NodeKind::MacroLiteral
+            visit_macro_literal(node.as(Frontend::MacroLiteralNode))
+          when Frontend::NodeKind::MacroDef
             # Body handled via MacroLiteral; skip definition node
-          when Frontend::DefNode
-            visit_def(node_id, node)
-          when Frontend::ClassNode
-            visit_class(node_id, node)
-      when Frontend::ConstantNode
-        visit(node.value)
-      when Frontend::IfNode
-        visit_if(node)
-      when Frontend::UnlessNode
-        visit_unless(node)
-      when Frontend::WhileNode
-        visit_while(node)
-      when Frontend::UntilNode
-        visit_until(node)
-      when Frontend::LoopNode
-        visit_loop(node)
-      when Frontend::BlockNode
-        visit_block(node)
-      when Frontend::ProcLiteralNode
-        visit_proc_literal(node)
-      when Frontend::ModuleNode
-        visit_module(node_id, node)
-      when Frontend::PathNode
-        resolve_path(node_id, node)
-      when Frontend::IncludeNode
-        visit(node.target) if node.target && !node.target.invalid?
-      when Frontend::ExtendNode
-        visit(node.target) if node.target && !node.target.invalid?
-      else
-        # Other kinds currently unsupported; ignore
-      end
-    end
+          when Frontend::NodeKind::Def
+            visit_def(node_id, node.as(Frontend::DefNode))
+          when Frontend::NodeKind::Class,
+               Frontend::NodeKind::Struct,
+               Frontend::NodeKind::Union
+            visit_class(node_id, node.as(Frontend::ClassNode))
+          when Frontend::NodeKind::Module
+            visit_module(node_id, node.as(Frontend::ModuleNode))
+          when Frontend::NodeKind::Enum
+            visit_enum(node_id, node.as(Frontend::EnumNode))
+          when Frontend::NodeKind::Constant
+            visit(node.as(Frontend::ConstantNode).value)
+          when Frontend::NodeKind::If
+            visit_if(node.as(Frontend::IfNode))
+          when Frontend::NodeKind::Unless
+            visit_unless(node.as(Frontend::UnlessNode))
+          when Frontend::NodeKind::While
+            visit_while(node.as(Frontend::WhileNode))
+          when Frontend::NodeKind::Until
+            visit_until(node.as(Frontend::UntilNode))
+          when Frontend::NodeKind::Loop
+            visit_loop(node.as(Frontend::LoopNode))
+          when Frontend::NodeKind::Block
+            visit_block(node.as(Frontend::BlockNode))
+          when Frontend::NodeKind::ProcLiteral
+            visit_proc_literal(node.as(Frontend::ProcLiteralNode))
+          when Frontend::NodeKind::Path
+            resolve_path(node_id, node.as(Frontend::PathNode))
+          when Frontend::NodeKind::Include
+            include_node = node.as(Frontend::IncludeNode)
+            visit(include_node.target) if include_node.target && !include_node.target.invalid?
+          when Frontend::NodeKind::Extend
+            extend_node = node.as(Frontend::ExtendNode)
+            visit(extend_node.target) if extend_node.target && !extend_node.target.invalid?
+          else
+            # Other kinds currently unsupported; ignore
+          end
+        end
 
         private def resolve_identifier(node_id : ExprId, node : Frontend::IdentifierNode)
           slice = node.name
@@ -269,6 +278,29 @@ module CrystalV2
 
           prev_table = @current_table
           @current_table = symbol.scope
+          (node.body || [] of ExprId).each { |expr_id| visit(expr_id) }
+          @current_table = prev_table
+        end
+
+        private def visit_enum(node_id : ExprId, node : Frontend::EnumNode)
+          name_slice = node.name
+          return unless name_slice
+
+          name = intern_name(name_slice)
+          symbol = @current_table.lookup(name)
+          unless symbol.is_a?(EnumSymbol)
+            return
+          end
+
+          @identifier_symbols[node_id] = symbol
+
+          prev_table = @current_table
+          @current_table = symbol.scope
+          node.members.each do |member|
+            if value = member.value
+              visit(value)
+            end
+          end
           (node.body || [] of ExprId).each { |expr_id| visit(expr_id) }
           @current_table = prev_table
         end

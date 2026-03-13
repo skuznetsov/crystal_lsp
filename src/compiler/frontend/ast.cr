@@ -4,7 +4,6 @@ require "./string_pool"
 module CrystalV2
   module Compiler
     module Frontend
-
       # Abstract base class for all AST nodes
       # Uses vtable dispatch instead of 94-type union
       abstract class Node
@@ -64,7 +63,7 @@ module CrystalV2
           when U128 then "UInt128"
           when F32  then "Float32"
           when F64  then "Float64"
-          else      "Int32"  # Default fallback
+          else           "Int32" # Default fallback
           end
         end
       end
@@ -81,6 +80,7 @@ module CrystalV2
       # Example: private CONST = 42 → VisibilityModifierNode(Private, Assign)
       class VisibilityModifierNode < Node
         getter span : Span
+
         def node_kind : NodeKind
           NodeKind::VisibilityModifier
         end
@@ -170,33 +170,33 @@ module CrystalV2
       #   def foo(x : Int32)   → Parameter("x", "Int32", span, name_span, type_span)
       struct Parameter
         getter name : Slice(UInt8)?          # Phase BLOCK_CAPTURE: nil for anonymous block (&)
-        getter external_name : Slice(UInt8)?  # Phase 103K: External parameter name (e.g., "to" in "def foo(to limit)")
+        getter external_name : Slice(UInt8)? # Phase 103K: External parameter name (e.g., "to" in "def foo(to limit)")
         getter type_annotation : Slice(UInt8)?
-        getter default_value : ExprId?  # Phase 71: default parameter value
-        getter span : Span              # Full "x : Int32 = 5" span
-        getter name_span : Span?        # Phase BLOCK_CAPTURE: nil for anonymous block
-        getter external_name_span : Span?  # Phase 103K: External name span for navigation
-        getter type_span : Span?        # Just "Int32" for hover (optional)
-        getter default_span : Span?     # Phase 71: Just default value span
-        getter is_splat : Bool          # Phase 68: *args (single splat)
-        getter is_double_splat : Bool   # Phase 68: **kwargs (double splat)
-        getter is_block : Bool          # Phase 103: &block (block parameter)
-        getter is_instance_var : Bool   # Instance variable parameter shorthand: @value : T
+        getter default_value : ExprId?    # Phase 71: default parameter value
+        getter span : Span                # Full "x : Int32 = 5" span
+        getter name_span : Span?          # Phase BLOCK_CAPTURE: nil for anonymous block
+        getter external_name_span : Span? # Phase 103K: External name span for navigation
+        getter type_span : Span?          # Just "Int32" for hover (optional)
+        getter default_span : Span?       # Phase 71: Just default value span
+        getter is_splat : Bool            # Phase 68: *args (single splat)
+        getter is_double_splat : Bool     # Phase 68: **kwargs (double splat)
+        getter is_block : Bool            # Phase 103: &block (block parameter)
+        getter is_instance_var : Bool     # Instance variable parameter shorthand: @value : T
 
         def initialize(
-          @name : Slice(UInt8)?,       # Phase BLOCK_CAPTURE: optional for anonymous block
-          @external_name : Slice(UInt8)? = nil,  # Phase 103K: External parameter name
+          @name : Slice(UInt8)?,                # Phase BLOCK_CAPTURE: optional for anonymous block
+          @external_name : Slice(UInt8)? = nil, # Phase 103K: External parameter name
           @type_annotation : Slice(UInt8)? = nil,
           @default_value : ExprId? = nil,
           @span : Span = Span.zero,
-          @name_span : Span? = nil,    # Phase BLOCK_CAPTURE: optional
-          @external_name_span : Span? = nil,  # Phase 103K: External name span
+          @name_span : Span? = nil,          # Phase BLOCK_CAPTURE: optional
+          @external_name_span : Span? = nil, # Phase 103K: External name span
           @type_span : Span? = nil,
           @default_span : Span? = nil,
           @is_splat : Bool = false,
           @is_double_splat : Bool = false,
           @is_block : Bool = false,
-          @is_instance_var : Bool = false
+          @is_instance_var : Bool = false,
         )
           if !@is_block && @name.nil? && !@is_splat && !@is_double_splat
             @is_block = true
@@ -214,16 +214,16 @@ module CrystalV2
       # - value_span: Just value for hover
       # - span: Full "key: value" span
       struct NamedTupleEntry
-        getter key : Slice(UInt8)       # TIER 2.3: Zero-copy slice
+        getter key : Slice(UInt8) # TIER 2.3: Zero-copy slice
         getter value : ExprId
-        getter key_span : Span          # Just "key"
-        getter value_span : Span        # Just value expression
+        getter key_span : Span   # Just "key"
+        getter value_span : Span # Just value expression
 
         def initialize(
           @key : Slice(UInt8),
           @value : ExprId,
           @key_span : Span,
-          @value_span : Span
+          @value_span : Span,
         )
         end
 
@@ -243,16 +243,16 @@ module CrystalV2
       # - value_span: Just value for hover
       # - span: Full "name: value" span
       struct NamedArgument
-        getter name : Slice(UInt8)      # Zero-copy slice from source
+        getter name : Slice(UInt8) # Zero-copy slice from source
         getter value : ExprId
-        getter name_span : Span         # Just "name"
-        getter value_span : Span        # Just value expression
+        getter name_span : Span  # Just "name"
+        getter value_span : Span # Just value expression
 
         def initialize(
           @name : Slice(UInt8),
           @value : ExprId,
           @name_span : Span,
-          @value_span : Span
+          @value_span : Span,
         )
         end
 
@@ -282,10 +282,10 @@ module CrystalV2
         getter name : Slice(UInt8)
         getter type_annotation : Slice(UInt8)?
         getter default_value : ExprId?
-        getter name_span : Span         # Just "name" for rename
-        getter type_span : Span?        # Just "String" for hover (optional)
-        getter default_span : Span?     # Span of default value expression (optional)
-        getter predicate : Bool         # true for getter?/property? (adds ? to getter name)
+        getter name_span : Span     # Just "name" for rename
+        getter type_span : Span?    # Just "String" for hover (optional)
+        getter default_span : Span? # Span of default value expression (optional)
+        getter predicate : Bool     # true for getter?/property? (adds ? to getter name)
 
         def initialize(
           @name : Slice(UInt8),
@@ -294,7 +294,7 @@ module CrystalV2
           @name_span : Span = Span.zero,
           @type_span : Span? = nil,
           @default_span : Span? = nil,
-          @predicate : Bool = false
+          @predicate : Bool = false,
         )
         end
 
@@ -336,7 +336,7 @@ module CrystalV2
       # - name_span: Exact location of member name
       # - value_span: Exact location of value expression (optional)
       struct EnumMember
-        getter name : Slice(UInt8)      # TIER 2.3: Zero-copy slice
+        getter name : Slice(UInt8) # TIER 2.3: Zero-copy slice
         getter value : ExprId?
         getter name_span : Span
         getter value_span : Span?
@@ -345,7 +345,7 @@ module CrystalV2
           @name : Slice(UInt8),
           @value : ExprId? = nil,
           @name_span : Span = Span.zero,
-          @value_span : Span? = nil
+          @value_span : Span? = nil,
         )
         end
       end
@@ -353,99 +353,98 @@ module CrystalV2
       enum NodeKind
         Identifier
         MacroVar
-        InstanceVar  # @var
-        InstanceVarDecl  # @var : Type (Phase 5C)
-        ClassVar  # Phase 76: @@var (class variable)
-        ClassVarDecl  # Phase 77: @@var : Type (class variable declaration)
-        Global  # Phase 75: $var (global variable)
-        GlobalVarDecl  # Phase 77: $var : Type (global variable declaration)
+        InstanceVar     # @var
+        InstanceVarDecl # @var : Type (Phase 5C)
+        ClassVar        # Phase 76: @@var (class variable)
+        ClassVarDecl    # Phase 77: @@var : Type (class variable declaration)
+        Global          # Phase 75: $var (global variable)
+        GlobalVarDecl   # Phase 77: $var : Type (global variable declaration)
         Number
         String
         Char  # Phase 56: character literal 'a'
-        Regex  # Phase 57: regex literal /pattern/flags
+        Regex # Phase 57: regex literal /pattern/flags
         Bool
         Nil
         Unary
-        Out  # Phase 98: out keyword (C bindings output parameter)
+        Out # Phase 98: out keyword (C bindings output parameter)
         Binary
         Call
         Index
         MemberAccess
-        SafeNavigation  # Phase 47: safe navigation (&.)
+        SafeNavigation # Phase 47: safe navigation (&.)
         Grouping
         If
-        Unless  # Phase 24: unless condition
+        Unless # Phase 24: unless condition
         While
-        Until   # Phase 25: until condition
-        For     # Phase 99: for loop (iteration)
-        Loop    # Phase 83: infinite loop
-        Spawn   # Phase 84: spawn fiber (concurrency)
+        Until # Phase 25: until condition
+        For   # Phase 99: for loop (iteration)
+        Loop  # Phase 83: infinite loop
+        Spawn # Phase 84: spawn fiber (concurrency)
         Assign
-        MultipleAssign  # Phase 73: multiple assignment (a, b = 1, 2)
+        MultipleAssign # Phase 73: multiple assignment (a, b = 1, 2)
         MacroExpression
         MacroLiteral
         MacroDef
-        MacroIf   # Phase 103B: {% if %}...{% end %} in expression context
-        MacroFor  # Phase 103B: {% for %}...{% end %} in expression context
+        MacroIf  # Phase 103B: {% if %}...{% end %} in expression context
+        MacroFor # Phase 103B: {% for %}...{% end %} in expression context
         Def
         Class
-        Return  # Phase 6: return statements
-        Self    # Phase 7: self keyword
-        ImplicitObj  # Phase IMPLICIT_RECEIVER: implicit receiver for .method calls
-        Super   # Phase 39: super keyword (call parent method)
-        PreviousDef  # Phase 96: previous_def keyword (call previous definition before reopening/redefining)
-        Typeof  # Phase 40: typeof (type introspection)
-        Sizeof  # Phase 41: sizeof (size in bytes)
-        Pointerof  # Phase 42: pointerof (pointer to variable/expression)
-        Uninitialized  # Phase 85: uninitialized variable
-        Offsetof  # Phase 86: offset of field in type
-        Alignof  # Phase 88: ABI alignment in bytes
-        InstanceAlignof  # Phase 88: instance alignment
-        Asm  # Phase 95: inline assembly
-        StringInterpolation  # Phase 8: string interpolation
-        ArrayLiteral  # Phase 9: array literals [1, 2, 3]
-        Block  # Phase 10: block {|x| ... } or do |x| ... end
-        ProcLiteral  # Phase 74: proc literal ->(x) { ... }
-        Yield  # Phase 10: yield keyword
-        Case  # Phase 11: case/when pattern matching
-        Select  # Phase 90A: select/when concurrent channel operations
-        Break  # Phase 12: break [value]
-        Next   # Phase 12: next
-        Range  # Phase 13: range literals (1..10, 1...10)
-        HashLiteral  # Phase 14: hash literals {"k"=>v}
-        TupleLiteral  # Phase 15: tuple literals {1, 2, 3}
-        NamedTupleLiteral  # Phase 70: named tuple literals {name: "value"}
-        Symbol  # Phase 16: symbol literals :hello
-        Ternary  # Phase 23: ternary operator (cond ? true : false)
-        Begin  # Phase 28: begin/end blocks
-        Raise  # Phase 29: raise exception
-        Require  # Phase 65: require (import file/library)
-        TypeDeclaration  # Phase 66: type declaration (x : Type)
-        With  # Phase 67: with (context block)
-        Getter  # Phase 30: getter macro
-        Setter  # Phase 30: setter macro
-        Property  # Phase 30: property macro (getter + setter)
-        Module  # Phase 31: module definition
-        Include  # Phase 31: include module into class/module
-        Extend  # Phase 31: extend module into class/module
-        Struct  # Phase 32: struct definition (value type)
-        Union  # Phase 97: union definition (C bindings)
-        Enum  # Phase 33: enum definition (enumerated type)
-        Alias  # Phase 34: type alias
-        AnnotationDef  # Phase 92: annotation definition (annotation MyAnnotation ... end)
-        Annotation  # Phase 92: annotation use (@[Link], @[JSON::Field(...)])
-        Constant  # Phase 35: constant declaration
-        Lib  # Phase 38: lib (C bindings)
-        Fun  # Phase 64: fun (C function declaration)
-        As  # Phase 44: type cast (value.as(Type))
-        AsQuestion  # Phase 45: safe cast (value.as?(Type))
-        IsA  # Phase 93: type check (value.is_a?(Type))
-        RespondsTo  # Phase 94: method check (value.responds_to?(:method))
-        Generic  # Phase 60: generic type instantiation (Box(Int32))
-        Path  # Phase 63: path expression (Foo::Bar)
+        Return              # Phase 6: return statements
+        Self                # Phase 7: self keyword
+        ImplicitObj         # Phase IMPLICIT_RECEIVER: implicit receiver for .method calls
+        Super               # Phase 39: super keyword (call parent method)
+        PreviousDef         # Phase 96: previous_def keyword (call previous definition before reopening/redefining)
+        Typeof              # Phase 40: typeof (type introspection)
+        Sizeof              # Phase 41: sizeof (size in bytes)
+        Pointerof           # Phase 42: pointerof (pointer to variable/expression)
+        Uninitialized       # Phase 85: uninitialized variable
+        Offsetof            # Phase 86: offset of field in type
+        Alignof             # Phase 88: ABI alignment in bytes
+        InstanceAlignof     # Phase 88: instance alignment
+        Asm                 # Phase 95: inline assembly
+        StringInterpolation # Phase 8: string interpolation
+        ArrayLiteral        # Phase 9: array literals [1, 2, 3]
+        Block               # Phase 10: block {|x| ... } or do |x| ... end
+        ProcLiteral         # Phase 74: proc literal ->(x) { ... }
+        Yield               # Phase 10: yield keyword
+        Case                # Phase 11: case/when pattern matching
+        Select              # Phase 90A: select/when concurrent channel operations
+        Break               # Phase 12: break [value]
+        Next                # Phase 12: next
+        Range               # Phase 13: range literals (1..10, 1...10)
+        HashLiteral         # Phase 14: hash literals {"k"=>v}
+        TupleLiteral        # Phase 15: tuple literals {1, 2, 3}
+        NamedTupleLiteral   # Phase 70: named tuple literals {name: "value"}
+        Symbol              # Phase 16: symbol literals :hello
+        Ternary             # Phase 23: ternary operator (cond ? true : false)
+        Begin               # Phase 28: begin/end blocks
+        Raise               # Phase 29: raise exception
+        Require             # Phase 65: require (import file/library)
+        TypeDeclaration     # Phase 66: type declaration (x : Type)
+        With                # Phase 67: with (context block)
+        Getter              # Phase 30: getter macro
+        Setter              # Phase 30: setter macro
+        Property            # Phase 30: property macro (getter + setter)
+        Module              # Phase 31: module definition
+        Include             # Phase 31: include module into class/module
+        Extend              # Phase 31: extend module into class/module
+        Struct              # Phase 32: struct definition (value type)
+        Union               # Phase 97: union definition (C bindings)
+        Enum                # Phase 33: enum definition (enumerated type)
+        Alias               # Phase 34: type alias
+        AnnotationDef       # Phase 92: annotation definition (annotation MyAnnotation ... end)
+        Annotation          # Phase 92: annotation use (@[Link], @[JSON::Field(...)])
+        Constant            # Phase 35: constant declaration
+        Lib                 # Phase 38: lib (C bindings)
+        Fun                 # Phase 64: fun (C function declaration)
+        As                  # Phase 44: type cast (value.as(Type))
+        AsQuestion          # Phase 45: safe cast (value.as?(Type))
+        IsA                 # Phase 93: type check (value.is_a?(Type))
+        RespondsTo          # Phase 94: method check (value.responds_to?(:method))
+        Generic             # Phase 60: generic type instantiation (Box(Int32))
+        Path                # Phase 63: path expression (Foo::Bar)
         VisibilityModifier  # Phase 103J: private/protected wrapper
       end
-
 
       struct MacroPiece
         enum Kind
@@ -495,7 +494,7 @@ module CrystalV2
           @iter_vars : Array(String)? = nil,
           @iterable : ExprId? = nil,
           @span : Span? = nil,
-          @macro_var_name : String? = nil
+          @macro_var_name : String? = nil,
         )
         end
       end
@@ -560,6 +559,7 @@ module CrystalV2
       # Size: ~48 bytes
       class NumberNode < Node
         getter span : Span
+
         def node_kind : NodeKind
           NodeKind::Number
         end
@@ -576,6 +576,7 @@ module CrystalV2
       # Size: ~40 bytes
       class IdentifierNode < Node
         getter span : Span
+
         def node_kind : NodeKind
           NodeKind::Identifier
         end
@@ -588,6 +589,7 @@ module CrystalV2
 
       class MacroVarNode < Node
         getter span : Span
+
         def node_kind : NodeKind
           NodeKind::MacroVar
         end
@@ -603,6 +605,7 @@ module CrystalV2
       # Size: ~56 bytes
       class BinaryNode < Node
         getter span : Span
+
         def node_kind : NodeKind
           NodeKind::Binary
         end
@@ -624,6 +627,7 @@ module CrystalV2
       # Size: ~64 bytes
       class CallNode < Node
         getter span : Span
+
         def node_kind : NodeKind
           NodeKind::Call
         end
@@ -642,6 +646,7 @@ module CrystalV2
       # Size: ~40 bytes
       class SplatNode < Node
         getter span : Span
+
         def node_kind : NodeKind
           # There is no dedicated NodeKind::Splat in the lightweight enum; keep
           # instance dispatch aligned with the helper overload semantics below.
@@ -659,6 +664,7 @@ module CrystalV2
       # Size: ~88 bytes
       class IfNode < Node
         getter span : Span
+
         def node_kind : NodeKind
           NodeKind::If
         end
@@ -673,7 +679,7 @@ module CrystalV2
           @condition : ExprId,
           @then_body : Array(ExprId),
           @elsifs : Array(ElsifBranch)? = nil,
-          @else_body : Array(ExprId)? = nil
+          @else_body : Array(ExprId)? = nil,
         )
         end
       end
@@ -687,6 +693,7 @@ module CrystalV2
       # Size: ~40 bytes
       class StringNode < Node
         getter span : Span
+
         def node_kind : NodeKind
           NodeKind::String
         end
@@ -702,6 +709,7 @@ module CrystalV2
       # Size: ~40 bytes
       class CharNode < Node
         getter span : Span
+
         def node_kind : NodeKind
           NodeKind::Char
         end
@@ -717,6 +725,7 @@ module CrystalV2
       # Size: ~40 bytes
       class RegexNode < Node
         getter span : Span
+
         def node_kind : NodeKind
           NodeKind::Regex
         end
@@ -732,6 +741,7 @@ module CrystalV2
       # Size: ~32 bytes
       class BoolNode < Node
         getter span : Span
+
         def node_kind : NodeKind
           NodeKind::Bool
         end
@@ -747,10 +757,10 @@ module CrystalV2
       # Size: ~24 bytes (just span)
       class NilNode < Node
         getter span : Span
+
         def node_kind : NodeKind
           NodeKind::Nil
         end
-
 
         def initialize(@span : Span)
         end
@@ -761,6 +771,7 @@ module CrystalV2
       # Size: ~40 bytes
       class SymbolNode < Node
         getter span : Span
+
         def node_kind : NodeKind
           NodeKind::Symbol
         end
@@ -776,12 +787,13 @@ module CrystalV2
       # Size: ~56 bytes
       class ArrayLiteralNode < Node
         getter span : Span
+
         def node_kind : NodeKind
           NodeKind::ArrayLiteral
         end
 
         getter elements : Array(ExprId)
-        getter of_type : ExprId?  # Phase 91: explicit type
+        getter of_type : ExprId? # Phase 91: explicit type
 
         def initialize(@span : Span, @elements : Array(ExprId), @of_type : ExprId? = nil)
         end
@@ -792,6 +804,7 @@ module CrystalV2
       # Size: ~56 bytes
       class HashLiteralNode < Node
         getter span : Span
+
         def node_kind : NodeKind
           NodeKind::HashLiteral
         end
@@ -804,7 +817,7 @@ module CrystalV2
           @span : Span,
           @entries : Array(HashEntry),
           @of_key_type : Slice(UInt8)? = nil,
-          @of_value_type : Slice(UInt8)? = nil
+          @of_value_type : Slice(UInt8)? = nil,
         )
         end
       end
@@ -814,6 +827,7 @@ module CrystalV2
       # Size: ~48 bytes
       class TupleLiteralNode < Node
         getter span : Span
+
         def node_kind : NodeKind
           NodeKind::TupleLiteral
         end
@@ -829,6 +843,7 @@ module CrystalV2
       # Size: ~48 bytes
       class NamedTupleLiteralNode < Node
         getter span : Span
+
         def node_kind : NodeKind
           NodeKind::NamedTupleLiteral
         end
@@ -844,6 +859,7 @@ module CrystalV2
       # Size: ~48 bytes
       class RangeNode < Node
         getter span : Span
+
         def node_kind : NodeKind
           NodeKind::Range
         end
@@ -860,11 +876,12 @@ module CrystalV2
 
       class UnaryNode < Node
         getter span : Span
+
         def node_kind : NodeKind
           NodeKind::Unary
         end
 
-        getter operator : Slice(UInt8)  # -, !, ~, +, etc.
+        getter operator : Slice(UInt8) # -, !, ~, +, etc.
         getter operand : ExprId
 
         def initialize(@span : Span, @operator : Slice(UInt8), @operand : ExprId)
@@ -873,6 +890,7 @@ module CrystalV2
 
       class TernaryNode < Node
         getter span : Span
+
         def node_kind : NodeKind
           NodeKind::Ternary
         end
@@ -889,11 +907,12 @@ module CrystalV2
 
       class InstanceVarNode < Node
         getter span : Span
+
         def node_kind : NodeKind
           NodeKind::InstanceVar
         end
 
-        getter name : Slice(UInt8)  # @var
+        getter name : Slice(UInt8) # @var
 
         def initialize(@span : Span, @name : Slice(UInt8))
         end
@@ -901,11 +920,12 @@ module CrystalV2
 
       class ClassVarNode < Node
         getter span : Span
+
         def node_kind : NodeKind
           NodeKind::ClassVar
         end
 
-        getter name : Slice(UInt8)  # @@var
+        getter name : Slice(UInt8) # @@var
 
         def initialize(@span : Span, @name : Slice(UInt8))
         end
@@ -913,11 +933,12 @@ module CrystalV2
 
       class GlobalNode < Node
         getter span : Span
+
         def node_kind : NodeKind
           NodeKind::Global
         end
 
-        getter name : Slice(UInt8)  # $var
+        getter name : Slice(UInt8) # $var
 
         def initialize(@span : Span, @name : Slice(UInt8))
         end
@@ -925,10 +946,10 @@ module CrystalV2
 
       class SelfNode < Node
         getter span : Span
+
         def node_kind : NodeKind
           NodeKind::Self
         end
-
 
         def initialize(@span : Span)
         end
@@ -938,10 +959,10 @@ module CrystalV2
       # Example: in .i8? (equivalent to self.i8?)
       class ImplicitObjNode < Node
         getter span : Span
+
         def node_kind : NodeKind
           NodeKind::ImplicitObj
         end
-
 
         def initialize(@span : Span)
         end
@@ -951,6 +972,7 @@ module CrystalV2
 
       class UnlessNode < Node
         getter span : Span
+
         def node_kind : NodeKind
           NodeKind::Unless
         end
@@ -965,6 +987,7 @@ module CrystalV2
 
       class WhileNode < Node
         getter span : Span
+
         def node_kind : NodeKind
           NodeKind::While
         end
@@ -978,6 +1001,7 @@ module CrystalV2
 
       class UntilNode < Node
         getter span : Span
+
         def node_kind : NodeKind
           NodeKind::Until
         end
@@ -991,6 +1015,7 @@ module CrystalV2
 
       class ForNode < Node
         getter span : Span
+
         def node_kind : NodeKind
           NodeKind::For
         end
@@ -1005,6 +1030,7 @@ module CrystalV2
 
       class LoopNode < Node
         getter span : Span
+
         def node_kind : NodeKind
           NodeKind::Loop
         end
@@ -1017,13 +1043,14 @@ module CrystalV2
 
       class CaseNode < Node
         getter span : Span
+
         def node_kind : NodeKind
           NodeKind::Case
         end
 
         getter value : ExprId?
         getter when_branches : Array(WhenBranch)
-        getter in_branches : Array(WhenBranch)?  # Phase PERCENT_LITERALS: pattern matching (case...in)
+        getter in_branches : Array(WhenBranch)? # Phase PERCENT_LITERALS: pattern matching (case...in)
         getter else_branch : Array(ExprId)?
 
         def initialize(@span : Span, @value : ExprId?, @when_branches : Array(WhenBranch),
@@ -1033,6 +1060,7 @@ module CrystalV2
 
       class BreakNode < Node
         getter span : Span
+
         def node_kind : NodeKind
           NodeKind::Break
         end
@@ -1045,6 +1073,7 @@ module CrystalV2
 
       class NextNode < Node
         getter span : Span
+
         def node_kind : NodeKind
           NodeKind::Next
         end
@@ -1057,6 +1086,7 @@ module CrystalV2
 
       class ReturnNode < Node
         getter span : Span
+
         def node_kind : NodeKind
           NodeKind::Return
         end
@@ -1069,6 +1099,7 @@ module CrystalV2
 
       class YieldNode < Node
         getter span : Span
+
         def node_kind : NodeKind
           NodeKind::Yield
         end
@@ -1081,6 +1112,7 @@ module CrystalV2
 
       class SpawnNode < Node
         getter span : Span
+
         def node_kind : NodeKind
           NodeKind::Spawn
         end
@@ -1096,6 +1128,7 @@ module CrystalV2
 
       class IndexNode < Node
         getter span : Span
+
         def node_kind : NodeKind
           NodeKind::Index
         end
@@ -1109,6 +1142,7 @@ module CrystalV2
 
       class MemberAccessNode < Node
         getter span : Span
+
         def node_kind : NodeKind
           NodeKind::MemberAccess
         end
@@ -1122,6 +1156,7 @@ module CrystalV2
 
       class SafeNavigationNode < Node
         getter span : Span
+
         def node_kind : NodeKind
           NodeKind::SafeNavigation
         end
@@ -1137,6 +1172,7 @@ module CrystalV2
 
       class AssignNode < Node
         getter span : Span
+
         def node_kind : NodeKind
           NodeKind::Assign
         end
@@ -1150,6 +1186,7 @@ module CrystalV2
 
       class MultipleAssignNode < Node
         getter span : Span
+
         def node_kind : NodeKind
           NodeKind::MultipleAssign
         end
@@ -1165,6 +1202,7 @@ module CrystalV2
 
       class BlockNode < Node
         getter span : Span
+
         def node_kind : NodeKind
           NodeKind::Block
         end
@@ -1178,6 +1216,7 @@ module CrystalV2
 
       class ProcLiteralNode < Node
         getter span : Span
+
         def node_kind : NodeKind
           NodeKind::ProcLiteral
         end
@@ -1192,6 +1231,7 @@ module CrystalV2
 
       class StringInterpolationNode < Node
         getter span : Span
+
         def node_kind : NodeKind
           NodeKind::StringInterpolation
         end
@@ -1204,6 +1244,7 @@ module CrystalV2
 
       class GroupingNode < Node
         getter span : Span
+
         def node_kind : NodeKind
           NodeKind::Grouping
         end
@@ -1218,6 +1259,7 @@ module CrystalV2
 
       class DefNode < Node
         getter span : Span
+
         def node_kind : NodeKind
           NodeKind::Def
         end
@@ -1228,7 +1270,7 @@ module CrystalV2
         getter body : Array(ExprId)?
         getter is_abstract : Bool?
         getter visibility : Visibility?
-        getter receiver : Slice(UInt8)?  # Phase PERCENT_LITERALS: self or object name for class/singleton methods
+        getter receiver : Slice(UInt8)? # Phase PERCENT_LITERALS: self or object name for class/singleton methods
 
         def initialize(@span : Span, @name : Slice(UInt8), @params : Array(Parameter)?,
                        @return_type : Slice(UInt8)?, @body : Array(ExprId)?,
@@ -1239,6 +1281,7 @@ module CrystalV2
 
       class ClassNode < Node
         getter span : Span
+
         def node_kind : NodeKind
           NodeKind::Class
         end
@@ -1276,6 +1319,7 @@ module CrystalV2
 
       class ModuleNode < Node
         getter span : Span
+
         def node_kind : NodeKind
           NodeKind::Module
         end
@@ -1290,6 +1334,7 @@ module CrystalV2
 
       class UnionNode < Node
         getter span : Span
+
         def node_kind : NodeKind
           NodeKind::Union
         end
@@ -1303,6 +1348,7 @@ module CrystalV2
 
       class EnumNode < Node
         getter span : Span
+
         def node_kind : NodeKind
           NodeKind::Enum
         end
@@ -1318,6 +1364,7 @@ module CrystalV2
 
       class AliasNode < Node
         getter span : Span
+
         def node_kind : NodeKind
           NodeKind::Alias
         end
@@ -1331,6 +1378,7 @@ module CrystalV2
 
       class ConstantNode < Node
         getter span : Span
+
         def node_kind : NodeKind
           NodeKind::Constant
         end
@@ -1344,6 +1392,7 @@ module CrystalV2
 
       class IncludeNode < Node
         getter span : Span
+
         def node_kind : NodeKind
           NodeKind::Include
         end
@@ -1357,6 +1406,7 @@ module CrystalV2
 
       class ExtendNode < Node
         getter span : Span
+
         def node_kind : NodeKind
           NodeKind::Extend
         end
@@ -1370,12 +1420,13 @@ module CrystalV2
 
       class GetterNode < Node
         getter span : Span
+
         def node_kind : NodeKind
           NodeKind::Getter
         end
 
         getter specs : Array(AccessorSpec)
-        getter? is_class : Bool  # true for class_getter, false for getter
+        getter? is_class : Bool # true for class_getter, false for getter
 
         def initialize(@span : Span, @specs : Array(AccessorSpec), @is_class : Bool = false)
         end
@@ -1383,12 +1434,13 @@ module CrystalV2
 
       class SetterNode < Node
         getter span : Span
+
         def node_kind : NodeKind
           NodeKind::Setter
         end
 
         getter specs : Array(AccessorSpec)
-        getter? is_class : Bool  # true for class_setter, false for setter
+        getter? is_class : Bool # true for class_setter, false for setter
 
         def initialize(@span : Span, @specs : Array(AccessorSpec), @is_class : Bool = false)
         end
@@ -1396,12 +1448,13 @@ module CrystalV2
 
       class PropertyNode < Node
         getter span : Span
+
         def node_kind : NodeKind
           NodeKind::Property
         end
 
         getter specs : Array(AccessorSpec)
-        getter? is_class : Bool  # true for class_property, false for property
+        getter? is_class : Bool # true for class_property, false for property
 
         def initialize(@span : Span, @specs : Array(AccessorSpec), @is_class : Bool = false)
         end
@@ -1412,11 +1465,12 @@ module CrystalV2
       # This is like a class definition for annotations
       class AnnotationDefNode < Node
         getter span : Span
+
         def node_kind : NodeKind
           NodeKind::AnnotationDef
         end
 
-        getter name : Slice(UInt8)    # Simple identifier (like ClassNode)
+        getter name : Slice(UInt8) # Simple identifier (like ClassNode)
 
         def initialize(@span : Span, @name : Slice(UInt8))
         end
@@ -1428,19 +1482,20 @@ module CrystalV2
       # during semantic analysis
       class AnnotationNode < Node
         getter span : Span
+
         def node_kind : NodeKind
           NodeKind::Annotation
         end
 
-        getter name : ExprId          # Path or identifier (e.g., Link, JSON::Field)
-        getter args : Array(ExprId)   # Positional arguments
-        getter named_args : Array(NamedArgument)?  # Named arguments (e.g., key: "test")
+        getter name : ExprId                      # Path or identifier (e.g., Link, JSON::Field)
+        getter args : Array(ExprId)               # Positional arguments
+        getter named_args : Array(NamedArgument)? # Named arguments (e.g., key: "test")
 
         def initialize(
           @span : Span,
           @name : ExprId,
           @args : Array(ExprId) = [] of ExprId,
-          @named_args : Array(NamedArgument)? = nil
+          @named_args : Array(NamedArgument)? = nil,
         )
         end
       end
@@ -1449,6 +1504,7 @@ module CrystalV2
 
       class AsNode < Node
         getter span : Span
+
         def node_kind : NodeKind
           NodeKind::As
         end
@@ -1462,6 +1518,7 @@ module CrystalV2
 
       class AsQuestionNode < Node
         getter span : Span
+
         def node_kind : NodeKind
           NodeKind::AsQuestion
         end
@@ -1475,6 +1532,7 @@ module CrystalV2
 
       class IsANode < Node
         getter span : Span
+
         def node_kind : NodeKind
           NodeKind::IsA
         end
@@ -1488,6 +1546,7 @@ module CrystalV2
 
       class RespondsToNode < Node
         getter span : Span
+
         def node_kind : NodeKind
           NodeKind::RespondsTo
         end
@@ -1501,6 +1560,7 @@ module CrystalV2
 
       class TypeofNode < Node
         getter span : Span
+
         def node_kind : NodeKind
           NodeKind::Typeof
         end
@@ -1513,6 +1573,7 @@ module CrystalV2
 
       class SizeofNode < Node
         getter span : Span
+
         def node_kind : NodeKind
           NodeKind::Sizeof
         end
@@ -1525,6 +1586,7 @@ module CrystalV2
 
       class PointerofNode < Node
         getter span : Span
+
         def node_kind : NodeKind
           NodeKind::Pointerof
         end
@@ -1537,6 +1599,7 @@ module CrystalV2
 
       class UninitializedNode < Node
         getter span : Span
+
         def node_kind : NodeKind
           NodeKind::Uninitialized
         end
@@ -1549,6 +1612,7 @@ module CrystalV2
 
       class OffsetofNode < Node
         getter span : Span
+
         def node_kind : NodeKind
           NodeKind::Offsetof
         end
@@ -1561,6 +1625,7 @@ module CrystalV2
 
       class AlignofNode < Node
         getter span : Span
+
         def node_kind : NodeKind
           NodeKind::Alignof
         end
@@ -1573,6 +1638,7 @@ module CrystalV2
 
       class InstanceAlignofNode < Node
         getter span : Span
+
         def node_kind : NodeKind
           NodeKind::InstanceAlignof
         end
@@ -1585,6 +1651,7 @@ module CrystalV2
 
       class SuperNode < Node
         getter span : Span
+
         def node_kind : NodeKind
           NodeKind::Super
         end
@@ -1597,6 +1664,7 @@ module CrystalV2
 
       class PreviousDefNode < Node
         getter span : Span
+
         def node_kind : NodeKind
           NodeKind::PreviousDef
         end
@@ -1609,6 +1677,7 @@ module CrystalV2
 
       class OutNode < Node
         getter span : Span
+
         def node_kind : NodeKind
           NodeKind::Out
         end
@@ -1623,6 +1692,7 @@ module CrystalV2
 
       class BeginNode < Node
         getter span : Span
+
         def node_kind : NodeKind
           NodeKind::Begin
         end
@@ -1638,6 +1708,7 @@ module CrystalV2
 
       class RaiseNode < Node
         getter span : Span
+
         def node_kind : NodeKind
           NodeKind::Raise
         end
@@ -1650,6 +1721,7 @@ module CrystalV2
 
       class RequireNode < Node
         getter span : Span
+
         def node_kind : NodeKind
           NodeKind::Require
         end
@@ -1662,13 +1734,14 @@ module CrystalV2
 
       class TypeDeclarationNode < Node
         getter span : Span
+
         def node_kind : NodeKind
           NodeKind::TypeDeclaration
         end
 
-        getter name : Slice(UInt8)  # Variable name (simple identifier)
-        getter declared_type : Slice(UInt8)  # Type name (simple identifier like Int32, String)
-        getter value : ExprId?  # Phase 103: Optional initial value for x : Type = value
+        getter name : Slice(UInt8)          # Variable name (simple identifier)
+        getter declared_type : Slice(UInt8) # Type name (simple identifier like Int32, String)
+        getter value : ExprId?              # Phase 103: Optional initial value for x : Type = value
 
         def initialize(@span : Span, @name : Slice(UInt8), @declared_type : Slice(UInt8), @value : ExprId? = nil)
         end
@@ -1676,6 +1749,7 @@ module CrystalV2
 
       class InstanceVarDeclNode < Node
         getter span : Span
+
         def node_kind : NodeKind
           NodeKind::InstanceVarDecl
         end
@@ -1690,6 +1764,7 @@ module CrystalV2
 
       class ClassVarDeclNode < Node
         getter span : Span
+
         def node_kind : NodeKind
           NodeKind::ClassVarDecl
         end
@@ -1704,6 +1779,7 @@ module CrystalV2
 
       class GlobalVarDeclNode < Node
         getter span : Span
+
         def node_kind : NodeKind
           NodeKind::GlobalVarDecl
         end
@@ -1722,6 +1798,7 @@ module CrystalV2
 
       class WithNode < Node
         getter span : Span
+
         def node_kind : NodeKind
           NodeKind::With
         end
@@ -1735,6 +1812,7 @@ module CrystalV2
 
       class LibNode < Node
         getter span : Span
+
         def node_kind : NodeKind
           NodeKind::Lib
         end
@@ -1748,15 +1826,16 @@ module CrystalV2
 
       class FunNode < Node
         getter span : Span
+
         def node_kind : NodeKind
           NodeKind::Fun
         end
 
         getter name : Slice(UInt8)
-        getter real_name : Slice(UInt8)?  # Actual C function name (if different from name)
+        getter real_name : Slice(UInt8)? # Actual C function name (if different from name)
         getter params : Array(Parameter)?
         getter return_type : Slice(UInt8)?
-        getter varargs : Bool  # Whether function has ... for variadic args
+        getter varargs : Bool # Whether function has ... for variadic args
 
         def initialize(@span : Span, @name : Slice(UInt8), @real_name : Slice(UInt8)?, @params : Array(Parameter)?, @return_type : Slice(UInt8)?, @varargs : Bool)
         end
@@ -1764,6 +1843,7 @@ module CrystalV2
 
       class GenericNode < Node
         getter span : Span
+
         def node_kind : NodeKind
           NodeKind::Generic
         end
@@ -1777,6 +1857,7 @@ module CrystalV2
 
       class PathNode < Node
         getter span : Span
+
         def node_kind : NodeKind
           NodeKind::Path
         end
@@ -1790,6 +1871,7 @@ module CrystalV2
 
       class MacroExpressionNode < Node
         getter span : Span
+
         def node_kind : NodeKind
           NodeKind::MacroExpression
         end
@@ -1802,6 +1884,7 @@ module CrystalV2
 
       class MacroLiteralNode < Node
         getter span : Span
+
         def node_kind : NodeKind
           NodeKind::MacroLiteral
         end
@@ -1825,6 +1908,7 @@ module CrystalV2
 
       class MacroDefNode < Node
         getter span : Span
+
         def node_kind : NodeKind
           NodeKind::MacroDef
         end
@@ -1839,7 +1923,7 @@ module CrystalV2
           @span : Span,
           @name : Slice(UInt8),
           @body : ExprId,
-          @params : Array(MacroParamDecl) = [] of MacroParamDecl
+          @params : Array(MacroParamDecl) = [] of MacroParamDecl,
         )
         end
 
@@ -1852,6 +1936,7 @@ module CrystalV2
       # Phase 103B: Macro control flow in expression context
       class MacroIfNode < Node
         getter span : Span
+
         def node_kind : NodeKind
           NodeKind::MacroIf
         end
@@ -1866,13 +1951,14 @@ module CrystalV2
 
       class MacroForNode < Node
         getter span : Span
+
         def node_kind : NodeKind
           NodeKind::MacroFor
         end
 
-        getter iter_vars : Array(Slice(UInt8))  # Variable names
-        getter iterable : ExprId   # Expression to iterate over
-        getter body : ExprId       # MacroLiteralNode
+        getter iter_vars : Array(Slice(UInt8)) # Variable names
+        getter iterable : ExprId               # Expression to iterate over
+        getter body : ExprId                   # MacroLiteralNode
 
         def initialize(@span : Span, @iter_vars : Array(Slice(UInt8)), @iterable : ExprId, @body : ExprId)
         end
@@ -1880,6 +1966,7 @@ module CrystalV2
 
       class SelectNode < Node
         getter span : Span
+
         def node_kind : NodeKind
           NodeKind::Select
         end
@@ -1893,6 +1980,7 @@ module CrystalV2
 
       class AsmNode < Node
         getter span : Span
+
         def node_kind : NodeKind
           NodeKind::Asm
         end
@@ -2305,7 +2393,6 @@ module CrystalV2
       # Helper: Get literal/name for nodes that have string data
       # ============================================================================
 
-
       def self.node_literal(node : IdentifierNode) : Slice(UInt8)?
         node.name
       end
@@ -2390,7 +2477,7 @@ module CrystalV2
       end
 
       def self.node_assign_value(node : TypedNode) : ExprId?
-        nil  # Other typed nodes don't have assign_value
+        nil # Other typed nodes don't have assign_value
       end
 
       # assign_target: Get target from assignment
@@ -2440,7 +2527,7 @@ module CrystalV2
       end
 
       def self.node_right(node : UnaryNode) : ExprId
-        node.operand  # UnaryNode uses 'operand' instead of 'right'
+        node.operand # UnaryNode uses 'operand' instead of 'right'
       end
 
       def self.node_right(node : TypedNode) : ExprId?
@@ -2450,7 +2537,7 @@ module CrystalV2
       # macro_expr: Get macro expression (MacroExpressionNode.expression vs ExpressionNode.macro_expr)
 
       def self.node_macro_expr(node : MacroExpressionNode) : ExprId?
-        node.expression  # Different field name!
+        node.expression # Different field name!
       end
 
       def self.node_macro_expr(node : TypedNode) : ExprId?
@@ -2519,24 +2606,23 @@ module CrystalV2
 
       # string_pieces: Get string interpolation pieces
 
-def self.node_string_pieces(node : StringInterpolationNode) : Array(StringPiece)
-  node.pieces
-end
+      def self.node_string_pieces(node : StringInterpolationNode) : Array(StringPiece)
+        node.pieces
+      end
 
-def self.node_string_pieces(node : TypedNode) : Array(StringPiece)?
-  nil
-end
-
+      def self.node_string_pieces(node : TypedNode) : Array(StringPiece)?
+        nil
+      end
 
       # asm_args: Get asm args
 
-def self.node_asm_args(node : AsmNode)
-  node.args
-end
+      def self.node_asm_args(node : AsmNode)
+        node.args
+      end
 
-def self.node_asm_args(node : TypedNode)
-  nil
-end
+      def self.node_asm_args(node : TypedNode)
+        nil
+      end
 
       # assign_targets: Get assign targets
 
@@ -2570,13 +2656,13 @@ end
 
       # call_block: Get call block
 
-def self.node_call_block(node : CallNode) : ExprId?
-  node.block
-end
+      def self.node_call_block(node : CallNode) : ExprId?
+        node.block
+      end
 
-def self.node_call_block(node : TypedNode)
-  nil
-end
+      def self.node_call_block(node : TypedNode)
+        nil
+      end
 
       # case_else: Get case else
 
@@ -2702,939 +2788,937 @@ end
         nil
       end
 
-# Generated helpers for fields actually used in tests
-# ============================================================================
+      # Generated helpers for fields actually used in tests
+      # ============================================================================
 
-# accessor_specs
+      # accessor_specs
 
-def self.node_accessor_specs(node : GetterNode)
-  node.specs
-end
+      def self.node_accessor_specs(node : GetterNode)
+        node.specs
+      end
 
-def self.node_accessor_specs(node : SetterNode)
-  node.specs
-end
+      def self.node_accessor_specs(node : SetterNode)
+        node.specs
+      end
 
-def self.node_accessor_specs(node : PropertyNode)
-  node.specs
-end
+      def self.node_accessor_specs(node : PropertyNode)
+        node.specs
+      end
 
-def self.node_accessor_specs(node : TypedNode)
-  nil
-end
+      def self.node_accessor_specs(node : TypedNode)
+        nil
+      end
 
-# alias_name
+      # alias_name
 
-def self.node_alias_name(node : AliasNode)
-  node.name
-end
+      def self.node_alias_name(node : AliasNode)
+        node.name
+      end
 
-def self.node_alias_name(node : TypedNode)
-  nil
-end
+      def self.node_alias_name(node : TypedNode)
+        nil
+      end
 
-# alias_value
+      # alias_value
 
-def self.node_alias_value(node : AliasNode)
-  node.value
-end
+      def self.node_alias_value(node : AliasNode)
+        node.value
+      end
 
-def self.node_alias_value(node : TypedNode)
-  nil
-end
+      def self.node_alias_value(node : TypedNode)
+        nil
+      end
 
-# alignof_args
+      # alignof_args
 
-def self.node_alignof_args(node : AlignofNode)
-  node.args
-end
+      def self.node_alignof_args(node : AlignofNode)
+        node.args
+      end
 
-def self.node_alignof_args(node : InstanceAlignofNode)
-  node.args
-end
+      def self.node_alignof_args(node : InstanceAlignofNode)
+        node.args
+      end
 
-def self.node_alignof_args(node : TypedNode)
-  nil
-end
+      def self.node_alignof_args(node : TypedNode)
+        nil
+      end
 
-# annotation_name
+      # annotation_name
 
-def self.node_annotation_name(node : AnnotationDefNode)
-  node.name
-end
+      def self.node_annotation_name(node : AnnotationDefNode)
+        node.name
+      end
 
-def self.node_annotation_name(node : AnnotationNode)
-  node.name
-end
+      def self.node_annotation_name(node : AnnotationNode)
+        node.name
+      end
 
-def self.node_annotation_name(node : TypedNode)
-  nil
-end
+      def self.node_annotation_name(node : TypedNode)
+        nil
+      end
 
-# as_question_value
+      # as_question_value
 
-def self.node_as_question_value(node : AsQuestionNode)
-  node.expression
-end
+      def self.node_as_question_value(node : AsQuestionNode)
+        node.expression
+      end
 
-def self.node_as_question_value(node : TypedNode)
-  nil
-end
+      def self.node_as_question_value(node : TypedNode)
+        nil
+      end
 
-# as_target_type
+      # as_target_type
 
-def self.node_as_target_type(node : AsNode)
-  node.target_type
-end
+      def self.node_as_target_type(node : AsNode)
+        node.target_type
+      end
 
-def self.node_as_target_type(node : TypedNode)
-  nil
-end
+      def self.node_as_target_type(node : TypedNode)
+        nil
+      end
 
-# as_value
+      # as_value
 
-def self.node_as_value(node : AsNode)
-  node.expression
-end
+      def self.node_as_value(node : AsNode)
+        node.expression
+      end
 
-def self.node_as_value(node : TypedNode)
-  nil
-end
+      def self.node_as_value(node : TypedNode)
+        nil
+      end
 
-# begin_body
+      # begin_body
 
-def self.node_begin_body(node : BeginNode)
-  node.body
-end
+      def self.node_begin_body(node : BeginNode)
+        node.body
+      end
 
-def self.node_begin_body(node : TypedNode)
-  nil
-end
+      def self.node_begin_body(node : TypedNode)
+        nil
+      end
 
-# else_body
+      # else_body
 
-def self.node_else_body(node : BeginNode)
-  node.else_body
-end
+      def self.node_else_body(node : BeginNode)
+        node.else_body
+      end
 
-def self.node_else_body(node : TypedNode)
-  nil
-end
+      def self.node_else_body(node : TypedNode)
+        nil
+      end
 
-# block_body
+      # block_body
 
-def self.node_block_body(node : BlockNode)
-  node.body
-end
+      def self.node_block_body(node : BlockNode)
+        node.body
+      end
 
-def self.node_block_body(node : ProcLiteralNode)
-  node.body
-end
+      def self.node_block_body(node : ProcLiteralNode)
+        node.body
+      end
 
-def self.node_block_body(node : TypedNode)
-  nil
-end
+      def self.node_block_body(node : TypedNode)
+        nil
+      end
 
-# block_params
+      # block_params
 
-def self.node_block_params(node : BlockNode)
-  node.params
-end
+      def self.node_block_params(node : BlockNode)
+        node.params
+      end
 
-def self.node_block_params(node : ProcLiteralNode)
-  node.params
-end
+      def self.node_block_params(node : ProcLiteralNode)
+        node.params
+      end
 
-def self.node_block_params(node : TypedNode)
-  nil
-end
+      def self.node_block_params(node : TypedNode)
+        nil
+      end
 
-# class_body
+      # class_body
 
-def self.node_class_body(node : ClassNode)
-  node.body
-end
+      def self.node_class_body(node : ClassNode)
+        node.body
+      end
 
-def self.node_class_body(node : UnionNode)
-  node.body
-end
+      def self.node_class_body(node : UnionNode)
+        node.body
+      end
 
-def self.node_class_body(node : TypedNode)
-  nil
-end
+      def self.node_class_body(node : TypedNode)
+        nil
+      end
 
-# class_is_abstract
+      # class_is_abstract
 
-def self.node_class_is_abstract(node : ClassNode)
-  node.is_abstract
-end
+      def self.node_class_is_abstract(node : ClassNode)
+        node.is_abstract
+      end
 
-def self.node_class_is_abstract(node : TypedNode)
-  nil
-end
+      def self.node_class_is_abstract(node : TypedNode)
+        nil
+      end
 
+      def self.node_class_is_union(node : ClassNode)
+        node.is_union
+      end
 
-def self.node_class_is_union(node : ClassNode)
-  node.is_union
-end
+      def self.node_class_is_union(node : TypedNode)
+        nil
+      end
 
-def self.node_class_is_union(node : TypedNode)
-  nil
-end
+      def self.node_class_is_struct(node : ClassNode)
+        node.is_struct
+      end
 
+      def self.node_class_is_struct(node : TypedNode)
+        nil
+      end
 
-def self.node_class_is_struct(node : ClassNode)
-  node.is_struct
-end
+      # class_name
 
-def self.node_class_is_struct(node : TypedNode)
-  nil
-end
+      def self.node_class_name(node : ClassNode)
+        node.name
+      end
 
-# class_name
+      def self.node_class_name(node : UnionNode)
+        node.name
+      end
 
-def self.node_class_name(node : ClassNode)
-  node.name
-end
+      def self.node_class_name(node : TypedNode)
+        nil
+      end
 
-def self.node_class_name(node : UnionNode)
-  node.name
-end
+      # class_super_name
 
-def self.node_class_name(node : TypedNode)
-  nil
-end
+      def self.node_class_super_name(node : ClassNode)
+        node.super_name
+      end
 
-# class_super_name
+      def self.node_class_super_name(node : TypedNode)
+        nil
+      end
 
-def self.node_class_super_name(node : ClassNode)
-  node.super_name
-end
+      # constant_name
 
-def self.node_class_super_name(node : TypedNode)
-  nil
-end
+      def self.node_constant_name(node : ConstantNode)
+        node.name
+      end
 
-# constant_name
+      def self.node_constant_name(node : TypedNode)
+        nil
+      end
 
-def self.node_constant_name(node : ConstantNode)
-  node.name
-end
+      # constant_value
 
-def self.node_constant_name(node : TypedNode)
-  nil
-end
+      def self.node_constant_value(node : ConstantNode)
+        node.value
+      end
 
-# constant_value
+      def self.node_constant_value(node : TypedNode)
+        nil
+      end
 
-def self.node_constant_value(node : ConstantNode)
-  node.value
-end
+      # def_body
 
-def self.node_constant_value(node : TypedNode)
-  nil
-end
+      def self.node_def_body(node : DefNode)
+        node.body
+      end
 
-# def_body
+      def self.node_def_body(node : TypedNode)
+        nil
+      end
 
-def self.node_def_body(node : DefNode)
-  node.body
-end
+      # def_is_abstract
 
-def self.node_def_body(node : TypedNode)
-  nil
-end
+      def self.node_def_is_abstract(node : DefNode)
+        node.is_abstract
+      end
 
-# def_is_abstract
+      def self.node_def_is_abstract(node : TypedNode)
+        nil
+      end
 
-def self.node_def_is_abstract(node : DefNode)
-  node.is_abstract
-end
+      # def_name
 
-def self.node_def_is_abstract(node : TypedNode)
-  nil
-end
+      def self.node_def_name(node : DefNode)
+        node.name
+      end
 
-# def_name
+      def self.node_def_name(node : TypedNode)
+        nil
+      end
 
-def self.node_def_name(node : DefNode)
-  node.name
-end
+      # def_params
 
-def self.node_def_name(node : TypedNode)
-  nil
-end
+      def self.node_def_params(node : DefNode)
+        node.params
+      end
 
-# def_params
+      def self.node_def_params(node : TypedNode)
+        nil
+      end
 
-def self.node_def_params(node : DefNode)
-  node.params
-end
+      # def_return_type
 
-def self.node_def_params(node : TypedNode)
-  nil
-end
+      def self.node_def_return_type(node : DefNode)
+        node.return_type
+      end
 
-# def_return_type
+      def self.node_def_return_type(node : TypedNode)
+        nil
+      end
 
-def self.node_def_return_type(node : DefNode)
-  node.return_type
-end
+      # def_visibility
 
-def self.node_def_return_type(node : TypedNode)
-  nil
-end
+      def self.node_def_visibility(node : DefNode)
+        node.visibility
+      end
 
-# def_visibility
+      def self.node_def_visibility(node : TypedNode)
+        nil
+      end
 
-def self.node_def_visibility(node : DefNode)
-  node.visibility
-end
+      # ensure_body
 
-def self.node_def_visibility(node : TypedNode)
-  nil
-end
+      def self.node_ensure_body(node : BeginNode)
+        node.ensure_body
+      end
 
-# ensure_body
+      def self.node_ensure_body(node : TypedNode)
+        nil
+      end
 
-def self.node_ensure_body(node : BeginNode)
-  node.ensure_body
-end
+      # enum_base_type
 
-def self.node_ensure_body(node : TypedNode)
-  nil
-end
+      def self.node_enum_base_type(node : EnumNode)
+        node.base_type
+      end
 
-# enum_base_type
+      def self.node_enum_base_type(node : TypedNode)
+        nil
+      end
 
-def self.node_enum_base_type(node : EnumNode)
-  node.base_type
-end
+      # enum_members
 
-def self.node_enum_base_type(node : TypedNode)
-  nil
-end
+      def self.node_enum_members(node : EnumNode)
+        node.members
+      end
 
-# enum_members
+      def self.node_enum_members(node : TypedNode)
+        nil
+      end
 
-def self.node_enum_members(node : EnumNode)
-  node.members
-end
+      # enum_body
 
-def self.node_enum_members(node : TypedNode)
-  nil
-end
+      def self.node_enum_body(node : EnumNode)
+        node.body
+      end
 
-# enum_body
+      def self.node_enum_body(node : TypedNode)
+        nil
+      end
 
-def self.node_enum_body(node : EnumNode)
-  node.body
-end
+      # enum_name
 
-def self.node_enum_body(node : TypedNode)
-  nil
-end
+      def self.node_enum_name(node : EnumNode)
+        node.name
+      end
 
-# enum_name
+      def self.node_enum_name(node : TypedNode)
+        nil
+      end
 
-def self.node_enum_name(node : EnumNode)
-  node.name
-end
+      # generic_name
 
-def self.node_enum_name(node : TypedNode)
-  nil
-end
+      def self.node_generic_name(node : GenericNode)
+        node.base_type
+      end
 
-# generic_name
+      def self.node_generic_name(node : TypedNode)
+        nil
+      end
 
-def self.node_generic_name(node : GenericNode)
-  node.base_type
-end
+      # generic_type_args
 
-def self.node_generic_name(node : TypedNode)
-  nil
-end
+      def self.node_generic_type_args(node : GenericNode)
+        node.type_args
+      end
 
-# generic_type_args
+      def self.node_generic_type_args(node : TypedNode)
+        nil
+      end
 
-def self.node_generic_type_args(node : GenericNode)
-  node.type_args
-end
+      # if_else
 
-def self.node_generic_type_args(node : TypedNode)
-  nil
-end
+      def self.node_if_else(node : IfNode)
+        node.else_body
+      end
 
-# if_else
+      def self.node_if_else(node : UnlessNode)
+        node.else_branch
+      end
 
-def self.node_if_else(node : IfNode)
-  node.else_body
-end
+      def self.node_if_else(node : TypedNode)
+        nil
+      end
 
-def self.node_if_else(node : UnlessNode)
-  node.else_branch
-end
+      # if_then
 
-def self.node_if_else(node : TypedNode)
-  nil
-end
+      def self.node_if_then(node : IfNode)
+        node.then_body
+      end
 
-# if_then
+      def self.node_if_then(node : UnlessNode)
+        node.then_branch
+      end
 
-def self.node_if_then(node : IfNode)
-  node.then_body
-end
+      def self.node_if_then(node : TypedNode)
+        nil
+      end
 
-def self.node_if_then(node : UnlessNode)
-  node.then_branch
-end
+      # instance_alignof_args
 
-def self.node_if_then(node : TypedNode)
-  nil
-end
+      def self.node_instance_alignof_args(node : InstanceAlignofNode)
+        node.args
+      end
 
-# instance_alignof_args
+      def self.node_instance_alignof_args(node : TypedNode)
+        nil
+      end
 
-def self.node_instance_alignof_args(node : InstanceAlignofNode)
-  node.args
-end
+      # is_a_target_type
 
-def self.node_instance_alignof_args(node : TypedNode)
-  nil
-end
+      def self.node_is_a_target_type(node : IsANode)
+        node.target_type
+      end
 
-# is_a_target_type
+      def self.node_is_a_target_type(node : TypedNode)
+        nil
+      end
 
-def self.node_is_a_target_type(node : IsANode)
-  node.target_type
-end
+      # is_a_value
 
-def self.node_is_a_target_type(node : TypedNode)
-  nil
-end
+      def self.node_is_a_value(node : IsANode)
+        node.expression
+      end
 
-# is_a_value
+      def self.node_is_a_value(node : TypedNode)
+        nil
+      end
 
-def self.node_is_a_value(node : IsANode)
-  node.expression
-end
+      # lib_body
 
-def self.node_is_a_value(node : TypedNode)
-  nil
-end
+      def self.node_lib_body(node : LibNode)
+        node.body
+      end
 
-# lib_body
+      def self.node_lib_body(node : TypedNode)
+        nil
+      end
 
-def self.node_lib_body(node : LibNode)
-  node.body
-end
+      # lib_name
 
-def self.node_lib_body(node : TypedNode)
-  nil
-end
+      def self.node_lib_name(node : LibNode)
+        node.name
+      end
 
-# lib_name
+      def self.node_lib_name(node : TypedNode)
+        nil
+      end
 
-def self.node_lib_name(node : LibNode)
-  node.name
-end
+      # loop_body
 
-def self.node_lib_name(node : TypedNode)
-  nil
-end
+      def self.node_loop_body(node : LoopNode)
+        node.body
+      end
 
-# loop_body
+      def self.node_loop_body(node : TypedNode)
+        nil
+      end
 
-def self.node_loop_body(node : LoopNode)
-  node.body
-end
+      # member
 
-def self.node_loop_body(node : TypedNode)
-  nil
-end
+      def self.node_member(node : MemberAccessNode)
+        node.member
+      end
 
-# member
+      def self.node_member(node : SafeNavigationNode)
+        node.member
+      end
 
-def self.node_member(node : MemberAccessNode)
-  node.member
-end
+      def self.node_member(node : TypedNode)
+        nil
+      end
 
-def self.node_member(node : SafeNavigationNode)
-  node.member
-end
+      # module_body
 
-def self.node_member(node : TypedNode)
-  nil
-end
+      def self.node_module_body(node : ModuleNode)
+        node.body
+      end
 
-# module_body
+      def self.node_module_body(node : TypedNode)
+        nil
+      end
 
-def self.node_module_body(node : ModuleNode)
-  node.body
-end
+      # module_name
 
-def self.node_module_body(node : TypedNode)
-  nil
-end
+      def self.node_module_name(node : ModuleNode)
+        node.name
+      end
 
-# module_name
+      def self.node_module_name(node : TypedNode)
+        nil
+      end
 
-def self.node_module_name(node : ModuleNode)
-  node.name
-end
+      # named_tuple_entries
 
-def self.node_module_name(node : TypedNode)
-  nil
-end
+      def self.node_named_tuple_entries(node : NamedTupleLiteralNode)
+        node.entries
+      end
 
-# named_tuple_entries
+      def self.node_named_tuple_entries(node : TypedNode)
+        nil
+      end
 
-def self.node_named_tuple_entries(node : NamedTupleLiteralNode)
-  node.entries
-end
+      # offsetof_args
 
-def self.node_named_tuple_entries(node : TypedNode)
-  nil
-end
+      def self.node_offsetof_args(node : OffsetofNode)
+        node.args
+      end
 
-# offsetof_args
+      def self.node_offsetof_args(node : TypedNode)
+        nil
+      end
 
-def self.node_offsetof_args(node : OffsetofNode)
-  node.args
-end
+      # out_identifier
 
-def self.node_offsetof_args(node : TypedNode)
-  nil
-end
+      def self.node_out_identifier(node : OutNode)
+        node.identifier
+      end
 
-# out_identifier
+      def self.node_out_identifier(node : TypedNode)
+        nil
+      end
 
-def self.node_out_identifier(node : OutNode)
-  node.identifier
-end
+      # pointerof_args
 
-def self.node_out_identifier(node : TypedNode)
-  nil
-end
+      def self.node_pointerof_args(node : PointerofNode)
+        node.args
+      end
 
-# pointerof_args
+      def self.node_pointerof_args(node : TypedNode)
+        nil
+      end
 
-def self.node_pointerof_args(node : PointerofNode)
-  node.args
-end
+      # previous_def_args
 
-def self.node_pointerof_args(node : TypedNode)
-  nil
-end
+      def self.node_previous_def_args(node : PreviousDefNode)
+        node.args
+      end
 
-# previous_def_args
+      def self.node_previous_def_args(node : TypedNode)
+        nil
+      end
 
-def self.node_previous_def_args(node : PreviousDefNode)
-  node.args
-end
+      # proc_return_type
 
-def self.node_previous_def_args(node : TypedNode)
-  nil
-end
+      def self.node_proc_return_type(node : ProcLiteralNode)
+        node.return_type
+      end
 
-# proc_return_type
+      def self.node_proc_return_type(node : TypedNode)
+        nil
+      end
 
-def self.node_proc_return_type(node : ProcLiteralNode)
-  node.return_type
-end
+      # raise_value
 
-def self.node_proc_return_type(node : TypedNode)
-  nil
-end
+      def self.node_raise_value(node : RaiseNode)
+        node.value
+      end
 
-# raise_value
+      def self.node_raise_value(node : TypedNode)
+        nil
+      end
 
-def self.node_raise_value(node : RaiseNode)
-  node.value
-end
+      # require_path
 
-def self.node_raise_value(node : TypedNode)
-  nil
-end
+      def self.node_require_path(node : RequireNode)
+        node.path
+      end
 
-# require_path
+      def self.node_require_path(node : TypedNode)
+        nil
+      end
 
-def self.node_require_path(node : RequireNode)
-  node.path
-end
+      # rescue_clauses
 
-def self.node_require_path(node : TypedNode)
-  nil
-end
+      def self.node_rescue_clauses(node : BeginNode)
+        node.rescue_clauses
+      end
 
-# rescue_clauses
+      def self.node_rescue_clauses(node : TypedNode)
+        nil
+      end
 
-def self.node_rescue_clauses(node : BeginNode)
-  node.rescue_clauses
-end
+      # responds_to_method_name (RespondsTo uses ExpressionNode, not RespondsToNode typed struct)
 
-def self.node_rescue_clauses(node : TypedNode)
-  nil
-end
+      def self.node_responds_to_method_name(node : TypedNode) : ExprId?
+        nil # RespondsToNode exists but is unused by parser
+      end
 
-# responds_to_method_name (RespondsTo uses ExpressionNode, not RespondsToNode typed struct)
+      # responds_to_value
 
-def self.node_responds_to_method_name(node : TypedNode) : ExprId?
-  nil  # RespondsToNode exists but is unused by parser
-end
+      def self.node_responds_to_value(node : RespondsToNode)
+        node.expression
+      end
 
-# responds_to_value
+      def self.node_responds_to_value(node : TypedNode)
+        nil
+      end
 
-def self.node_responds_to_value(node : RespondsToNode)
-  node.expression
-end
+      # sizeof_args
 
-def self.node_responds_to_value(node : TypedNode)
-  nil
-end
+      def self.node_sizeof_args(node : SizeofNode)
+        node.args
+      end
 
-# sizeof_args
+      def self.node_sizeof_args(node : TypedNode)
+        nil
+      end
 
-def self.node_sizeof_args(node : SizeofNode)
-  node.args
-end
+      # spawn_body
 
-def self.node_sizeof_args(node : TypedNode)
-  nil
-end
+      def self.node_spawn_body(node : SpawnNode)
+        node.body
+      end
 
-# spawn_body
+      def self.node_spawn_body(node : TypedNode)
+        nil
+      end
 
-def self.node_spawn_body(node : SpawnNode)
-  node.body
-end
+      # spawn_expression
 
-def self.node_spawn_body(node : TypedNode)
-  nil
-end
+      def self.node_spawn_expression(node : SpawnNode)
+        node.expression
+      end
 
-# spawn_expression
+      def self.node_spawn_expression(node : TypedNode)
+        nil
+      end
 
-def self.node_spawn_expression(node : SpawnNode)
-  node.expression
-end
+      # super_args
 
-def self.node_spawn_expression(node : TypedNode)
-  nil
-end
+      def self.node_super_args(node : SuperNode)
+        node.args
+      end
 
-# super_args
+      def self.node_super_args(node : TypedNode)
+        nil
+      end
 
-def self.node_super_args(node : SuperNode)
-  node.args
-end
+      # ternary_condition
 
-def self.node_super_args(node : TypedNode)
-  nil
-end
+      def self.node_ternary_condition(node : TernaryNode)
+        node.condition
+      end
 
-# ternary_condition
+      def self.node_ternary_condition(node : TypedNode)
+        nil
+      end
 
-def self.node_ternary_condition(node : TernaryNode)
-  node.condition
-end
+      # ternary_false_branch
 
-def self.node_ternary_condition(node : TypedNode)
-  nil
-end
+      def self.node_ternary_false_branch(node : TernaryNode)
+        node.false_branch
+      end
 
-# ternary_false_branch
+      def self.node_ternary_false_branch(node : TypedNode)
+        nil
+      end
 
-def self.node_ternary_false_branch(node : TernaryNode)
-  node.false_branch
-end
+      # ternary_true_branch
 
-def self.node_ternary_false_branch(node : TypedNode)
-  nil
-end
+      def self.node_ternary_true_branch(node : TernaryNode)
+        node.true_branch
+      end
 
-# ternary_true_branch
+      def self.node_ternary_true_branch(node : TypedNode)
+        nil
+      end
 
-def self.node_ternary_true_branch(node : TernaryNode)
-  node.true_branch
-end
+      # type_decl_var (for TypeDeclarationNode only)
 
-def self.node_ternary_true_branch(node : TypedNode)
-  nil
-end
+      def self.node_type_decl_var(node : TypeDeclarationNode)
+        node.var
+      end
 
-# type_decl_var (for TypeDeclarationNode only)
+      def self.node_type_decl_var(node : TypedNode)
+        ExprId::INVALID
+      end
 
-def self.node_type_decl_var(node : TypeDeclarationNode)
-  node.var
-end
+      # type_decl_declared_type (for TypeDeclarationNode only)
 
-def self.node_type_decl_var(node : TypedNode)
-  ExprId::INVALID
-end
+      def self.node_type_decl_declared_type(node : TypeDeclarationNode)
+        node.declared_type
+      end
 
-# type_decl_declared_type (for TypeDeclarationNode only)
+      def self.node_type_decl_declared_type(node : TypedNode)
+        ExprId::INVALID
+      end
 
-def self.node_type_decl_declared_type(node : TypeDeclarationNode)
-  node.declared_type
-end
+      # type_decl_name (legacy for InstanceVarDeclNode etc)
 
-def self.node_type_decl_declared_type(node : TypedNode)
-  ExprId::INVALID
-end
+      def self.node_type_decl_name(node : TypeDeclarationNode)
+        node.name
+      end
 
-# type_decl_name (legacy for InstanceVarDeclNode etc)
+      def self.node_type_decl_name(node : TypedNode)
+        nil
+      end
 
-def self.node_type_decl_name(node : TypeDeclarationNode)
-  node.name
-end
+      # type_decl_type (legacy for InstanceVarDeclNode etc)
 
-def self.node_type_decl_name(node : TypedNode)
-  nil
-end
+      def self.node_type_decl_type(node : TypeDeclarationNode)
+        node.declared_type
+      end
 
-# type_decl_type (legacy for InstanceVarDeclNode etc)
+      def self.node_type_decl_type(node : InstanceVarDeclNode)
+        node.type
+      end
 
-def self.node_type_decl_type(node : TypeDeclarationNode)
-  node.declared_type
-end
+      def self.node_type_decl_type(node : TypedNode)
+        nil
+      end
 
-def self.node_type_decl_type(node : InstanceVarDeclNode)
-  node.type
-end
+      # type_decl_value (Phase 103)
 
-def self.node_type_decl_type(node : TypedNode)
-  nil
-end
+      def self.node_type_decl_value(node : TypeDeclarationNode)
+        node.value
+      end
 
-# type_decl_value (Phase 103)
+      def self.node_type_decl_value(node : InstanceVarDeclNode)
+        node.value
+      end
 
-def self.node_type_decl_value(node : TypeDeclarationNode)
-  node.value
-end
+      def self.node_type_decl_value(node : TypedNode)
+        nil
+      end
 
-def self.node_type_decl_value(node : InstanceVarDeclNode)
-  node.value
-end
+      # typeof_args
 
-def self.node_type_decl_value(node : TypedNode)
-  nil
-end
+      def self.node_typeof_args(node : TypeofNode)
+        node.args
+      end
 
-# typeof_args
+      def self.node_typeof_args(node : TypedNode)
+        nil
+      end
 
-def self.node_typeof_args(node : TypeofNode)
-  node.args
-end
+      # uninitialized_type
 
-def self.node_typeof_args(node : TypedNode)
-  nil
-end
+      def self.node_uninitialized_type(node : UninitializedNode)
+        node.type
+      end
 
-# uninitialized_type
+      def self.node_uninitialized_type(node : TypedNode)
+        nil
+      end
 
-def self.node_uninitialized_type(node : UninitializedNode)
-  node.type
-end
+      # while_body
 
-def self.node_uninitialized_type(node : TypedNode)
-  nil
-end
+      def self.node_while_body(node : WhileNode)
+        node.body
+      end
 
-# while_body
+      def self.node_while_body(node : UntilNode)
+        node.body
+      end
 
-def self.node_while_body(node : WhileNode)
-  node.body
-end
+      def self.node_while_body(node : TypedNode)
+        nil
+      end
 
-def self.node_while_body(node : UntilNode)
-  node.body
-end
+      # with_body
 
-def self.node_while_body(node : TypedNode)
-  nil
-end
+      def self.node_with_body(node : WithNode)
+        node.body
+      end
 
-# with_body
+      def self.node_with_body(node : TypedNode)
+        nil
+      end
 
-def self.node_with_body(node : WithNode)
-  node.body
-end
+      # with_receiver
 
-def self.node_with_body(node : TypedNode)
-  nil
-end
+      def self.node_with_receiver(node : WithNode)
+        node.receiver
+      end
 
-# with_receiver
+      def self.node_with_receiver(node : TypedNode)
+        nil
+      end
 
-def self.node_with_receiver(node : WithNode)
-  node.receiver
-end
+      # ============================================================================
+      # PHASE C WEEK 3: Added 8 missing helpers for failing parser tests
+      # ============================================================================
 
-def self.node_with_receiver(node : TypedNode)
-  nil
-end
+      # range_begin (RangeNode.begin_expr vs ExpressionNode.range_begin)
 
-# ============================================================================
-# PHASE C WEEK 3: Added 8 missing helpers for failing parser tests
-# ============================================================================
+      def self.node_range_begin(node : RangeNode) : ExprId?
+        node.begin_expr # Different field name!
+      end
 
-# range_begin (RangeNode.begin_expr vs ExpressionNode.range_begin)
+      def self.node_range_begin(node : TypedNode) : ExprId?
+        nil
+      end
 
-def self.node_range_begin(node : RangeNode) : ExprId?
-  node.begin_expr  # Different field name!
-end
+      # range_end (RangeNode.end_expr vs ExpressionNode.range_end)
 
-def self.node_range_begin(node : TypedNode) : ExprId?
-  nil
-end
+      def self.node_range_end(node : RangeNode) : ExprId?
+        node.end_expr # Different field name!
+      end
 
-# range_end (RangeNode.end_expr vs ExpressionNode.range_end)
+      def self.node_range_end(node : TypedNode) : ExprId?
+        nil
+      end
 
-def self.node_range_end(node : RangeNode) : ExprId?
-  node.end_expr  # Different field name!
-end
+      # range_exclusive (RangeNode.exclusive vs ExpressionNode.range_exclusive)
 
-def self.node_range_end(node : TypedNode) : ExprId?
-  nil
-end
+      def self.node_range_exclusive(node : RangeNode) : Bool?
+        node.exclusive # Different field name!
+      end
 
-# range_exclusive (RangeNode.exclusive vs ExpressionNode.range_exclusive)
+      def self.node_range_exclusive(node : TypedNode) : Bool?
+        nil
+      end
 
-def self.node_range_exclusive(node : RangeNode) : Bool?
-  node.exclusive  # Different field name!
-end
+      # macro_name (MacroDefNode.name vs ExpressionNode.macro_name)
 
-def self.node_range_exclusive(node : TypedNode) : Bool?
-  nil
-end
+      def self.node_macro_name(node : MacroDefNode) : Slice(UInt8)?
+        node.name # Different field name!
+      end
 
-# macro_name (MacroDefNode.name vs ExpressionNode.macro_name)
+      def self.node_macro_name(node : TypedNode) : Slice(UInt8)?
+        nil
+      end
 
-def self.node_macro_name(node : MacroDefNode) : Slice(UInt8)?
-  node.name  # Different field name!
-end
+      # macro_pieces (only exists in ExpressionNode, MacroLiteral uses ExpressionNode not typed node)
 
-def self.node_macro_name(node : TypedNode) : Slice(UInt8)?
-  nil
-end
+      def self.node_macro_pieces(node : MacroLiteralNode) : Array(MacroPiece)?
+        node.pieces
+      end
 
-# macro_pieces (only exists in ExpressionNode, MacroLiteral uses ExpressionNode not typed node)
+      def self.node_macro_pieces(node : TypedNode) : Array(MacroPiece)?
+        nil # No typed node has this field
+      end
 
-def self.node_macro_pieces(node : MacroLiteralNode) : Array(MacroPiece)?
-  node.pieces
-end
+      # args
 
-def self.node_macro_pieces(node : TypedNode) : Array(MacroPiece)?
-  nil  # No typed node has this field
-end
+      def self.node_args(node : CallNode) : Array(ExprId)?
+        node.args
+      end
 
-# args
+      def self.node_args(node : IndexNode) : Array(ExprId)
+        node.indexes
+      end
 
-def self.node_args(node : CallNode) : Array(ExprId)?
-  node.args
-end
+      def self.node_args(node : TypedNode) : Array(ExprId)?
+        nil
+      end
 
-def self.node_args(node : IndexNode) : Array(ExprId)
-  node.indexes
-end
+      # array_of_type
 
-def self.node_args(node : TypedNode) : Array(ExprId)?
-  nil
-end
+      def self.node_array_of_type(node : ArrayLiteralNode) : ExprId?
+        node.of_type
+      end
 
-# array_of_type
+      def self.node_array_of_type(node : TypedNode) : ExprId?
+        nil
+      end
 
-def self.node_array_of_type(node : ArrayLiteralNode) : ExprId?
-  node.of_type
-end
+      # callee
 
-def self.node_array_of_type(node : TypedNode) : ExprId?
-  nil
-end
+      def self.node_callee(node : CallNode) : ExprId?
+        node.callee
+      end
 
-# callee
+      def self.node_callee(node : TypedNode) : ExprId?
+        nil
+      end
 
-def self.node_callee(node : CallNode) : ExprId?
-  node.callee
-end
+      # extend_name
 
-def self.node_callee(node : TypedNode) : ExprId?
-  nil
-end
+      def self.node_extend_name(node : ExtendNode) : Slice(UInt8)?
+        node.name
+      end
 
-# extend_name
+      def self.node_extend_name(node : TypedNode) : Slice(UInt8)?
+        nil
+      end
 
-def self.node_extend_name(node : ExtendNode) : Slice(UInt8)?
-  node.name
-end
+      def self.node_extend_target(node : ExtendNode) : ExprId
+        node.target
+      end
 
-def self.node_extend_name(node : TypedNode) : Slice(UInt8)?
-  nil
-end
+      def self.node_extend_target(node : TypedNode) : ExprId
+        ExprId.new(-1)
+      end
 
-def self.node_extend_target(node : ExtendNode) : ExprId
-  node.target
-end
+      # include_name
 
-def self.node_extend_target(node : TypedNode) : ExprId
-  ExprId.new(-1)
-end
+      def self.node_include_name(node : IncludeNode) : Slice(UInt8)?
+        node.name
+      end
 
-# include_name
+      def self.node_include_name(node : TypedNode) : Slice(UInt8)?
+        nil
+      end
 
-def self.node_include_name(node : IncludeNode) : Slice(UInt8)?
-  node.name
-end
+      def self.node_include_target(node : IncludeNode) : ExprId
+        node.target
+      end
 
-def self.node_include_name(node : TypedNode) : Slice(UInt8)?
-  nil
-end
+      def self.node_include_target(node : TypedNode) : ExprId
+        ExprId.new(-1)
+      end
 
-def self.node_include_target(node : IncludeNode) : ExprId
-  node.target
-end
+      # operator
 
-def self.node_include_target(node : TypedNode) : ExprId
-  ExprId.new(-1)
-end
+      def self.node_operator(node : BinaryNode) : Slice(UInt8)?
+        node.operator
+      end
 
-# operator
+      def self.node_operator(node : UnaryNode) : Slice(UInt8)?
+        node.operator
+      end
 
-def self.node_operator(node : BinaryNode) : Slice(UInt8)?
-  node.operator
-end
+      def self.node_operator(node : TypedNode) : Slice(UInt8)?
+        nil
+      end
 
-def self.node_operator(node : UnaryNode) : Slice(UInt8)?
-  node.operator
-end
+      # trim_left
 
-def self.node_operator(node : TypedNode) : Slice(UInt8)?
-  nil
-end
+      def self.node_trim_left(node : MacroLiteralNode) : Bool
+        node.trim_left
+      end
 
-# trim_left
+      def self.node_trim_left(node : TypedNode) : Bool?
+        nil
+      end
 
-def self.node_trim_left(node : MacroLiteralNode) : Bool
-  node.trim_left
-end
+      # trim_right
 
-def self.node_trim_left(node : TypedNode) : Bool?
-  nil
-end
+      def self.node_trim_right(node : MacroLiteralNode) : Bool
+        node.trim_right
+      end
 
-# trim_right
+      def self.node_trim_right(node : TypedNode) : Bool?
+        nil
+      end
 
-def self.node_trim_right(node : MacroLiteralNode) : Bool
-  node.trim_right
-end
-
-def self.node_trim_right(node : TypedNode) : Bool?
-  nil
-end
-
-# ============================================================================
-# Total: 75 fields × ~3 overloads = 225 methods (includes 67 original + 8 new)
+      # ============================================================================
+      # Total: 75 fields × ~3 overloads = 225 methods (includes 67 original + 8 new)
       # ============================================================================
 
       class AstArena
@@ -3647,9 +3731,21 @@ end
         end
 
         @[AlwaysInline]
-        def add(node : TypedNode) : ExprId
+        def add(node) : ExprId
           id = ExprId.new(@nodes.size)
+          debug_store = if filter = ENV["DEBUG_ARENA_ADD"]?
+                          filter == "1" || node.class.name.includes?(filter)
+                        else
+                          false
+                        end
+          if debug_store
+            STDERR.puts "[ARENA_ADD] phase=before id=#{id.index} arg=#{node.class.name}"
+          end
           @nodes << node
+          if debug_store
+            stored = @nodes[id.index]
+            STDERR.puts "[ARENA_ADD] phase=after id=#{id.index} stored=#{stored.class.name}"
+          end
           id
         end
 
@@ -3661,7 +3757,7 @@ end
 
         # Compatibility shim while callers migrate off add_typed
         @[AlwaysInline]
-        def add_typed(node : TypedNode) : ExprId
+        def add_typed(node) : ExprId
           add(node)
         end
 
@@ -3700,10 +3796,10 @@ end
       # - Mutable: supports adding generated nodes (accessor expansion, etc)
       class VirtualArena
         getter file_arenas : Array(AstArena)
-        getter file_paths : Array(String)  # arena index → file path
+        getter file_paths : Array(String) # arena index → file path
         getter extra_sources : Array(String)
-        @offsets : Array(Int32)  # offsets[i] = global start for arena[i]
-        @generated_arena : AstArena  # For newly created nodes (macro expansion, etc)
+        @offsets : Array(Int32)     # offsets[i] = global start for arena[i]
+        @generated_arena : AstArena # For newly created nodes (macro expansion, etc)
 
         def initialize
           @file_arenas = [] of AstArena
@@ -3721,7 +3817,7 @@ end
         end
 
         # Add node to generated arena (for macro expansion, accessor generation, etc)
-        def add(node : TypedNode) : ExprId
+        def add(node) : ExprId
           local_id = @generated_arena.add(node)
           # Offset by all file arenas
           ExprId.new(local_id.index + @offsets.last)
@@ -3734,7 +3830,7 @@ end
         end
 
         # Compatibility shim
-        def add_typed(node : TypedNode) : ExprId
+        def add_typed(node) : ExprId
           add(node)
         end
 
@@ -3836,22 +3932,34 @@ end
         end
 
         @[AlwaysInline]
-        def add(node : TypedNode) : ExprId
+        def add(node) : ExprId
           idx = @count
           page_index = idx // PAGE
           offset = idx % PAGE
+          debug_store = if filter = ENV["DEBUG_ARENA_ADD"]?
+                          filter == "1" || node.class.name.includes?(filter)
+                        else
+                          false
+                        end
+          if debug_store
+            STDERR.puts "[PAGE_ARENA_ADD] phase=before id=#{idx} arg=#{node.class.name}"
+          end
           if page_index >= @pages.size
             page = uninitialized StaticArray(TypedNode, PAGE)
             @pages << page
           end
           @pages[page_index][offset] = node
+          if debug_store
+            stored = @pages[page_index][offset]
+            STDERR.puts "[PAGE_ARENA_ADD] phase=after id=#{idx} stored=#{stored.class.name}"
+          end
           @count = idx + 1
           ExprId.new(idx)
         end
 
         # Compatibility shim
         @[AlwaysInline]
-        def add_typed(node : TypedNode) : ExprId
+        def add_typed(node) : ExprId
           add(node)
         end
 
@@ -3859,6 +3967,16 @@ end
         def [](id : ExprId) : TypedNode
           idx = id.index
           if idx < 0 || idx >= @count
+            if ENV["DEBUG_PAGEARENA_OOB"]?
+              STDERR.puts "[PAGEARENA_OOB] idx=#{idx} size=#{@count}"
+              begin
+                raise "page arena oob"
+              rescue ex
+                if bt = ex.backtrace?
+                  bt.first(20).each { |line| STDERR.puts "[PAGEARENA_OOB] #{line}" }
+                end
+              end
+            end
             raise IndexError.new("PageArena index out of bounds: #{idx} (size #{@count})")
           end
           page_index = idx // PAGE
@@ -3889,16 +4007,58 @@ end
 
       alias ArenaLike = AstArena | VirtualArena | PageArena
 
-      struct Program
-        getter arena : ArenaLike
+      # Keep Program as a reference type: generated binaries have shown
+      # unstable copies of structs carrying ArenaLike unions.
+      class Program
         getter roots : Array(ExprId)
         getter string_pool : StringPool
+        @ast_arena : AstArena?
+        @virtual_arena : VirtualArena?
+        @page_arena : PageArena?
 
         def initialize(
-          @arena : ArenaLike,
+          arena : ArenaLike,
           @roots : Array(ExprId),
           @string_pool : StringPool = StringPool.new,
         )
+          @ast_arena = nil
+          @virtual_arena = nil
+          @page_arena = nil
+
+          case arena
+          when AstArena
+            @ast_arena = arena
+          when VirtualArena
+            @virtual_arena = arena
+          when PageArena
+            @page_arena = arena
+          end
+        end
+
+        def arena : ArenaLike
+          if arena = @ast_arena
+            arena
+          elsif arena = @virtual_arena
+            arena
+          else
+            @page_arena.not_nil!
+          end
+        end
+
+        def ast_arena : AstArena
+          @ast_arena.not_nil!
+        end
+
+        def ast_arena? : AstArena?
+          @ast_arena
+        end
+
+        def virtual_arena? : VirtualArena?
+          @virtual_arena
+        end
+
+        def page_arena? : PageArena?
+          @page_arena
         end
       end
     end
