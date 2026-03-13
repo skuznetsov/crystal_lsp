@@ -113,6 +113,51 @@ closure cells, Tuple ptr/value confusion.
   - inspect `constant_literal_values` insertion/iteration and shared hash
     runtime behavior before returning to heavier full-prelude/bootstrap runs.
 
+### Current checkpoint (2026-03-13 `Hash(String, MacroValue)` runtime oracle points at stage1-generated abstract-value container corruption)
+
+- Added a new cheap runtime oracle:
+  - `regression_tests/stage1_macro_value_hash_identity_repro.sh`
+  - it compiles a tiny program that uses:
+    ```crystal
+    require "<repo>/src/compiler/semantic/macro_value"
+
+    h = {} of String => CrystalV2::Compiler::Semantic::MacroValue
+    h["x"] = CrystalV2::Compiler::Semantic::MacroBoolValue.new(true)
+    ```
+    and then checks lookup/`each` type identity through `Hash(String, MacroValue)`.
+- Why this matters:
+  - the tiny no-prelude lib oracle had already shown that fresh self-hosted
+    stage2 reaches `hir_converter_created` with `constant_literal_values.size=1`
+    before any legitimate writes, then dies at `constant_literal_values.each`;
+  - new phase tracing proves that `constant_literal_values` is already wrong at
+    `phase=hir_converter_created`, and numeric `object_id` probes refute the
+    simplest ivar-alias story (`const_lit` is distinct from `sources/main/paths`);
+  - the new runtime oracle now gives a much cheaper reproduction of the same
+    class of failure: stage1-generated code degrades abstract-value hash lookup
+    / iteration identity even though the inserted value remains truthy.
+- Fresh verification:
+  - `bash regression_tests/stage1_macro_value_hash_identity_repro.sh /private/tmp/stage1_dbg_const_map_ids_20260313`
+    -> `reproduced: generated code degraded Hash(String, MacroValue) lookup/each type identity`
+  - direct probe output from the generated binary:
+    - `empty=0`
+    - `filled=1`
+    - `lookup_is_bool=true`
+    - `lookup_class=CrystalV2::Compiler::Semantic::MacroValue | String`
+    - `each=x:true:CrystalV2::Compiler::Semantic::MacroValue`
+  - matching phase trace on fresh self-hosted stage2:
+    - `phase=hir_converter_created literals=1 types=0`
+    - `ids_a const_lit=... const_types=... const_defs=... nested=...`
+    - `ids_b sources=... main=... lines=... paths=...`
+    - `ids_c extra=... links=... type_literals=...`
+    - with all printed object ids distinct, so the broken `const_lit` value is
+      not a trivial alias of `sources_by_arena`, `paths_by_arena`, or `main_arenas`.
+- New frontier:
+  - the strongest live hypothesis is now lower-level than HIR registration:
+    stage1-generated runtime/codegen for hash containers with abstract-ref
+    values is corrupting dynamic identity or container state;
+  - that hypothesis is much cheaper to attack with the new runtime oracle than
+    with another full stage1→stage2 bootstrap cycle.
+
 ### Current checkpoint (2026-03-13 CLI manual `%w/%i` split moves the old top-level macro collection frontier)
 
 - Verified a narrower CLI-side fix in `src/compiler/cli.cr`:

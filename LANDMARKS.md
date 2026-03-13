@@ -3,6 +3,33 @@
 Updated: 2026-03-13
 Context: compiler/bootstrap/stage2-stability
 
+[LM-170|repro]: the strongest current late-stage bootstrap hypothesis now has a
+cheap standalone runtime oracle: stage1-generated code corrupts abstract-value
+hash lookup/iteration identity, which closely matches the self-hosted
+`constant_literal_values` crash corridor. The new script
+`regression_tests/stage1_macro_value_hash_identity_repro.sh` compiles a tiny
+program that uses `Hash(String, CrystalV2::Compiler::Semantic::MacroValue)`,
+inserts `MacroBoolValue.new(true)`, and checks both lookup and `each` output.
+Fresh verification on the exact compiler
+`/private/tmp/stage1_dbg_const_map_ids_20260313` reports
+`reproduced: generated code degraded Hash(String, MacroValue) lookup/each type identity`.
+The generated binary output is:
+`empty=0`, `filled=1`, `lookup_is_bool=true`,
+`lookup_class=CrystalV2::Compiler::Semantic::MacroValue | String`,
+`each=x:true:CrystalV2::Compiler::Semantic::MacroValue`.
+That is much closer to the self-hosted compiler failure than the older generic
+`Base/Child` side-signal because it exercises the exact `MacroValue` class used
+by `@constant_literal_values`. The paired phase-localized tiny no-prelude lib
+trace on fresh self-hosted stage2 now proves two additional facts:
+`constant_literal_values.size` is already `1` at
+`phase=hir_converter_created`, and the new numeric object-id probe shows that
+`const_lit` is distinct from `sources_by_arena`, `paths_by_arena`, and
+`main_arenas`, refuting the simplest ivar-alias explanation. Boundary: this
+does not yet prove the exact runtime mechanism (hash metadata vs abstract-ref
+carrier vs accessor lowering), but it strongly shifts the frontier below HIR
+registration and gives a cheap falsifier for future fixes. {F/G/R:
+0.96/0.83/0.97} [verified]
+
 [LM-169|repro]: a fresh self-hosted stage2 now has a second tiny oracle that
 is independent of the noisy full-prelude `LibC` path: the compiler crashes on a
 trivial no-prelude lib file even though the matching stage1 survives cleanly.
