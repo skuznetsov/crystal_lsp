@@ -1,7 +1,37 @@
 # LANDMARKS
 
-Updated: 2026-03-12
+Updated: 2026-03-13
 Context: compiler/bootstrap/stage2-stability
+
+[LM-164|verify]: the fresh self-hosted nested macro parser drop was another
+broken default-arg wrapper path, now for
+`Parser#parse_macro_body_until_branch(stop_on_branch : Bool = true)`. The key
+artifact proof came from the stale fresh stage2 `.ll`: it still contained five
+unsuffixed calls `@...Parser$Hparse_macro_body_until_branch(ptr %self)` inside
+`parse_macro_if_control`, `parse_macro_for_control`, and
+`parse_macro_begin_control`, plus a dead-code stub for that same no-arg
+entrypoint, while separate `LOWER_FUNC_TARGET` traces on the same worktree were
+already proving that `lower_function_if_needed(...)` can resolve the real body
+as `Parser#parse_macro_body_until_branch$Bool`. The verified local fix is to
+remove the helper's default argument entirely and make every caller pass the
+branch flag explicitly (`true` for `if/elsif/else/for/begin`, `false` for the
+existing `parse_macro_body_until_end`). Fresh debug stage1
+`/private/tmp/stage1_dbg_macro_body_until_branch_explicit_20260313` builds in
+`6.71s` and passes broad adversary
+`regression_tests/run_all.sh /private/tmp/stage1_dbg_macro_body_until_branch_explicit_20260313`
+with `68 passed, 0 failed`. Fresh guarded self-hosted stage2
+`/private/tmp/stage2_dbg_macro_body_until_branch_explicit_20260313` builds
+successfully (`status=0`, `real 517.85`). On that fresh stage2 both focused
+parser-frontier oracles move cleanly: `stage2_enum_nested_macro_repro.sh`
+reports `not reproduced (compiler kept the enum macro body intact)` and
+`stage2_errno_macro_body_parse_repro.sh` reports `not reproduced (compiler
+parsed Errno and moved past the old macro-body parse crash)`. Structural
+adversary on the fresh `.ll` is clean too: there are no longer any unsuffixed
+`parse_macro_body_until_branch(ptr %self)` callsites and no dead-code stub for
+the wrapper entrypoint. Boundary: the fresh stage2 still segfaults later after
+the old parser-wrapper signatures disappear, so this is a verified frontier
+shift, not the final stage2/stage3 stabilization. {F/G/R: 0.97/0.83/0.97}
+[verified]
 
 [LM-163|repro]: the current nested enum macro parser failure now has a small
 standalone oracle that does not depend on full `src/stdlib/errno.cr`. The new

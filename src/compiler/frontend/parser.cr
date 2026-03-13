@@ -13691,7 +13691,7 @@ current_token.kind == Token::Kind::Identifier &&
             return PREFIX_ERROR
           end
 
-          then_body = parse_macro_body_until_branch
+          then_body = parse_macro_body_until_branch(true)
 
           branches << {span: start_span, condition: condition, body: then_body}
 
@@ -13727,7 +13727,7 @@ current_token.kind == Token::Kind::Identifier &&
                 return PREFIX_ERROR
               end
 
-              branch_body = parse_macro_body_until_branch
+              branch_body = parse_macro_body_until_branch(true)
 
               branches << {span: branch_start_span, condition: branch_condition, body: branch_body}
             when "else"
@@ -13735,7 +13735,7 @@ current_token.kind == Token::Kind::Identifier &&
                 return PREFIX_ERROR
               end
 
-              else_body = parse_macro_body_until_branch
+              else_body = parse_macro_body_until_branch(true)
 
               end_start_span = consume_macro_control_start
               unless end_start_span
@@ -13951,7 +13951,7 @@ current_token.kind == Token::Kind::Identifier &&
           end
 
           # Parse body until {% end %}
-          body = parse_macro_body_until_branch
+          body = parse_macro_body_until_branch(true)
           if ENV["DEBUG_MACRO_FOR"]?
             body_node = @arena[body]
             STDERR.puts "[MACRO_FOR_BODY_DONE] id=#{body.index} kind=#{Frontend.node_kind(body_node)} current=#{current_token.kind}:#{token_text(current_token).inspect}"
@@ -14044,7 +14044,7 @@ current_token.kind == Token::Kind::Identifier &&
           end
 
           # Parse body until {% end %}
-          body = parse_macro_body_until_branch
+          body = parse_macro_body_until_branch(true)
 
           # Expect {% end %}
           end_start = consume_macro_control_start
@@ -14168,7 +14168,7 @@ current_token.kind == Token::Kind::Identifier &&
         # Returns MacroLiteralNode with the body content
         # STUB VERSION: Just skip all tokens until target keyword
         # Full implementation would properly parse expressions and text
-        private def parse_macro_body_until_branch(stop_on_branch : Bool = true) : ExprId
+        private def parse_macro_body_until_branch(stop_on_branch : Bool) : ExprId
           start_span = current_token.span
           pieces = parse_macro_body(stop_on_branch)
           macro_trim_left = false

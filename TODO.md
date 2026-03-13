@@ -22,6 +22,58 @@ closure cells, Tuple ptr/value confusion.
 - [ ] **Phase 5: FIX RC-3** — String.build block lowering
 - [ ] **Phase 6: RE-ENABLE RTA + BOOTSTRAP** — stage0→stage1→stage2→stage3 + benchmark
 
+### Current checkpoint (2026-03-13 explicit `parse_macro_body_until_branch` flag removes the stale wrapper path)
+
+- Verified a new self-hosted parser-wrapper fix in `src/compiler/frontend/parser.cr`:
+  - `parse_macro_body_until_branch(stop_on_branch : Bool)` no longer has a
+    default argument;
+  - all remaining callers now pass the branch flag explicitly:
+    - `parse_macro_if_control` / `elsif` / `else` use `true`
+    - `parse_macro_for_control` uses `true`
+    - `parse_macro_begin_control` uses `true`
+    - `parse_macro_body_until_end` already kept the explicit `false`
+- Why this is the right corridor:
+  - stale fresh stage2 `.ll` still contained five unsuffixed calls
+    `@...Parser$Hparse_macro_body_until_branch(ptr %self)` from
+    `parse_macro_if_control`, `parse_macro_for_control`, and
+    `parse_macro_begin_control`, plus a dead-code stub for that same no-arg
+    wrapper;
+  - the same worktree already proved via `LOWER_FUNC_TARGET` trace that
+    `lower_function_if_needed(...)` can resolve the real implementation as
+    `Parser#parse_macro_body_until_branch$Bool`;
+  - so the active bug was no longer "pick the right lowered body later", but a
+    broken self-hosted default-arg wrapper path for the no-arg entrypoint.
+- Fresh verification on the new debug pair:
+  - `stage1 debug`:
+    - `/usr/bin/time -p scripts/build_stage1_original_debug.sh /private/tmp/stage1_dbg_macro_body_until_branch_explicit_20260313`
+      -> `real 6.71`
+  - broad adversary:
+    - `/usr/bin/time -p regression_tests/run_all.sh /private/tmp/stage1_dbg_macro_body_until_branch_explicit_20260313`
+      -> `68 passed, 0 failed`
+      -> `real 1030.80`
+  - `stage2 debug`:
+    - `/usr/bin/time -p scripts/timeout_sample_lldb.sh -t 900 -m 24576 --no-series --no-lldb -o /tmp/stage2_dbg_macro_body_until_branch_explicit_probe2_20260313 -- scripts/build_stage2_debug.sh /private/tmp/stage1_dbg_macro_body_until_branch_explicit_20260313 /private/tmp/stage2_dbg_macro_body_until_branch_explicit_20260313`
+      -> `status=0`
+      -> `real 517.85`
+- Focused stale-vs-fresh outcome on the fresh stage2:
+  - `bash regression_tests/stage2_enum_nested_macro_repro.sh /private/tmp/stage2_dbg_macro_body_until_branch_explicit_20260313`
+    -> `not reproduced (compiler kept the enum macro body intact)`
+    -> the binary still exits later with `Segmentation fault: 11`, but only
+       after the old nested-macro signature disappears
+  - `bash regression_tests/stage2_errno_macro_body_parse_repro.sh /private/tmp/stage2_dbg_macro_body_until_branch_explicit_20260313`
+    -> `not reproduced (compiler parsed Errno and moved past the old macro-body parse crash)`
+    -> again, the binary still exits later with `Segmentation fault: 11`, but
+       only after the old parser-wrapper corridor is gone
+- Structural adversary on the fresh stage2 artifact:
+  - `rg -n "Hparse_macro_body_until_branch\\(ptr %self\\)|stub for dead-code method: CrystalV2\\$CCCompiler\\$CCFrontend\\$CCParser\\$Hparse_macro_body_until_branch|define ptr @CrystalV2\\$CCCompiler\\$CCFrontend\\$CCParser\\$Hparse_macro_body_until_branch\\(" /private/tmp/stage2_dbg_macro_body_until_branch_explicit_20260313.ll`
+    -> no matches
+- Boundary after the fix:
+  - the stale self-hosted default-wrapper corridor for
+    `parse_macro_body_until_branch(true)` is gone;
+  - both focused parser-frontier oracles now move forward cleanly;
+  - stage2 is still not fully stable, because the fresh binary continues to
+    segfault later, after the old parser signatures disappear.
+
 ### Current checkpoint (2026-03-12 percent-word splitter frontier shift in Errno macro-for header)
 
 - Verified a narrower parser-side fix in `percent_literal_words(...)`:
