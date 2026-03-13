@@ -22,6 +22,53 @@ closure cells, Tuple ptr/value confusion.
 - [ ] **Phase 5: FIX RC-3** — String.build block lowering
 - [ ] **Phase 6: RE-ENABLE RTA + BOOTSTRAP** — stage0→stage1→stage2→stage3 + benchmark
 
+### Current checkpoint (2026-03-13 def-body arena gate rejects generic enum method bodies)
+
+- Verified a narrower HIR-side fix in `src/compiler/hir/ast_to_hir.cr`:
+  - `arena_fits_def?(...)` no longer trusts only `max_index` + source span;
+  - it now also requires `def_body_nodes_match_arena?(...)`, so a def arena is
+    rejected when its body expr ids resolve to generic `Frontend::Node` slots.
+- Why this is the right corridor:
+  - fresh stage2 after the previous `%w/%i` HIR fix still crashed in
+    `PageArena#[] -> node_for_return_infer -> collect_return_types ->
+    register_enum_methods`;
+  - the decisive tiny trace on `E.value` showed the deeper invariant break:
+    `known/stored/current/chosen` all reported `fit=true`, but the same arena
+    also logged `first=CrystalV2::Compiler::Frontend::Node` and
+    `last=CrystalV2::Compiler::Frontend::Node`, which means the body carrier was
+    corrupt even though the old fit heuristic accepted it.
+- New focused regression:
+  - `regression_tests/stage2_enum_method_def_arena_repro.sh`
+  - it runs the tiny nested enum method repro under `--no-prelude` with
+    `DEBUG_DEF_ARENA=E`, `DEBUG_SET_FTYPE=E.value`, and
+    `DEBUG_INFER_BODY_NAME=value`;
+  - it reports failure only when stage2 still accepts a corrupt enum-method
+    arena (`fit=true`) whose body endpoints are generic `Frontend::Node`.
+- Fresh verification on the exact debug pair:
+  - `stage1 debug`:
+    - `/usr/bin/time -p scripts/timeout_sample_lldb.sh -t 900 -m 24576 --no-series --no-lldb -o /tmp/stage1_dbg_def_body_match_probe_20260313 -- scripts/build_stage1_original_debug.sh /private/tmp/stage1_dbg_def_body_match_20260313`
+      -> `real 9.73`
+  - `stage2 debug`:
+    - `/usr/bin/time -p scripts/timeout_sample_lldb.sh -t 900 -m 24576 --no-series --no-lldb -o /tmp/stage2_dbg_def_body_match_probe_20260313 -- scripts/build_stage2_debug.sh /private/tmp/stage1_dbg_def_body_match_20260313 /private/tmp/stage2_dbg_def_body_match_20260313`
+      -> `status=0`
+      -> `real 519.70`
+  - focused oracle:
+    - `bash regression_tests/stage2_enum_method_def_arena_repro.sh /private/tmp/stage2_dbg_macro_word_inner_split_20260313`
+      -> `reproduced: stage2 accepted a corrupt enum method arena with generic body nodes`
+    - `bash regression_tests/stage2_enum_method_def_arena_repro.sh /private/tmp/stage2_dbg_def_body_match_20260313`
+      -> `not reproduced (compiler rejected the corrupt enum method arena and typed E.value)`
+    - `bash regression_tests/stage2_enum_method_def_arena_repro.sh /private/tmp/stage1_dbg_def_body_match_20260313`
+      -> `not reproduced (compiler rejected the corrupt enum method arena and typed E.value)`
+- Direct boundary on the fresh stage2:
+  - tiny `E.value` under `--no-prelude` now exits `0`;
+  - `src/stdlib/errno.cr --no-prelude` now exits `0`;
+  - but full `puts 1` / `scripts/stage2_minimal_compile_repro.sh` still fail
+    later with `139`, and fresh LLDB on `puts 1` now points to a new corridor:
+    `Regex::MatchData#byte_end -> CLI#process_require_node -> parse_file_recursive`
+  - this is a real frontier shift: the old enum-method return-inference crash is
+    gone, and the next blocker now sits earlier in full-prelude require
+    processing, not in `register_enum_methods`.
+
 ### Current checkpoint (2026-03-13 manual `%w/%i` HIR split removes the stale `macro_word_list_from_source` crash corridor)
 
 - Verified a narrower HIR-side fix in `src/compiler/hir/ast_to_hir.cr`:

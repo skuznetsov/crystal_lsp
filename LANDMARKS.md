@@ -3,6 +3,30 @@
 Updated: 2026-03-13
 Context: compiler/bootstrap/stage2-stability
 
+[LM-166|verify]: the fresh self-hosted enum-method return-inference crash was
+another false-positive arena-fit bug, not a deeper `collect_return_types`
+problem. The decisive tiny `E.value` trace showed that stale stage2
+`/private/tmp/stage2_dbg_macro_word_inner_split_20260313` accepted the def body
+arena as `fit=true` even though the same `known/stored/current/chosen` arena
+reported `first=CrystalV2::Compiler::Frontend::Node` and
+`last=CrystalV2::Compiler::Frontend::Node`. The narrow local fix is to harden
+`arena_fits_def?(...)` so it also requires `def_body_nodes_match_arena?(...)`
+instead of trusting only max body index + span/source fit. The new oracle
+`regression_tests/stage2_enum_method_def_arena_repro.sh` cleanly brackets the
+frontier: stale stage2 reports
+`reproduced: stage2 accepted a corrupt enum method arena with generic body nodes`,
+while fresh exact stage2 `/private/tmp/stage2_dbg_def_body_match_20260313` and
+fresh exact stage1 `/private/tmp/stage1_dbg_def_body_match_20260313` both report
+`not reproduced (compiler rejected the corrupt enum method arena and typed E.value)`.
+Fresh debug stage1 builds in `9.73s`, fresh guarded self-hosted stage2 builds
+successfully in `519.70s`, the tiny `E.value` no-prelude path now exits `0`,
+and `src/stdlib/errno.cr --no-prelude` also exits `0`. Boundary: full-prelude
+`puts 1` / `scripts/stage2_minimal_compile_repro.sh` still fail later with
+`139`, but the new LLDB stack is no longer in enum-method HIR; it is now
+`Regex::MatchData#byte_end -> CLI#process_require_node -> parse_file_recursive`,
+so the active blocker moved into full-prelude require processing. {F/G/R:
+0.97/0.82/0.97} [verified]
+
 [LM-165|verify]: the stale self-hosted `%w/%i` HIR crash in
 `AstToHir#macro_word_list_from_source` is a real, isolated frontier and it can
 be moved with a narrow splitter change instead of another parser patch. The

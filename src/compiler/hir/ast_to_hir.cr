@@ -7293,6 +7293,7 @@ module Crystal::HIR
     ) : Bool
       max_index = body_max_index_for_def(func_def)
       return false if max_index >= 0 && max_index >= arena.size
+      return false unless def_body_nodes_match_arena?(arena, func_def)
       span_fits_source?(arena, func_def.span)
     end
 
