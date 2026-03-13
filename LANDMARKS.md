@@ -3,6 +3,28 @@
 Updated: 2026-03-13
 Context: compiler/bootstrap/stage2-stability
 
+[LM-168|repro]: the fresh self-hosted `LibC`/`register_lib` crash family is no
+longer best modeled as only a HIR arena-transport problem; there is now a tiny
+frontend oracle showing that `parse_lib` body members are already corrupted to
+generic `Frontend::Node` on self-hosted stage2. The new script
+`regression_tests/stage2_lib_alias_body_node_repro.sh` uses only:
+`lib L; alias A = Int32; end` under `--no-prelude` with
+`DEBUG_LIB_MEMBER=L CRYSTAL_V2_STOP_AFTER_HIR=1`. It cleanly brackets the fresh
+pair built for the lib-reparse investigation: exact stage1
+`/private/tmp/stage1_dbg_lib_reparse_trace_20260313` reports
+`not reproduced (compiler kept the lib alias body typed)`, while exact
+self-hosted stage2 `/private/tmp/stage2_dbg_lib_reparse_trace_20260313`
+reports `reproduced: stage2 parsed the lib alias body into a generic Frontend::Node carrier`.
+The stronger falsifier is that forced full-file lib reparse works on stage1
+(`phase=match` plus typed `AliasNode` / `MacroIfNode`) but still yields generic
+`Frontend::Node` members on fresh stage2 even after `phase=match`, so the
+reparse helper and the earlier `ArenaLike` tuple-transport bug are not the last
+active blocker. Boundary: source-reparse can move one narrow transport crash,
+but the remaining root cause now points higher into self-hosted frontend
+`parse_lib` / AST construction. The next useful work should use this tiny alias
+oracle as the primary falsifier before any heavier `LibC` or prelude runs.
+{F/G/R: 0.97/0.88/0.97} [verified]
+
 [LM-167|verify]: the stale self-hosted CLI `%w/%i` top-level macro iterable
 splitter was a real, isolated frontier, and a narrow byte-wise replacement
 moves stage2 materially deeper without touching parser/HIR architecture. The

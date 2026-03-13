@@ -22,6 +22,53 @@ closure cells, Tuple ptr/value confusion.
 - [ ] **Phase 5: FIX RC-3** — String.build block lowering
 - [ ] **Phase 6: RE-ENABLE RTA + BOOTSTRAP** — stage0→stage1→stage2→stage3 + benchmark
 
+### Current checkpoint (2026-03-13 tiny lib alias oracle proves self-hosted `parse_lib` body corruption)
+
+- Added a new primary mini-oracle:
+  - `regression_tests/stage2_lib_alias_body_node_repro.sh`
+  - source:
+    ```crystal
+    lib L
+      alias A = Int32
+    end
+    ```
+  - it runs `--no-prelude` with `DEBUG_LIB_MEMBER=L CRYSTAL_V2_STOP_AFTER_HIR=1`
+    and reports failure only when the lib body alias is emitted as generic
+    `Frontend::Node` instead of `AliasNode`.
+- Why this matters:
+  - the bigger `LibC` frontier looked like another HIR arena transport problem;
+  - but forcing full-file lib reparse on healthy stage1 shows the helper itself
+    is fine (`phase=match`, typed `AliasNode` / `MacroIfNode`);
+  - the same forced helper on fresh self-hosted stage2 also reaches
+    `phase=match`, yet the reparsed fresh `AstArena` still yields generic
+    `Frontend::Node` body members;
+  - that proves source-reparse cannot be the final fix here: the remaining root
+    cause sits earlier, inside self-hosted frontend `parse_lib` / AST
+    construction, not in HIR arena transport.
+- Fresh verification on the exact debug pair:
+  - `stage1 debug`:
+    - `/usr/bin/time -p scripts/build_stage1_original_debug.sh /private/tmp/stage1_dbg_lib_reparse_trace_20260313`
+      -> `real 8.46`
+  - `stage2 debug`:
+    - `/usr/bin/time -p scripts/build_stage2_debug.sh /private/tmp/stage1_dbg_lib_reparse_trace_20260313 /private/tmp/stage2_dbg_lib_reparse_trace_20260313`
+      -> `status=0`
+      -> `real 507.81`
+  - focused oracle:
+    - `bash regression_tests/stage2_lib_alias_body_node_repro.sh /private/tmp/stage1_dbg_lib_reparse_trace_20260313`
+      -> `not reproduced (compiler kept the lib alias body typed)`
+    - `bash regression_tests/stage2_lib_alias_body_node_repro.sh /private/tmp/stage2_dbg_lib_reparse_trace_20260313`
+      -> `reproduced: stage2 parsed the lib alias body into a generic Frontend::Node carrier`
+  - extra minimization:
+    - a 5-line `lib L` with `alias A = Int32` plus a single `{% if %}` still
+      crashes fresh stage2 after the same generic-`Node` member trace, so the
+      old `LibC` crash family has been reduced to a tiny parser-side repro.
+- New frontier:
+  - `with_reparsed_lib_from_source(...)` and forced full-file `LibC` reparses
+    are now falsified as final fixes;
+  - the next useful branch is parser-level tracing inside `parse_lib`, using the
+    new alias-only oracle as the cheapest falsifier before any larger
+    `LibC`/prelude/bootstrap runs.
+
 ### Current checkpoint (2026-03-13 CLI manual `%w/%i` split moves the old top-level macro collection frontier)
 
 - Verified a narrower CLI-side fix in `src/compiler/cli.cr`:
