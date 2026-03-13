@@ -22,6 +22,47 @@ closure cells, Tuple ptr/value confusion.
 - [ ] **Phase 5: FIX RC-3** — String.build block lowering
 - [ ] **Phase 6: RE-ENABLE RTA + BOOTSTRAP** — stage0→stage1→stage2→stage3 + benchmark
 
+### Current checkpoint (2026-03-12 percent-word splitter frontier shift in Errno macro-for header)
+
+- Verified a narrower parser-side fix in `percent_literal_words(...)`:
+  the `%w/%i` splitter no longer accumulates the current word via repeated
+  `String += Char`; it now uses a byte buffer (`IO::Memory`) and flushes stable
+  strings only at word boundaries.
+- New focused regression:
+  - `regression_tests/stage2_errno_percent_words_repro.sh`
+  - it runs `src/stdlib/errno.cr` under `--no-prelude` with
+    `DEBUG_MACRO_FOR=1`, `DEBUG_PERCENT_WORDS=1`, and
+    `CRYSTAL_V2_STOP_AFTER_HIR=1`;
+  - it reports failure only when fresh stage2 reaches
+    `[PERCENT_WORDS_ENTRY]` but dies before the first
+    `[PERCENT_WORDS_FLUSH] count=1`, which was the old `%w(...)` splitter
+    signature.
+- Fresh verification on the current debug pair:
+  - `stage1 debug` rebuilt on `/private/tmp/stage1_dbg_percent_words_fix_20260312`
+    (`real 9.47`)
+  - fresh guarded `stage2 debug` rebuilt on
+    `/private/tmp/stage2_dbg_percent_words_fix_20260312`
+    (`status=0`)
+  - the new focused oracle cleanly brackets old/new stage2 binaries:
+    - `bash regression_tests/stage2_errno_percent_words_repro.sh /private/tmp/stage2_dbg_macro_for_trace_20260312`
+      -> `reproduced: stage2 crashed while splitting Errno %w(...) before the first word flush`
+    - `bash regression_tests/stage2_errno_percent_words_repro.sh /private/tmp/stage2_dbg_percent_words_fix_20260312`
+      -> `not reproduced (compiler reached Errno %w(...) header completion)`
+    - `bash regression_tests/stage2_errno_percent_words_repro.sh /private/tmp/stage1_dbg_percent_words_fix_20260312`
+      -> `not reproduced (compiler reached Errno %w(...) header completion)`
+- Direct trace on the fresh fixed stage2:
+  - `env DEBUG_MACRO_FOR=1 DEBUG_PERCENT_WORDS=1 CRYSTAL_V2_STOP_AFTER_HIR=1 /private/tmp/stage2_dbg_percent_words_fix_20260312 --no-prelude src/stdlib/errno.cr ...`
+    now logs:
+    - `[PERCENT_WORDS_FLUSH] count=1 ...`
+    - `[PERCENT_WORDS_DONE] count=88 ...`
+    - `[MACRO_FOR_ITERABLE_DONE] ...`
+    - `[MACRO_FOR_HEADER_DONE] ...`
+    - then crashes with `139` before `[MACRO_FOR_BODY_DONE]`
+- Boundary learned:
+  - the old self-hosted crash inside `Errno` `%w(...)` word splitting is gone;
+  - the active frontier has moved deeper into `parse_macro_body_until_branch /
+    parse_macro_body` for the body of that same `{% for %}` block.
+
 ### Current checkpoint (2026-03-12 focused Errno enum-method no-prelude oracle)
 
 - Verified a narrower self-hosted parser fix in `parse_percent_macro_control`:

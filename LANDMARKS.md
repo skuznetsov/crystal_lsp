@@ -3,6 +3,27 @@
 Updated: 2026-03-12
 Context: compiler/bootstrap/stage2-stability
 
+[LM-161|verify]: the fresh self-hosted `Errno` `%w(...)` header crash was a
+real parser-side string-accumulation bug in `percent_literal_words(...)`, and
+it can be moved with a narrow local change. The decisive bracket was a new
+focused oracle `regression_tests/stage2_errno_percent_words_repro.sh`: on stale
+traced stage2 `/private/tmp/stage2_dbg_macro_for_trace_20260312` it reports
+`reproduced: stage2 crashed while splitting Errno %w(...) before the first word flush`,
+while on fresh fixed stage2 `/private/tmp/stage2_dbg_percent_words_fix_20260312`
+it reports `not reproduced (compiler reached Errno %w(...) header completion)`.
+The local fix is to stop building the current percent-word token via repeated
+`String += Char` in `percent_literal_words(...)` and use a byte buffer
+(`IO::Memory`) that flushes stable `String` objects only at word boundaries.
+Fresh debug stage1 `/private/tmp/stage1_dbg_percent_words_fix_20260312` still
+builds in `9.47s`, fresh guarded self-hosted stage2 builds successfully
+(`status=0`), and direct trace on the fresh stage2 now prints
+`[PERCENT_WORDS_FLUSH] count=1`, `[PERCENT_WORDS_DONE] count=88`,
+`[MACRO_FOR_ITERABLE_DONE]`, and `[MACRO_FOR_HEADER_DONE]` before the compiler
+dies later with `139`. Boundary: the old `%w(...)` splitter crash is gone, but
+the active frontier has moved deeper into the body parser
+(`parse_macro_body_until_branch` / `parse_macro_body`) for the same Errno
+`{% for %}` block. {F/G/R: 0.95/0.74/0.96} [verified]
+
 [LM-160|verify]: `parse_percent_macro_control` no longer needs to trust the
 pre-consume `keyword_peek` object to dispatch recognized `%` control blocks on
 fresh self-hosted stage2. The verified local fix is twofold: make

@@ -9560,8 +9560,14 @@ module CrystalV2
         private def percent_literal_words(content : String) : Array(String)
           return [] of String if content.empty?
 
+          trace_percent_words = ENV["DEBUG_PERCENT_WORDS"]?
+          if trace_percent_words
+            preview = content.bytesize > 80 ? content.byte_slice(0, 80) + "..." : content
+            STDERR.puts "[PERCENT_WORDS_ENTRY] bytes=#{content.bytesize} content=#{preview.inspect}"
+          end
+
           words = [] of String
-          current = String.new
+          current = IO::Memory.new
           i = 0
           bytesize = content.bytesize
 
@@ -9569,26 +9575,35 @@ module CrystalV2
             Watchdog.check!
             char = content.byte_at(i).chr
             if char.ascii_whitespace?
-              unless current.empty?
-                words << current
-                current = String.new
+              unless current.size == 0
+                word = String.new(current.to_slice)
+                words << word
+                if trace_percent_words && (words.size <= 4 || words.size == 8 || words.size == 16 || words.size == 32 || words.size == 64 || words.size == 96)
+                  STDERR.puts "[PERCENT_WORDS_FLUSH] count=#{words.size} last=#{word.inspect} index=#{i}"
+                end
+                current.clear
               end
               i += 1
               next
             elsif char == '\\'
               i += 1
               if i < bytesize
-                current += content.byte_at(i).chr
+                current.write_byte(content.byte_at(i))
               end
               i += 1
               next
             else
-              current += char
+              current.write_byte(content.byte_at(i))
               i += 1
             end
           end
 
-          words << current unless current.empty?
+          unless current.size == 0
+            words << String.new(current.to_slice)
+          end
+          if trace_percent_words
+            STDERR.puts "[PERCENT_WORDS_DONE] count=#{words.size} last=#{words.last?.inspect}"
+          end
           words
         end
 
@@ -13878,6 +13893,9 @@ current_token.kind == Token::Kind::Identifier &&
 
         # Parse {% for vars in iterable %}...{% end %}
         private def parse_macro_for_control(start_span : Span) : ExprId
+          if ENV["DEBUG_MACRO_FOR"]?
+            STDERR.puts "[MACRO_FOR_ENTRY] current=#{current_token.kind}:#{token_text(current_token).inspect}"
+          end
           # Parse iteration variables
           vars = [] of Slice(UInt8)
 
@@ -13900,6 +13918,11 @@ current_token.kind == Token::Kind::Identifier &&
             end
           end
 
+          if ENV["DEBUG_MACRO_FOR"]?
+            vars_preview = vars.map { |entry| String.new(entry) }.join(",")
+            STDERR.puts "[MACRO_FOR_VARS] vars=#{vars_preview} current=#{current_token.kind}:#{token_text(current_token).inspect}"
+          end
+
           # Expect 'in' keyword
           unless current_token.kind == Token::Kind::In
             @diagnostics << Diagnostic.new("Expected 'in' keyword in for loop", current_token.span)
@@ -13910,8 +13933,15 @@ current_token.kind == Token::Kind::Identifier &&
           skip_trivia
 
           # Parse iterable expression
+          if ENV["DEBUG_MACRO_FOR"]?
+            STDERR.puts "[MACRO_FOR_ITERABLE_ENTRY] current=#{current_token.kind}:#{token_text(current_token).inspect}"
+          end
           iterable = parse_expression(0)
           return PREFIX_ERROR if iterable.invalid?
+          if ENV["DEBUG_MACRO_FOR"]?
+            iterable_node = @arena[iterable]
+            STDERR.puts "[MACRO_FOR_ITERABLE_DONE] id=#{iterable.index} kind=#{Frontend.node_kind(iterable_node)} current=#{current_token.kind}:#{token_text(current_token).inspect}"
+          end
 
           skip_trivia
 
@@ -13919,10 +13949,17 @@ current_token.kind == Token::Kind::Identifier &&
           unless expect_macro_close("Expected '%}' after for header")
             return PREFIX_ERROR
           end
+          if ENV["DEBUG_MACRO_FOR"]?
+            STDERR.puts "[MACRO_FOR_HEADER_DONE] current=#{current_token.kind}:#{token_text(current_token).inspect}"
+          end
 
           # Parse body until {% end %}
           body = parse_macro_body_until_branch
           return PREFIX_ERROR if body.invalid?
+          if ENV["DEBUG_MACRO_FOR"]?
+            body_node = @arena[body]
+            STDERR.puts "[MACRO_FOR_BODY_DONE] id=#{body.index} kind=#{Frontend.node_kind(body_node)} current=#{current_token.kind}:#{token_text(current_token).inspect}"
+          end
 
           # Expect {% end %}
           end_start_span = consume_macro_control_start
