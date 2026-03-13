@@ -35313,6 +35313,7 @@ module Crystal::HIR
       ast_owner_types = @ast_reachable_owner_types
       ast_method_bases = @ast_reachable_method_bases
       ast_filter_cache = Hash(String, Bool).new(initial_capacity: 8192)
+      rta_filter = lazy_rta_enabled?
 
       while iteration < max_iterations
         # Collect all unique function names from pending arg types
@@ -35322,6 +35323,7 @@ module Crystal::HIR
         skipped_bare = 0
         skipped_seen = 0
         skipped_ast = 0
+        skipped_rta = 0
         considered = 0
         @pending_arg_types.each do |name, args|
           considered += 1
@@ -35340,6 +35342,23 @@ module Crystal::HIR
           unless ast_allowed
             skipped_ast += 1 if debug_emit
             next
+          end
+          # Method-level RTA filter: skip functions whose method is never called
+          if rta_filter
+            owner_base = extract_owner_base_for_rta(name)
+            if owner_base && !@rta_called_methods.includes?(name)
+              if @live_types.includes?(owner_base)
+                if mpart = extract_method_part_for_rta(name)
+                  unless @rta_called_method_parts.includes?(mpart)
+                    skipped_rta += 1 if debug_emit
+                    next
+                  end
+                end
+              else
+                skipped_rta += 1 if debug_emit
+                next
+              end
+            end
           end
           if !args.types.empty? && args.types.all? { |t| t == TypeRef::VOID }
             skipped_void += 1 if debug_emit
@@ -35406,6 +35425,23 @@ module Crystal::HIR
               skipped_ast += 1 if debug_emit
               next
             end
+            # Method-level RTA filter: skip functions whose method is never called
+            if rta_filter
+              owner_base = extract_owner_base_for_rta(name)
+              if owner_base && !@rta_called_methods.includes?(name)
+                if @live_types.includes?(owner_base)
+                  if mpart = extract_method_part_for_rta(name)
+                    unless @rta_called_method_parts.includes?(mpart)
+                      skipped_rta += 1 if debug_emit
+                      next
+                    end
+                  end
+                else
+                  skipped_rta += 1 if debug_emit
+                  next
+                end
+              end
+            end
             has_bare_generic = args.types.any? do |t|
               if desc = @module.get_type_descriptor(t)
                 is_bare = !desc.name.includes?('(') && KNOWN_GENERIC_TYPES.includes?(desc.name)
@@ -35439,7 +35475,7 @@ module Crystal::HIR
 
         if debug_emit
           budget_note = sig_budget > 0 ? " budget=#{sig_budget}" : ""
-          STDERR.puts "[EMIT_SIGS] iteration=#{iteration} sigs=#{sigs_to_lower.size}#{budget_note} considered=#{considered} skipped_void=#{skipped_void} skipped_bare=#{skipped_bare} skipped_seen=#{skipped_seen} skipped_ast=#{skipped_ast}"
+          STDERR.puts "[EMIT_SIGS] iteration=#{iteration} sigs=#{sigs_to_lower.size}#{budget_note} considered=#{considered} skipped_void=#{skipped_void} skipped_bare=#{skipped_bare} skipped_seen=#{skipped_seen} skipped_ast=#{skipped_ast} skipped_rta=#{skipped_rta}"
           if iteration == 0 && sigs_to_lower.size > 0
             sigs_to_lower.first(10).each do |name|
               STDERR.puts "[EMIT_SIGS] sample: #{name}"
