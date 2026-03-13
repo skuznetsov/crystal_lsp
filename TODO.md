@@ -80,6 +80,62 @@ closure cells, Tuple ptr/value confusion.
   - this new probe is the cheapest current falsifier before returning to the
     larger `AstToHir` and full-bootstrap paths.
 
+### Working checkpoint (2026-03-13 `normalize_union_type_name` sort sink; handoff snapshot, not verified)
+
+- The smaller no-prelude `AstArena + LibNode` frontier turned out to overlap the
+  older tuple-key sort/runtime family at a much narrower compiler-local sink:
+  fresh LLDB on the broken self-hosted stage2
+  `/private/tmp/stage2_dbg_lib_macro_parse_reason_20260313` for the tiny
+  `--no-prelude --no-link` libnode probe now stops at:
+  - `__crystal_v2_null_fn_guard`
+  - `Slice(UInt64)#cmp` for
+    `Tuple(String, Tuple(Int32, String))`
+  - `AstToHir#normalize_union_type_name`
+  - `AstToHir#create_union_type`
+- Strong supporting evidence on the exact stage1 control
+  `/private/tmp/stage1_dbg_lib_parse_return_trace_20260313`:
+  - `bash regression_tests/sort_by_tuple_key_runtime_repro.sh /private/tmp/stage1_dbg_lib_parse_return_trace_20260313`
+    -> compile succeeds, runtime `133`,
+    `reproduced: unexpected sort_by! tuple-key signature`
+  - `bash regression_tests/array_tuple_sort_runtime_repro.sh /private/tmp/stage1_dbg_lib_parse_return_trace_20260313`
+    -> runtime `139`,
+    `reproduced: array tuple sort sample crashes at runtime`
+  - a new tiny ad-hoc sample matching the exact compiler shape
+    `dedup.sort_by { |name| {nil_flag, name} }`
+    also compiles and then dies at runtime with `133`
+  - control checks on the same stage1 stay green:
+    - `Array(String)#sort!` prints `a,b,c`
+    - direct string comparisons (`"a" < "b"`, `"a" <=> "b"`) behave correctly
+- Current dirty mitigation in `src/compiler/hir/ast_to_hir.cr`:
+  - replace `dedup.sort_by { |name| {nil_flag, name} }` inside
+    `normalize_union_type_name(...)` with a nil/non-nil partition plus
+    blockless `Array(String)#sort!`
+  - goal: avoid the known tuple-key comparator-proc sink on this compiler path
+    without claiming to fix the broader `sort_by!` family
+- Fresh rebuild status at handoff time:
+  - `stage1 debug` rebuilt successfully:
+    - `/usr/bin/time -p scripts/build_stage1_original_debug.sh /private/tmp/stage1_dbg_union_name_no_sortby_20260313`
+      -> `real 9.59`
+  - fresh `stage2 debug` rebuild was launched:
+    - `/usr/bin/time -p scripts/build_stage2_debug.sh /private/tmp/stage1_dbg_union_name_no_sortby_20260313 /private/tmp/stage2_dbg_union_name_no_sortby_20260313`
+  - last observed output before this handoff:
+    - stage2 had already parsed through the compiler sources,
+      reached `AstToHir` lowering, and printed
+      `[DEBUG_STAGE1] hir_converter=...`
+      plus `[ALLOC_OVERLOAD] class=Crystal::HIR::AstToHir ...`
+    - there was no recurrence yet of the old
+      `normalize_union_type_name` null-call stack, but there is still no final
+      pass/fail verdict for the new stage2 binary
+- Next step for Claude:
+  - wait for `/private/tmp/stage2_dbg_union_name_no_sortby_20260313` to finish,
+    then immediately run:
+    - `bash regression_tests/stage2_astarena_libnode_repro.sh /private/tmp/stage2_dbg_union_name_no_sortby_20260313`
+    - the manual no-prelude libnode probe that used
+      `/tmp/libnode_noprelude.DxlWB3/probe.cr`
+    - `bash scripts/stage2_minimal_compile_repro.sh /private/tmp/stage2_dbg_union_name_no_sortby_20260313`
+  - if the frontier moves, only then promote this branch from working snapshot
+    to a verified checkpoint / fix
+
 ### Current checkpoint (2026-03-13 tiny lib alias oracle proves self-hosted `parse_lib` body corruption)
 
 - Added a new primary mini-oracle:

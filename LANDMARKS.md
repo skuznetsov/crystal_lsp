@@ -3,6 +3,34 @@
 Updated: 2026-03-13
 Context: compiler/bootstrap/stage2-stability
 
+[LM-173|working]: the smallest current no-prelude compiler frontier now points
+at a narrower member of the older tuple-key sort family, not at another fresh
+arena-only root cause. On the broken self-hosted stage2
+`/private/tmp/stage2_dbg_lib_macro_parse_reason_20260313`, LLDB for the tiny
+`AstArena + LibNode` no-prelude probe stops at `__crystal_v2_null_fn_guard`
+with a null indirect callee, and the backtrace runs through a comparator proc
+for `Tuple(String, Tuple(Int32, String))` into
+`AstToHir#normalize_union_type_name -> create_union_type -> type_ref_for_name`.
+Fresh control checks on `/private/tmp/stage1_dbg_lib_parse_return_trace_20260313`
+show the broader family is still alive there: both
+`regression_tests/sort_by_tuple_key_runtime_repro.sh` and
+`regression_tests/array_tuple_sort_runtime_repro.sh` still reproduce, and a new
+tiny ad-hoc sample matching the exact compiler shape
+`dedup.sort_by { |name| {nil_flag, name} }` also compiles and then dies at
+runtime with `133`. In contrast, `Array(String)#sort!` and direct string
+comparisons are clean on the same stage1. This motivated a local dirty branch
+in `src/compiler/hir/ast_to_hir.cr` that replaces
+`normalize_union_type_name`'s tuple-key `sort_by` with a nil/non-nil partition
+plus blockless `Array(String)#sort!`. Fresh `stage1 debug`
+`/private/tmp/stage1_dbg_union_name_no_sortby_20260313` rebuilt in `9.59s`,
+and fresh `stage2 debug`
+`/private/tmp/stage2_dbg_union_name_no_sortby_20260313` was already
+progressing through compiler parsing/HIR setup when this handoff was recorded,
+but there is not yet a final verdict for that new stage2 binary. Boundary:
+this is a working branch only, not a verified fix; it narrows the next step
+for Claude to finishing that rebuild and rerunning the tiny libnode oracles.
+{F/G/R: 0.79/0.71/0.84} [working]
+
 [LM-172|repro]: there is now a smaller self-hosted compiler oracle below the
 older direct `AstToHir` probe: compiling a tiny program that only requires
 `src/compiler/bootstrap_shims` and `src/compiler/frontend/ast`, stores a
