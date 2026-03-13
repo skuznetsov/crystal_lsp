@@ -1431,6 +1431,10 @@ module Crystal::HIR
     @rta_scan_start_idx : Int32 = 0      # Track which functions we've already scanned
     @rta_type_scan_start_idx : Int32 = 0 # Track which type descriptors we've already scanned
     @lazy_rta_active : Bool = false      # Set to true only during main process_pending pass
+    # Method-level RTA: exact call target names from already-lowered functions
+    @rta_called_methods : Set(String) = Set(String).new
+    # Method-level RTA: method parts (after # or .) for virtual dispatch matching
+    @rta_called_method_parts : Set(String) = Set(String).new
 
     # Initialize live types for lazy RTA
     private def initialize_lazy_rta
@@ -1440,10 +1444,9 @@ module Crystal::HIR
       # Primitives are always live
       {"Int8", "Int16", "Int32", "Int64", "UInt8", "UInt16", "UInt32", "UInt64",
        "Float32", "Float64", "Bool", "Char", "String", "Nil", "Pointer", "Symbol",
-       "Slice", "StaticArray", "Tuple", "NamedTuple",
        # Core runtime types always needed
        "Object", "Reference", "Value", "Struct", "Number", "Int", "Float",
-       "IO", "Fiber", "Thread", "Mutex", "Exception", "ArgumentError",
+       "Fiber", "Thread", "Mutex", "Exception", "ArgumentError",
        "IndexError", "KeyError", "NilAssertionError", "OverflowError",
        "Crystal", "GC", "Enum"}.each { |t| @live_types << t }
 
@@ -1452,10 +1455,9 @@ module Crystal::HIR
         @rta_module_base_names << strip_generics_simple(mod_name)
       end
 
-      # Union type variants — if a union exists, its variants can appear at runtime.
-      @module.types.each do |desc|
-        mark_union_variants_live(desc.name)
-      end
+      # Union type variants — only expand unions whose types appear in live functions.
+      # Deferred: union variant expansion happens incrementally during process_pending
+      # when scan_hir_function_for_live_types finds union-typed values.
 
       # Monomorphized types — generic instantiations that have been created
       @monomorphized.each do |name|
@@ -1502,22 +1504,52 @@ module Crystal::HIR
     private def extract_owner_base_for_rta(name : String) : String?
       # Top-level / runtime helpers → never defer
       return nil if name.starts_with?("__crystal") || name.starts_with?("main")
-      # Instance methods have '#'
-      hash_idx = name.rindex('#')
-      return nil unless hash_idx # class method (.) or top-level → never defer
-      owner = name[0, hash_idx]
-      base = strip_generics_simple(owner)
-      # Constructors → never defer
-      method_part = name[(hash_idx + 1)..]
-      return nil if method_part.starts_with?("initialize")
-      # Module methods → never defer (they're dispatched via includers)
-      return nil if @rta_module_base_names.includes?(base)
-      base
+
+      # Instance methods: Type#method
+      if hash_idx = name.rindex('#')
+        owner = name[0, hash_idx]
+        base = strip_generics_simple(owner)
+        # Constructors → never defer (needed for .new allocation)
+        method_part = name[(hash_idx + 1)..]
+        return nil if method_part.starts_with?("initialize")
+        # Module methods → never defer (they're dispatched via includers)
+        return nil if @rta_module_base_names.includes?(base)
+        return base
+      end
+
+      # Class methods: Type.method
+      if dot_idx = name.rindex('.')
+        owner = name[0, dot_idx]
+        base = strip_generics_simple(owner)
+        method_part = name[(dot_idx + 1)..]
+        # .new / .allocate → never defer (needed for allocation)
+        return nil if method_part.starts_with?("new") || method_part == "allocate"
+        # Module class methods → never defer
+        return nil if @rta_module_base_names.includes?(base)
+        return base
+      end
+
+      # Top-level function → never defer
+      nil
+    end
+
+    # Extract method part from function name (after # or .) for method-level RTA matching.
+    # "Dir#entries$Array(String)" → "entries$Array(String)"
+    # "Dir.current$String" → "current$String"
+    private def extract_method_part_for_rta(name : String) : String?
+      if hash_idx = name.rindex('#')
+        name[(hash_idx + 1)..]
+      elsif dot_idx = name.rindex('.')
+        name[(dot_idx + 1)..]
+      else
+        nil
+      end
     end
 
     # Scan a single HIR function for type instantiations, return true if new types found
     private def scan_hir_function_for_live_types(func : Crystal::HIR::Function) : Bool
       new_types = false
+      rta_trace = env_get("CRYSTAL_V2_RTA_TRACE")
       func.blocks.each do |block|
         block.instructions.each do |inst|
           case inst
@@ -1527,6 +1559,9 @@ module Crystal::HIR
               unless @live_types.includes?(base)
                 @live_types << base
                 new_types = true
+                if rta_trace && (rta_trace == "1" || base.includes?(rta_trace))
+                  STDERR.puts "[RTA_LIVE] #{base} via Allocate in #{func.name}"
+                end
               end
             end
           when Crystal::HIR::ArrayLiteral
@@ -1551,6 +1586,14 @@ module Crystal::HIR
             end
           when Crystal::HIR::Call
             mname = inst.method_name
+            # Method-level RTA: record this call target (exact name for non-virtual)
+            @rta_called_methods << mname
+            # For virtual calls, also record method part for cross-type dispatch matching
+            if inst.virtual
+              if mpart = extract_method_part_for_rta(mname)
+                @rta_called_method_parts << mpart
+              end
+            end
             # Track .new calls (type instantiation)
             if dot_idx = mname.rindex('.')
               after_dot = mname[(dot_idx + 1)..]
@@ -1559,6 +1602,9 @@ module Crystal::HIR
                 unless owner_name.empty? || @live_types.includes?(owner_name)
                   @live_types << owner_name
                   new_types = true
+                  if rta_trace && (rta_trace == "1" || owner_name.includes?(rta_trace))
+                    STDERR.puts "[RTA_LIVE] #{owner_name} via .new call in #{func.name}"
+                  end
                 end
               end
             end
@@ -1569,12 +1615,18 @@ module Crystal::HIR
                 unless owner.empty? || @live_types.includes?(owner)
                   @live_types << owner
                   new_types = true
+                  if rta_trace && (rta_trace == "1" || owner.includes?(rta_trace))
+                    STDERR.puts "[RTA_LIVE] #{owner} via direct call #{mname} in #{func.name}"
+                  end
                 end
               elsif dot_idx2 = mname.rindex('.')
                 owner = strip_generics_simple(mname[0, dot_idx2])
                 unless owner.empty? || @live_types.includes?(owner)
                   @live_types << owner
                   new_types = true
+                  if rta_trace && (rta_trace == "1" || owner.includes?(rta_trace))
+                    STDERR.puts "[RTA_LIVE] #{owner} via direct class call #{mname} in #{func.name}"
+                  end
                 end
               end
             end
@@ -1658,12 +1710,29 @@ module Crystal::HIR
       b == 32_u8 || b == 9_u8 || b == 10_u8 || b == 13_u8
     end
 
-    # Move deferred functions whose owner type is now live back to the pending queue
+    # Move deferred functions whose owner type is now live AND actually called back to pending.
+    # Method-level RTA: only undefer if the specific method is a known call target,
+    # not all methods of a live type.
     private def undefer_rta_functions : Int32
       count = 0
       @rta_deferred_functions.reject! do |name|
         owner_base = extract_owner_base_for_rta(name)
-        if owner_base.nil? || @live_types.includes?(owner_base)
+        should_undefer = if owner_base.nil?
+                           true # No owner (top-level/runtime) → always undefer
+                         elsif @rta_called_methods.includes?(name)
+                           true # Exact call target match
+                         elsif @live_types.includes?(owner_base)
+                           # Owner type is live — but only undefer if this method is actually called
+                           # (match by method part for virtual dispatch across subtypes)
+                           if mpart = extract_method_part_for_rta(name)
+                             @rta_called_method_parts.includes?(mpart)
+                           else
+                             true # Can't extract method part, be safe
+                           end
+                         else
+                           false # Owner not live, keep deferred
+                         end
+        if should_undefer
           @rta_deferred_set.delete(name)
           @pending_function_queue << name
           count += 1
@@ -35583,15 +35652,33 @@ module Crystal::HIR
           pending = pending.first(budget)
         end
 
-        # Lazy RTA: partition pending into live (process now) and deferred (skip)
+        # Lazy RTA: partition pending into live (process now) and deferred (skip).
+        # Uses both type-level and method-level filtering:
+        # - Type not live → defer
+        # - Type live but method not called → defer (method-level RTA)
+        # - Type live and method called (exact or virtual match) → keep
         if lazy_rta
           deferred_this_iter = 0
           pending.reject! do |name|
             owner_base = extract_owner_base_for_rta(name)
-            if owner_base.nil? || @live_types.includes?(owner_base)
-              false # Keep in pending — owner is live
+            should_keep = if owner_base.nil?
+                            true # No owner (top-level/runtime) → always keep
+                          elsif @rta_called_methods.includes?(name)
+                            true # Exact call target → keep
+                          elsif @live_types.includes?(owner_base)
+                            # Owner is live — only keep if method is actually called
+                            if mpart = extract_method_part_for_rta(name)
+                              @rta_called_method_parts.includes?(mpart)
+                            else
+                              true # Can't extract method part, keep (safe)
+                            end
+                          else
+                            false # Owner not live → defer
+                          end
+            if should_keep
+              false # Keep in pending
             else
-              # Defer — owner type not yet instantiated
+              # Defer — not a known call target
               unless @rta_deferred_set.includes?(name)
                 @rta_deferred_functions << name
                 @rta_deferred_set << name
@@ -35702,10 +35789,13 @@ module Crystal::HIR
           end
           # Also check newly registered union type descriptors
           new_types_found = true if scan_new_type_descriptors_for_live_types
-          if new_types_found
-            undeferred = undefer_rta_functions
-            rta_undeferred_total += undeferred
-            STDERR.puts "[LAZY_RTA] iter=#{iteration} new live types (total=#{@live_types.size}), undeferred=#{undeferred} remaining_deferred=#{@rta_deferred_functions.size}" if lazy_rta_log || env_has?("CRYSTAL_V2_PHASE_STATS")
+          # Always try to undefer — method-level RTA discovers new call targets each iteration,
+          # not just new types. Undefer functions that match exact call targets or whose method
+          # part matches a called method on a live type.
+          undeferred = undefer_rta_functions
+          rta_undeferred_total += undeferred
+          if (new_types_found || undeferred > 0) && (lazy_rta_log || env_has?("CRYSTAL_V2_PHASE_STATS"))
+            STDERR.puts "[LAZY_RTA] iter=#{iteration} live_types=#{@live_types.size} called_methods=#{@rta_called_methods.size} undeferred=#{undeferred} remaining_deferred=#{@rta_deferred_functions.size}"
           end
         end
 
@@ -35738,7 +35828,7 @@ module Crystal::HIR
           end
         end
         if progress_log
-          STDERR.puts "[LAZY_RTA] summary: deferred=#{rta_deferred_total} undeferred=#{rta_undeferred_total} final_live_types=#{@live_types.size} skipped=#{deferred_count}"
+          STDERR.puts "[LAZY_RTA] summary: deferred=#{rta_deferred_total} undeferred=#{rta_undeferred_total} final_live_types=#{@live_types.size} called_methods=#{@rta_called_methods.size} called_parts=#{@rta_called_method_parts.size} skipped=#{deferred_count}"
         end
         # Clear deferred tracking
         @rta_deferred_functions.clear
