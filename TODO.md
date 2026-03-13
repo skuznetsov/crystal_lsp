@@ -63,6 +63,47 @@ closure cells, Tuple ptr/value confusion.
   - the active frontier has moved deeper into `parse_macro_body_until_branch /
     parse_macro_body` for the body of that same `{% for %}` block.
 
+### Current checkpoint (2026-03-12 macro-body invalid-check removal moves Errno past parse)
+
+- Verified a narrower self-hosted parser fix in macro control callers:
+  the `invalid?` checks after `parse_macro_body_until_branch(...)` in
+  `parse_macro_if_control`, `parse_macro_for_control`, and
+  `parse_macro_begin_control` were dead code and an active crash site on fresh
+  self-hosted stage2.
+- Why this is sound:
+  - `parse_macro_body_until_branch(...)` always constructs and returns a
+    `MacroLiteralNode` `ExprId`; it has no `PREFIX_ERROR` / invalid return path.
+  - fresh traced stage2 before the fix already proved control reached
+    `MACRO_FOR_BODY_ASSIGN`, then died on the first caller-side read of the
+    returned `ExprId`.
+- New focused regression:
+  - `regression_tests/stage2_errno_macro_body_parse_repro.sh`
+  - it runs `src/stdlib/errno.cr` under `--no-prelude` with
+    `DEBUG_PERCENT_WORDS=1` and `CRYSTAL_V2_STOP_AFTER_HIR=1`;
+  - it reports failure only when stage2 finishes the `%w(...)` splitter
+    (`[PERCENT_WORDS_DONE]`) but still crashes before
+    `[PARSE_OK] .../src/stdlib/errno.cr`.
+- Fresh verification on the current debug pair:
+  - `stage1 debug` rebuilt on `/private/tmp/stage1_dbg_macro_body_dead_checks_20260312`
+    (`real 9.91`)
+  - fresh guarded `stage2 debug` rebuilt on
+    `/private/tmp/stage2_dbg_macro_body_dead_checks_20260312`
+    (`status=0`)
+  - the new focused oracle cleanly brackets old/new stage2 binaries:
+    - `bash regression_tests/stage2_errno_macro_body_parse_repro.sh /private/tmp/stage2_dbg_percent_words_fix_20260312`
+      -> `reproduced: stage2 finished Errno %w(...) but crashed before PARSE_OK`
+    - `bash regression_tests/stage2_errno_macro_body_parse_repro.sh /private/tmp/stage2_dbg_macro_body_dead_checks_20260312`
+      -> `not reproduced (compiler parsed Errno and moved past the old macro-body parse crash)`
+- Direct no-debug trace on the fresh fixed stage2:
+  - `env CRYSTAL_V2_STOP_AFTER_HIR=1 /private/tmp/stage2_dbg_macro_body_dead_checks_20260312 --no-prelude src/stdlib/errno.cr ...`
+    now reaches:
+    - `[PARSE_OK] .../src/stdlib/errno.cr`
+    - `[REQSCAN_DONE] .../src/stdlib/errno.cr reqs=2`
+    - and only then exits `138`
+- Boundary learned:
+  - the old self-hosted crash in macro-body parsing for `Errno` is gone;
+  - the active frontier has moved past parse/reqscan into a later HIR phase.
+
 ### Current checkpoint (2026-03-12 focused Errno enum-method no-prelude oracle)
 
 - Verified a narrower self-hosted parser fix in `parse_percent_macro_control`:

@@ -13692,7 +13692,6 @@ current_token.kind == Token::Kind::Identifier &&
           end
 
           then_body = parse_macro_body_until_branch
-          return PREFIX_ERROR if then_body.invalid?
 
           branches << {span: start_span, condition: condition, body: then_body}
 
@@ -13729,7 +13728,6 @@ current_token.kind == Token::Kind::Identifier &&
               end
 
               branch_body = parse_macro_body_until_branch
-              return PREFIX_ERROR if branch_body.invalid?
 
               branches << {span: branch_start_span, condition: branch_condition, body: branch_body}
             when "else"
@@ -13738,7 +13736,6 @@ current_token.kind == Token::Kind::Identifier &&
               end
 
               else_body = parse_macro_body_until_branch
-              return PREFIX_ERROR if else_body.invalid?
 
               end_start_span = consume_macro_control_start
               unless end_start_span
@@ -13955,7 +13952,6 @@ current_token.kind == Token::Kind::Identifier &&
 
           # Parse body until {% end %}
           body = parse_macro_body_until_branch
-          return PREFIX_ERROR if body.invalid?
           if ENV["DEBUG_MACRO_FOR"]?
             body_node = @arena[body]
             STDERR.puts "[MACRO_FOR_BODY_DONE] id=#{body.index} kind=#{Frontend.node_kind(body_node)} current=#{current_token.kind}:#{token_text(current_token).inspect}"
@@ -14049,7 +14045,6 @@ current_token.kind == Token::Kind::Identifier &&
 
           # Parse body until {% end %}
           body = parse_macro_body_until_branch
-          return PREFIX_ERROR if body.invalid?
 
           # Expect {% end %}
           end_start = consume_macro_control_start

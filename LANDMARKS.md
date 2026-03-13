@@ -3,6 +3,30 @@
 Updated: 2026-03-12
 Context: compiler/bootstrap/stage2-stability
 
+[LM-162|verify]: the fresh self-hosted `Errno` macro-body parse crash after the
+`%w(...)` splitter was another caller-side dead-check bug, not a deeper body
+parser collapse. The key local observation was that
+`parse_macro_body_until_branch(...)` always constructs and returns a valid
+`MacroLiteralNode` `ExprId`, yet traced stage2 already reached
+`[MACRO_FOR_BODY_ASSIGN]` and then died on the first caller-side read of that
+returned value. Removing the dead `invalid?` checks after
+`parse_macro_body_until_branch(...)` in `parse_macro_if_control`,
+`parse_macro_for_control`, and `parse_macro_begin_control` is the verified local
+fix. The new focused oracle
+`regression_tests/stage2_errno_macro_body_parse_repro.sh` cleanly brackets the
+frontier: stale stage2 `/private/tmp/stage2_dbg_percent_words_fix_20260312`
+reports `reproduced: stage2 finished Errno %w(...) but crashed before PARSE_OK`,
+while fresh fixed stage2 `/private/tmp/stage2_dbg_macro_body_dead_checks_20260312`
+reports `not reproduced (compiler parsed Errno and moved past the old
+macro-body parse crash)`. Fresh debug stage1
+`/private/tmp/stage1_dbg_macro_body_dead_checks_20260312` still builds in
+`9.91s`, fresh guarded self-hosted stage2 builds successfully (`status=0`), and
+the direct no-debug run on the fresh stage2 now reaches `[PARSE_OK]` and
+`[REQSCAN_DONE]` for `src/stdlib/errno.cr` before exiting later with `138`.
+Boundary: the old macro-body parse crash is gone, but the active bootstrap
+frontier has moved farther into post-parse HIR. {F/G/R: 0.95/0.75/0.96}
+[verified]
+
 [LM-161|verify]: the fresh self-hosted `Errno` `%w(...)` header crash was a
 real parser-side string-accumulation bug in `percent_literal_words(...)`, and
 it can be moved with a narrow local change. The decisive bracket was a new
