@@ -12937,12 +12937,17 @@ current_token.kind == Token::Kind::Identifier &&
         # Peek ahead after {% to determine if this is a control or expression
         # Handles whitespace/newlines like original parser's next_token_skip_space_or_newline
         private def peek_macro_keyword_after_lbracepercent : String?
-          return nil unless current_token.kind == Token::Kind::LBracePercent
-
           saved_index = @index
           saved_previous = @previous_token
 
-          advance # skip {%
+          if current_token.kind == Token::Kind::LBracePercent
+            advance # skip {%
+          elsif current_token.kind == Token::Kind::LBrace && peek_token.kind == Token::Kind::Percent
+            advance # skip {
+            advance # skip %
+          else
+            return nil
+          end
 
           # Skip optional trim token (-)
           if macro_trim_token?(current_token)
@@ -13280,7 +13285,7 @@ current_token.kind == Token::Kind::Identifier &&
         private def parse_macro_control_piece(left_trim : Bool)
           start_token = current_token
 
-          unless start_token.kind == Token::Kind::LBracePercent
+          unless macro_control_start?
             emit_unexpected(start_token)
             return {MacroPiece.text("", start_token.span), :none, false}
           end
@@ -13291,7 +13296,8 @@ current_token.kind == Token::Kind::Identifier &&
 
           if handled_as_control
             # BRANCH A: Macro control (if, for, begin, verbatim, etc.)
-            advance # consume {% (combined token)
+            start_span = consume_macro_control_start
+            return {MacroPiece.text("", start_token.span), :none, false} unless start_span
 
             if macro_trim_token?(current_token)
               left_trim = true
@@ -13340,7 +13346,7 @@ current_token.kind == Token::Kind::Identifier &&
             end
 
             unless end_span
-              end_span = start_token.span
+              end_span = start_span
             end
 
             newline_escape = consume_macro_newline_escape?
@@ -13357,7 +13363,7 @@ current_token.kind == Token::Kind::Identifier &&
                      MacroPiece::Kind::ControlStart
                    end
 
-            control_span = start_token.span.cover(end_span)
+            control_span = start_span.cover(end_span)
             piece = MacroPiece.control(kind, keyword, expr, left_trim, right_trim, iter_vars, iterable, control_span)
 
             effect = case keyword
@@ -13373,7 +13379,8 @@ current_token.kind == Token::Kind::Identifier &&
           else
             # BRANCH B: Macro expression (not a control keyword)
             # Examples: {% x = 1 %}, {% @type %}, {% raise "error" %}
-            advance # consume {% (combined token)
+            start_span = consume_macro_control_start
+            return {MacroPiece.text("", start_token.span), :none, false} unless start_span
 
             if macro_trim_token?(current_token)
               left_trim = true
@@ -13405,11 +13412,11 @@ current_token.kind == Token::Kind::Identifier &&
 
             right_trim = macro_trim_operator?
             closing_span = consume_macro_close_span("Expected '%}' after macro expression")
-            closing_span ||= start_token.span
+            closing_span ||= start_span
             newline_escape = consume_macro_newline_escape?
             skip_whitespace = newline_escape || right_trim
 
-            macro_span = start_token.span.cover(closing_span)
+            macro_span = start_span.cover(closing_span)
             macro_expr_id = @arena.add_typed(MacroExpressionNode.new(macro_span, expr))
             piece = MacroPiece.expression(macro_expr_id, left_trim, right_trim, macro_span)
             {piece, :none, skip_whitespace}
@@ -13463,41 +13470,37 @@ current_token.kind == Token::Kind::Identifier &&
         # Called from parse_prefix when seeing {% token sequence.
         # Returns MacroIfNode or MacroForNode when possible; falls back to raw MacroLiteral.
         private def parse_percent_macro_control : ExprId
-          keyword_peek = peek_macro_keyword_after_lbracepercent
-          if keyword_peek && keyword_peek.in?("if", "unless", "for", "begin", "verbatim")
-            start_span = consume_macro_control_start
-            return PREFIX_ERROR unless start_span
+          saved_index = @index
+          saved_previous = @previous_token
 
-            if macro_trim_token?(current_token)
-              advance
-            end
+          start_span = consume_macro_control_start
+          return PREFIX_ERROR unless start_span
 
-            skip_macro_whitespace # Must skip newlines inside {% %} even outside macro_context
-
-            keyword_token = current_token
-            keyword_index = @index
-            keyword = token_text(keyword_token)
+          if macro_trim_token?(current_token)
             advance
-
-            skip_macro_whitespace # Same: inside {% %} block
-
-            case keyword
-            when "if", "unless"
-              return parse_macro_if_control(start_span, keyword)
-            when "for"
-              return parse_macro_for_control(start_span)
-            when "begin"
-              return parse_macro_begin_control(start_span)
-            when "verbatim"
-              return parse_macro_verbatim_control(start_span)
-            else
-              expr = parse_macro_expression_control(start_span, keyword_token, keyword_index)
-              skip_trivia
-              expect_macro_close("Expected '%}' after macro expression")
-              return expr
-            end
           end
 
+          skip_macro_whitespace # Must skip newlines inside {% %} even outside macro_context
+
+          keyword_token = current_token
+          keyword = token_text(keyword_token)
+          advance
+
+          skip_macro_whitespace # Same: inside {% %} block
+
+          case keyword
+          when "if", "unless"
+            return parse_macro_if_control(start_span, keyword)
+          when "for"
+            return parse_macro_for_control(start_span)
+          when "begin"
+            return parse_macro_begin_control(start_span)
+          when "verbatim"
+            return parse_macro_verbatim_control(start_span)
+          end
+
+          @index = saved_index
+          @previous_token = saved_previous
           start_span = current_token.span
           fast_forward_percent_block
           end_span = @previous_token ? @previous_token.not_nil!.span : start_span

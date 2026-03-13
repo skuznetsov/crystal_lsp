@@ -3,6 +3,25 @@
 Updated: 2026-03-12
 Context: compiler/bootstrap/stage2-stability
 
+[LM-160|verify]: `parse_percent_macro_control` no longer needs to trust the
+pre-consume `keyword_peek` object to dispatch recognized `%` control blocks on
+fresh self-hosted stage2. The verified local fix is twofold: make
+`peek_macro_keyword_after_lbracepercent` / `parse_macro_control_piece` accept
+split `{` + `%` starts, and in `parse_percent_macro_control` dispatch from the
+real consumed keyword token instead of the old `keyword_peek && keyword_peek.in?(...)`
+guard. Fresh debug stage1 `/private/tmp/stage1_dbg_enum_parse_append_20260312`
+still parses `Errno` correctly, and fresh guarded self-hosted stage2
+`/private/tmp/stage2_dbg_enum_parse_append_20260312` now moves the old focused
+oracle forward: `bash regression_tests/stage2_errno_unsafe_message_repro.sh /private/tmp/stage2_dbg_enum_parse_append_20260312`
+reports `not reproduced (compiler exited 139 after the old Errno signature disappeared)`.
+Direct trace on the same stage2 with
+`DEBUG_ENUM_PARSE_BODY=Errno DEBUG_MACRO_CTRL=1 CRYSTAL_V2_STOP_AFTER_HIR=1`
+shows `[MACRO_CTRL_MATCH] start=166 keyword_token=45:for`, proving the old
+`% for` -> raw `MacroLiteral` fallback at the front of `Errno` is gone.
+Boundary: the compiler still crashes with `139`, but now deeper inside
+`parse_macro_for_control` / macro-body parsing, before the first enum-body
+append. {F/G/R: 0.95/0.72/0.96} [verified]
+
 [LM-159|repro]: the current post-`LibX::Foo` self-hosted frontier has a faster focused enum-method oracle on `src/stdlib/errno.cr`. The new script `regression_tests/stage2_errno_unsafe_message_repro.sh` runs `--no-prelude` with `CRYSTAL_V2_STOP_AFTER_HIR=1`, `DEBUG_ENUM_ARENA=Errno`, and `DEBUG_DEF_ARENA=Errno`, and reports failure only when the compiler reaches `Errno#unsafe_message`, never reaches `Errno.value`, and still logs generic `CrystalV2::Compiler::Frontend::Node` body candidates. On the current verified class-fastpath pair it cleanly brackets the stages: `/private/tmp/stage1_dbg_class_current_fastpath_20260312` reports `not reproduced`, while `/private/tmp/stage2_dbg_class_current_fastpath_20260312` reports `reproduced: stage2 corrupted Errno#unsafe_message before reaching Errno.value`. The same diagnostic run also shows that fresh stage2 reaches `Errno` member extraction (`members_done=1`, `body_done=1`) before dying in enum method registration, so the active frontier is now narrower than generic enum registration and sits specifically in `Errno#unsafe_message` return-type inference / body carrier corruption. {F/G/R: 0.97/0.77/0.97} [verified]
 
 [LM-158|verify]: bypassing the unnecessary arena-switch round trip when the current arena already fits is a verified self-hosted stage2 frontier shift for tiny `lib struct` HIR crashes, but it is not yet the final stage2 fix. Fresh debug stage1 `/private/tmp/stage1_dbg_class_current_fastpath_20260312` builds in `9.11s`, and broad adversary `regression_tests/run_all.sh /private/tmp/stage1_dbg_class_current_fastpath_20260312` finishes `68 passed, 0 failed`. Fresh guarded self-hosted stage2 produces `/private/tmp/stage2_dbg_class_current_fastpath_20260312` with `status=0`. On that fresh stage2, the tiny no-prelude oracle `env CRYSTAL_V2_STOP_AFTER_HIR=1 ... --no-prelude /tmp/lib_struct_trace_20260312.cr` now exits `0`, the updated `regression_tests/stage2_type_decl_node_identity_repro.sh` cleanly brackets old/new binaries (`reproduced` on stale `/private/tmp/stage2_dbg_nested_fetch_20260312`, `not reproduced` on the fresh fixed stage2), and the older `regression_tests/stage2_lib_struct_bodyless_repro.sh` remains green. Boundary: `scripts/stage2_minimal_compile_repro.sh /private/tmp/stage2_dbg_class_current_fastpath_20260312` still exits `138` after full prelude and target-file parsing, so the bootstrap frontier has moved again but not disappeared. {F/G/R: 0.95/0.73/0.96} [verified]

@@ -24,6 +24,30 @@ closure cells, Tuple ptr/value confusion.
 
 ### Current checkpoint (2026-03-12 focused Errno enum-method no-prelude oracle)
 
+- Verified a narrower self-hosted parser fix in `parse_percent_macro_control`:
+  it now dispatches from the consumed macro keyword instead of trusting the
+  pre-consume `keyword_peek` guard, and `peek_macro_keyword_after_lbracepercent`
+  / `parse_macro_control_piece` now accept split `{` + `%` starts too.
+- Fresh verification on the current debug pair:
+  - `stage1 debug` rebuilt on `/private/tmp/stage1_dbg_enum_parse_append_20260312`
+    (`real 10.34`)
+  - fresh guarded `stage2 debug` rebuilt on
+    `/private/tmp/stage2_dbg_enum_parse_append_20260312`
+    (`status=0`)
+  - old focused regression moved:
+    - `bash regression_tests/stage2_errno_unsafe_message_repro.sh /private/tmp/stage2_dbg_enum_parse_append_20260312`
+      -> `not reproduced (compiler exited 139 after the old Errno signature disappeared)`
+- New direct trace on the fresh stage2:
+  - `env DEBUG_ENUM_PARSE_BODY=Errno DEBUG_MACRO_CTRL=1 CRYSTAL_V2_STOP_AFTER_HIR=1 /private/tmp/stage2_dbg_enum_parse_append_20260312 --no-prelude src/stdlib/errno.cr ...`
+    now logs:
+    - `[MACRO_CTRL_ENTRY] ... keyword_peek=for`
+    - `[MACRO_CTRL_MATCH] start=166 keyword_token=45:for`
+    - then crashes with `139` before the first enum-body append
+- Boundary learned:
+  - the old `% for` -> raw `MacroLiteral` fallback at the front of `Errno` is gone;
+  - the active frontier has moved deeper into `parse_macro_for_control` / macro-body
+    parsing, earlier than the old `Errno#unsafe_message` method-registration crash.
+
 - Verified that the post-`LibX::Foo` frontier has a faster focused oracle than
   full `puts 1`: `src/stdlib/errno.cr` under `--no-prelude` with
   `CRYSTAL_V2_STOP_AFTER_HIR=1`.
