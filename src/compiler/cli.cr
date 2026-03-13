@@ -846,8 +846,8 @@ module CrystalV2
 
         stage2_debug("[STAGE2_DEBUG] hir setup start", err_io)
         first_arena = all_arenas.unsafe_fetch(0).arena
-        sources_by_arena = {} of Frontend::ArenaLike => String
-        paths_by_arena = {} of Frontend::ArenaLike => String
+        sources_by_arena = Hash(UInt64, String).new(initial_capacity: all_arenas.size)
+        paths_by_arena = Hash(UInt64, String).new(initial_capacity: all_arenas.size)
         main_arenas = [] of Frontend::ArenaLike
         # Populate arena→path and arena→source maps from all_arenas.
         # Required for __FILE__/__DIR__ resolution and diagnostics.
@@ -861,17 +861,18 @@ module CrystalV2
             log(options, out_io, "    [hir-arena] idx=#{arena_map_i} size=#{map_arena.size} roots=#{map_entry.roots.size} path=#{map_path}")
           end
           main_arenas << map_arena
-          paths_by_arena[map_arena] = map_path
-          sources_by_arena[map_arena] = map_source
+          map_key = map_arena.object_id.to_u64
+          paths_by_arena[map_key] = map_path
+          sources_by_arena[map_key] = map_source
           arena_map_i += 1
         end
-        stage2_debug("[STAGE2_DEBUG] hir setup maps ready size=#{sources_by_arena.size}", err_io)
-        hir_converter = HIR::AstToHir.new(first_arena, input_file, sources_by_arena, paths_by_arena, main_arenas)
+        stage2_debug("[STAGE2_DEBUG] hir setup maps ready size=#{main_arenas.size}", err_io)
+        hir_mod = HIR::Module.new(input_file)
+        hir_mod.bootstrap_reinitialize_runtime_state
+        hir_converter = HIR::AstToHir.new(first_arena, input_file, sources_by_arena, paths_by_arena, main_arenas, hir_module: hir_mod, link_libraries: link_libs)
         stage2_debug("[STAGE2_DEBUG] hir converter created", err_io)
-        hir_mod = hir_converter.module
         STDERR.puts "[DEBUG_STAGE1] hir_converter=#{hir_converter.object_id} module=#{hir_mod.object_id} link_libs=#{link_libs.size}"
         STDERR.flush
-        link_libs.each { |lib_name| hir_mod.add_link_library(lib_name) }
         stage2_debug("[STAGE2_DEBUG] hir link libs attached", err_io)
         stage2_debug("[STAGE2_DEBUG] top-level collection init", err_io)
 
@@ -1010,7 +1011,7 @@ module CrystalV2
                 stack << expr_node.body
               when Frontend::ConstantNode
                 if debug_filter && (debug_filter == "1" || String.new(expr_node.name) == debug_filter)
-                  path = paths_by_arena[arena]? || "(unknown)"
+                  path = paths_by_arena[arena.object_id.to_u64]? || "(unknown)"
                   STDERR.puts "[PRE_SCAN_CONST] owner=#{owner} name=#{String.new(expr_node.name)} file=#{path}"
                 end
                 hir_converter.register_constant(expr_node, owner)
@@ -1018,7 +1019,7 @@ module CrystalV2
                 target = arena[expr_node.target]
                 if target.is_a?(Frontend::ConstantNode)
                   if debug_filter && (debug_filter == "1" || String.new(target.name) == debug_filter)
-                    path = paths_by_arena[arena]? || "(unknown)"
+                    path = paths_by_arena[arena.object_id.to_u64]? || "(unknown)"
                     STDERR.puts "[PRE_SCAN_CONST] owner=#{owner} name=#{String.new(target.name)} file=#{path}"
                   end
                   hir_converter.register_constant_value(String.new(target.name), expr_node.value, arena, owner)
@@ -1257,7 +1258,7 @@ module CrystalV2
           hir_converter.lower_main(main_exprs)
         end
 
-        after_lower_main = hir_converter.module.function_count
+        after_lower_main = hir_mod.function_count
         STDERR.puts "[PHASE_STATS] After lower_main: #{after_lower_main} functions" if ENV.has_key?("CRYSTAL_V2_PHASE_STATS")
 
         # Pass 2.5: AST reachability pre-filter (experimental, opt-in)
@@ -1293,10 +1294,10 @@ module CrystalV2
         hir_converter.refresh_void_type_params
 
         STDERR.puts "  Getting HIR module..." if options.progress
-        hir_module = hir_converter.module
+        hir_module = hir_mod
         STDERR.puts "  Got HIR module with #{hir_module.functions.size} functions" if options.progress
         timings["dbg_count_hir_funcs_before_rta"] = hir_module.functions.size.to_f if debug_profile
-        options.link_libraries = hir_module.link_libraries.dup
+        options.link_libraries = link_libs.dup
         log(options, out_io, "  Functions: #{hir_module.functions.size}")
         timings["hir"] = (Time.instant - hir_start).total_milliseconds if options.stats
         timings["hir_funcs"] = hir_module.functions.size.to_f if options.stats
@@ -2355,9 +2356,7 @@ module CrystalV2
         when Frontend::MacroLiteralNode
           macro_literal_require_texts(arena, node, Runtime.target_flags).each do |text|
             next unless text.includes?("require")
-            # Extract require paths from text (handles optional whitespace/quotes).
-            text.scan(/\brequire\s*["']?([^"'\s]+)["']?/) do |match|
-              req_path = match[1]
+            scan_source_require_literals(text) do |req_path|
               resolved = resolve_require_path(req_path, base_dir, input_file)
               case resolved
               when String
@@ -2580,7 +2579,7 @@ module CrystalV2
         pending_annotations : Array(Frontend::AnnotationNode),
         acyclic_types : Set(String),
         flags : Set(String),
-        sources_by_arena : Hash(Frontend::ArenaLike, String),
+        sources_by_arena : Hash(UInt64, String),
         source : String,
         depth : Int32 = 0,
         collect_main_exprs : Bool = true
@@ -2652,7 +2651,7 @@ module CrystalV2
                 if parsed = parse_macro_literal_program(combined)
                   program, sanitized = parsed
                   parsed_any = true
-                  sources_by_arena[program.arena] = sanitized
+                  sources_by_arena[program.arena.object_id.to_u64] = sanitized
                   program.roots.each do |inner_id|
                     collect_top_level_nodes(program.arena, arena_index, inner_id, def_nodes, class_nodes, module_nodes, enum_nodes, macro_nodes, alias_nodes, lib_nodes, constant_exprs, main_exprs, pending_annotations, acyclic_types, flags, sources_by_arena, sanitized, depth + 1, false)
                   end
@@ -2702,7 +2701,7 @@ module CrystalV2
               unless expanded.strip.empty?
                 if parsed = parse_top_level_macro_expansion(expanded)
                   program, exp_source = parsed
-                  sources_by_arena[program.arena] = exp_source
+                  sources_by_arena[program.arena.object_id.to_u64] = exp_source
                   program.roots.each do |inner_id|
                     collect_top_level_nodes(program.arena, arena_index, inner_id, def_nodes, class_nodes, module_nodes, enum_nodes, macro_nodes, alias_nodes, lib_nodes, constant_exprs, main_exprs, pending_annotations, acyclic_types, flags, sources_by_arena, exp_source, depth + 1, false)
                   end
@@ -2716,7 +2715,7 @@ module CrystalV2
             unless combined.strip.empty? || combined.includes?("{%")
               if parsed = parse_macro_literal_program(combined)
                 program, sanitized = parsed
-                sources_by_arena[program.arena] = sanitized
+                sources_by_arena[program.arena.object_id.to_u64] = sanitized
                 program.roots.each do |inner_id|
                   collect_top_level_nodes(program.arena, arena_index, inner_id, def_nodes, class_nodes, module_nodes, enum_nodes, macro_nodes, alias_nodes, lib_nodes, constant_exprs, main_exprs, pending_annotations, acyclic_types, flags, sources_by_arena, sanitized, depth + 1, false)
                 end
@@ -2776,7 +2775,7 @@ module CrystalV2
         pending_annotations : Array(Frontend::AnnotationNode),
         acyclic_types : Set(String),
         flags : Set(String),
-        sources_by_arena : Hash(Frontend::ArenaLike, String),
+        sources_by_arena : Hash(UInt64, String),
         depth : Int32
       ) : Nil
         return if depth > 3
@@ -2818,7 +2817,7 @@ module CrystalV2
         # Parse the expanded text (which may contain {% %} / {{ }} inside struct bodies)
         if parsed = parse_top_level_macro_expansion(expanded)
           program, exp_source = parsed
-          sources_by_arena[program.arena] = exp_source
+          sources_by_arena[program.arena.object_id.to_u64] = exp_source
           program.roots.each do |inner_id|
             collect_top_level_nodes(program.arena, arena_index, inner_id, def_nodes, class_nodes, module_nodes, enum_nodes, macro_nodes, alias_nodes, lib_nodes, constant_exprs, main_exprs, pending_annotations, acyclic_types, flags, sources_by_arena, exp_source, depth + 1, false)
           end
@@ -2852,17 +2851,8 @@ module CrystalV2
           iterable_text = iterable_text.strip
 
           # Direct %w() word list
-          if iterable_text.starts_with?("%w(") && iterable_text.ends_with?(")")
-            inner = iterable_text[3, iterable_text.size - 4]
-            return inner.split(/\s+/).reject(&.empty?)
-          end
-          if iterable_text.starts_with?("%w[") && iterable_text.ends_with?("]")
-            inner = iterable_text[3, iterable_text.size - 4]
-            return inner.split(/\s+/).reject(&.empty?)
-          end
-          if iterable_text.starts_with?("%w{") && iterable_text.ends_with?("}")
-            inner = iterable_text[3, iterable_text.size - 4]
-            return inner.split(/\s+/).reject(&.empty?)
+          if words = parse_macro_word_list_text(iterable_text)
+            return words
           end
 
           # Variable reference - look up in tracked macro vars
@@ -2880,17 +2870,8 @@ module CrystalV2
       private def resolve_macro_text_value(text : String) : Array(String)?
         text = text.strip
         # %w() word list
-        if text.starts_with?("%w(") && text.ends_with?(")")
-          inner = text[3, text.size - 4]
-          return inner.split(/\s+/).reject(&.empty?)
-        end
-        if text.starts_with?("%w[") && text.ends_with?("]")
-          inner = text[3, text.size - 4]
-          return inner.split(/\s+/).reject(&.empty?)
-        end
-        if text.starts_with?("%w{") && text.ends_with?("}")
-          inner = text[3, text.size - 4]
-          return inner.split(/\s+/).reject(&.empty?)
+        if words = parse_macro_word_list_text(text)
+          return words
         end
         # Variable reference to another macro var
         if text.matches?(/\A[a-z_][a-z0-9_]*\z/)
@@ -2899,6 +2880,71 @@ module CrystalV2
           end
         end
         nil
+      end
+
+      private def parse_macro_word_list_text(text : String) : Array(String)?
+        return nil unless text.size >= 4
+        return nil unless text.starts_with?("%w") || text.starts_with?("%i")
+
+        open_delim = text[2]
+        close_delim = macro_word_list_closer(open_delim)
+        return nil unless close_delim
+        return nil unless text.ends_with?(close_delim.to_s)
+
+        inner = text[3, text.size - 4]
+        split_macro_word_list_inner(inner)
+      end
+
+      private def split_macro_word_list_inner(inner : String) : Array(String)
+        words = [] of String
+        current = IO::Memory.new
+        i = 0
+        bytesize = inner.bytesize
+
+        while i < bytesize
+          Frontend::Watchdog.check!
+          byte = inner.byte_at(i)
+          char = byte.chr
+
+          if char.ascii_whitespace?
+            unless current.size == 0
+              words << String.new(current.to_slice)
+              current.clear
+            end
+            i += 1
+            next
+          end
+
+          if char == '\\'
+            i += 1
+            if i < bytesize
+              current.write_byte(inner.byte_at(i))
+            end
+            i += 1
+            next
+          end
+
+          current.write_byte(byte)
+          i += 1
+        end
+
+        unless current.size == 0
+          words << String.new(current.to_slice)
+        end
+
+        words
+      end
+
+      private def macro_word_list_closer(open_delim : Char) : Char?
+        case open_delim
+        when '(' then ')'
+        when '[' then ']'
+        when '{' then '}'
+        when '<' then '>'
+        when '|' then '|'
+        else
+          nil
+        end
       end
 
       # Use the MacroExpander to fully expand a MacroLiteralNode that contains

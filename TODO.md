@@ -22,6 +22,60 @@ closure cells, Tuple ptr/value confusion.
 - [ ] **Phase 5: FIX RC-3** — String.build block lowering
 - [ ] **Phase 6: RE-ENABLE RTA + BOOTSTRAP** — stage0→stage1→stage2→stage3 + benchmark
 
+### Current checkpoint (2026-03-13 CLI manual `%w/%i` split moves the old top-level macro collection frontier)
+
+- Verified a narrower CLI-side fix in `src/compiler/cli.cr`:
+  - `resolve_top_level_macro_iterable(...)` and `resolve_macro_text_value(...)`
+    no longer call `inner.split(/\s+/).reject(&.empty?)`;
+  - they now share `parse_macro_word_list_text(...)` and
+    `split_macro_word_list_inner(...)`, a byte-wise `%w/%i` splitter that uses
+    `IO::Memory`, flushes only on ASCII whitespace, and preserves escaped bytes.
+- Why this is the right corridor:
+  - stale fresh stage2 `/private/tmp/stage2_dbg_require_scan_20260313` had
+    already moved past the old `process_require_node` regex crash, but tiny
+    `puts 1` still died during full-prelude top-level collection;
+  - the fresh binary with only this additional splitter change,
+    `/private/tmp/stage2_dbg_cli_macro_word_split_20260313`, still exits `139`,
+    but `STAGE2_DEBUG=1` now shows it getting much farther through HIR setup:
+    it reaches `top-level collection done` and `pre-scan constants done`, while
+    the stale baseline dies earlier, before top-level collection completes.
+- New focused regression:
+  - `regression_tests/stage2_cli_macro_collection_repro.sh`
+  - it runs a tiny `puts 1` build with
+    `STAGE2_DEBUG=1 CRYSTAL_V2_STOP_AFTER_HIR=1` and reports failure only when
+    the compiler still dies before `top-level collection done`; success means
+    the old top-level macro collection frontier is gone, even if a later crash
+    remains.
+- Fresh verification on the exact debug pair:
+  - `stage1 debug`:
+    - `/usr/bin/time -p scripts/build_stage1_original_debug.sh /private/tmp/stage1_dbg_cli_macro_word_split_20260313`
+      -> `real 8.53`
+  - `stage2 debug`:
+    - `/usr/bin/time -p scripts/build_stage2_debug.sh /private/tmp/stage1_dbg_cli_macro_word_split_20260313 /private/tmp/stage2_dbg_cli_macro_word_split_20260313`
+      -> `status=0`
+      -> `real 515.92`
+  - focused oracle:
+    - `bash regression_tests/stage2_cli_macro_collection_repro.sh /private/tmp/stage2_dbg_require_scan_20260313`
+      -> `reproduced: stage2 still crashed before top-level macro collection completed`
+    - `bash regression_tests/stage2_cli_macro_collection_repro.sh /private/tmp/stage2_dbg_cli_macro_word_split_20260313`
+      -> `not reproduced (compiler moved past the old top-level macro collection frontier)`
+    - `bash regression_tests/stage2_cli_macro_collection_repro.sh /private/tmp/stage1_dbg_cli_macro_word_split_20260313`
+      -> `not reproduced (compiler moved past the old top-level macro collection frontier)`
+  - broad adversary:
+    - `regression_tests/run_all.sh /private/tmp/stage1_dbg_cli_macro_word_split_20260313`
+      -> `68 passed, 0 failed`
+- Direct boundary on the fresh stage2:
+  - `scripts/stage2_minimal_compile_repro.sh /private/tmp/stage2_dbg_cli_macro_word_split_20260313`
+    still exits `139`;
+  - batch LLDB on the same binary no longer points at the old
+    `CLI#resolve_top_level_macro_iterable -> String#split` corridor; the crash
+    head is back in `Regex::MatchData#byte_end`;
+  - `STAGE2_DEBUG=1 CRYSTAL_V2_STOP_AFTER_HIR=1` shows the new boundary more
+    precisely: the fresh binary reaches `pre-scan constants done` and then dies
+    before the next Pass 1 progress markers, so the active blocker has moved
+    deeper into post-collection HIR type registration, not the old macro-word
+    iterable split path.
+
 ### Current checkpoint (2026-03-13 def-body arena gate rejects generic enum method bodies)
 
 - Verified a narrower HIR-side fix in `src/compiler/hir/ast_to_hir.cr`:

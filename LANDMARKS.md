@@ -3,6 +3,34 @@
 Updated: 2026-03-13
 Context: compiler/bootstrap/stage2-stability
 
+[LM-167|verify]: the stale self-hosted CLI `%w/%i` top-level macro iterable
+splitter was a real, isolated frontier, and a narrow byte-wise replacement
+moves stage2 materially deeper without touching parser/HIR architecture. The
+verified local fix in `src/compiler/cli.cr` is to remove
+`inner.split(/\s+/).reject(&.empty?)` from
+`resolve_top_level_macro_iterable(...)` and `resolve_macro_text_value(...)`,
+replace it with `parse_macro_word_list_text(...)`, and reuse a byte-wise
+`split_macro_word_list_inner(...)` scanner that accumulates into `IO::Memory`
+and preserves escaped bytes. The new oracle
+`regression_tests/stage2_cli_macro_collection_repro.sh` cleanly brackets the
+frontier on the exact dirty baseline that already included the earlier require
+scan hardening: stale stage2 `/private/tmp/stage2_dbg_require_scan_20260313`
+reports `reproduced: stage2 still crashed before top-level macro collection completed`,
+while fresh exact stage2 `/private/tmp/stage2_dbg_cli_macro_word_split_20260313`
+and fresh exact stage1 `/private/tmp/stage1_dbg_cli_macro_word_split_20260313`
+both report `not reproduced (compiler moved past the old top-level macro collection frontier)`.
+Fresh debug stage1 builds in `8.53s`, fresh guarded self-hosted stage2 builds
+successfully in `515.92s`, and broad adversary
+`regression_tests/run_all.sh /private/tmp/stage1_dbg_cli_macro_word_split_20260313`
+stays clean with `68 passed, 0 failed`. Boundary: full-prelude tiny `puts 1`
+still exits `139`, but `STAGE2_DEBUG=1 CRYSTAL_V2_STOP_AFTER_HIR=1` now shows
+the fresh binary reaching `top-level collection done` and `pre-scan constants done`
+before dying, whereas the stale baseline dies earlier during collection.
+Fresh LLDB no longer points at `CLI#resolve_top_level_macro_iterable`; the
+crash head is back in `Regex::MatchData#byte_end`, so the active blocker has
+moved deeper into post-collection HIR type registration rather than the old
+macro-word iterable split path. {F/G/R: 0.96/0.78/0.97} [verified]
+
 [LM-166|verify]: the fresh self-hosted enum-method return-inference crash was
 another false-positive arena-fit bug, not a deeper `collect_return_types`
 problem. The decisive tiny `E.value` trace showed that stale stage2
