@@ -957,6 +957,7 @@ module CrystalV2
           timings["dbg_count_hir_acyclic_types"] = acyclic_types.size.to_f
         end
 
+        hir_phase_start = Time.instant if debug_profile
         stage2_debug("[STAGE2_DEBUG] seed top-level names start", err_io)
         top_level_type_names = Set(String).new
         i = 0
@@ -1004,6 +1005,10 @@ module CrystalV2
           hir_converter.seed_top_level_class_kinds(top_level_class_kinds)
         end
         stage2_debug("[STAGE2_DEBUG] seed top-level names done", err_io)
+        if debug_profile
+          timings["dbg_ms_hir_seed_names"] = (Time.instant - hir_phase_start.not_nil!).total_milliseconds
+          hir_phase_start = Time.instant
+        end
 
         # Pre-scan constant definitions so nested classes can resolve outer constants
         # across reopened types (require order interleaves files).
@@ -1094,6 +1099,10 @@ module CrystalV2
           i += 1
         end
         stage2_debug("[STAGE2_DEBUG] pre-scan constants done", err_io)
+        if debug_profile
+          timings["dbg_ms_hir_prescan_const"] = (Time.instant - hir_phase_start.not_nil!).total_milliseconds
+          hir_phase_start = Time.instant
+        end
         if const_map_trace
           STDERR.puts "[CONST_MAP] phase=pre_scan_done literals=#{hir_converter.constant_literal_values.size} types=#{hir_converter.constant_types.size}"
         end
@@ -1124,6 +1133,10 @@ module CrystalV2
           hir_converter.register_lib(entry.node, entry.annotations)
         end
         stage2_debug("[STAGE2_DEBUG] lib register done", err_io)
+        if debug_profile
+          timings["dbg_ms_hir_reg_libs"] = (Time.instant - hir_phase_start.not_nil!).total_milliseconds
+          hir_phase_start = Time.instant
+        end
         if const_map_trace
           STDERR.puts "[CONST_MAP] phase=lib_register_done literals=#{hir_converter.constant_literal_values.size} types=#{hir_converter.constant_types.size}"
         end
@@ -1154,6 +1167,10 @@ module CrystalV2
           hir_converter.recompute_c_struct_sizes
         end
         stage2_debug("[STAGE2_DEBUG] recompute_c_struct_sizes returned", err_io)
+        if debug_profile
+          timings["dbg_ms_hir_reg_enums"] = (Time.instant - hir_phase_start.not_nil!).total_milliseconds
+          hir_phase_start = Time.instant
+        end
         log(options, out_io, "    Aliases: #{alias_nodes.size}")
         alias_count = alias_nodes.size
         stage2_debug("[STAGE2_DEBUG] alias register start count=#{alias_count}", err_io)
@@ -1165,6 +1182,10 @@ module CrystalV2
           hir_converter.register_alias(n)
         end
         stage2_debug("[STAGE2_DEBUG] alias register done", err_io)
+        if debug_profile
+          timings["dbg_ms_hir_reg_aliases"] = (Time.instant - hir_phase_start.not_nil!).total_milliseconds
+          hir_phase_start = Time.instant
+        end
         if const_map_trace
           STDERR.puts "[CONST_MAP] phase=alias_register_done literals=#{hir_converter.constant_literal_values.size} types=#{hir_converter.constant_types.size}"
         end
@@ -1182,6 +1203,10 @@ module CrystalV2
           hir_converter.register_macro(n)
         end
         stage2_debug("[STAGE2_DEBUG] macro register done", err_io)
+        if debug_profile
+          timings["dbg_ms_hir_reg_macros"] = (Time.instant - hir_phase_start.not_nil!).total_milliseconds
+          hir_phase_start = Time.instant
+        end
         if const_map_trace
           STDERR.puts "[CONST_MAP] phase=macro_register_done literals=#{hir_converter.constant_literal_values.size} types=#{hir_converter.constant_types.size}"
         end
@@ -1203,6 +1228,10 @@ module CrystalV2
           end
         end
         stage2_debug("[STAGE2_DEBUG] module register done", err_io)
+        if debug_profile
+          timings["dbg_ms_hir_reg_modules"] = (Time.instant - hir_phase_start.not_nil!).total_milliseconds
+          hir_phase_start = Time.instant
+        end
         if const_map_trace
           STDERR.puts "[CONST_MAP] phase=module_register_done literals=#{hir_converter.constant_literal_values.size} types=#{hir_converter.constant_types.size}"
         end
@@ -1219,6 +1248,10 @@ module CrystalV2
           STDERR.print "\r    Registered class #{i+1}/#{class_nodes.size}" if options.progress && (i % 10 == 0 || i == class_nodes.size - 1)
         end
         stage2_debug("[STAGE2_DEBUG] class register done", err_io)
+        if debug_profile
+          timings["dbg_ms_hir_reg_classes"] = (Time.instant - hir_phase_start.not_nil!).total_milliseconds
+          hir_phase_start = Time.instant
+        end
         if const_map_trace
           STDERR.puts "[CONST_MAP] phase=class_register_done literals=#{hir_converter.constant_literal_values.size} types=#{hir_converter.constant_types.size}"
         end
@@ -1244,6 +1277,10 @@ module CrystalV2
           end
         end
         stage2_debug("[STAGE2_DEBUG] constant register done", err_io)
+        if debug_profile
+          timings["dbg_ms_hir_reg_constants"] = (Time.instant - hir_phase_start.not_nil!).total_milliseconds
+          hir_phase_start = Time.instant
+        end
         if const_map_trace
           STDERR.puts "[CONST_MAP] phase=constant_register_done literals=#{hir_converter.constant_literal_values.size} types=#{hir_converter.constant_types.size}"
         end
@@ -1253,6 +1290,10 @@ module CrystalV2
         log(options, out_io, "  Flushing pending monomorphizations...")
         hir_converter.flush_pending_monomorphizations
         stage2_debug("[STAGE2_DEBUG] flush_pending_monomorphizations done", err_io)
+        if debug_profile
+          timings["dbg_ms_hir_flush_mono"] = (Time.instant - hir_phase_start.not_nil!).total_milliseconds
+          hir_phase_start = Time.instant
+        end
 
         # Refresh union descriptors now that all types are registered
         stage2_debug("[STAGE2_DEBUG] refresh_union_descriptors start", err_io)
@@ -1262,6 +1303,10 @@ module CrystalV2
         stage2_debug("[STAGE2_DEBUG] refresh_void_type_params start", err_io)
         hir_converter.refresh_void_type_params
         stage2_debug("[STAGE2_DEBUG] refresh_void_type_params done", err_io)
+        if debug_profile
+          timings["dbg_ms_hir_refresh_unions"] = (Time.instant - hir_phase_start.not_nil!).total_milliseconds
+          hir_phase_start = Time.instant
+        end
 
         # Pass 2: Register function signatures
         def_count = def_nodes.size
@@ -1276,6 +1321,10 @@ module CrystalV2
           STDERR.print "\r    Registered function #{i+1}/#{def_nodes.size}" if options.progress && (i % 50 == 0 || i == def_nodes.size - 1)
         end
         stage2_debug("[STAGE2_DEBUG] pass2 register_functions done", err_io)
+        if debug_profile
+          timings["dbg_ms_hir_reg_funcs"] = (Time.instant - hir_phase_start.not_nil!).total_milliseconds
+          hir_phase_start = Time.instant
+        end
         if const_map_trace
           STDERR.puts "[CONST_MAP] phase=register_functions_done literals=#{hir_converter.constant_literal_values.size} types=#{hir_converter.constant_types.size}"
         end
@@ -1286,6 +1335,10 @@ module CrystalV2
         stage2_debug("[STAGE2_DEBUG] fixup_inherited_ivars start", err_io)
         hir_converter.fixup_inherited_ivars
         stage2_debug("[STAGE2_DEBUG] fixup_inherited_ivars done", err_io)
+        if debug_profile
+          timings["dbg_ms_hir_fixup_ivars"] = (Time.instant - hir_phase_start.not_nil!).total_milliseconds
+          hir_phase_start = Time.instant
+        end
         if const_map_trace
           STDERR.puts "[CONST_MAP] phase=fixup_inherited_ivars_done literals=#{hir_converter.constant_literal_values.size} types=#{hir_converter.constant_types.size}"
         end
@@ -1340,6 +1393,11 @@ module CrystalV2
         end
         hir_converter.flush_pending_functions unless did_flush
         STDERR.puts "  Main function created" if options.progress
+
+        if debug_profile
+          timings["dbg_ms_hir_lower_bodies"] = (Time.instant - hir_phase_start.not_nil!).total_milliseconds
+          hir_phase_start = Time.instant
+        end
 
         # Refresh generic type params that were captured as VOID after lowering.
         hir_converter.refresh_void_type_params
