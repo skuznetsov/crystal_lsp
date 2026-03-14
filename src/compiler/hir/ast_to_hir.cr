@@ -17375,6 +17375,9 @@ module Crystal::HIR
       class_name : String,
       is_struct : Bool,
     )
+      if env_has?("DEBUG_REG_CLASS") && class_name.includes?("AstToHir")
+        STDERR.puts "[REG_CLASS] #{class_name} body_size=#{node.body.try(&.size) || 0}"
+      end
       # Check if class already exists (class reopening)
       existing_info = @class_info[class_name]?
       mono_debug = env_has?("DEBUG_MONO") && (class_name.starts_with?("Hash(") || class_name.starts_with?("Set("))
@@ -17589,6 +17592,9 @@ module Crystal::HIR
 
         begin
           body_start = Time.instant if mono_debug
+          if env_has?("DEBUG_REG_CLASS") && class_name.ends_with?("AstToHir")
+            STDERR.puts "[REG_CLASS_BODY] #{class_name} about to iterate body, body_size=#{class_body.size} ivars_before=#{ivars.size}"
+          end
           skip_next = false
           class_body.each_with_index do |expr_id, idx|
             if skip_next
@@ -17596,13 +17602,15 @@ module Crystal::HIR
               next
             end
             member = unwrap_visibility_member_in_arena(@arena[expr_id], @arena)
-            if dump_filter = env_get("DEBUG_CLASS_BODY_DUMP")
+            if dump_filter = ENV["DEBUG_CLASS_BODY_DUMP"]?
               if dump_filter == "1" || class_name.includes?(dump_filter)
                 detail = case member
                          when CrystalV2::Compiler::Frontend::DefNode
                            "def=#{String.new(member.name)}"
                          when CrystalV2::Compiler::Frontend::MacroDefNode
                            "macro=#{String.new(member.name)}"
+                         when CrystalV2::Compiler::Frontend::InstanceVarDeclNode
+                           "ivar=#{String.new(member.name)} type=#{String.new(member.type)} has_value=#{!member.value.nil?}"
                          when CrystalV2::Compiler::Frontend::IncludeNode
                            "include"
                          when CrystalV2::Compiler::Frontend::ExtendNode
@@ -17696,6 +17704,10 @@ module Crystal::HIR
                 field_name = String.new(member.name)
                 ivar_name = field_name.starts_with?('@') ? field_name : "@#{field_name}"
                 ivar_type = annotation_type_ref(String.new(member.declared_type), class_name)
+                if env_has?("DEBUG_TYPEDECL_IVAR") && class_name.ends_with?("AstToHir")
+                  has_val = !member.value.nil?
+                  STDERR.puts "[TYPEDECL_IVAR] class=#{class_name} ivar=#{ivar_name} type=#{String.new(member.declared_type)} has_value=#{has_val} already_exists=#{ivars.any? { |iv| iv.name == ivar_name }}"
+                end
                 unless ivars.any? { |iv| iv.name == ivar_name }
                   offset = align_offset(offset, type_alignment(ivar_type, is_c_struct))
                   ivars << IVarInfo.new(ivar_name, ivar_type, offset)
@@ -17930,6 +17942,14 @@ module Crystal::HIR
               elsif !has_block
                 prefer_non_yield_base_name(base_name, member, member_arena)
                 prefer_lower_arity_base_name(base_name, member, member_arena)
+              end
+              # Always register the base name for initialize methods so the
+              # allocator can find the DefNode even when mangled type suffixes
+              # differ (e.g., "SymbolTable" vs "CrystalV2::...::SymbolTable"
+              # due to resolve_type_alias_chain timing differences).
+              if method_name == "initialize" && !@function_defs.has_key?(base_name)
+                set_function_def_entry(base_name, member)
+                set_function_def_arena(base_name, member_arena)
               end
 
               # Track yield-functions for inline expansion.
@@ -19855,6 +19875,19 @@ module Crystal::HIR
       ctx.register_type(alloc.id, class_info.type_ref)
 
       # Initialize instance variables to zero/default or evaluate default expressions
+      if env_has?("DEBUG_ALLOC_DEFAULTS")
+        filter = ENV["DEBUG_ALLOC_DEFAULTS"]? || ""
+        if filter.empty? || class_name.includes?(filter)
+          total = class_info.ivars.size
+          with_defaults = class_info.ivars.count { |iv| iv.default_expr_id != nil }
+          STDERR.puts "[ALLOC_DEFAULTS] class=#{class_name} ivars=#{total} with_defaults=#{with_defaults}"
+          class_info.ivars.each do |iv|
+            has_default = iv.default_expr_id != nil
+            type_name = get_type_name_from_ref(iv.type)
+            STDERR.puts "  #{iv.name}@#{iv.offset} type=#{type_name} default=#{has_default}"
+          end
+        end
+      end
       class_info.ivars.each do |ivar|
         # Check if this is a union type by looking up the type descriptor
         type_desc = @module.get_type_descriptor(ivar.type)
@@ -19933,6 +19966,29 @@ module Crystal::HIR
           ivar_store = FieldSet.new(ctx.next_id, ivar.type, alloc.id, ivar.name, struct_alloc.id, ivar.offset)
           ctx.emit(ivar_store)
           next
+        end
+
+        # For reference-typed ivars (Array, Hash, Set, etc.) that have no default_expr_id,
+        # synthesize a .new call to create an empty collection instead of storing null.
+        # This handles cases where the default expression wasn't captured during class body
+        # scanning (e.g., arena mismatches in large classes like AstToHir).
+        if ivar.default_expr_id.nil? && type_desc
+          is_collection = type_desc.kind == TypeKind::Array ||
+                          type_desc.kind == TypeKind::Hash ||
+                          type_desc.kind == TypeKind::Class
+          if is_collection
+            type_name = get_type_name_from_ref(ivar.type)
+            if type_name.starts_with?("Array(") ||
+               type_name.starts_with?("Hash(") ||
+               type_name.starts_with?("Set(")
+              new_call = try_emit_empty_collection_new(ctx, ivar.type, type_name)
+              if new_call
+                ivar_store = FieldSet.new(ctx.next_id, ivar.type, alloc.id, ivar.name, new_call, ivar.offset)
+                ctx.emit(ivar_store)
+                next
+              end
+            end
+          end
         end
 
         # Use nil for pointer types, 0 for others
@@ -33604,6 +33660,30 @@ module Crystal::HIR
       else
         nil
       end
+    end
+
+    # Emit HIR instructions to create an empty collection (Array, Hash, Set).
+    # Returns the ValueId of the new collection, or nil if emission fails.
+    private def try_emit_empty_collection_new(
+      ctx : LoweringContext,
+      ivar_type : TypeRef,
+      type_name : String,
+    ) : ValueId?
+      # Get or generate the allocator for this type
+      if ci = @class_info[type_name]?
+        new_name = "#{type_name}.new"
+        unless @module.has_function?(new_name)
+          generate_allocator(type_name, ci)
+        end
+        lower_function_if_needed(new_name)
+        # Emit a Call to ClassName.new() with no args
+        call_id = ctx.next_id
+        call = Call.new(call_id, ivar_type, nil, new_name, [] of ValueId)
+        ctx.emit(call)
+        ctx.register_type(call_id, ivar_type)
+        return call_id
+      end
+      nil
     end
 
     # Discover implicit ivars from method body AST nodes.
