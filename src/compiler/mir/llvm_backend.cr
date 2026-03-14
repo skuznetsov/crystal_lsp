@@ -279,7 +279,7 @@ module Crystal::MIR
 
     private def runtime_pointer_backed_union_variant?(type : Type?) : Bool
       return false unless type
-      type.kind.reference? || type.kind.array?
+      type.kind.reference? || type.kind.array? || type.kind.pointer?
     end
 
     private def compute_tuple_type(type : Type) : String

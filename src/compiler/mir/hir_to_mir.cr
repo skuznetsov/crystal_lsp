@@ -652,7 +652,7 @@ module Crystal
 
     private def runtime_pointer_backed_union_variant?(type : Type?) : Bool
       return false unless type
-      type.kind.reference? || type.kind.array?
+      type.kind.reference? || type.kind.array? || type.kind.pointer?
     end
 
     private def finalize_pointer_backed_union_layouts : Nil
@@ -1449,10 +1449,17 @@ module Crystal
                       # are already stored as ptr and don't need offset adjustment).
                       actual_descriptor = @mir_module.get_union_descriptor(found_field.type_ref)
                       if actual_descriptor && !all_ref_union_descriptor?(actual_descriptor)
-                        # GEP past the union header to the payload and load from there.
-                        # The LLVM union type is {i32, [N x i32]} with payload at offset 4
-                        # (sizeof(i32) header).
-                        field_ptr = builder.gep(obj_ptr, [(field.field_offset.to_u32 + 4_u32)], TypeRef::POINTER)
+                        # Only adjust when the FieldGet type is ptr-backed (all-ref union
+                        # or plain reference). If the FieldGet type is ALSO a non-all-ref
+                        # union, the +4 adjustment would cause a double-unwrap.
+                        field_descriptor = @mir_module.get_union_descriptor(field_mir_type)
+                        field_is_allref = field_descriptor ? all_ref_union_descriptor?(field_descriptor) : true
+                        if field_is_allref
+                          # GEP past the union header to the payload and load from there.
+                          # The LLVM union type is {i32, [N x i32]} with payload at offset 4
+                          # (sizeof(i32) header).
+                          field_ptr = builder.gep(obj_ptr, [(field.field_offset.to_u32 + 4_u32)], TypeRef::POINTER)
+                        end
                       end
                     end
                   end
