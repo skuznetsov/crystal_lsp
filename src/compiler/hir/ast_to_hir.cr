@@ -35648,19 +35648,9 @@ module Crystal::HIR
     # This breaks the recursive stack overflow by processing functions iteratively.
     # Each iteration may add more functions to the queue, so we loop until empty.
     private def process_pending_lower_functions
-      max_iterations = 10000 # Safety limit to prevent infinite loops
-      iteration = 0
-      budget = env_get("CRYSTAL_V2_PENDING_BUDGET").try(&.to_i?) || 0
-      debug_pending = env_has?("DEBUG_PENDING")
-      pending_sources_mode = env_get("DEBUG_PENDING_SOURCES")
-      pending_sources_each = pending_sources_mode == "each"
-      pending_sources_top = env_get("DEBUG_PENDING_SOURCES_TOP").try(&.to_i?) || 15
-      pending_sources_samples = env_has?("DEBUG_PENDING_SOURCES_SAMPLES")
-      mono_sources_each = env_has?("DEBUG_MONO_SOURCES_EACH")
-      mono_sources_top = env_get("DEBUG_MONO_SOURCES_TOP").try(&.to_i?) || 15
-      mono_sources_samples = env_has?("DEBUG_MONO_SOURCES_SAMPLES")
       phase_stats = env_has?("CRYSTAL_V2_PHASE_STATS")
       progress_log = phase_stats || env_has?("CRYSTAL_V2_LOWER_PROGRESS")
+      lazy_rta_log = env_has?("CRYSTAL_V2_LAZY_RTA_LOG")
 
       lazy_rta = @lazy_rta_active
       # Main lowering path (`lower_main`) calls process_pending_lower_functions directly,
@@ -35671,7 +35661,6 @@ module Crystal::HIR
         @lazy_rta_active = true
         lazy_rta = true
       end
-      lazy_rta_log = env_has?("CRYSTAL_V2_LAZY_RTA_LOG")
       rta_deferred_total = 0
       rta_undeferred_total = 0
 
@@ -35679,172 +35668,138 @@ module Crystal::HIR
         STDERR.puts "[LAZY_RTA] active: #{@live_types.size} live types, #{@rta_module_base_names.size} module names"
       end
 
-      attempt_counts = Hash(String, Int32).new(0)
-      while pending_functions.size > 0 && iteration < max_iterations
-        # Take a snapshot of currently pending functions — skip stuck ones (max 3 attempts)
-        pending = pending_functions.dup
-        pending.reject! { |name| attempt_counts[name] >= 3 }
-        if budget > 0 && pending.size > budget
-          pending = pending.first(budget)
-        end
+      # ── Worklist approach ──────────────────────────────────────────────────
+      # Instead of batch-snapshot-filter-process (20+ iterations with heavy
+      # queue management overhead), we use a direct worklist: walk the queue
+      # with an index, lowering each function in-place.  Newly discovered
+      # functions are appended to the end of the same queue and processed in
+      # the same pass.  RTA scans happen every `rta_interval` functions to
+      # discover new live types and undefer previously deferred functions.
+      # This collapses 20+ batch iterations into 2-3 passes.
 
-        # Lazy RTA: partition pending into live (process now) and deferred (skip).
-        # Uses both type-level and method-level filtering:
-        # - Type not live → defer
-        # - Type live but method not called → defer (method-level RTA)
-        # - Type live and method called (exact or virtual match) → keep
-        if lazy_rta
-          deferred_this_iter = 0
-          pending.reject! do |name|
+      rta_interval = 64 # RTA scan frequency: every N lowered functions
+      max_passes = 20   # Safety limit (was 10000 iterations)
+      pass = 0
+      total_lowered = 0
+      total_deferred = 0
+      attempt_counts = Hash(String, Int32).new(0)
+      # Track which names we've already attempted in this overall run
+      # to avoid re-processing the same name when it reappears in the queue.
+      processed = Set(String).new(@pending_function_queue.size)
+
+      saved_depth = @lowering_depth
+      @lowering_depth = 0
+
+      while pass < max_passes
+        pass_lowered = 0
+        pass_deferred = 0
+        mono_before = @monomorphized.size
+        funcs_before = @module.function_count
+        idx = 0
+
+        while idx < @pending_function_queue.size
+          name = @pending_function_queue[idx]
+          idx += 1
+
+          # Skip stuck functions (max 3 attempts across all passes)
+          next if attempt_counts[name] >= 3
+
+          # Lazy RTA: check if this function should be deferred
+          if lazy_rta
             owner_base = extract_owner_base_for_rta(name)
             should_keep = if owner_base.nil?
-                            true # No owner (top-level/runtime) → always keep
+                            true
                           elsif @rta_called_methods.includes?(name)
-                            true # Exact call target → keep
+                            true
                           elsif @live_types.includes?(owner_base)
-                            # Owner is live — only keep if method is actually called
                             if mpart = extract_method_part_for_rta(name)
                               @rta_called_method_parts.includes?(mpart)
                             else
-                              true # Can't extract method part, keep (safe)
+                              true
                             end
                           else
-                            false # Owner not live → defer
+                            false
                           end
-            if should_keep
-              false # Keep in pending
-            else
-              # Defer — not a known call target
+            unless should_keep
               unless @rta_deferred_set.includes?(name)
                 @rta_deferred_functions << name
                 @rta_deferred_set << name
               end
               STDERR.puts "[LAZY_RTA] defer: #{name} (owner=#{owner_base})" if lazy_rta_log
-              deferred_this_iter += 1
+              pass_deferred += 1
               rta_deferred_total += 1
-              true # Remove from pending
+              next
             end
           end
-        end
 
-        if debug_pending
-          STDERR.puts "[PENDING] iteration=#{iteration} pending=#{pending.size}"
-          if pending_sources_mode && (pending_sources_each || iteration == 0) && !@pending_source_counts.empty?
-            STDERR.puts "[PENDING_SOURCES] top=#{pending_sources_top} total=#{@pending_source_counts.size}"
-            @pending_source_counts.to_a
-              .sort_by { |entry| -entry[1] }
-              .first(pending_sources_top)
-              .each do |name, count|
-                STDERR.puts "  #{name}: #{count}"
-                if pending_sources_samples
-                  if samples = @pending_source_samples[name]?
-                    samples.each do |sample|
-                      STDERR.puts "    - #{sample}"
-                    end
-                  end
-                end
-              end
-          end
-          if mono_sources_each && !@mono_source_counts.empty?
-            STDERR.puts "[MONO_SOURCES] top=#{mono_sources_top} total=#{@mono_source_counts.size}"
-            @mono_source_counts.to_a
-              .sort_by { |entry| -entry[1] }
-              .first(mono_sources_top)
-              .each do |name, count|
-                STDERR.puts "  #{name}: #{count}"
-                if mono_sources_samples
-                  if samples = @mono_source_samples[name]?
-                    samples.each { |sample| STDERR.puts "    - #{sample}" }
-                  end
-                end
-              end
-          end
-          if env_get("DEBUG_MONO_CALLER") && !@mono_caller_counts.empty?
-            caller_top = env_get("DEBUG_MONO_CALLER_TOP").try(&.to_i?) || 20
-            STDERR.puts "[MONO_CALLERS] top=#{caller_top} total=#{@mono_caller_counts.size}"
-            @mono_caller_counts.to_a
-              .sort_by { |entry| -entry[1] }
-              .first(caller_top)
-              .each do |key, count|
-                STDERR.puts "  #{key}: #{count}"
-              end
-          end
-        end
-
-        # Clear pending state (transition to NotStarted so they can be lowered)
-        pending.each { |name| @function_lowering_states.delete(name) }
-        # Remove from queue so we don't reprocess endlessly
-        # Also remove deferred functions from the queue (they're tracked separately)
-        if lazy_rta
-          remove_set = @pending_queue_remove_set
-          remove_set.clear
-          pending.each { |name| remove_set << name }
-          @rta_deferred_set.each { |name| remove_set << name }
-          @pending_function_queue.reject! { |name| remove_set.includes?(name) }
-        elsif pending.size == @pending_function_queue.size
-          @pending_function_queue.clear
-        else
-          remove_set = @pending_queue_remove_set
-          remove_set.clear
-          pending.each { |name| remove_set << name }
-          @pending_function_queue.reject! { |name| remove_set.includes?(name) }
-        end
-
-        # Reset lowering depth to allow these functions to be processed
-        saved_depth = @lowering_depth
-        @lowering_depth = 0
-
-        lowered_this_iter = 0
-        defs_before = @function_defs.size
-        mono_before = @monomorphized.size
-        pending.each do |name|
-          # Skip if already lowered (with a real body) or currently being lowered
+          # Skip already processed/lowered
+          next if processed.includes?(name)
+          processed << name
           next if @module.has_function_with_body?(name)
           next if function_state(name).completed?
           next if function_state(name).in_progress?
 
+          # Clear pending state so it can be lowered
+          @function_lowering_states.delete(name)
           attempt_counts[name] += 1
           lower_function_if_needed(name)
-          lowered_this_iter += 1
+          pass_lowered += 1
+          total_lowered += 1
+
+          # Periodic RTA scan: discover new live types from recently lowered
+          # functions and undefer previously deferred functions.
+          if lazy_rta && pass_lowered % rta_interval == 0
+            scan_new_functions_for_live_types
+            if @monomorphized.size > mono_before
+              @monomorphized.each do |mname|
+                mbase = strip_generics_simple(mname)
+                unless @live_types.includes?(mbase)
+                  @live_types << mbase
+                end
+              end
+            end
+            scan_new_type_descriptors_for_live_types
+            undeferred = undefer_rta_functions
+            rta_undeferred_total += undeferred
+            # Undeferred functions were appended to @pending_function_queue,
+            # so they'll be picked up as idx advances.
+          end
         end
 
-        @lowering_depth = saved_depth
+        # Clear the queue — everything up to idx has been visited
+        @pending_function_queue.clear
 
-        # Lazy RTA: scan newly emitted functions + monomorphized types for live type discovery
+        # End-of-pass RTA scan
         if lazy_rta
-          new_types_found = scan_new_functions_for_live_types
-          # Also check newly monomorphized types
+          scan_new_functions_for_live_types
           if @monomorphized.size > mono_before
             @monomorphized.each do |mname|
               mbase = strip_generics_simple(mname)
               unless @live_types.includes?(mbase)
                 @live_types << mbase
-                new_types_found = true
               end
             end
           end
-          # Also check newly registered union type descriptors
-          new_types_found = true if scan_new_type_descriptors_for_live_types
-          # Always try to undefer — method-level RTA discovers new call targets each iteration,
-          # not just new types. Undefer functions that match exact call targets or whose method
-          # part matches a called method on a live type.
+          scan_new_type_descriptors_for_live_types
           undeferred = undefer_rta_functions
           rta_undeferred_total += undeferred
-          if (new_types_found || undeferred > 0) && (lazy_rta_log || env_has?("CRYSTAL_V2_PHASE_STATS"))
-            STDERR.puts "[LAZY_RTA] iter=#{iteration} live_types=#{@live_types.size} called_methods=#{@rta_called_methods.size} undeferred=#{undeferred} remaining_deferred=#{@rta_deferred_functions.size}"
+          if progress_log
+            STDERR.puts "[LAZY_RTA] pass=#{pass} live_types=#{@live_types.size} called_methods=#{@rta_called_methods.size} undeferred=#{undeferred} remaining_deferred=#{@rta_deferred_functions.size}"
           end
         end
 
-        iteration += 1
-        defs_after = @function_defs.size
-        mono_after = @monomorphized.size
-        new_pending = pending_functions.size
-        deferred_info = lazy_rta ? " deferred=#{@rta_deferred_functions.size}" : ""
+        total_deferred += pass_deferred
         if progress_log
-          STDERR.puts "[PROGRESS] iter=#{iteration} lowered=#{lowered_this_iter}/#{pending.size} pending=#{new_pending} funcs=#{@module.function_count} defs=#{defs_before}->#{defs_after}(+#{defs_after - defs_before}) mono=#{mono_before}->#{mono_after}(+#{mono_after - mono_before})#{deferred_info}"
+          STDERR.puts "[PROGRESS] pass=#{pass} lowered=#{pass_lowered} deferred=#{pass_deferred} funcs=#{funcs_before}->#{@module.function_count}(+#{@module.function_count - funcs_before}) mono=#{mono_before}->#{@monomorphized.size}(+#{@monomorphized.size - mono_before})"
         end
-        break if pending.empty?
+
+        pass += 1
+
+        # If nothing new was queued (by undefer or by lowering), we're done
+        break if @pending_function_queue.empty?
       end
+
+      @lowering_depth = saved_depth
 
       # Mark main pass done so subsequent calls (from emit_tracked_sigs, lower_missing)
       # don't defer. Deferred functions that are actually needed will be discovered
@@ -35871,12 +35826,11 @@ module Crystal::HIR
         @rta_deferred_set.clear
       end
 
-      pending_remaining = pending_functions
       if progress_log
-        STDERR.puts "[LOWER] Finished lowering: #{iteration} iterations, #{@module.function_count} functions, #{@monomorphized.size} types, #{@function_defs.size} defs"
+        STDERR.puts "[LOWER] Finished lowering: #{pass} passes, #{total_lowered} lowered, #{@module.function_count} functions, #{@monomorphized.size} types, #{@function_defs.size} defs"
       end
-      if iteration >= max_iterations && pending_remaining.size > 0
-        STDERR.puts "[WARNING] process_pending_lower_functions hit iteration limit, #{pending_remaining.size} functions remaining"
+      if @pending_function_queue.size > 0
+        STDERR.puts "[WARNING] process_pending_lower_functions: #{@pending_function_queue.size} functions remaining after #{pass} passes"
       end
     end
 
