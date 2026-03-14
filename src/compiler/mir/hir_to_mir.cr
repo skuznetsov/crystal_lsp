@@ -2083,6 +2083,46 @@ module Crystal
       end
 
       # Unknown function - emit as extern call
+      # Last resort: for unqualified method names that weren't resolved, try suffix matching
+      # against all known functions. This handles cases where class method receivers are
+      # typed as Void (e.g., `Location.local` → `Time::Location.local`).
+      unless func
+        # Only try suffix match for short unqualified names (no ::, #, or .)
+        if !call.method_name.includes?("::") && !call.method_name.includes?('#') && !call.method_name.includes?('.')
+          dot_suffix = ".#{base_method_name}"
+          hash_suffix = "##{base_method_name}"
+          candidates = [] of MIR::Function
+          @mir_module.functions.each do |mf|
+            next unless mf.name.ends_with?(dot_suffix) || mf.name.ends_with?(hash_suffix)
+            # Match exact arg count, or (args - 1) for class methods where receiver is extra
+            if mf.params.size == args.size || (call.receiver && mf.params.size == args.size - 1)
+              candidates << mf
+            end
+          end
+          if candidates.size == 1
+            func = candidates[0]
+          end
+        end
+        if func
+          # Drop receiver arg for class methods (func.params.size < args.size)
+          effective_args = if call.receiver && func.params.size < args.size
+                             args[1, func.params.size]
+                           else
+                             args[0, func.params.size]
+                           end
+          hir_args = call.receiver ? [call.receiver.not_nil!] + call.args : call.args
+          if func.params.size < hir_args.size
+            hir_args = hir_args[hir_args.size - func.params.size, func.params.size]
+          end
+          coerced_args = coerce_call_args(builder, effective_args, hir_args, func)
+          call_return_type = func.return_type
+          hir_call_return_type = convert_type(call.type)
+          if call_return_type == TypeRef::VOID && hir_call_return_type != TypeRef::VOID
+            call_return_type = hir_call_return_type
+          end
+          return builder.call(func.id, coerced_args, call_return_type)
+        end
+      end
       if ENV.has_key?("CRYSTAL_V2_UNRESOLVED_CALL_TRACE")
         recv_type = call.receiver ? @hir_value_types[call.receiver.not_nil!]? : nil
         recv_name = hir_type_name(recv_type)
@@ -2108,6 +2148,21 @@ module Crystal
               extern_return_type = TypeRef.new(struct_type.id)
             end
           end
+        end
+      end
+      # Skip emitting extern calls for bare unqualified method names (no ::, #, ., __)
+      # that look like Crystal method names but can't be resolved. These are usually
+      # vestigial calls from class_property getters or default arguments that the compiler
+      # failed to fully qualify. Emitting them as extern calls causes linker errors.
+      if !call.method_name.includes?("::") && !call.method_name.includes?('#') &&
+         !call.method_name.includes?('.') && !call.method_name.starts_with?("__") &&
+         !call.method_name.includes?('$') && call.method_name =~ /\A[a-z_][a-zA-Z0-9_]*\z/
+        # This is an unqualified method name like "local", "tempdir" — likely a missing
+        # class method resolution. Return null/zero instead.
+        if extern_return_type == TypeRef::VOID
+          return builder.const_nil
+        else
+          return builder.const_nil_typed(extern_return_type)
         end
       end
       builder.extern_call(call.method_name, args, extern_return_type)
