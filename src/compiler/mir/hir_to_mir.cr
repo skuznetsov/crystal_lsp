@@ -1552,6 +1552,7 @@ module Crystal
       # non-all-ref union field.
       store_inst = MIR::Store.new(builder.next_id, field_ptr, value)
       store_inst.field_type = actual_field_type
+
       builder.emit(store_inst)
       value
     end
