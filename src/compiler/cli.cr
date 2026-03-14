@@ -483,6 +483,7 @@ module CrystalV2
             p.on("--no-link", "Skip final link step (leave .o file)") { options.link = false }
             p.on("--no-mir-opt", "Skip MIR optimization passes (faster, less optimized)") { options.mir_opt = false }
             p.on("--no-ltp", "Disable LTP/WBA MIR optimization (benchmarking)") { options.ltp_opt = false }
+            p.on("--no-escape-analysis", "Skip escape analysis (all allocs use GC)") { options.escape_analysis = false }
             p.on("--slab-frame", "Use slab frame for no-escape functions (experimental)") { options.slab_frame = true }
             p.on("--mm=MODE", "Memory mode: conservative, balanced, aggressive") { |mode| options.mm_mode = mode }
             p.on("--mm-stack-threshold BYTES", "Max bytes for stack allocation in MM mode") do |bytes|
@@ -625,6 +626,7 @@ module CrystalV2
         property emit_type_metadata : Bool = true
         property ltp_opt : Bool = true
         property mir_opt : Bool = true
+        property escape_analysis : Bool = true
         property slab_frame : Bool = false
         property mm_mode : String = "balanced"
         property mm_stack_threshold : UInt32 = 4096_u32
@@ -837,6 +839,8 @@ module CrystalV2
             timings["pipeline_cache_hit"] = 1.0 if options.stats
           end
         end
+
+        pipeline_cache_pid = 0
 
         unless pipeline_cache_hit
 
@@ -1452,7 +1456,8 @@ module CrystalV2
         end
 
         # Step 3: Escape analysis
-        log(options, out_io, "\n[3/6] Escape analysis...")
+        effective_ea = options.escape_analysis
+        log(options, out_io, "\n[3/6] Escape analysis#{effective_ea ? "" : " (skipped)"}...")
         escape_start = Time.instant
         total_funcs = hir_module.functions.size
         timings["dbg_count_escape_total_funcs"] = total_funcs.to_f if debug_profile
@@ -1474,42 +1479,46 @@ module CrystalV2
         gc_details = [] of String
         total_gc = 0
         ea_skipped = 0
-        hir_module.functions.each_with_index do |func, idx|
-          if options.progress && (idx % 1000 == 0 || idx == total_funcs - 1)
-            STDERR.puts "  Escape analysis: #{idx + 1}/#{total_funcs}..."
-          end
+        if effective_ea
+          hir_module.functions.each_with_index do |func, idx|
+            if options.progress && (idx % 1000 == 0 || idx == total_funcs - 1)
+              STDERR.puts "  Escape analysis: #{idx + 1}/#{total_funcs}..."
+            end
 
-          # Fast-path: skip EA for functions with no allocation instructions
-          has_alloc = false
-          func.blocks.each do |block|
-            block.instructions.each do |inst|
-              if inst.is_a?(HIR::Allocate) || inst.is_a?(HIR::ArrayLiteral) || inst.is_a?(HIR::StringInterpolation)
-                has_alloc = true
-                break
+            # Fast-path: skip EA for functions with no allocation instructions
+            has_alloc = false
+            func.blocks.each do |block|
+              block.instructions.each do |inst|
+                if inst.is_a?(HIR::Allocate) || inst.is_a?(HIR::ArrayLiteral) || inst.is_a?(HIR::StringInterpolation)
+                  has_alloc = true
+                  break
+                end
+              end
+              break if has_alloc
+            end
+            unless has_alloc
+              ea_skipped += 1
+              next
+            end
+
+            ms = HIR::MemoryStrategyAssigner.new(func, memory_config, type_provider, hir_module)
+            result = ms.assign
+            stats = result.stats
+            total_ms_stats.stack_count += stats.stack_count
+            total_ms_stats.slab_count += stats.slab_count
+            total_ms_stats.arc_count += stats.arc_count
+            total_ms_stats.atomic_arc_count += stats.atomic_arc_count
+            total_ms_stats.gc_count += stats.gc_count
+            if options.no_gc && stats.gc_count > 0
+              total_gc += stats.gc_count
+              gc_functions << {func.name, stats.gc_count}
+              gc_allocation_details(func, result, hir_module, memory_config).each do |detail|
+                gc_details << detail
               end
             end
-            break if has_alloc
           end
-          unless has_alloc
-            ea_skipped += 1
-            next
-          end
-
-          ms = HIR::MemoryStrategyAssigner.new(func, memory_config, type_provider, hir_module)
-          result = ms.assign
-          stats = result.stats
-          total_ms_stats.stack_count += stats.stack_count
-          total_ms_stats.slab_count += stats.slab_count
-          total_ms_stats.arc_count += stats.arc_count
-          total_ms_stats.atomic_arc_count += stats.atomic_arc_count
-          total_ms_stats.gc_count += stats.gc_count
-          if options.no_gc && stats.gc_count > 0
-            total_gc += stats.gc_count
-            gc_functions << {func.name, stats.gc_count}
-            gc_allocation_details(func, result, hir_module, memory_config).each do |detail|
-              gc_details << detail
-            end
-          end
+        else
+          ea_skipped = total_funcs
         end
         timings["escape"] = (Time.instant - escape_start).total_milliseconds if options.stats
         timings["ea_skipped"] = ea_skipped.to_f if options.stats
@@ -1813,13 +1822,29 @@ module CrystalV2
           return 0
         end
 
-        # Save to pipeline cache on miss
+        # Save to pipeline cache on miss — fork to background so llc can start sooner
         if options.pipeline_cache && !pipeline_cache_file.empty?
-          FileUtils.mkdir_p(File.dirname(pipeline_cache_file))
-          FileUtils.cp(ll_file, pipeline_cache_file)
-          File.write(pipeline_cache_file + ".libs", options.link_libraries.join("\n") + "\n")
-          @pipeline_cache_misses += 1
-          log(options, out_io, "  Pipeline cache MISS → saved")
+          pipeline_cache_pid = LibC.fork
+          if pipeline_cache_pid == 0
+            # Child: save cache and exit
+            begin
+              FileUtils.mkdir_p(File.dirname(pipeline_cache_file))
+              FileUtils.cp(ll_file, pipeline_cache_file)
+              File.write(pipeline_cache_file + ".libs", options.link_libraries.join("\n") + "\n")
+            rescue
+            end
+            LibC._exit(0)
+          elsif pipeline_cache_pid > 0
+            @pipeline_cache_misses += 1
+            log(options, out_io, "  Pipeline cache MISS → saving (background)")
+          else
+            # Fork failed — save synchronously
+            FileUtils.mkdir_p(File.dirname(pipeline_cache_file))
+            FileUtils.cp(ll_file, pipeline_cache_file)
+            File.write(pipeline_cache_file + ".libs", options.link_libraries.join("\n") + "\n")
+            @pipeline_cache_misses += 1
+            log(options, out_io, "  Pipeline cache MISS → saved")
+          end
         end
 
         end # unless pipeline_cache_hit
@@ -1847,6 +1872,11 @@ module CrystalV2
         if result != 0
           emit_timings(options, out_io, timings, total_start)
           return result
+        end
+
+        # Wait for background pipeline cache save (if running)
+        if pipeline_cache_pid > 0
+          LibC.waitpid(pipeline_cache_pid, out _cache_status, 0)
         end
 
         log(options, out_io, "\n=== Compilation complete ===")
@@ -2059,6 +2089,9 @@ module CrystalV2
 
       private def apply_llvm_entry_opt_guard!(ll_file : String, options : Options, out_io : IO) : Nil
         return unless llvm_entry_opt_guard_enabled?
+        # At -O0 optnone is redundant — everything is unoptimized already.
+        # Skip reading/rewriting the entire 17MB .ll file.
+        return if options.optimize == 0
         return unless File.exists?(ll_file)
 
         targets = [
