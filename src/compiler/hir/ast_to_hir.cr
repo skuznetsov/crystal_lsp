@@ -35827,6 +35827,9 @@ module Crystal::HIR
           # Clear pending state so it can be lowered
           @function_lowering_states.delete(name)
           attempt_counts[name] += 1
+          if progress_log && (pass_lowered % 100 == 0 || pass_lowered < 10)
+            STDERR.puts "[LOWER] p#{pass} ##{pass_lowered} idx=#{idx}/#{@pending_function_queue.size} name=#{name[0, 80]}"
+          end
           lower_function_if_needed(name)
           pass_lowered += 1
           total_lowered += 1

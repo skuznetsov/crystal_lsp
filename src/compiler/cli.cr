@@ -1375,6 +1375,7 @@ module CrystalV2
         end
 
         after_lower_main = hir_mod.function_count
+        STDERR.puts "  lower_main done, #{after_lower_main} functions" if options.progress
         STDERR.puts "[PHASE_STATS] After lower_main: #{after_lower_main} functions" if ENV.has_key?("CRYSTAL_V2_PHASE_STATS")
 
         # Pass 2.5: AST reachability pre-filter (experimental, opt-in)
@@ -1403,6 +1404,7 @@ module CrystalV2
           hir_converter.flush_pending_functions
           did_flush = true
         end
+        STDERR.puts "  Flushing pending functions..." if options.progress
         hir_converter.flush_pending_functions unless did_flush
         STDERR.puts "  Main function created" if options.progress
 
