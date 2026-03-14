@@ -4366,15 +4366,12 @@ module Crystal::HIR
         # Skip files already present in the current require graph.
         next if loaded_paths.includes?(cr_file)
 
-        # Parse the file
-        begin
-          source = File.read(cr_file)
-          lexer = CrystalV2::Compiler::Frontend::Lexer.new(source)
-          parser = CrystalV2::Compiler::Frontend::Parser.new(lexer)
-          program = parser.parse_program
-        rescue
-          next
-        end
+        # Parse the file (skip if unreadable)
+        next unless File.exists?(cr_file)
+        source = File.read(cr_file)
+        lexer = CrystalV2::Compiler::Frontend::Lexer.new(source)
+        parser = CrystalV2::Compiler::Frontend::Parser.new(lexer)
+        program = parser.parse_program
 
         # Walk AST to find and register the enum
         if find_and_register_enum_from_ast(program.arena, program.roots, qualified_name, bare_name, module_prefix)
@@ -4399,13 +4396,8 @@ module Crystal::HIR
 
       Dir.glob(File.join(dir, "*.cr")).each do |cr_file|
         next if loaded_paths.includes?(cr_file)
-
-        source = begin
-          File.read(cr_file)
-        rescue
-          nil
-        end
-        next unless source
+        next unless File.exists?(cr_file)
+        source = File.read(cr_file)
 
         source.scan(/(?:^|\n)\s*enum\s+([A-Za-z_][A-Za-z0-9_]*)/) do |match|
           enum_name = match[1]?
@@ -8652,32 +8644,30 @@ module Crystal::HIR
       body : Array(ExprId)?,
     ) : Bool
       return true if body.nil?
+      return true if body.to_unsafe.address == 0_u64
       sz = body.size
       return true if sz == 0
-      return true if body.to_unsafe.address == 0_u64
 
       first_id = body.unsafe_fetch(0)
+      return true if first_id.null_ptr? || first_id.invalid?
       last_id = body.unsafe_fetch(sz - 1)
+      return true if last_id.null_ptr? || last_id.invalid?
 
       return false unless expr_id_matches_arena?(arena, first_id)
       return false unless expr_id_matches_arena?(arena, last_id)
 
       true
-    rescue
-      false
     end
 
     private def expr_id_matches_arena?(
       arena : CrystalV2::Compiler::Frontend::ArenaLike,
       expr_id : ExprId,
     ) : Bool
-      return false if expr_id.invalid?
+      return false if expr_id.null_ptr? || expr_id.invalid?
       return false if expr_id.index < 0 || expr_id.index >= arena.size
       node = arena[expr_id]
       CrystalV2::Compiler::Frontend.node_kind(node)
       true
-    rescue
-      false
     end
 
     private def debug_def_arena_enabled_for?(base_name : String) : Bool
@@ -13024,7 +13014,8 @@ module Crystal::HIR
       return nil if raw.empty?
 
       if signed
-        int_value = raw.to_i64(base)
+        int_value = raw.to_i64?(base)
+        return nil unless int_value
         int_value = -int_value if negative
         type = case bits
                when   8 then TypeRef::INT8
@@ -13043,7 +13034,8 @@ module Crystal::HIR
       end
 
       return nil if negative
-      uint_value = raw.to_u64(base)
+      uint_value = raw.to_u64?(base)
+      return nil unless uint_value
       type = case bits
              when   8 then TypeRef::UINT8
              when  16 then TypeRef::UINT16
@@ -13054,8 +13046,6 @@ module Crystal::HIR
                TypeRef::UINT64
              end
       {type, uint_value}
-    rescue
-      nil
     end
 
     private def infer_arg_types_for_call(args : Array(ExprId), self_type_name : String?) : Array(TypeRef)
@@ -39974,18 +39964,14 @@ module Crystal::HIR
               # the LLVM backend's union payload extraction.
               type_name = get_type_name_from_ref(val_type)
               unless @enum_info.try(&.has_key?(type_name))
-                begin
-                  to_s_name = resolve_method_call(ctx, val_id, "to_s", [] of TypeRef, false)
-                  if to_s_name && !to_s_name.empty?
-                    remember_callsite_arg_types(to_s_name, [] of TypeRef)
-                    lower_function_if_needed(to_s_name) unless @function_lowering_states[to_s_name]?.try(&.completed?)
-                    to_s_call = Call.new(ctx.next_id, TypeRef::STRING, val_id, to_s_name, [] of ValueId)
-                    ctx.emit(to_s_call)
-                    ctx.register_type(to_s_call.id, TypeRef::STRING)
-                    val_id = to_s_call.id
-                  end
-                rescue
-                  # If resolution fails, leave as-is (ptr fallback in LLVM backend)
+                to_s_name = resolve_method_call(ctx, val_id, "to_s", [] of TypeRef, false)
+                if to_s_name && !to_s_name.empty?
+                  remember_callsite_arg_types(to_s_name, [] of TypeRef)
+                  lower_function_if_needed(to_s_name) unless @function_lowering_states[to_s_name]?.try(&.completed?)
+                  to_s_call = Call.new(ctx.next_id, TypeRef::STRING, val_id, to_s_name, [] of ValueId)
+                  ctx.emit(to_s_call)
+                  ctx.register_type(to_s_call.id, TypeRef::STRING)
+                  val_id = to_s_call.id
                 end
               end
             end

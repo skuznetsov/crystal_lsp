@@ -3871,8 +3871,6 @@ module CrystalV2
           idx = id.index
           return nil if idx < 0 || idx >= size
           self[id]
-        rescue
-          nil
         end
 
         # For LSP: find which file contains this global ID
@@ -4021,8 +4019,6 @@ module CrystalV2
           page_index = idx // PAGE
           offset = idx % PAGE
           @pages[page_index][offset]
-        rescue
-          nil
         end
 
         # Keep source strings alive for slices stored in nodes.

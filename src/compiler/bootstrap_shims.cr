@@ -15,9 +15,9 @@ end
 
 module CrystalV2::Compiler::BootstrapEnv
   def self.get?(key : String) : String?
+    # Avoid rescue block — V2 stage2 has broken setjmp codegen.
+    # ENV[key]? should not raise for simple lookups.
     ENV[key]?
-  rescue
-    nil
   end
 
   def self.get(key : String, default : String) : String
