@@ -1435,6 +1435,12 @@ module Crystal::HIR
     @rta_called_methods : Set(String) = Set(String).new
     # Method-level RTA: method parts (after # or .) for virtual dispatch matching
     @rta_called_method_parts : Set(String) = Set(String).new
+    # Method-level RTA: for each method part, the set of owner base types that are
+    # valid receivers (extracted from virtual call union types). If a method part has
+    # no receiver set, any live owner is valid (conservative fallback).
+    @rta_virtual_receivers : Hash(String, Set(String)) = Hash(String, Set(String)).new
+    # Reverse lookup: type_base → set of module bases it includes (for receiver check)
+    @rta_type_to_modules : Hash(String, Set(String))? = nil
 
     # Initialize live types for lazy RTA
     private def initialize_lazy_rta
@@ -1496,6 +1502,76 @@ module Crystal::HIR
       else
         name
       end
+    end
+
+    # Record virtual call receiver types for a method part.
+    # owner_str may be a union like "String | Int32" or a single type.
+    private def rta_record_virtual_receivers(mpart : String, owner_str : String)
+      receivers = @rta_virtual_receivers[mpart]? || Set(String).new
+      if owner_str.includes?(" | ") || owner_str.includes?("$_$OR$_")
+        normalized = owner_str.includes?("$_$OR$_") ? owner_str.gsub("$_$OR$_", " | ") : owner_str
+        normalized.split(" | ").each do |variant|
+          base = strip_generics_simple(variant.strip)
+          receivers << base unless base.empty?
+        end
+      else
+        base = strip_generics_simple(owner_str)
+        receivers << base unless base.empty?
+      end
+      @rta_virtual_receivers[mpart] = receivers
+    end
+
+    # Build reverse lookup: type → modules it includes (cached, rebuilt when includers change)
+    @rta_type_to_modules_version : Int32 = -1
+    private def rta_get_type_to_modules : Hash(String, Set(String))
+      if @rta_type_to_modules_version != @module_includers_version
+        map = Hash(String, Set(String)).new
+        @module_includers.each do |mod_name, includers|
+          mod_base = strip_generics_simple(mod_name)
+          includers.each do |inc|
+            inc_base = strip_generics_simple(inc)
+            if mods = map[inc_base]?
+              mods << mod_base
+            else
+              map[inc_base] = Set(String){mod_base}
+            end
+          end
+        end
+        @rta_type_to_modules = map
+        @rta_type_to_modules_version = @module_includers_version
+      end
+      @rta_type_to_modules.not_nil!
+    end
+
+    # Check if a method part is called with a compatible owner.
+    # Returns true if:
+    # 1. The method part has no receiver tracking (conservative), OR
+    # 2. The owner_base appears among the recorded virtual receivers, OR
+    # 3. The owner_base is a subtype (via class hierarchy) of any recorded receiver, OR
+    # 4. The owner_base includes a module that's a recorded receiver
+    @[AlwaysInline]
+    private def rta_method_part_matches_owner?(mpart : String, owner_base : String) : Bool
+      return false unless @rta_called_method_parts.includes?(mpart)
+      receivers = @rta_virtual_receivers[mpart]?
+      return true unless receivers  # No receiver info → conservative, keep
+      return true if receivers.includes?(owner_base)
+      # Walk up class hierarchy: if any parent is a receiver, keep
+      current = owner_base
+      10.times do
+        parent = @module.class_parents[current]?
+        break unless parent
+        parent_base = strip_generics_simple(parent)
+        return true if receivers.includes?(parent_base)
+        current = parent_base
+      end
+      # Check if owner includes a module that's a receiver (via cached reverse lookup)
+      type_to_mods = rta_get_type_to_modules
+      if mods = type_to_mods[owner_base]?
+        mods.each do |mod_base|
+          return true if receivers.includes?(mod_base)
+        end
+      end
+      false
     end
 
     # Extract owner base type from function name for RTA filtering.
@@ -1589,9 +1665,18 @@ module Crystal::HIR
             # Method-level RTA: record this call target (exact name for non-virtual)
             @rta_called_methods << mname
             # For virtual calls, also record method part for cross-type dispatch matching
+            # AND track which owner types are valid receivers
             if inst.virtual
               if mpart = extract_method_part_for_rta(mname)
                 @rta_called_method_parts << mpart
+                # Extract owner types from the virtual call name (may be a union type)
+                if hash_idx2 = mname.rindex('#')
+                  owner_str = mname[0, hash_idx2]
+                  rta_record_virtual_receivers(mpart, owner_str)
+                elsif dot_idx2 = mname.rindex('.')
+                  owner_str = mname[0, dot_idx2]
+                  rta_record_virtual_receivers(mpart, owner_str)
+                end
               end
             end
             # Track .new calls (type instantiation)
@@ -1725,7 +1810,7 @@ module Crystal::HIR
                            # Owner type is live — but only undefer if this method is actually called
                            # (match by method part for virtual dispatch across subtypes)
                            if mpart = extract_method_part_for_rta(name)
-                             @rta_called_method_parts.includes?(mpart)
+                             rta_method_part_matches_owner?(mpart, owner_base.not_nil!)
                            else
                              true # Can't extract method part, be safe
                            end
@@ -35349,7 +35434,7 @@ module Crystal::HIR
             if owner_base && !@rta_called_methods.includes?(name)
               if @live_types.includes?(owner_base)
                 if mpart = extract_method_part_for_rta(name)
-                  unless @rta_called_method_parts.includes?(mpart)
+                  unless rta_method_part_matches_owner?(mpart, owner_base)
                     skipped_rta += 1 if debug_emit
                     next
                   end
@@ -35431,7 +35516,7 @@ module Crystal::HIR
               if owner_base && !@rta_called_methods.includes?(name)
                 if @live_types.includes?(owner_base)
                   if mpart = extract_method_part_for_rta(name)
-                    unless @rta_called_method_parts.includes?(mpart)
+                    unless rta_method_part_matches_owner?(mpart, owner_base)
                       skipped_rta += 1 if debug_emit
                       next
                     end
@@ -35713,7 +35798,7 @@ module Crystal::HIR
                             true
                           elsif @live_types.includes?(owner_base)
                             if mpart = extract_method_part_for_rta(name)
-                              @rta_called_method_parts.includes?(mpart)
+                              rta_method_part_matches_owner?(mpart, owner_base)
                             else
                               true
                             end

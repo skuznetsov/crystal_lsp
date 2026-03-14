@@ -1425,6 +1425,7 @@ module CrystalV2
         hir_converter.flush_deferred_allocators
 
         # Reduce later phases by keeping only functions reachable from entrypoints.
+        rta_start = Time.instant
         reachable = hir_module.reachable_function_names(["__crystal_main", "main"])
         if !reachable.empty? && reachable.size < hir_module.functions.size
           total_before = hir_module.functions.size
@@ -1434,6 +1435,7 @@ module CrystalV2
           log(options, out_io, rta_msg)
           STDERR.puts "[PHASE_STATS] RTA: #{rta_msg.strip}" if ENV.has_key?("CRYSTAL_V2_PHASE_STATS")
         end
+        timings["hir_rta"] = (Time.instant - rta_start).total_milliseconds if options.stats
         timings["hir_reachable_funcs"] = hir_module.functions.size.to_f if options.stats
         if debug_profile
           timings["dbg_count_hir_reachable_names"] = reachable.size.to_f
@@ -4396,6 +4398,9 @@ module CrystalV2
         end
         if (hir_reach = timings["hir_reachable_funcs"]?)
           parts << "hir_reach=#{hir_reach.to_i}"
+        end
+        if (hir_rta_ms = timings["hir_rta"]?)
+          parts << "hir_rta=#{hir_rta_ms.round(1)}"
         end
         if (escape = timings["escape"]?)
           parts << "escape=#{escape.round(1)}"
