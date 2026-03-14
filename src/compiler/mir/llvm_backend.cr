@@ -601,6 +601,13 @@ module Crystal::MIR
     property reachability : Bool = false  # Only emit reachable functions (from main) - DISABLED, needs HIR-level implementation
     property no_prelude : Bool = false   # --no-prelude mode: emit C strings instead of Crystal String objects
     property constant_initial_values : Hash(String, Float64 | Int64) = {} of String => (Float64 | Int64)  # Constant literal values for globals (e.g., Math::PI)
+
+    # Fused parallel pipeline: MIR lowering in fork workers (experimental, correctness issues).
+    property fused_mir_lowering : HIRToMIRLowering? = nil
+    # Per-worker MIR optimization: each fork worker optimizes its chunk before LLVM emission.
+    # This parallelizes MIR opt across workers, saving serial MIR opt time.
+    property worker_mir_opt : Bool = false
+    property worker_ltp_opt : Bool = false
     property target_triple : String = {% if flag?(:darwin) %}
                                         {% if flag?(:aarch64) %}
                                           "arm64-apple-macosx"
@@ -923,6 +930,13 @@ module Crystal::MIR
       STDERR.puts "  [LLVM] function emission: #{func_emit_elapsed.round(1)}ms for #{total_funcs} functions (workers=#{n_workers})"
 
       emit_entrypoint_if_needed(functions_to_emit)
+
+      # In fused mode, module singleton globals are discovered by workers during
+      # emission. Emit their declarations now that we've merged side-effects.
+      if @fused_mir_lowering && !@module_singleton_globals.empty?
+        emit_raw "\n; Module singleton globals (from parallel workers)\n"
+        emit_module_singleton_globals
+      end
 
       # Emit zero-filled struct globals for cross-block alloca initialization
       if @zero_struct_global_decls.pos > 0
@@ -2150,7 +2164,9 @@ module Crystal::MIR
     end
 
     private def emit_global_variables
-      collect_module_singleton_globals
+      # In fused mode, MIR bodies aren't lowered yet — module singletons will be
+      # discovered by workers and emitted post-merge via emit_module_singleton_globals
+      collect_module_singleton_globals unless @fused_mir_lowering
 
       # Collect all defined globals
       defined_globals = Set(String).new
@@ -9965,7 +9981,6 @@ module Crystal::MIR
     # Parent concatenates results and merges side-effect data.
     private def emit_functions_parallel(functions : Array(Function), n_workers : Int32)
       total = functions.size
-      chunk_size = (total + n_workers - 1) // n_workers
 
       # Create temp directory for worker outputs
       tmp_dir = File.tempname("crystal_v2_llvm_par", "")
@@ -9976,17 +9991,69 @@ module Crystal::MIR
 
       workers = [] of {Int32, String, String}  # pid, ir_file, sideeffects_file
 
-      n_workers.times do |worker_idx|
-        start_idx = worker_idx * chunk_size
-        break if start_idx >= total
-        end_idx = Math.min(start_idx + chunk_size, total)
+      # Pre-compute MIR function name → module index mapping for fused mode
+      fused_func_to_mir_idx = if @fused_mir_lowering
+                                 idx_map = {} of UInt64 => Int32
+                                 @module.functions.each_with_index do |f, i|
+                                   idx_map[f.object_id] = i
+                                 end
+                                 idx_map
+                               else
+                                 nil
+                               end
 
+      # Balance load across workers by instruction count (greedy assignment).
+      # Without balancing, W0 gets the largest early functions and takes 3-5x
+      # longer than other workers (e.g. 1338ms vs 200ms).
+      worker_assignments = Array(Array(Int32)).new(n_workers) { [] of Int32 }
+      worker_loads = Array(Int32).new(n_workers, 0)
+      # Sort functions by instruction count (descending) for greedy assignment
+      func_costs = Array({Int32, Int32}).new(total)
+      max_cost = 0
+      max_cost_name = ""
+      functions.each_with_index do |func, idx|
+        cost = 0
+        func.blocks.each { |b| cost += b.instructions.size }
+        cost = 1 if cost == 0
+        if cost > max_cost
+          max_cost = cost
+          max_cost_name = func.name
+        end
+        func_costs << {idx, cost}
+      end
+      func_costs.sort_by! { |_, cost| -cost }
+      # Assign each function to the worker with least current load
+      func_costs.each do |idx, cost|
+        min_worker = 0
+        min_load = worker_loads[0]
+        (1...n_workers).each do |w|
+          if worker_loads[w] < min_load
+            min_worker = w
+            min_load = worker_loads[w]
+          end
+        end
+        worker_assignments[min_worker] << idx
+        worker_loads[min_worker] += cost
+      end
+      STDERR.puts "  [LLVM] largest func: #{max_cost_name} (#{max_cost} instructions)" if @progress
+
+      # Extract the largest function for parent-side emission (concurrent with workers).
+      # This prevents one worker from being bottlenecked by a single huge function
+      # (e.g., __crystal_main with 63K instructions taking 800ms while others finish in 200ms).
+      parent_func_indices = [] of Int32
+      heaviest_worker = worker_loads.index(worker_loads.max) || 0
+      if max_cost > 5000 && worker_assignments[heaviest_worker].size == 1
+        # The heaviest worker has just one function — emit it in parent instead
+        parent_func_indices = worker_assignments[heaviest_worker]
+        worker_assignments[heaviest_worker] = [] of Int32
+      end
+
+      n_workers.times do |worker_idx|
+        next if worker_assignments[worker_idx].empty?
+
+        my_indices = worker_assignments[worker_idx]
         ir_file = File.join(tmp_dir, "w#{worker_idx}.ll")
         se_file = File.join(tmp_dir, "w#{worker_idx}.se")
-
-        # Capture range for this worker
-        w_start = start_idx
-        w_end = end_idx
 
         # Give each worker a unique string counter range to avoid @.str.N collisions
         # Reserve 100K IDs per worker (more than enough for any chunk)
@@ -10000,8 +10067,53 @@ module Crystal::MIR
           @cond_counter = worker_idx * 1_000_000
           worker_output = IO::Memory.new(1024 * 256)
           @output = worker_output
+          w_t0 = Time.instant
 
-          w_start.upto(w_end - 1) do |fi|
+          # Fused pipeline: MIR body lowering before LLVM emission
+          if mir_lowering = @fused_mir_lowering
+            mir_to_hir = mir_lowering.mir_to_hir_indices
+            func_idx_map = fused_func_to_mir_idx
+            # Collect HIR function indices for this worker's MIR function chunk
+            hir_indices = [] of Int32
+            my_indices.each do |fi|
+              func = functions[fi]
+              mir_idx = func_idx_map.try(&.[func.object_id]?)
+              if mir_idx && mir_idx < mir_to_hir.size
+                hir_indices << mir_to_hir[mir_idx]
+              end
+            end
+            hir_indices.sort!
+            # Lower HIR function bodies for this worker's chunk
+            hir_indices.each do |hir_idx|
+              next if hir_idx >= mir_lowering.hir_module.functions.size
+              begin
+                mir_lowering.lower_bodies_range(hir_idx, hir_idx + 1)
+              rescue ex
+                STDERR.puts "Worker #{worker_idx}: MIR lowering error: #{ex.message}"
+              end
+            end
+          end
+
+          # Per-worker MIR optimization: each worker optimizes its chunk of functions
+          # before emitting LLVM IR. This parallelizes MIR opt across workers.
+          if @worker_mir_opt
+            my_indices.each do |fi|
+              func = functions[fi]
+              next if func.blocks.all? { |b| b.instructions.empty? }
+              begin
+                if @worker_ltp_opt
+                  func.optimize_with_potential
+                else
+                  func.optimize
+                end
+              rescue ex
+                STDERR.puts "Worker #{worker_idx}: MIR opt error for #{func.name}: #{ex.message}"
+              end
+            end
+          end
+
+          w_t4 = Time.instant
+          my_indices.each do |fi|
             func = functions[fi]
             begin
               emit_function(func)
@@ -10009,6 +10121,8 @@ module Crystal::MIR
               STDERR.puts "Worker #{worker_idx}: Index error in emit_function for: #{func.name}\n#{ex.message}"
             end
           end
+          w_t5 = Time.instant
+          STDERR.puts "  [W#{worker_idx}] funcs=#{my_indices.size} llvm_emit=#{(w_t5 - w_t4).total_milliseconds.round(1)}ms write..." if @progress
 
           # Write function IR to temp file
           File.write(ir_file, worker_output.to_s)
@@ -10043,9 +10157,16 @@ module Crystal::MIR
             @emitted_function_return_types.each do |fname, ret_type|
               f.puts "ERT\t#{fname}\t#{ret_type}"
             end
+            # Module singleton globals
+            @module_singleton_globals.each do |type_ref, global_name|
+              f.puts "MSG\t#{type_ref.id}\t#{global_name}"
+            end
             # String counter high-water mark
             f.puts "SCN\t#{@string_counter}"
           end
+
+          w_t6 = Time.instant
+          STDERR.puts "  [W#{worker_idx}] total=#{(w_t6 - w_t0).total_milliseconds.round(1)}ms ir_size=#{worker_output.pos}B" if @progress
 
           # Exit child cleanly without running at_exit handlers
           LibC._exit(0)
@@ -10056,7 +10177,46 @@ module Crystal::MIR
         workers << {pid, ir_file, se_file}
       end
 
-      # Parent: wait for all workers
+      # Parent: emit large functions concurrently with workers.
+      # While workers handle the bulk of functions (finishing in ~300ms), the parent
+      # emits the single largest function (__crystal_main, ~800ms) in parallel.
+      parent_output = IO::Memory.new(1024 * 256)
+      parent_t0 = Time.instant
+      parent_opt_ms = 0.0
+      unless parent_func_indices.empty?
+        old_output = @output
+        @output = parent_output
+        parent_func_indices.each do |fi|
+          func = functions[fi]
+          # MIR opt: skip for very large functions (>10K instructions) where
+          # optimization time exceeds potential gains (e.g., __crystal_main with
+          # 63K instructions takes 420ms to optimize but is mostly sequential init code)
+          instr_count = 0
+          func.blocks.each { |b| instr_count += b.instructions.size }
+          if @worker_mir_opt && instr_count > 0 && instr_count <= 10_000
+            opt_t0 = Time.instant
+            begin
+              if @worker_ltp_opt
+                func.optimize_with_potential
+              else
+                func.optimize
+              end
+            rescue
+            end
+            parent_opt_ms += (Time.instant - opt_t0).total_milliseconds
+          end
+          begin
+            emit_function(func)
+          rescue ex : IndexError
+            STDERR.puts "Parent: Index error in emit_function for: #{func.name}\n#{ex.message}"
+          end
+        end
+        @output = old_output
+      end
+      parent_elapsed = (Time.instant - parent_t0).total_milliseconds
+      STDERR.puts "  [LLVM] parent emitted #{parent_func_indices.size} funcs in #{parent_elapsed.round(1)}ms (opt=#{parent_opt_ms.round(1)}ms, #{parent_output.pos}B)" if @progress && !parent_func_indices.empty?
+
+      # Wait for all workers
       workers.each do |pid, _, _|
         ret = LibC.waitpid(pid, out status, 0)
         if ret == -1
@@ -10072,6 +10232,12 @@ module Crystal::MIR
       @output = saved_output
       max_string_counter = @string_counter
       # Track worker string names that need aliases (worker_name => canonical_name)
+
+      # Append parent-emitted functions first
+      if parent_output.pos > 0
+        parent_output.rewind
+        IO.copy(parent_output, @output)
+      end
 
       workers.each do |_, ir_file, se_file|
         # Append function IR
@@ -10127,6 +10293,12 @@ module Crystal::MIR
             when "ERT"
               next if parts.size < 3
               @emitted_function_return_types[parts[1]] ||= parts[2]
+            when "MSG"
+              next if parts.size < 3
+              type_id = parts[1].to_u32
+              global_name = parts[2]
+              type_ref = TypeRef.new(type_id)
+              @module_singleton_globals[type_ref] ||= global_name
             when "SCN"
               next if parts.size < 2
               worker_counter = parts[1].to_i

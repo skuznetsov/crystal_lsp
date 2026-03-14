@@ -1631,72 +1631,108 @@ module CrystalV2
         mir_lowering.register_tuple_types(hir_module.types)
         STDERR.puts "[MIR_SETUP] register_tuple_types done" if mir_setup_trace
 
-        STDERR.puts "  Lowering #{hir_module.functions.size} functions to MIR..." if options.progress
-        STDERR.puts "[MIR_SETUP] lowering bodies count=#{hir_module.functions.size}" if mir_setup_trace
-        mir_module = mir_lowering.lower(options.progress)
-        STDERR.puts "[MIR_SETUP] lowering bodies done funcs=#{mir_module.functions.size}" if mir_setup_trace
-        timings["dbg_count_mir_funcs"] = mir_module.functions.size.to_f if debug_profile
-        log(options, out_io, "  Functions: #{mir_module.functions.size}")
-        timings["mir"] = (Time.instant - mir_start).total_milliseconds if options.stats
-        timings["mir_funcs"] = mir_module.functions.size.to_f if options.stats
+        # Fused parallel mode: MIR lowering + optimization + LLVM emission in one parallel step.
+        # Default off — fused mode has correctness issues with worker-side state (symbols,
+        # module singletons, etc.) that get lost across fork boundaries.
+        # Enable with CRYSTAL_V2_FUSED_PARALLEL=1 for experimentation.
+        fused_parallel = (ENV["CRYSTAL_V2_FUSED_PARALLEL"]? || "0") != "0"
 
-        # Optimize MIR
-        if options.mir_opt
-          log(options, out_io, "  Optimizing MIR...")
-          mir_opt_start = Time.instant
-          if options.stats && MIR::OptimizationPipeline.pass_timing_enabled?
-            MIR::OptimizationPipeline.reset_pass_timing
-          end
-          if options.stats && MIR::CopyPropagationPass.cp_phase_timing_enabled?
-            MIR::CopyPropagationPass.reset_cp_phase_timing
-          end
-          mir_module.functions.each_with_index do |func, idx|
-            begin
-              STDERR.puts "  Optimizing #{idx + 1}/#{mir_module.functions.size}: #{func.name}..." if options.progress
-              if func.blocks.all? { |block| block.instructions.empty? }
-                log(options, out_io, "    #{func.name} -> skipped (empty body)") if options.verbose
-                next
-              end
-              if options.ltp_opt
-                stats, ltp_potential = func.optimize_with_potential
-                if options.verbose
-                  log(options, out_io, "    #{func.name} -> #{stats.total} changes, potential #{ltp_potential}")
-                end
-              else
-                stats = func.optimize
-                log(options, out_io, "    #{func.name} -> #{stats.total} changes (legacy)") if options.verbose
-              end
-            rescue ex : IndexError
-              raise "Index error in optimize for: #{func.name}\n#{ex.message}"
+        if fused_parallel && !options.emit_mir && !ENV.has_key?("CRYSTAL_V2_STOP_AFTER_MIR")
+          # Fused path: prepare stubs only, defer body lowering to parallel LLVM workers
+          STDERR.puts "  Preparing #{hir_module.functions.size} MIR function stubs..." if options.progress
+          STDERR.puts "[MIR_SETUP] prepare stubs count=#{hir_module.functions.size}" if mir_setup_trace
+          mir_module = mir_lowering.prepare(options.progress)
+          STDERR.puts "[MIR_SETUP] prepare done stubs=#{mir_module.functions.size}" if mir_setup_trace
+          timings["dbg_count_mir_funcs"] = mir_module.functions.size.to_f if debug_profile
+          log(options, out_io, "  Functions: #{mir_module.functions.size} (stubs, fused parallel)")
+          timings["mir"] = (Time.instant - mir_start).total_milliseconds if options.stats
+          timings["mir_funcs"] = mir_module.functions.size.to_f if options.stats
+          timings["mir_opt"] = 0.0 if options.stats  # included in LLVM timing for fused mode
+          if options.stats
+            mir_stage_ms = timings["mir"]? || 0.0
+            mir_details = [] of String
+            if options.verbose
+              mir_details << "lower=stubs_only"
+              mir_details << "opt=deferred_to_llvm"
+              mir_details << "funcs=#{mir_module.functions.size}"
             end
+            emit_stage_timing(options, out_io, total_start, 4, "mir", mir_stage_ms, mir_details)
           end
-          timings["mir_opt"] = (Time.instant - mir_opt_start).total_milliseconds if options.stats
-          timings["dbg_count_mir_opt_funcs"] = mir_module.functions.size.to_f if debug_profile
         else
-          log(options, out_io, "  Skipping MIR optimizations (--no-mir-opt)")
-          timings["mir_opt"] = 0.0 if options.stats
-        end
-        if options.stats
-          mir_stage_ms = (timings["mir"]? || 0.0) + (timings["mir_opt"]? || 0.0)
-          mir_details = [] of String
-          if options.verbose
-            mir_details << "lower=#{(timings["mir"]? || 0.0).round(1)}ms"
-            mir_details << "opt=#{(timings["mir_opt"]? || 0.0).round(1)}ms"
-            mir_details << "funcs=#{(timings["mir_funcs"]? || 0.0).to_i}"
+          # Serial path: full MIR lowering + optimization
+          STDERR.puts "  Lowering #{hir_module.functions.size} functions to MIR..." if options.progress
+          STDERR.puts "[MIR_SETUP] lowering bodies count=#{hir_module.functions.size}" if mir_setup_trace
+          mir_module = mir_lowering.lower(options.progress)
+          STDERR.puts "[MIR_SETUP] lowering bodies done funcs=#{mir_module.functions.size}" if mir_setup_trace
+          timings["dbg_count_mir_funcs"] = mir_module.functions.size.to_f if debug_profile
+          log(options, out_io, "  Functions: #{mir_module.functions.size}")
+          timings["mir"] = (Time.instant - mir_start).total_milliseconds if options.stats
+          timings["mir_funcs"] = mir_module.functions.size.to_f if options.stats
+
+          # Optimize MIR — deferred to LLVM workers when parallel (saves ~700ms)
+          workers_available = (ENV["CRYSTAL_V2_LLVM_WORKERS"]?.try(&.to_i?) || System.cpu_count).clamp(1, 8) > 1
+          if options.mir_opt && !workers_available
+            # Serial fallback: optimize here when no parallel workers
+            log(options, out_io, "  Optimizing MIR (serial)...")
+            mir_opt_start = Time.instant
+            if options.stats && MIR::OptimizationPipeline.pass_timing_enabled?
+              MIR::OptimizationPipeline.reset_pass_timing
+            end
+            if options.stats && MIR::CopyPropagationPass.cp_phase_timing_enabled?
+              MIR::CopyPropagationPass.reset_cp_phase_timing
+            end
+            mir_module.functions.each_with_index do |func, idx|
+              begin
+                STDERR.puts "  Optimizing #{idx + 1}/#{mir_module.functions.size}: #{func.name}..." if options.progress
+                if func.blocks.all? { |block| block.instructions.empty? }
+                  log(options, out_io, "    #{func.name} -> skipped (empty body)") if options.verbose
+                  next
+                end
+                if options.ltp_opt
+                  stats, ltp_potential = func.optimize_with_potential
+                  if options.verbose
+                    log(options, out_io, "    #{func.name} -> #{stats.total} changes, potential #{ltp_potential}")
+                  end
+                else
+                  stats = func.optimize
+                  log(options, out_io, "    #{func.name} -> #{stats.total} changes (legacy)") if options.verbose
+                end
+              rescue ex : IndexError
+                raise "Index error in optimize for: #{func.name}\n#{ex.message}"
+              end
+            end
+            timings["mir_opt"] = (Time.instant - mir_opt_start).total_milliseconds if options.stats
+            timings["dbg_count_mir_opt_funcs"] = mir_module.functions.size.to_f if debug_profile
+          elsif options.mir_opt
+            log(options, out_io, "  MIR optimization deferred to LLVM workers (parallel)")
+            timings["mir_opt"] = 0.0 if options.stats  # included in LLVM timing
+          else
+            log(options, out_io, "  Skipping MIR optimizations (--no-mir-opt)")
+            timings["mir_opt"] = 0.0 if options.stats
           end
-          emit_stage_timing(options, out_io, total_start, 4, "mir", mir_stage_ms, mir_details)
-        end
+          if options.stats
+            mir_stage_ms = (timings["mir"]? || 0.0) + (timings["mir_opt"]? || 0.0)
+            mir_details = [] of String
+            if options.verbose
+              mir_details << "lower=#{(timings["mir"]? || 0.0).round(1)}ms"
+              mir_details << "opt=#{(timings["mir_opt"]? || 0.0).round(1)}ms"
+              mir_details << "funcs=#{(timings["mir_funcs"]? || 0.0).to_i}"
+            end
+            emit_stage_timing(options, out_io, total_start, 4, "mir", mir_stage_ms, mir_details)
+          end
 
-        if options.emit_mir
-          mir_file = options.output + ".mir"
-          File.write(mir_file, mir_module.to_s)
-          log(options, out_io, "  Wrote: #{mir_file}")
-        end
+          if options.emit_mir
+            mir_file = options.output + ".mir"
+            File.write(mir_file, mir_module.to_s)
+            log(options, out_io, "  Wrote: #{mir_file}")
+          end
 
-        if ENV.has_key?("CRYSTAL_V2_STOP_AFTER_MIR")
-          log(options, out_io, "  Stop after MIR (CRYSTAL_V2_STOP_AFTER_MIR)")
-          emit_timings(options, out_io, timings, total_start)
-          return 0
+          if ENV.has_key?("CRYSTAL_V2_STOP_AFTER_MIR")
+            log(options, out_io, "  Stop after MIR (CRYSTAL_V2_STOP_AFTER_MIR)")
+            emit_timings(options, out_io, timings, total_start)
+            return 0
+          end
+          fused_parallel = false  # already lowered serially
         end
 
         # Step 5: Generate LLVM IR
@@ -1710,6 +1746,14 @@ module CrystalV2
         llvm_gen.progress = options.progress
         llvm_gen.reachability = false  # DISABLED for debugging PC=0 crash
         llvm_gen.no_prelude = options.no_prelude
+        if fused_parallel
+          llvm_gen.fused_mir_lowering = mir_lowering
+        end
+        # Enable per-worker MIR optimization: workers optimize their function chunk
+        # before LLVM emission, parallelizing MIR opt across fork workers.
+        # This saves the serial MIR opt phase (skipped when workers do it).
+        llvm_gen.worker_mir_opt = options.mir_opt
+        llvm_gen.worker_ltp_opt = options.ltp_opt
         STDERR.puts "[LLVM_SETUP] generator flags configured" if llvm_setup_trace
 
         # Pass constant literal values for global initialization (e.g., Math::PI)
@@ -1866,7 +1910,9 @@ module CrystalV2
         obj_cache_file = options.llvm_cache ? path_join(cache_dir, "#{digest_string("#{base_hash}|#{opt_tag}|#{llc_tag}")}.o") : ""
 
         opt_ll_file = ll_file
-        if options.llvm_opt
+        # Skip opt at -O0 — it's essentially a no-op that wastes ~300ms
+        effective_llvm_opt = options.llvm_opt && options.optimize > 0
+        if effective_llvm_opt
           opt_ll_file = "#{ll_file}.opt.bc"
           opt_start = Time.instant
           if options.llvm_cache && File.exists?(opt_cache_file)
@@ -1904,14 +1950,16 @@ module CrystalV2
             @llvm_cache_hits += 1
           else
             llc_used_fallback = false
-            llc_cmd = "llc #{opt_flag} -filetype=obj -o #{obj_file} #{opt_ll_file} 2>&1"
+            # Use --fast-isel at -O0 for faster code generation (~20% speedup)
+            fast_isel_flag = options.optimize == 0 ? " --fast-isel" : ""
+            llc_cmd = "llc #{opt_flag}#{fast_isel_flag} -filetype=obj -o #{obj_file} #{opt_ll_file} 2>&1"
             log(options, out_io, "  $ #{llc_cmd}")
             llc_result = `#{llc_cmd}`
             unless $?.success?
-              if options.llvm_opt && opt_ll_file != ll_file
+              if effective_llvm_opt && opt_ll_file != ll_file
                 llc_used_fallback = true
                 err_io.puts "llc failed on optimized IR, retrying unoptimized IR..."
-                fallback_cmd = "llc #{opt_flag} -filetype=obj -o #{obj_file} #{ll_file} 2>&1"
+                fallback_cmd = "llc #{opt_flag}#{fast_isel_flag} -filetype=obj -o #{obj_file} #{ll_file} 2>&1"
                 log(options, out_io, "  $ #{fallback_cmd}")
                 llc_result = `#{fallback_cmd}`
               end
@@ -1997,7 +2045,7 @@ module CrystalV2
 
         # Clean up intermediate files
         File.delete(obj_file) if File.exists?(obj_file)
-        if options.llvm_opt && opt_ll_file != ll_file && File.exists?(opt_ll_file)
+        if effective_llvm_opt && opt_ll_file != ll_file && File.exists?(opt_ll_file)
           File.delete(opt_ll_file)
         end
         return 0
