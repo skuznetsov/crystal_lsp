@@ -170,53 +170,53 @@ module CrystalV2
           end
         end
 
-        def self.load(file_path : String) : AstCache?
+        def self.load(file_path : String, source_mtime_ns : Int64? = nil) : AstCache?
           cache_path = self.cache_path(file_path)
-          return nil unless File.exists?(cache_path)
-          return nil unless File.exists?(file_path)
 
-          # Quick mtime check — exact source/compiler validation happens from cache header.
-          cache_mtime = File.info(cache_path).modification_time
-          return nil if compiler_mtime > cache_mtime
-          source_mtime_ns = File.info(file_path).modification_time.to_unix_ns.to_i64
+          # Read entire cache file at once — one syscall instead of many small reads.
+          # Skip separate exists/mtime checks; header validation is sufficient.
+          data = File.read(cache_path).to_slice rescue return nil
+          return nil if data.size < 24 # minimum header size
 
-          File.open(cache_path, "rb") do |io|
-            # Read header
-            magic = Bytes.new(4)
-            io.read_fully(magic)
-            return nil unless String.new(magic) == MAGIC
+          io = IO::Memory.new(data)
 
-            version = io.read_bytes(UInt32, IO::ByteFormat::LittleEndian)
-            return nil unless version == VERSION
+          # Read header
+          magic = Bytes.new(4)
+          io.read_fully(magic)
+          return nil unless String.new(magic) == MAGIC
 
-            cached_compiler_fingerprint = io.read_bytes(UInt64, IO::ByteFormat::LittleEndian)
-            return nil unless cached_compiler_fingerprint == compiler_fingerprint
+          version = io.read_bytes(UInt32, IO::ByteFormat::LittleEndian)
+          return nil unless version == VERSION
 
-            cached_source_mtime_ns = io.read_bytes(Int64, IO::ByteFormat::LittleEndian)
-            return nil unless cached_source_mtime_ns == source_mtime_ns
+          cached_compiler_fingerprint = io.read_bytes(UInt64, IO::ByteFormat::LittleEndian)
+          return nil unless cached_compiler_fingerprint == compiler_fingerprint
 
-            # Read string table
-            string_pool = Frontend::StringPool.new
-            strings = read_string_table(io)
+          cached_source_mtime_ns = io.read_bytes(Int64, IO::ByteFormat::LittleEndian)
+          # Use caller-provided mtime to avoid redundant stat call
+          actual_mtime_ns = source_mtime_ns || File.info(file_path).modification_time.to_unix_ns.to_i64
+          return nil unless cached_source_mtime_ns == actual_mtime_ns
 
-            # Read nodes
-            arena = Frontend::AstArena.new
-            node_count = io.read_bytes(UInt32, IO::ByteFormat::LittleEndian)
-            node_count.times do
-              node = read_node(io, strings, string_pool)
-              arena.add(node) if node
-            end
+          # Read string table
+          string_pool = Frontend::StringPool.new
+          strings = read_string_table(io)
 
-            # Read roots
-            root_count = io.read_bytes(UInt32, IO::ByteFormat::LittleEndian)
-            roots = Array(Frontend::ExprId).new(root_count.to_i)
-            root_count.times do
-              idx = io.read_bytes(Int32, IO::ByteFormat::LittleEndian)
-              roots << Frontend::ExprId.new(idx)
-            end
-
-            new(arena, roots, string_pool)
+          # Read nodes
+          arena = Frontend::AstArena.new
+          node_count = io.read_bytes(UInt32, IO::ByteFormat::LittleEndian)
+          node_count.times do
+            node = read_node(io, strings, string_pool)
+            arena.add(node) if node
           end
+
+          # Read roots
+          root_count = io.read_bytes(UInt32, IO::ByteFormat::LittleEndian)
+          roots = Array(Frontend::ExprId).new(root_count.to_i)
+          root_count.times do
+            idx = io.read_bytes(Int32, IO::ByteFormat::LittleEndian)
+            roots << Frontend::ExprId.new(idx)
+          end
+
+          new(arena, roots, string_pool)
         rescue ex
           STDERR.puts "[AST_CACHE] Load error: #{ex.message}" if ENV["LSP_DEBUG"]?
           nil

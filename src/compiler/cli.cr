@@ -618,7 +618,7 @@ module CrystalV2
         {% if flag?(:bootstrap_fast) %}
         property ast_cache : Bool = false
         {% else %}
-        property ast_cache : Bool = false
+        property ast_cache : Bool = true
         {% end %}
         property llvm_opt : Bool = true
         property llvm_cache : Bool = BootstrapEnv.get("CRYSTAL_V2_LLVM_CACHE", "1") != "0"
@@ -2292,7 +2292,8 @@ module CrystalV2
 
         {% unless flag?(:bootstrap_fast) %}
         if options.ast_cache
-          if cached = LSP::AstCache.load(abs_path)
+          source_mtime_ns = File.info(abs_path).modification_time.to_unix_ns.to_i64 rescue nil
+          if cached = LSP::AstCache.load(abs_path, source_mtime_ns)
             @ast_cache_hits += 1
             arena = cached.arena
             exprs = cached.roots
