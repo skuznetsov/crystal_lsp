@@ -437,6 +437,7 @@ module Crystal::MIR
     @alloc_element_types : Hash(ValueId, TypeRef)  # For GEP element type lookup
     @array_info : Hash(ValueId, {String, Int32})  # Array element_type and size
     @string_constants : Hash(String, String)  # String value -> global name
+    @string_aliases : Hash(String, String) = {} of String => String  # worker_name -> canonical_name (for parallel dedup)
     @module_singleton_globals : Hash(TypeRef, String)  # Module type -> singleton global name
     @emitted_value_types : Hash(String, String)  # SSA name -> LLVM type (per function)
     @emitted_value_names : Set(String)  # SSA names materialized in current function
@@ -894,18 +895,32 @@ module Crystal::MIR
       # see the corrected type, keeping LLVM IR consistent.
       precompute_function_return_types(@module.functions) unless ENV["CRYSTAL_V2_NO_PRECOMPUTE"]?
 
-      total_funcs = functions_to_emit.size
-      STDERR.puts "  [LLVM] emitting #{total_funcs} functions (#{@module.functions.size} total, #{@module.functions.size - total_funcs} pruned)..." if @progress
-      functions_to_emit.each_with_index do |func, idx|
-        if @progress && (idx % 100 == 0 || idx == total_funcs - 1)
-          STDERR.puts "    Emitting function #{idx + 1}/#{total_funcs}: #{func.name}"
-        end
-        begin
-          emit_function(func)
-        rescue ex : IndexError
-          raise "Index error in emit_function for: #{func.name}\n#{ex.message}"
+      # Deduplicate functions by mangled name (keep first occurrence).
+      dedup_seen = Set(String).new(@emitted_functions.size + functions_to_emit.size)
+      @emitted_functions.each { |n| dedup_seen << n }
+      functions_to_emit = functions_to_emit.reject do |func|
+        mangled = mangle_function_name(func.name)
+        if dedup_seen.includes?(mangled)
+          true
+        else
+          dedup_seen << mangled
+          false
         end
       end
+
+      total_funcs = functions_to_emit.size
+      n_workers = parallel_llvm_workers
+      STDERR.puts "  [LLVM] emitting #{total_funcs} functions (#{@module.functions.size} total, #{@module.functions.size - total_funcs} pruned, workers=#{n_workers})..." if @progress
+      func_emit_start = Time.instant
+
+      if n_workers > 1 && total_funcs >= n_workers * 4
+        emit_functions_parallel(functions_to_emit, n_workers)
+      else
+        emit_functions_sequential(functions_to_emit)
+      end
+
+      func_emit_elapsed = (Time.instant - func_emit_start).total_milliseconds
+      STDERR.puts "  [LLVM] function emission: #{func_emit_elapsed.round(1)}ms for #{total_funcs} functions (workers=#{n_workers})"
 
       emit_entrypoint_if_needed(functions_to_emit)
 
@@ -921,6 +936,21 @@ module Crystal::MIR
       # Emit string constants at end (LLVM allows globals anywhere)
       STDERR.puts "  [LLVM] emit_string_constants..." if @progress
       emit_string_constants
+
+      # Emit duplicate string constants for worker names that collided with existing names.
+      # Workers may create @.str.100000 for a string that parent already has as @.str.42.
+      # We need to emit the same constant under the worker's name so references resolve.
+      unless @string_aliases.empty?
+        emit_raw "\n; Duplicate string constants from parallel workers\n"
+        # Build reverse lookup: canonical_name -> string_value
+        canonical_to_value = {} of String => String
+        @string_constants.each { |val, name| canonical_to_value[name] = val }
+        @string_aliases.each do |worker_name, canonical_name|
+          if str_val = canonical_to_value[canonical_name]?
+            emit_crystal_string_constant(worker_name, str_val)
+          end
+        end
+      end
 
       # Emit symbol table for symbol_to_s (after string constants so globals are defined)
       emit_symbol_table
@@ -2055,22 +2085,23 @@ module Crystal::MIR
       return if @string_constants.empty?
 
       @string_constants.each do |str, global_name|
-        # Escape string for LLVM: replace special chars
-        escaped = str.gsub("\\", "\\\\")
-                    .gsub("\n", "\\0A")
-                    .gsub("\r", "\\0D")
-                    .gsub("\t", "\\09")
-                    .gsub("\"", "\\22")
-        len = str.bytesize + 1  # +1 for null terminator
-        if string_mir_type
-          # Crystal String: { i32 type_id, i32 bytesize, i32 length, [len x i8] bytes_with_null }
-          bytesize = str.bytesize
-          charsize = str.size  # character count (may differ for multibyte)
-          emit_raw "#{global_name} = private unnamed_addr constant { i32, i32, i32, [#{len} x i8] } { i32 #{string_type_id}, i32 #{bytesize}, i32 #{charsize}, [#{len} x i8] c\"#{escaped}\\00\" }, align 8\n"
-        else
-          # C string
-          emit_raw "#{global_name} = private unnamed_addr constant [#{len} x i8] c\"#{escaped}\\00\", align 1\n"
-        end
+        emit_crystal_string_constant(global_name, str)
+      end
+    end
+
+    private def emit_crystal_string_constant(global_name : String, str : String)
+      escaped = str.gsub("\\", "\\\\")
+                  .gsub("\n", "\\0A")
+                  .gsub("\r", "\\0D")
+                  .gsub("\t", "\\09")
+                  .gsub("\"", "\\22")
+      len = str.bytesize + 1
+      if @string_type_id != 0
+        bytesize = str.bytesize
+        charsize = str.size
+        emit_raw "#{global_name} = private unnamed_addr constant { i32, i32, i32, [#{len} x i8] } { i32 #{@string_type_id}, i32 #{bytesize}, i32 #{charsize}, [#{len} x i8] c\"#{escaped}\\00\" }, align 8\n"
+      else
+        emit_raw "#{global_name} = private unnamed_addr constant [#{len} x i8] c\"#{escaped}\\00\", align 1\n"
       end
     end
 
@@ -9901,6 +9932,223 @@ module Crystal::MIR
         # Track actual constant type
         @value_types[inst.id] = inst.type
       end
+    end
+
+    # Number of parallel LLVM IR worker processes (0 or 1 = sequential)
+    private def parallel_llvm_workers : Int32
+      if val = ENV["CRYSTAL_V2_LLVM_WORKERS"]?
+        return val.to_i? || 1
+      end
+      # Default: use available cores (capped at 8)
+      n = System.cpu_count
+      n = 8 if n > 8
+      n = 1 if n < 1
+      n.to_i32
+    end
+
+    # Sequential function emission (original path)
+    private def emit_functions_sequential(functions : Array(Function))
+      functions.each_with_index do |func, idx|
+        if @progress && (idx % 100 == 0 || idx == functions.size - 1)
+          STDERR.puts "    Emitting function #{idx + 1}/#{functions.size}: #{func.name}"
+        end
+        begin
+          emit_function(func)
+        rescue ex : IndexError
+          raise "Index error in emit_function for: #{func.name}\n#{ex.message}"
+        end
+      end
+    end
+
+    # Parallel function emission using Process.fork
+    # Each worker emits its chunk of functions to a temp file.
+    # Parent concatenates results and merges side-effect data.
+    private def emit_functions_parallel(functions : Array(Function), n_workers : Int32)
+      total = functions.size
+      chunk_size = (total + n_workers - 1) // n_workers
+
+      # Create temp directory for worker outputs
+      tmp_dir = File.tempname("crystal_v2_llvm_par", "")
+      Dir.mkdir_p(tmp_dir)
+
+      # Save the current output position — workers will write to temp files
+      saved_output = @output
+
+      workers = [] of {Int32, String, String}  # pid, ir_file, sideeffects_file
+
+      n_workers.times do |worker_idx|
+        start_idx = worker_idx * chunk_size
+        break if start_idx >= total
+        end_idx = Math.min(start_idx + chunk_size, total)
+
+        ir_file = File.join(tmp_dir, "w#{worker_idx}.ll")
+        se_file = File.join(tmp_dir, "w#{worker_idx}.se")
+
+        # Capture range for this worker
+        w_start = start_idx
+        w_end = end_idx
+
+        # Give each worker a unique string counter range to avoid @.str.N collisions
+        # Reserve 100K IDs per worker (more than enough for any chunk)
+        worker_string_base = @string_counter + worker_idx * 100_000
+
+        pid = LibC.fork
+        if pid == 0
+          # Child process: emit this chunk of functions
+          # Use non-overlapping counter ranges to avoid name collisions
+          @string_counter = worker_string_base
+          @cond_counter = worker_idx * 1_000_000
+          worker_output = IO::Memory.new(1024 * 256)
+          @output = worker_output
+
+          w_start.upto(w_end - 1) do |fi|
+            func = functions[fi]
+            begin
+              emit_function(func)
+            rescue ex : IndexError
+              STDERR.puts "Worker #{worker_idx}: Index error in emit_function for: #{func.name}\n#{ex.message}"
+            end
+          end
+
+          # Write function IR to temp file
+          File.write(ir_file, worker_output.to_s)
+
+          # Write side-effect data: string constants, zero-struct globals, externs, called functions
+          File.open(se_file, "w") do |f|
+            # String constants: "STR\tglobal_name\tstring_value_base64"
+            @string_constants.each do |str_val, global_name|
+              f.puts "STR\t#{global_name}\t#{Base64.strict_encode(str_val)}"
+            end
+            # Zero-struct globals
+            if @zero_struct_global_decls.pos > 0
+              @zero_struct_global_decls.rewind
+              while line = @zero_struct_global_decls.gets
+                f.puts "ZSG\t#{line}"
+              end
+            end
+            # Undefined externs
+            @undefined_externs.each do |name, ret_type|
+              f.puts "EXT\t#{name}\t#{ret_type}"
+            end
+            # Called crystal functions
+            @called_crystal_functions.each do |name, info|
+              ret_type, arg_count, arg_types = info
+              f.puts "CCF\t#{name}\t#{ret_type}\t#{arg_count}\t#{arg_types.join(",")}"
+            end
+            # Emitted functions (for dedup tracking)
+            @emitted_functions.each do |fname|
+              f.puts "EMF\t#{fname}"
+            end
+            # Emitted function return types
+            @emitted_function_return_types.each do |fname, ret_type|
+              f.puts "ERT\t#{fname}\t#{ret_type}"
+            end
+            # String counter high-water mark
+            f.puts "SCN\t#{@string_counter}"
+          end
+
+          # Exit child cleanly without running at_exit handlers
+          LibC._exit(0)
+        elsif pid < 0
+          raise "fork() failed for LLVM worker #{worker_idx}"
+        end
+
+        workers << {pid, ir_file, se_file}
+      end
+
+      # Parent: wait for all workers
+      workers.each do |pid, _, _|
+        ret = LibC.waitpid(pid, out status, 0)
+        if ret == -1
+          raise "waitpid failed for LLVM worker pid #{pid}"
+        end
+        exit_code = (status >> 8) & 0xFF
+        if exit_code != 0
+          raise "LLVM worker pid #{pid} failed with exit code #{exit_code}"
+        end
+      end
+
+      # Merge results in order
+      @output = saved_output
+      max_string_counter = @string_counter
+      # Track worker string names that need aliases (worker_name => canonical_name)
+
+      workers.each do |_, ir_file, se_file|
+        # Append function IR
+        if File.exists?(ir_file)
+          File.open(ir_file) do |f|
+            IO.copy(f, @output)
+          end
+        end
+
+        # Merge side-effects
+        if File.exists?(se_file)
+          File.each_line(se_file) do |line|
+            parts = line.split('\t')
+            next if parts.empty?
+            case parts[0]
+            when "STR"
+              next if parts.size < 3
+              global_name = parts[1]
+              str_val = Base64.decode_string(parts[2])
+              if existing = @string_constants[str_val]?
+                # String already exists with a different name — need alias
+                @string_aliases[global_name] = existing if global_name != existing
+              else
+                @string_constants[str_val] = global_name
+              end
+            when "ZSG"
+              next if parts.size < 2
+              decl_line = parts[1]
+              # Extract struct name from "global_name = internal global %StructName zeroinitializer"
+              # to deduplicate across workers
+              if m = decl_line.match(/@__zero\.(\S+)\s*=/)
+                struct_key = m[1]
+                unless @zero_struct_globals.includes?(struct_key)
+                  @zero_struct_globals << struct_key
+                  @zero_struct_global_decls << decl_line << "\n"
+                end
+              else
+                @zero_struct_global_decls << decl_line << "\n"
+              end
+            when "EXT"
+              next if parts.size < 3
+              @undefined_externs[parts[1]] ||= parts[2]
+            when "CCF"
+              next if parts.size < 5
+              name = parts[1]
+              unless @called_crystal_functions.has_key?(name)
+                arg_types = parts[4].split(",").reject(&.empty?)
+                @called_crystal_functions[name] = {parts[2], parts[3].to_i, arg_types}
+              end
+            when "EMF"
+              next if parts.size < 2
+              @emitted_functions << parts[1]
+            when "ERT"
+              next if parts.size < 3
+              @emitted_function_return_types[parts[1]] ||= parts[2]
+            when "SCN"
+              next if parts.size < 2
+              worker_counter = parts[1].to_i
+              max_string_counter = worker_counter if worker_counter > max_string_counter
+            end
+          end
+        end
+      end
+
+      @string_counter = max_string_counter
+
+      # Clean up temp files
+      workers.each do |_, ir_file, se_file|
+        File.delete?(ir_file)
+        File.delete?(se_file)
+      end
+      Dir.delete?(tmp_dir)
+    rescue ex
+      # On failure, fall back to sequential emission
+      STDERR.puts "  [LLVM] parallel emission failed: #{ex.message}, falling back to sequential"
+      @output = saved_output if saved_output
+      emit_functions_sequential(functions)
     end
 
     private def get_or_create_string_global(str : String) : String
