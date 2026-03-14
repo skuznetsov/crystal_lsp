@@ -9224,6 +9224,19 @@ module Crystal::MIR
 
         # Check actual emitted type — value_ref may have already cast from slot type
         actual_type = @emitted_value_types[val_ref]?
+
+        # Handle float/double values from cross-block slots: convert to integer first
+        if actual_type && (actual_type == "float" || actual_type == "double")
+          val_type = @value_types[val_id]?
+          is_unsigned = val_type && unsigned_type_ref?(val_type)
+          fp_op = is_unsigned ? "fptoui" : "fptosi"
+          int_name = "%#{conv_name}.ftoi"
+          emit "#{int_name} = #{fp_op} #{actual_type} #{val_ref} to i#{to_bits}"
+          emit "%#{conv_name} = add i#{to_bits} #{int_name}, 0"
+          record_emitted_type("%#{conv_name}", "i#{to_bits}")
+          next
+        end
+
         actual_bits = if actual_type && actual_type.starts_with?('i') && !actual_type.includes?('.')
                         actual_type[1..].to_i? || from_bits
                       else
@@ -13073,7 +13086,6 @@ module Crystal::MIR
                       @undefined_externs[undefined_name] = ret_type unless @undefined_externs.has_key?(undefined_name)
                       undefined_name
                     end
-
       raw_callee_name = callee_func.try(&.name)
 
       # Keep direct self-recursive calls intact. Overload retargeting must be resolved
