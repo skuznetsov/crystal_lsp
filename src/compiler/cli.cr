@@ -909,12 +909,7 @@ module CrystalV2
           exprs = entry.roots
           file_path = entry.path
           source = entry.source
-          safe_source = begin
-            File.read(file_path)
-          rescue
-            source
-          end
-          unless skip_file_directive?(safe_source, flags)
+          unless skip_file_directive?(source, flags)
             pending_annotations = [] of Frontend::AnnotationNode
             expr_i = 0
             while expr_i < exprs.size
@@ -936,7 +931,7 @@ module CrystalV2
                 acyclic_types,
                 flags,
                 sources_by_arena,
-                safe_source
+                source
               )
               expr_i += 1
             end
@@ -1218,6 +1213,7 @@ module CrystalV2
         log(options, out_io, "    Modules: #{module_nodes.size}")
         module_count = module_nodes.size
         stage2_debug("[STAGE2_DEBUG] module register start count=#{module_count}", err_io)
+        reg_type_profile = ENV.has_key?("CRYSTAL_V2_REG_TYPE_PROFILE")
         module_nodes.each_with_index do |(n, a), i|
           if i < 3 || (i % 50 == 0) || i == module_count - 1
             stage2_debug("[STAGE2_DEBUG] module register idx=#{i + 1}/#{module_count}", err_io)
@@ -1226,7 +1222,12 @@ module CrystalV2
           if options.progress && env_enabled?("CRYSTAL_V2_PROGRESS_MODULE_NAMES")
             STDERR.puts "\n    Module #{i + 1}/#{module_nodes.size}: #{String.new(n.name)}"
           end
+          reg_t0 = Time.instant if reg_type_profile
           hir_converter.register_module(n)
+          if reg_type_profile
+            ms = (Time.instant - reg_t0.not_nil!).total_milliseconds
+            STDERR.puts "[REG_TYPE] module #{String.new(n.name)} #{ms.round(1)}ms" if ms > 5.0
+          end
           if options.progress && (i % 10 == 0 || i == module_nodes.size - 1)
             STDERR.print "\r    Registered module #{i + 1}/#{module_nodes.size}"
           end
@@ -1248,7 +1249,12 @@ module CrystalV2
             stage2_debug("[STAGE2_DEBUG] class register idx=#{i + 1}/#{class_count}", err_io)
           end
           hir_converter.arena = a
+          reg_t0 = Time.instant if reg_type_profile
           hir_converter.register_class(n)
+          if reg_type_profile
+            ms = (Time.instant - reg_t0.not_nil!).total_milliseconds
+            STDERR.puts "[REG_TYPE] class #{String.new(n.name)} #{ms.round(1)}ms" if ms > 5.0
+          end
           STDERR.print "\r    Registered class #{i+1}/#{class_nodes.size}" if options.progress && (i % 10 == 0 || i == class_nodes.size - 1)
         end
         stage2_debug("[STAGE2_DEBUG] class register done", err_io)
@@ -1978,6 +1984,7 @@ module CrystalV2
           if options.llvm_cache && File.exists?(obj_cache_file)
             FileUtils.cp(obj_cache_file, obj_file)
             @llvm_cache_hits += 1
+            timings["llc"] = (Time.instant - llc_start).total_milliseconds if options.stats
           else
             llc_used_fallback = false
             # Use --fast-isel at -O0 for faster code generation (~20% speedup)
@@ -2006,8 +2013,8 @@ module CrystalV2
               FileUtils.cp(obj_file, obj_cache_file)
               @llvm_cache_misses += 1
             end
+            timings["llc"] = (Time.instant - llc_start).total_milliseconds if options.stats
           end
-          timings["llc"] = (Time.instant - llc_start).total_milliseconds if options.stats
         end
 
         # Find runtime stub
