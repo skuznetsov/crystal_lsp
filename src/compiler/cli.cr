@@ -89,6 +89,7 @@ module CrystalV2
       @llvm_cache_misses : Int32 = 0
       @pipeline_cache_hits : Int32 = 0
       @pipeline_cache_misses : Int32 = 0
+      @parse_trace : Bool = ENV.has_key?("CRYSTAL_V2_PARSE_TRACE")
       # Top-level macro variable assignments (e.g., {% nums = %w(Int8 ...) %})
       @macro_text_vars = {} of String => String
 
@@ -882,8 +883,9 @@ module CrystalV2
           STDERR.puts "[CONST_MAP] ids_b sources=#{hir_converter.debug_sources_by_arena_object_id} main=#{hir_converter.debug_main_arenas_object_id} lines=#{hir_converter.debug_line_counts_by_arena_object_id} paths=#{hir_converter.debug_paths_by_arena_object_id}"
           STDERR.puts "[CONST_MAP] ids_c extra=#{hir_converter.debug_extra_sources_by_arena_object_id} links=#{hir_converter.debug_link_libraries_object_id} type_literals=#{hir_converter.debug_type_literals_object_id}"
         end
-        STDERR.puts "[DEBUG_STAGE1] hir_converter=#{hir_converter.object_id} module=#{hir_mod.object_id} link_libs=#{link_libs.size}"
-        STDERR.flush
+        if @parse_trace
+          STDERR.puts "[DEBUG_STAGE1] hir_converter=#{hir_converter.object_id} module=#{hir_mod.object_id} link_libs=#{link_libs.size}"
+        end
         stage2_debug("[STAGE2_DEBUG] hir link libs attached", err_io)
         stage2_debug("[STAGE2_DEBUG] top-level collection init", err_io)
 
@@ -1429,6 +1431,30 @@ module CrystalV2
         reachable = hir_module.reachable_function_names(["__crystal_main", "main"])
         if !reachable.empty? && reachable.size < hir_module.functions.size
           total_before = hir_module.functions.size
+          if ENV.has_key?("CRYSTAL_V2_RTA_PRUNED_DUMP")
+            pruned_owners = Hash(String, Int32).new(0)
+            hir_module.functions.each do |func|
+              unless reachable.includes?(func.name)
+                owner = if hi = func.name.rindex('#')
+                          func.name[0, hi]
+                        elsif di = func.name.rindex('.')
+                          func.name[0, di]
+                        else
+                          "(top-level)"
+                        end
+                base_owner = if pi = owner.index('(')
+                               owner[0, pi]
+                             else
+                               owner
+                             end
+                pruned_owners[base_owner] += 1
+              end
+            end
+            STDERR.puts "[RTA_PRUNED] #{total_before - reachable.size} functions pruned, top owners:"
+            pruned_owners.to_a.sort_by { |_, c| -c }.first(30).each do |name, count|
+              STDERR.puts "  #{name}: #{count}"
+            end
+          end
           hir_module.functions.select! { |func| reachable.includes?(func.name) }
           discarded = total_before - hir_module.functions.size
           rta_msg = "  Reachable functions: #{hir_module.functions.size}/#{total_before} (discarded #{discarded}, #{(discarded * 100.0 / total_before).round(1)}%)"
@@ -1679,8 +1705,15 @@ module CrystalV2
           # Serial path: full MIR lowering + optimization
           STDERR.puts "  Lowering #{hir_module.functions.size} functions to MIR..." if options.progress
           STDERR.puts "[MIR_SETUP] lowering bodies count=#{hir_module.functions.size}" if mir_setup_trace
-          mir_module = mir_lowering.lower(options.progress)
+          mir_prepare_start = Time.instant
+          mir_module = mir_lowering.prepare(options.progress)
+          mir_prepare_ms = (Time.instant - mir_prepare_start).total_milliseconds
+          mir_lower_start = Time.instant
+          mir_lowering.lower_all_bodies(options.progress)
+          mir_lower_ms = (Time.instant - mir_lower_start).total_milliseconds
           STDERR.puts "[MIR_SETUP] lowering bodies done funcs=#{mir_module.functions.size}" if mir_setup_trace
+          timings["mir_prepare"] = mir_prepare_ms if options.stats
+          timings["mir_lower"] = mir_lower_ms if options.stats
           timings["dbg_count_mir_funcs"] = mir_module.functions.size.to_f if debug_profile
           log(options, out_io, "  Functions: #{mir_module.functions.size}")
           timings["mir"] = (Time.instant - mir_start).total_milliseconds if options.stats
@@ -2352,12 +2385,14 @@ module CrystalV2
         stage2_debug("[STAGE2_DEBUG] parse_file_recursive lexer created, creating parser", out_io)
         parser = Frontend::Parser.new(lexer)
         stage2_debug("[STAGE2_DEBUG] parse_file_recursive parse start abs_path=#{abs_path}", out_io)
-        STDERR.puts "[PARSE] #{abs_path}"
-        STDERR.flush
+        if @parse_trace
+          STDERR.puts "[PARSE] #{abs_path}"
+        end
         program = begin
           res = parser.parse_program
-          STDERR.puts "[PARSE_OK] #{abs_path}"
-          STDERR.flush
+          if @parse_trace
+            STDERR.puts "[PARSE_OK] #{abs_path}"
+          end
           res
         rescue ex : IndexError
           if env_enabled?("CRYSTAL_V2_PARSER_INDEX_TRACE") || env_enabled?("CRYSTAL2_PARSER_INDEX_TRACE")
@@ -2369,8 +2404,9 @@ module CrystalV2
         stage2_debug("[STAGE2_DEBUG] parse_file_recursive parse ok abs_path=#{abs_path}", out_io)
         arena = program.arena.as(Frontend::AstArena)
         exprs = program.roots
-        STDERR.puts "[REQSCAN] #{abs_path} exprs=#{exprs.size}"
-        STDERR.flush
+        if @parse_trace
+          STDERR.puts "[REQSCAN] #{abs_path} exprs=#{exprs.size}"
+        end
 
         # Bootstrap debug: always log arena/expr stats for diagnosis
         if options.verbose
@@ -2389,8 +2425,9 @@ module CrystalV2
             end
           end
         end
-        STDERR.puts "[REQSCAN_DONE] #{abs_path} reqs=#{requires.size}"
-        STDERR.flush
+        if @parse_trace
+          STDERR.puts "[REQSCAN_DONE] #{abs_path} reqs=#{requires.size}"
+        end
         needs_source_fallback = source_requires_fallback?(source, requires, loaded)
         if needs_source_fallback
           if options.verbose && !requires.empty?
@@ -4428,6 +4465,12 @@ module CrystalV2
         end
         if (mir_funcs = timings["mir_funcs"]?)
           parts << "mir_funcs=#{mir_funcs.to_i}"
+        end
+        if (mp = timings["mir_prepare"]?)
+          parts << "mir_prep=#{mp.round(1)}"
+        end
+        if (ml = timings["mir_lower"]?)
+          parts << "mir_low=#{ml.round(1)}"
         end
         if (opt = timings["mir_opt"]?)
           parts << "mir_opt=#{opt.round(1)}"

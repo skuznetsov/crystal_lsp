@@ -188,7 +188,9 @@ module Crystal
     def lower_all_bodies(progress : Bool = false) : Nil
       total = @hir_module.functions.size
       STDERR.puts "    Pass 2: Lowering #{total} function bodies..." if progress
+      profile_mir = ENV.has_key?("CRYSTAL_V2_MIR_PROFILE")
       processed = Set(String).new
+      slow_funcs = [] of Tuple(String, Float64) if profile_mir
       @hir_module.functions.each_with_index do |hir_func, idx|
         if progress && (idx % 5000 == 0 || idx == total - 1)
           STDERR.puts "      Body #{idx + 1}/#{total}..."
@@ -197,11 +199,22 @@ module Crystal
         processed.add(hir_func.name)
         begin
           @current_lowering_func_name = hir_func.name
+          t0 = Time.instant if profile_mir
           lower_function_body(hir_func)
+          if profile_mir
+            ms = (Time.instant - t0.not_nil!).total_milliseconds
+            slow_funcs.not_nil! << {hir_func.name, ms} if ms > 1.0
+          end
         rescue ex : IndexError
           raise "Index out of bounds in function #{idx + 1}/#{total}: #{hir_func.name}\n#{ex.message}\n#{ex.backtrace.first(10).join("\n")}"
         rescue ex : KeyError
           raise "Missing hash key in function #{idx + 1}/#{total}: #{hir_func.name}\n#{ex.message}\n#{ex.backtrace.first(10).join("\n")}"
+        end
+      end
+      if profile_mir && !slow_funcs.not_nil!.empty?
+        STDERR.puts "[MIR_PROFILE] Slow functions (>1ms):"
+        slow_funcs.not_nil!.sort_by { |_, ms| -ms }.first(30).each do |name, ms|
+          STDERR.puts "  #{ms.round(1)}ms #{name}"
         end
       end
     end
