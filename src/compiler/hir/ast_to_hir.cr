@@ -18724,6 +18724,19 @@ module Crystal::HIR
         STDERR.puts "[ALIGN] Iteration #{iteration}: realigned #{realigned} classes" if realigned > 0 && env_has?("CRYSTAL_V2_DEBUG_FIXUP")
         break if realigned == 0 || iteration >= max_iterations
       end
+
+      # Dump layouts for comparison between stages
+      if env_has?("CRYSTAL_V2_DUMP_LAYOUTS")
+        dump_pattern = ENV["CRYSTAL_V2_DUMP_LAYOUTS"]? || ""
+        sorted_names = @class_info.keys.sort
+        sorted_names.each do |class_name|
+          next if dump_pattern != "" && dump_pattern != "*" && !class_name.includes?(dump_pattern)
+          info = @class_info[class_name]
+          next if info.ivars.empty?
+          ivar_dump = info.ivars.map { |iv| "  #{iv.name}:#{iv.type.id}@#{iv.offset}" }.join("\n")
+          STDERR.puts "[LAYOUT] #{class_name} size=#{info.size} is_struct=#{info.is_struct}\n#{ivar_dump}"
+        end
+      end
     end
 
     # Align ivars for a single class (used after late monomorphization)
@@ -20140,11 +20153,28 @@ module Crystal::HIR
 
       init_params = @init_params[class_name]? || [] of {String, TypeRef}
 
-      # When call_arg_types has fewer args than the primary init params, try to
-      # find an initialize overload that matches the actual call arg count/types.
+      # When call_arg_types doesn't match the primary init params (by count or type),
+      # try to find an initialize overload that matches the actual call arg count/types.
       # E.g., Time.new$Int64 should use Time#initialize(unsafe_utc_seconds : Int64)
       # not Time#initialize(seconds, nanoseconds, location).
-      if init_params.size > 0 && call_arg_types.size < init_params.size
+      # Also handles classes with multiple constructors where only the first was captured.
+      needs_alt_init_lookup = call_arg_types.size != init_params.size
+      unless needs_alt_init_lookup
+        call_arg_types.each_with_index do |call_type, idx|
+          break if idx >= init_params.size
+          param_type = init_params[idx][1]
+          next if call_type == TypeRef::VOID || param_type == TypeRef::VOID
+          if call_type != param_type
+            call_is_user = call_type.id >= TypeRef::FIRST_USER_TYPE
+            param_is_user = param_type.id >= TypeRef::FIRST_USER_TYPE
+            if call_is_user != param_is_user || (call_is_user && param_is_user && call_type != param_type)
+              needs_alt_init_lookup = true
+              break
+            end
+          end
+        end
+      end
+      if init_params.size > 0 && needs_alt_init_lookup
         init_base = resolve_method_with_inheritance(class_name, "initialize")
         if init_base
           if alt_match = lookup_function_def_for_call(init_base, call_arg_types.size, false, call_arg_types, false, call_arg_types.size > 0)
