@@ -82,6 +82,9 @@ module Crystal
     # Statistics
     getter stats : LoweringStats = LoweringStats.new
 
+    # Mapping from MIR function index to HIR function index (built during prepare())
+    getter mir_to_hir_indices : Array(Int32) = [] of Int32
+
     def initialize(@hir_module : HIR::Module, *, slab_frame : Bool = false)
       trace = mir_setup_trace?
       STDERR.puts "[MIR_INIT] begin" if trace
@@ -119,23 +122,23 @@ module Crystal
     # Main Entry Point
     # ─────────────────────────────────────────────────────────────────────────
 
-    def lower(progress : Bool = false) : Crystal::MIR::Module
+    # Prepare stubs and indices for all functions (serial, fast).
+    # Call this before lower() or lower_bodies_range().
+    def prepare(progress : Bool = false) : Crystal::MIR::Module
       finalize_pointer_backed_union_layouts
 
-      # Two-pass approach for forward references:
-      # Pass 1: Create all function stubs (for call resolution)
-      # Track which functions we've created stubs for (avoid duplicates from methods with/without blocks)
       total = @hir_module.functions.size
       STDERR.puts "    Pass 1: Creating #{total} function stubs..." if progress
       seen_names = Set(String).new
+      @mir_to_hir_indices.clear
       @hir_module.functions.each_with_index do |hir_func, idx|
         if progress && (idx % 5000 == 0 || idx == total - 1)
           STDERR.puts "      Stub #{idx + 1}/#{total}..."
         end
-        # Skip duplicates (methods with block have same mangled name as non-block version)
         next if seen_names.includes?(hir_func.name)
         seen_names.add(hir_func.name)
         create_function_stub(hir_func)
+        @mir_to_hir_indices << idx
       end
 
       if (dump_path = ENV["DEBUG_MIR_FUNC_NAMES"]?)
@@ -157,8 +160,7 @@ module Crystal
         end
       end
 
-      # Build base-name index for fuzzy call resolution (avoids O(N) scans with split)
-      # Also build class-name index for virtual dispatch (avoids O(N) full scans)
+      # Build base-name index for fuzzy call resolution
       @mir_module.functions.each do |func|
         name = func.name
         dollar_idx = name.index('$')
@@ -166,7 +168,6 @@ module Crystal
         @function_by_base_name[base] = func unless @function_by_base_name.has_key?(base)
         (@functions_by_base_name_all[base] ||= [] of Crystal::MIR::Function) << func
 
-        # Index by class name (part before '#' or '.')
         hash_idx = name.index('#')
         dot_idx = name.index('.')
         sep_idx = if hash_idx && dot_idx
@@ -180,15 +181,18 @@ module Crystal
         end
       end
 
-      # Pass 2: Lower function bodies
-      # Track which functions we've processed to avoid duplicate lowering
+      @mir_module
+    end
+
+    # Lower all function bodies (serial). Call prepare() first.
+    def lower_all_bodies(progress : Bool = false) : Nil
+      total = @hir_module.functions.size
       STDERR.puts "    Pass 2: Lowering #{total} function bodies..." if progress
       processed = Set(String).new
       @hir_module.functions.each_with_index do |hir_func, idx|
         if progress && (idx % 5000 == 0 || idx == total - 1)
           STDERR.puts "      Body #{idx + 1}/#{total}..."
         end
-        # Skip if already processed
         next if processed.includes?(hir_func.name)
         processed.add(hir_func.name)
         begin
@@ -200,7 +204,29 @@ module Crystal
           raise "Missing hash key in function #{idx + 1}/#{total}: #{hir_func.name}\n#{ex.message}\n#{ex.backtrace.first(10).join("\n")}"
         end
       end
+    end
 
+    # Lower function bodies for a range of HIR functions (for parallel workers).
+    # Call prepare() first. Worker gets its own copy via fork.
+    def lower_bodies_range(start_idx : Int32, end_idx : Int32) : Nil
+      processed = Set(String).new
+      start_idx.upto(end_idx - 1) do |idx|
+        next if idx >= @hir_module.functions.size
+        hir_func = @hir_module.functions[idx]
+        next if processed.includes?(hir_func.name)
+        processed.add(hir_func.name)
+        begin
+          @current_lowering_func_name = hir_func.name
+          lower_function_body(hir_func)
+        rescue ex : IndexError | KeyError
+          STDERR.puts "Worker error in function #{idx}: #{hir_func.name}: #{ex.message}"
+        end
+      end
+    end
+
+    def lower(progress : Bool = false) : Crystal::MIR::Module
+      prepare(progress)
+      lower_all_bodies(progress)
       @mir_module
     end
 
