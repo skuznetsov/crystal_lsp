@@ -554,6 +554,7 @@ module Crystal::MIR
 
     # String type_id for runtime helpers and string literals
     @string_type_id : Int32 = 16  # TypeRef::STRING.id default, updated during prelude emission
+    @dtor_type_ids : Set(UInt32) = Set(UInt32).new  # Type IDs that have ARC destructors
 
     # Cross-block value tracking for dominance fix
     @value_def_block : Hash(ValueId, BlockId) = {} of ValueId => BlockId  # value → block where defined
@@ -836,6 +837,8 @@ module Crystal::MIR
       emit_runtime_declarations
       STDERR.puts "  [LLVM] emit_union_debug_helpers..." if @progress
       emit_union_debug_helpers
+      STDERR.puts "  [LLVM] emit_arc_destructors..." if @progress
+      emit_arc_destructors
       STDERR.puts "  [LLVM] emit_global_variables..." if @progress
       emit_global_variables
 
@@ -4981,6 +4984,85 @@ module Crystal::MIR
       emit_raw "}\n\n"
       STDERR.puts "  [RT_DECL] end" if runtime_decl_trace
 
+    end
+
+    # Generate per-type ARC destructors and a universal dispatch function.
+    # A destructor rc_dec's all reference-typed fields of an object before free.
+    # The dispatch function reads the type_id header and calls the right destructor.
+    private def emit_arc_destructors
+      emit_raw "\n; ARC destructor functions\n"
+
+      # Collect types that have reference-typed fields
+      dtor_types = [] of MIR::Type
+      @module.type_registry.types.each do |type|
+        next unless type.kind.reference? || type.kind.array?
+        fields = type.fields
+        next unless fields
+        has_ref_field = fields.any? do |field|
+          if ft = @module.type_registry.get(field.type_ref)
+            ft.kind.reference? || ft.kind.array?
+          else
+            false
+          end
+        end
+        dtor_types << type if has_ref_field
+      end
+
+      # Track which type_ids have destructors for the dispatch table
+      @dtor_type_ids = Set(UInt32).new
+
+      # Generate per-type destructors
+      dtor_types.each do |type|
+        fields = type.fields.not_nil!
+        type_id = type.id
+        @dtor_type_ids << type_id
+        dtor_name = "@__crystal_v2_dtor_#{type_id}"
+
+        emit_raw "define void #{dtor_name}(ptr %obj) {\n"
+        field_idx = 0
+        fields.each do |field|
+          ft = @module.type_registry.get(field.type_ref)
+          next unless ft && (ft.kind.reference? || ft.kind.array?)
+
+          # Load the reference field at the given byte offset.
+          # Object layout: [i32 type_id][fields...] — offsets are from object start.
+          # Class objects have 4-byte type_id header, struct fields start at 0.
+          emit_raw "  %fptr.#{field_idx} = getelementptr i8, ptr %obj, i64 #{field.offset}\n"
+          emit_raw "  %fval.#{field_idx} = load ptr, ptr %fptr.#{field_idx}, align 8\n"
+          # rc_dec the field value — this will cascade to child destructors
+          emit_raw "  call void @__crystal_v2_rc_dec(ptr %fval.#{field_idx}, ptr @__crystal_v2_dtor_dispatch)\n"
+          field_idx += 1
+        end
+        emit_raw "  ret void\n"
+        emit_raw "}\n\n"
+      end
+
+      # Generate dispatch function: reads type_id, calls correct destructor
+      emit_raw "define void @__crystal_v2_dtor_dispatch(ptr %obj) {\n"
+      emit_raw "  %tid_ptr = load i32, ptr %obj, align 4\n"
+
+      if dtor_types.empty?
+        emit_raw "  ret void\n"
+      else
+        # Switch on type_id
+        emit_raw "  switch i32 %tid_ptr, label %no_dtor [\n"
+        dtor_types.each do |type|
+          emit_raw "    i32 #{type.id.to_i32}, label %dtor_#{type.id}\n"
+        end
+        emit_raw "  ]\n"
+
+        dtor_types.each do |type|
+          emit_raw "dtor_#{type.id}:\n"
+          emit_raw "  call void @__crystal_v2_dtor_#{type.id}(ptr %obj)\n"
+          emit_raw "  br label %no_dtor\n"
+        end
+
+        emit_raw "no_dtor:\n"
+        emit_raw "  ret void\n"
+      end
+      emit_raw "}\n\n"
+
+      STDERR.puts "  [LLVM] generated #{dtor_types.size} ARC destructors" if @progress
     end
 
     # Union debug helper function definitions - stubs for bootstrap
@@ -10534,7 +10616,10 @@ module Crystal::MIR
 
     private def emit_rc_dec(inst : RCDecrement)
       ptr = value_ref(inst.ptr)
-      destructor = "null"  # TODO: per-type destructor functions
+      # Use the universal destructor dispatch function — it reads the object's
+      # type_id and calls the appropriate per-type destructor (which rc_dec's
+      # all reference-typed fields for cascading cleanup).
+      destructor = @dtor_type_ids.empty? ? "null" : "@__crystal_v2_dtor_dispatch"
       if inst.atomic
         emit "call void @__crystal_v2_rc_dec_atomic(ptr #{ptr}, ptr #{destructor})"
       else
