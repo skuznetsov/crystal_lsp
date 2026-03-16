@@ -1336,8 +1336,9 @@ module Crystal::MIR
     getter array_value : ValueId
     getter index_value : ValueId
     getter element_type : TypeRef
+    getter container_type : TypeRef?
 
-    def initialize(id : ValueId, @element_type : TypeRef, @array_value : ValueId, @index_value : ValueId)
+    def initialize(id : ValueId, @element_type : TypeRef, @array_value : ValueId, @index_value : ValueId, @container_type : TypeRef? = nil)
       super(id, @element_type)
     end
 
@@ -1356,8 +1357,9 @@ module Crystal::MIR
     getter index_value : ValueId
     getter value_id : ValueId
     getter element_type : TypeRef
+    getter container_type : TypeRef?
 
-    def initialize(id : ValueId, @element_type : TypeRef, @array_value : ValueId, @index_value : ValueId, @value_id : ValueId)
+    def initialize(id : ValueId, @element_type : TypeRef, @array_value : ValueId, @index_value : ValueId, @value_id : ValueId, @container_type : TypeRef? = nil)
       super(id, TypeRef::VOID)
     end
 

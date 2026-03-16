@@ -1857,8 +1857,14 @@ module Crystal
       # When the object was obtained from Pointer(Struct).value (inline struct data),
       # struct-typed fields are also stored inline — return the GEP pointer without loading.
       # For non-inline objects (normal heap-allocated), always load as before.
+      # StaticArray fields are ALWAYS stored inline (never behind an extra pointer),
+      # so skip the load for them regardless of @inline_struct_ptrs.
       if @inline_struct_ptrs.includes?(field.object) && hir_type_is_struct?(field.type)
         # Tag the result as also pointing to inline struct data
+        @inline_struct_ptrs << field.id
+        field_ptr
+      elsif hir_type_is_static_array?(field.type)
+        # StaticArray is always inline in its parent — return GEP pointer directly
         @inline_struct_ptrs << field.id
         field_ptr
       elsif hir_type_is_lib_struct?(field.type)
@@ -1952,14 +1958,21 @@ module Crystal
       # GEP to field address + store
       field_ptr = builder.gep(obj_ptr, [field.field_offset.to_u32], TypeRef::POINTER)
 
-      # For lib struct fields, copy the data inline instead of storing a pointer.
-      # This prevents dangling pointers when the source struct is stack-allocated
-      # and the target outlives the current stack frame (e.g., File::Info.@stat).
+      # For lib struct and StaticArray fields, copy the data inline instead of
+      # storing a pointer. This prevents dangling pointers when the source struct
+      # is stack-allocated and the target outlives the current stack frame.
       is_lib = hir_type_is_lib_struct?(field.type)
-      struct_size = is_lib ? hir_type_lib_struct_size(field.type) : 0_u64
-      if is_lib && struct_size > 0
-        builder.memcopy(field_ptr, value, struct_size)
-        return value
+      is_static_array = hir_type_is_static_array?(field.type)
+      if is_lib || is_static_array
+        struct_size = if is_lib
+                        hir_type_lib_struct_size(field.type)
+                      else
+                        hir_type_inline_size(field.type).to_u64
+                      end
+        if struct_size > 0
+          builder.memcopy(field_ptr, value, struct_size)
+          return value
+        end
       end
 
       # Look up the actual field type from the object's class layout.
@@ -2095,6 +2108,13 @@ module Crystal
       desc.kind == HIR::TypeKind::Struct
     end
 
+    private def hir_type_is_static_array?(type : HIR::TypeRef) : Bool
+      return false if type.id < HIR::TypeRef::FIRST_USER_TYPE
+      desc = @hir_module.get_type_descriptor(type)
+      return false unless desc
+      desc.name.starts_with?("StaticArray(")
+    end
+
     private def hir_type_is_lib_struct?(type : HIR::TypeRef) : Bool
       return false if type.id < HIR::TypeRef::FIRST_USER_TYPE
       desc = @hir_module.get_type_descriptor(type)
@@ -2158,12 +2178,21 @@ module Crystal
         element_type = MIR::TypeRef::INT32
       end
 
+      # Detect StaticArray container so LLVM backend uses inline element access
+      container_type : MIR::TypeRef? = nil
+      if obj_hir_type = @hir_value_types[idx.object]?
+        if hir_type_is_static_array?(obj_hir_type)
+          container_type = convert_type(obj_hir_type)
+        end
+      end
+
       # Emit ArrayGet instruction
       arr_get = MIR::ArrayGet.new(
         builder.next_id,
         element_type,
         obj_ptr,
-        index
+        index,
+        container_type
       )
       builder.emit(arr_get)
     end
@@ -2183,13 +2212,22 @@ module Crystal
         element_type = MIR::TypeRef::INT32
       end
 
+      # Detect StaticArray container so LLVM backend uses inline element access
+      container_type : MIR::TypeRef? = nil
+      if obj_hir_type = @hir_value_types[idx.object]?
+        if hir_type_is_static_array?(obj_hir_type)
+          container_type = convert_type(obj_hir_type)
+        end
+      end
+
       # Emit ArraySet instruction
       arr_set = MIR::ArraySet.new(
         builder.next_id,
         element_type,
         obj_ptr,
         index,
-        value
+        value,
+        container_type
       )
       builder.emit(arr_set)
 
