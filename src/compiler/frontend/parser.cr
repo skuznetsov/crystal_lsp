@@ -14605,11 +14605,8 @@ current_token.kind == Token::Kind::Identifier &&
         private def node_span(id : ExprId) : Span
           return Span.zero if id.invalid?
           node = @arena[id]
-          # V2 defensive guard: struct fields may be null pointers because V2
-          # heap-allocates structs.  The @span field (first ivar) sits at object+8
-          # due to 4-byte type_id header + 4-byte alignment padding for 8-byte pointer.
-          # Read the 8-byte pointer value at that offset; if null, return a zero span.
-          # Under Crystal v1 (inline structs) this reads start/end offsets — harmless.
+          # V2 defensive guard: arena lookup may return null pointer (V2 heap-allocates structs)
+          return Span.zero if node.as(Void*).address == 0
           span_ptr = Pointer(UInt64).new(node.object_id &+ 8).value
           return Span.zero if span_ptr == 0_u64
           node.span

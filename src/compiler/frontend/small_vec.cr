@@ -1,54 +1,27 @@
 module CrystalV2
   module Compiler
     module Frontend
-      # SmallVec stores up to N elements inline (StaticArray) and spills to a heap Array when exceeded.
-      # Generic, minimal API for parser builders: push, size, empty?, last, each, to_a
+      # SmallVec: V2-compatible version that always uses Array.
+      # The inline StaticArray + heap spill path is broken under V2's
+      # struct-as-pointer ABI (corrupted Array buffer on spill).
+      # Using Array directly is safe and correct for stage2 bootstrap.
       struct SmallVec(T, N)
-        @len : Int32
-        @inline : StaticArray(T, N)
-        @heap : Array(T)?
+        @arr : Array(T)
 
         def initialize
-          @len = 0
-          @inline = uninitialized StaticArray(T, N)
-          @heap = nil
+          @arr = Array(T).new(N)
         end
 
         def size : Int32
-          if arr = @heap
-            arr.size
-          else
-            @len
-          end
+          @arr.size
         end
 
         def empty? : Bool
-          size == 0
+          @arr.empty?
         end
 
         def push(value : T)
-          if arr = @heap
-            arr << value
-            return
-          end
-
-          if @len < N
-            @inline[@len] = value
-            @len += 1
-          else
-            # Spill to heap: move inline elements
-            arr2 = Array(T).new(N * 2)
-            buf = @inline
-            i = 0
-            while i < @len
-              arr2 << buf[i]
-              i += 1
-            end
-            arr2 << value
-            @heap = arr2
-            # Free inline state
-            @len = arr2.size
-          end
+          @arr << value
         end
 
         def <<(value : T)
@@ -57,47 +30,19 @@ module CrystalV2
         end
 
         def last : T
-          if arr = @heap
-            arr.last
-          else
-            @inline.not_nil![@len - 1]
-          end
+          @arr.last
         end
 
         def pop : T
-          if arr = @heap
-            arr.pop
-          else
-            raise IndexError.new("SmallVec is empty") if @len == 0
-            @len -= 1
-            @inline.not_nil![@len]
-          end
+          @arr.pop
         end
 
         def each(&block : T ->)
-          if arr = @heap
-            arr.each { |e| yield e }
-          else
-            i = 0
-            while i < @len
-              yield @inline.not_nil![i]
-              i += 1
-            end
-          end
+          @arr.each { |e| yield e }
         end
 
         def to_a : Array(T)
-          if arr = @heap
-            return arr
-          end
-          out = Array(T).new(@len)
-          i = 0
-          buf = @inline
-          while i < @len
-            out << buf.not_nil![i]
-            i += 1
-          end
-          out
+          @arr
         end
       end
     end

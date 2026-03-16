@@ -2681,104 +2681,26 @@ module Crystal::MIR
       # ARC runtime — real reference counting with null safety
       # Layout: [i64 refcount][object data...], ptr points to object data (refcount at ptr-8)
 
-      # rc_inc (non-atomic): null-safe increment, sentinel-safe (skips static/GC objects)
-      # Sentinel threshold: 0x4000000000000000 (2^62) — any refcount >= this is static
+      # rc_inc (non-atomic): NO-OP for bootstrap safety.
+      # Many runtime-allocated objects lack the 8-byte ARC prefix, making ptr-8
+      # reads unsafe (page boundary crashes, memory corruption). Since stage2 is
+      # short-lived, skipping refcount management is safe.
       emit_raw "define void @__crystal_v2_rc_inc(ptr %ptr) {\n"
-      emit_raw "  %is_null = icmp eq ptr %ptr, null\n"
-      emit_raw "  br i1 %is_null, label %done, label %check\n"
-      emit_raw "check:\n"
-      emit_raw "  %rc_ptr = getelementptr i8, ptr %ptr, i64 -8\n"
-      emit_raw "  %old = load i64, ptr %rc_ptr, align 8\n"
-      # Skip if sentinel (large value) OR if zero (no ARC header — runtime-allocated object)
-      emit_raw "  %is_static = icmp uge i64 %old, 4611686018427387904\n"
-      emit_raw "  br i1 %is_static, label %done, label %check_zero\n"
-      emit_raw "check_zero:\n"
-      emit_raw "  %is_zero = icmp eq i64 %old, 0\n"
-      emit_raw "  br i1 %is_zero, label %done, label %inc\n"
-      emit_raw "inc:\n"
-      emit_raw "  %new = add i64 %old, 1\n"
-      emit_raw "  store i64 %new, ptr %rc_ptr, align 8\n"
-      emit_raw "  br label %done\n"
-      emit_raw "done:\n"
       emit_raw "  ret void\n"
       emit_raw "}\n\n"
 
-      # rc_dec (non-atomic): null-safe decrement, sentinel-safe, free when count reaches 0
+      # rc_dec (non-atomic): NO-OP for bootstrap safety.
       emit_raw "define void @__crystal_v2_rc_dec(ptr %ptr, ptr %destructor) {\n"
-      emit_raw "  %is_null = icmp eq ptr %ptr, null\n"
-      emit_raw "  br i1 %is_null, label %done, label %check\n"
-      emit_raw "check:\n"
-      emit_raw "  %rc_ptr = getelementptr i8, ptr %ptr, i64 -8\n"
-      emit_raw "  %old = load i64, ptr %rc_ptr, align 8\n"
-      # Skip if sentinel (large value) OR if zero (no ARC header — runtime-allocated object)
-      emit_raw "  %is_static = icmp uge i64 %old, 4611686018427387904\n"
-      emit_raw "  br i1 %is_static, label %done, label %check_zero\n"
-      emit_raw "check_zero:\n"
-      emit_raw "  %is_zero = icmp eq i64 %old, 0\n"
-      emit_raw "  br i1 %is_zero, label %done, label %dec\n"
-      emit_raw "dec:\n"
-      emit_raw "  %new = sub i64 %old, 1\n"
-      emit_raw "  store i64 %new, ptr %rc_ptr, align 8\n"
-      emit_raw "  %should_free = icmp eq i64 %new, 0\n"
-      emit_raw "  br i1 %should_free, label %do_free, label %done\n"
-      emit_raw "do_free:\n"
-      emit_raw "  %has_dtor = icmp ne ptr %destructor, null\n"
-      emit_raw "  br i1 %has_dtor, label %call_dtor, label %free_only\n"
-      emit_raw "call_dtor:\n"
-      emit_raw "  call void %destructor(ptr %ptr)\n"
-      emit_raw "  br label %free_only\n"
-      emit_raw "free_only:\n"
-      emit_raw "  call void @free(ptr %rc_ptr)\n"
-      emit_raw "  br label %done\n"
-      emit_raw "done:\n"
       emit_raw "  ret void\n"
       emit_raw "}\n\n"
 
-      # rc_inc_atomic: null-safe, sentinel-safe, zero-safe atomic increment
+      # rc_inc_atomic: NO-OP for bootstrap safety.
       emit_raw "define void @__crystal_v2_rc_inc_atomic(ptr %ptr) {\n"
-      emit_raw "  %is_null = icmp eq ptr %ptr, null\n"
-      emit_raw "  br i1 %is_null, label %done, label %check\n"
-      emit_raw "check:\n"
-      emit_raw "  %rc_ptr = getelementptr i8, ptr %ptr, i64 -8\n"
-      emit_raw "  %old = load i64, ptr %rc_ptr, align 8\n"
-      emit_raw "  %is_static = icmp uge i64 %old, 4611686018427387904\n"
-      emit_raw "  br i1 %is_static, label %done, label %check_zero\n"
-      emit_raw "check_zero:\n"
-      emit_raw "  %is_zero = icmp eq i64 %old, 0\n"
-      emit_raw "  br i1 %is_zero, label %done, label %inc\n"
-      emit_raw "inc:\n"
-      emit_raw "  %old2 = atomicrmw add ptr %rc_ptr, i64 1 seq_cst\n"
-      emit_raw "  br label %done\n"
-      emit_raw "done:\n"
       emit_raw "  ret void\n"
       emit_raw "}\n\n"
 
-      # rc_dec_atomic: null-safe, sentinel-safe, zero-safe atomic decrement, free when count reaches 0
+      # rc_dec_atomic: NO-OP for bootstrap safety.
       emit_raw "define void @__crystal_v2_rc_dec_atomic(ptr %ptr, ptr %destructor) {\n"
-      emit_raw "  %is_null = icmp eq ptr %ptr, null\n"
-      emit_raw "  br i1 %is_null, label %done, label %check\n"
-      emit_raw "check:\n"
-      emit_raw "  %rc_ptr = getelementptr i8, ptr %ptr, i64 -8\n"
-      emit_raw "  %peek = load i64, ptr %rc_ptr, align 8\n"
-      emit_raw "  %is_static = icmp uge i64 %peek, 4611686018427387904\n"
-      emit_raw "  br i1 %is_static, label %done, label %check_zero\n"
-      emit_raw "check_zero:\n"
-      emit_raw "  %is_zero = icmp eq i64 %peek, 0\n"
-      emit_raw "  br i1 %is_zero, label %done, label %dec\n"
-      emit_raw "dec:\n"
-      emit_raw "  %old = atomicrmw sub ptr %rc_ptr, i64 1 acq_rel\n"
-      emit_raw "  %should_free = icmp eq i64 %old, 1\n"
-      emit_raw "  br i1 %should_free, label %do_free, label %done\n"
-      emit_raw "do_free:\n"
-      emit_raw "  %has_dtor = icmp ne ptr %destructor, null\n"
-      emit_raw "  br i1 %has_dtor, label %call_dtor, label %free_only\n"
-      emit_raw "call_dtor:\n"
-      emit_raw "  call void %destructor(ptr %ptr)\n"
-      emit_raw "  br label %free_only\n"
-      emit_raw "free_only:\n"
-      emit_raw "  call void @free(ptr %rc_ptr)\n"
-      emit_raw "  br label %done\n"
-      emit_raw "done:\n"
       emit_raw "  ret void\n"
       emit_raw "}\n\n"
       STDERR.puts "  [RT_DECL] after rc stubs" if runtime_decl_trace

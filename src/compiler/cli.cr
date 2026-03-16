@@ -392,6 +392,57 @@ module CrystalV2
         path_join(path_join(a, b, c), d)
       end
 
+      # V2 workaround: Dir.mkdir_p calls Path.new(String) which dispatches to
+      # the wrong 2-arg overload in V2. Use LibC.mkdir directly.
+      private def safe_mkdir_p(path : String, mode : Int32 = 0o777) : Nil
+        return if Dir.exists?(path)
+        # Build parent dirs incrementally without Array#join (V2 dispatch issues)
+        built = ""
+        pos = 0
+        if path.starts_with?("/")
+          built = "/"
+          pos = 1
+        end
+        while pos < path.bytesize
+          next_sep = path.index('/', pos)
+          part = if next_sep
+                   seg = path.byte_slice(pos, next_sep - pos)
+                   pos = next_sep + 1
+                   seg
+                 else
+                   seg = path.byte_slice(pos)
+                   pos = path.bytesize
+                   seg
+                 end
+          next if part.empty?
+          built = if built.empty? || built == "/"
+                    built + part
+                  else
+                    built + "/" + part
+                  end
+          unless Dir.exists?(built)
+            LibC.mkdir(built.to_unsafe, LibC::ModeT.new(mode))
+          end
+        end
+      end
+
+      # V2 workaround: File.basename calls Path.new which has dispatch bug.
+      # Inline basename logic using string operations.
+      private def safe_basename(path : String) : String
+        return "" if path.empty?
+        last_sep = path.rindex('/')
+        last_sep ? path.byte_slice(last_sep + 1) : path
+      end
+
+      # V2 workaround: File.dirname calls Path.new which has dispatch bug.
+      private def safe_dirname(path : String) : String
+        return "." if path.empty?
+        last_sep = path.rindex('/')
+        return "." unless last_sep
+        return "/" if last_sep == 0
+        path.byte_slice(0, last_sep)
+      end
+
       {% if flag?(:debug_hooks) %}
       private def setup_debug_hooks : Nil
         return unless env_enabled?("CRYSTAL_V2_DEBUG_HOOKS")
@@ -831,7 +882,7 @@ module CrystalV2
 
         if options.pipeline_cache
           pipeline_cache_dir = File.expand_path("tmp/pipeline_cache", Dir.current)
-          FileUtils.mkdir_p(pipeline_cache_dir)
+          safe_mkdir_p(pipeline_cache_dir)
           digest = Digest::SHA256.new
           loaded_files.to_a.sort.each do |f|
             digest.update(f.to_slice)
@@ -1894,7 +1945,7 @@ module CrystalV2
           if pipeline_cache_pid == 0
             # Child: save cache and exit
             begin
-              FileUtils.mkdir_p(File.dirname(pipeline_cache_file))
+              safe_mkdir_p(safe_dirname(pipeline_cache_file))
               FileUtils.cp(ll_file, pipeline_cache_file)
               File.write(pipeline_cache_file + ".libs", options.link_libraries.join("\n") + "\n")
             rescue
@@ -1905,7 +1956,7 @@ module CrystalV2
             log(options, out_io, "  Pipeline cache MISS → saving (background)")
           else
             # Fork failed — save synchronously
-            FileUtils.mkdir_p(File.dirname(pipeline_cache_file))
+            safe_mkdir_p(safe_dirname(pipeline_cache_file))
             FileUtils.cp(ll_file, pipeline_cache_file)
             File.write(pipeline_cache_file + ".libs", options.link_libraries.join("\n") + "\n")
             @pipeline_cache_misses += 1
@@ -1995,7 +2046,7 @@ module CrystalV2
         cache_dir = File.expand_path("tmp/llvm_cache", Dir.current)
         base_hash = ""
         if options.llvm_cache
-          FileUtils.mkdir_p(cache_dir)
+          safe_mkdir_p(cache_dir)
           base_hash = file_sha256(ll_file)
         end
 
@@ -2078,7 +2129,7 @@ module CrystalV2
         end
 
         # Find runtime stub
-        runtime_dir = File.dirname(File.dirname(__FILE__))
+        runtime_dir = safe_dirname(safe_dirname(__FILE__))
         runtime_stub = path_join(runtime_dir, "..", "runtime_stub.o")
         runtime_src = runtime_stub.gsub(/\.o$/, ".c")
 
@@ -2329,7 +2380,7 @@ module CrystalV2
             @ast_cache_hits += 1
             arena = cached.arena
             exprs = cached.roots
-            base_dir = File.dirname(abs_path)
+            base_dir = safe_dirname(abs_path)
             if cached_requires = load_require_cache(abs_path)
               if source_has_glob_require?(source) || cached_requires.any? { |path| !File.exists?(path) }
                 cached_requires = nil
@@ -2447,7 +2498,7 @@ module CrystalV2
         end
 
         # Process requires first
-        base_dir = File.dirname(abs_path)
+        base_dir = safe_dirname(abs_path)
         requires = [] of String
         # V2 stage2: Array(ExprId)#each yields ExprId pointers that may be corrupted
         # (8-byte GEP stride reads past actual element boundaries). Use index-based
@@ -2786,7 +2837,7 @@ module CrystalV2
         return if unique.empty?
 
         cache_path = require_cache_path(file_path)
-        Dir.mkdir_p(File.dirname(cache_path))
+        safe_mkdir_p(safe_dirname(cache_path))
         File.write(cache_path, unique.join("\n") + "\n")
       rescue ex
         nil
@@ -4224,6 +4275,10 @@ module CrystalV2
       end
 
       private def resolve_require_path(req_path : String, base_dir : String, input_file : String) : String | Array(String) | Nil
+        # V2 guard: string args may be null in stage2
+        return nil if pointerof(req_path).as(Pointer(UInt64)).value == 0_u64
+        return nil if pointerof(base_dir).as(Pointer(UInt64)).value == 0_u64
+        return nil if req_path.bytesize == 0
         # Handle wildcards (/* and /**)
         if req_path.ends_with?("/*") || req_path.ends_with?("/**")
           return resolve_wildcard_require(req_path, base_dir)
@@ -4252,19 +4307,31 @@ module CrystalV2
           return result if result
 
           # Try relative to input file
-          input_dir = File.dirname(File.expand_path(input_file))
-          input_rel = File.expand_path(req_path, input_dir)
-          result = try_require_path(input_rel)
-          return result if result
+          input_ref = pointerof(input_file).as(Pointer(UInt64)).value
+          if input_ref != 0_u64
+            input_dir = safe_dirname(File.expand_path(input_file))
+            input_dir_ref = pointerof(input_dir).as(Pointer(UInt64)).value
+            if input_dir_ref != 0_u64
+              input_rel = File.expand_path(req_path, input_dir)
+              result = try_require_path(input_rel)
+              return result if result
+            end
+          end
 
           # Try stdlib
-          resolved_stdlib = File.expand_path(req_path, stdlib_path)
-          result = try_require_path(resolved_stdlib)
-          return result if result
+          sl = stdlib_path
+          sl_ref = pointerof(sl).as(Pointer(UInt64)).value
+          if sl_ref != 0_u64
+            resolved_stdlib = File.expand_path(req_path, sl)
+            result = try_require_path(resolved_stdlib)
+            return result if result
+          end
 
           # Try original Crystal compiler source (for compiler modules like lexer/parser)
-          if File.directory?(CRYSTAL_SRC_PATH)
-            crystal_src = File.expand_path(req_path, CRYSTAL_SRC_PATH)
+          csp = CRYSTAL_SRC_PATH
+          csp_ref = pointerof(csp).as(Pointer(UInt64)).value
+          if csp_ref != 0_u64 && File.directory?(csp)
+            crystal_src = File.expand_path(req_path, csp)
             result = try_require_path(crystal_src)
             return result if result
           end
@@ -4275,6 +4342,12 @@ module CrystalV2
       # Try to resolve a require path, handling both files and directories
       # Crystal convention: require "foo" looks for foo.cr, then foo/foo.cr
       private def try_require_path(path : String) : String | Array(String) | Nil
+        # V2 guard: File.expand_path may return corrupted/null string in stage2.
+        # path is a reference type (pointer in V2). We use pointerof trick to read
+        # the pointer value WITHOUT dereferencing it.
+        path_ref = pointerof(path).as(Pointer(UInt64)).value
+        return nil if path_ref == 0_u64
+        return nil if path.bytesize <= 0
         # Try with .cr extension first
         cr_path = path + ".cr"
         if File.exists?(cr_path)
@@ -4290,7 +4363,9 @@ module CrystalV2
         end
 
         # Directory convention fallback: foo/foo.cr
-        basename = File.basename(path)
+        # Inline basename to avoid V2 Path.new overload dispatch bug
+        last_sep = path.rindex('/')
+        basename = last_sep ? path.byte_slice(last_sep + 1) : path
         inner_path = path_join(path, basename + ".cr")
         if File.exists?(inner_path)
           # For crystal/system modules, also load the unix variant
