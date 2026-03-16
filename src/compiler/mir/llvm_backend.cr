@@ -4736,6 +4736,13 @@ module Crystal::MIR
       emit_raw "sum_add:\n"
       emit_raw "  %sbs_ptr = getelementptr i8, ptr %spart, i32 4\n"
       emit_raw "  %sbs = load i32, ptr %sbs_ptr\n"
+      # Safety: skip parts with corrupted bytesize (negative or > 100MB)
+      emit_raw "  %sbs_neg = icmp slt i32 %sbs, 0\n"
+      emit_raw "  br i1 %sbs_neg, label %sum_next, label %sum_check_big\n"
+      emit_raw "sum_check_big:\n"
+      emit_raw "  %sbs_big = icmp sgt i32 %sbs, 100000000\n"
+      emit_raw "  br i1 %sbs_big, label %sum_next, label %sum_ok\n"
+      emit_raw "sum_ok:\n"
       emit_raw "  %sold = load i32, ptr %total_ptr\n"
       emit_raw "  %snew = add i32 %sold, %sbs\n"
       emit_raw "  store i32 %snew, ptr %total_ptr\n"
@@ -4772,6 +4779,16 @@ module Crystal::MIR
       emit_raw "copy_do:\n"
       emit_raw "  %cbs_ptr = getelementptr i8, ptr %cpart, i32 4\n"
       emit_raw "  %cbs = load i32, ptr %cbs_ptr\n"
+      # Safety: skip parts with corrupted bytesize (negative or > 100MB)
+      emit_raw "  %cbs_neg = icmp slt i32 %cbs, 0\n"
+      emit_raw "  br i1 %cbs_neg, label %copy_next, label %copy_check_big\n"
+      emit_raw "copy_check_big:\n"
+      emit_raw "  %cbs_big = icmp sgt i32 %cbs, 100000000\n"
+      emit_raw "  br i1 %cbs_big, label %copy_next, label %copy_check_zero\n"
+      emit_raw "copy_check_zero:\n"
+      emit_raw "  %cbs_zero = icmp eq i32 %cbs, 0\n"
+      emit_raw "  br i1 %cbs_zero, label %copy_next, label %copy_ok\n"
+      emit_raw "copy_ok:\n"
       emit_raw "  %cdata = getelementptr i8, ptr %cpart, i32 12\n"
       emit_raw "  %coff = load i32, ptr %off_ptr\n"
       emit_raw "  %dst = getelementptr i8, ptr %buf, i32 12\n"
@@ -6202,11 +6219,13 @@ module Crystal::MIR
         return true
       end
 
-      # Hash#key_hash for String keys — bypass broken Object#hash vdispatch for String.
-      # String#hash calls hasher.string(self) which uses @bytesize and raw bytes.
-      # Override: directly call String's hash infrastructure.
+      # Hash#key_hash for String keys — String#hash(Crystal::Hasher) is not
+      # discovered by RTA (it's inherited, and the demand-driven path through
+      # Object#hash → vdispatch → String#hash(hasher) doesn't trigger RTA).
+      # Without this, vdispatch hits unreachable for String's type_id.
+      # TODO: fix RTA to discover hash(hasher) for all types used as hash keys.
       if mangled.ends_with?("$Hkey_hash$$String") && mangled.includes?("Hash$L")
-        emit_raw "; #{mangled} — direct String hash override (bypass vdispatch)\n"
+        emit_raw "; #{mangled} — direct String hash (RTA gap: String#hash(hasher) not discovered)\n"
         emit_raw "define i32 @#{mangled}(ptr %self, ptr %key) {\n"
         emit_raw "entry:\n"
         emit_raw "  %key_null = icmp eq ptr %key, null\n"
@@ -6215,14 +6234,10 @@ module Crystal::MIR
         emit_raw "  ret i32 0\n"
         emit_raw "do_hash:\n"
         emit_raw "  %hasher = call ptr @Crystal$CCHasher$Dnew(i64 0, i64 0)\n"
-        # String hash: read bytesize from offset 4, get data ptr at offset 12
-        # Then hash each byte (like Crystal::Hasher#bytes does)
         emit_raw "  %bs_ptr = getelementptr i8, ptr %key, i32 4\n"
         emit_raw "  %bytesize = load i32, ptr %bs_ptr\n"
         emit_raw "  %data = getelementptr i8, ptr %key, i32 12\n"
         emit_raw "  %bs64 = sext i32 %bytesize to i64\n"
-        # Call Crystal::Hasher#bytes(ptr, size) if available, otherwise do permute with bytes
-        # Simple approach: hash the bytesize and first 8 bytes as i64 chunks
         emit_raw "  br label %hash_loop\n"
         emit_raw "hash_loop:\n"
         emit_raw "  %i = phi i64 [0, %do_hash], [%i_next, %hash_continue]\n"
@@ -6250,7 +6265,6 @@ module Crystal::MIR
         emit_raw "  %i_next = phi i64 [%i8_next, %read8], [%i1_next, %read1]\n"
         emit_raw "  br label %hash_loop\n"
         emit_raw "hash_finish:\n"
-        # Also permute with the length for better distribution
         emit_raw "  %h_len = call ptr @Crystal$CCHasher$Hpermute$$UInt64(ptr %h, i64 %bs64)\n"
         emit_raw "  %hash64 = call i64 @Crystal$CCHasher$Hresult(ptr %h_len)\n"
         emit_raw "  %hash32 = trunc i64 %hash64 to i32\n"
@@ -7042,6 +7056,100 @@ module Crystal::MIR
         # This keeps stage2 codegen valid even when the 3-arg overload isn't lowered.
         emit_raw "  %result = call ptr @Time$Dnew$$Int64(i64 %seconds)\n"
         emit_raw "  ret ptr %result\n"
+        emit_raw "}\n\n"
+        return true
+      end
+
+      if mangled == "String$Hhash" || mangled == "String$Hhash$$Crystal$CCHasher"
+        # V2 codegen bug: V2's method resolution resolves `key.hash` (0-arg) to
+        # `String#hash(hasher)` (1-arg) instead of Object#hash() (0-arg), passing null hasher.
+        # Also: V2's struct-as-pointer ABI corrupts Slice from to_slice → crash in Hasher#bytes.
+        # Fix: if hasher is null, create one; hash String bytes directly without to_slice.
+        emit_raw "; #{mangled} — V2 override: null-hasher guard + direct byte hash\n"
+        emit_raw "define ptr @#{mangled}(ptr %self, ptr %hasher) {\n"
+        emit_raw "entry:\n"
+        emit_raw "  %self_null = icmp eq ptr %self, null\n"
+        emit_raw "  br i1 %self_null, label %ret_raw_hasher, label %check_hasher\n"
+        # If hasher is null (V2 method resolution bug), create one
+        emit_raw "check_hasher:\n"
+        emit_raw "  %h_null = icmp eq ptr %hasher, null\n"
+        emit_raw "  br i1 %h_null, label %create_hasher, label %read_bs\n"
+        emit_raw "create_hasher:\n"
+        emit_raw "  %new_hasher = call ptr @Crystal$CCHasher$Dnew(i64 0, i64 0)\n"
+        emit_raw "  br label %read_bs\n"
+        emit_raw "read_bs:\n"
+        emit_raw "  %real_hasher = phi ptr [%hasher, %check_hasher], [%new_hasher, %create_hasher]\n"
+        emit_raw "  %bs_ptr = getelementptr i8, ptr %self, i32 4\n"
+        emit_raw "  %bytesize = load i32, ptr %bs_ptr\n"
+        emit_raw "  %data = getelementptr i8, ptr %self, i32 12\n"
+        emit_raw "  %bs_neg = icmp slt i32 %bytesize, 0\n"
+        emit_raw "  br i1 %bs_neg, label %ret_hasher, label %bs_check_big\n"
+        emit_raw "bs_check_big:\n"
+        emit_raw "  %bs_big = icmp sgt i32 %bytesize, 100000000\n"
+        emit_raw "  br i1 %bs_big, label %ret_hasher, label %size_dispatch\n"
+        emit_raw "size_dispatch:\n"
+        emit_raw "  %bs64 = sext i32 %bytesize to i64\n"
+        emit_raw "  %has_data = icmp sgt i32 %bytesize, 0\n"
+        emit_raw "  br i1 %has_data, label %check_big_str, label %do_size_xor\n"
+        emit_raw "check_big_str:\n"
+        emit_raw "  %big_str = icmp sge i32 %bytesize, 8\n"
+        emit_raw "  br i1 %big_str, label %loop8, label %small_loop\n"
+        # Loop: 8-byte chunks via permute (matches Crystal::Hasher#bytes)
+        emit_raw "loop8:\n"
+        emit_raw "  %i8 = phi i64 [0, %check_big_str], [%i8_next, %loop8_body]\n"
+        emit_raw "  %h8 = phi ptr [%real_hasher, %check_big_str], [%h8_next, %loop8_body]\n"
+        emit_raw "  %rem8 = sub i64 %bs64, %i8\n"
+        emit_raw "  %can8 = icmp sge i64 %rem8, 8\n"
+        emit_raw "  br i1 %can8, label %loop8_body, label %loop8_tail\n"
+        emit_raw "loop8_body:\n"
+        emit_raw "  %chunk_ptr = getelementptr i8, ptr %data, i64 %i8\n"
+        emit_raw "  %chunk = load i64, ptr %chunk_ptr, align 1\n"
+        emit_raw "  %h8_next = call ptr @Crystal$CCHasher$Hpermute$$UInt64(ptr %h8, i64 %chunk)\n"
+        emit_raw "  %i8_next = add i64 %i8, 8\n"
+        emit_raw "  br label %loop8\n"
+        # Tail: read last 8 bytes (overlapping, per Crystal's Hasher#bytes)
+        emit_raw "loop8_tail:\n"
+        emit_raw "  %tail_off = sub i64 %bs64, 8\n"
+        emit_raw "  %tail_ptr = getelementptr i8, ptr %data, i64 %tail_off\n"
+        emit_raw "  %tail_val = load i64, ptr %tail_ptr, align 1\n"
+        emit_raw "  br label %do_size_xor\n"
+        # Small strings (1-7 bytes): load byte-by-byte into a u64
+        emit_raw "small_loop:\n"
+        emit_raw "  %si = phi i32 [0, %check_big_str], [%si_next, %small_body]\n"
+        emit_raw "  %sv = phi i64 [0, %check_big_str], [%sv_next, %small_body]\n"
+        emit_raw "  %small_done = icmp sge i32 %si, %bytesize\n"
+        emit_raw "  br i1 %small_done, label %small_done_blk, label %small_body\n"
+        emit_raw "small_body:\n"
+        emit_raw "  %sb_ptr = getelementptr i8, ptr %data, i32 %si\n"
+        emit_raw "  %sb = load i8, ptr %sb_ptr\n"
+        emit_raw "  %sb64 = zext i8 %sb to i64\n"
+        emit_raw "  %shift = mul i32 %si, 8\n"
+        emit_raw "  %shift64 = zext i32 %shift to i64\n"
+        emit_raw "  %sb_shifted = shl i64 %sb64, %shift64\n"
+        emit_raw "  %sv_next = or i64 %sv, %sb_shifted\n"
+        emit_raw "  %si_next = add i32 %si, 1\n"
+        emit_raw "  br label %small_loop\n"
+        emit_raw "small_done_blk:\n"
+        emit_raw "  br label %do_size_xor\n"
+        # Finalize: XOR size into @a and @b, permute(last)
+        emit_raw "do_size_xor:\n"
+        emit_raw "  %fh = phi ptr [%real_hasher, %size_dispatch], [%h8, %loop8_tail], [%real_hasher, %small_done_blk]\n"
+        emit_raw "  %flast = phi i64 [0, %size_dispatch], [%tail_val, %loop8_tail], [%sv, %small_done_blk]\n"
+        emit_raw "  %fsize = phi i64 [0, %size_dispatch], [%bs64, %loop8_tail], [%bs64, %small_done_blk]\n"
+        emit_raw "  %a_ptr = getelementptr i8, ptr %fh, i32 0\n"
+        emit_raw "  %a_val = load i64, ptr %a_ptr\n"
+        emit_raw "  %a_xor = xor i64 %a_val, %fsize\n"
+        emit_raw "  store i64 %a_xor, ptr %a_ptr\n"
+        emit_raw "  %b_ptr = getelementptr i8, ptr %fh, i32 8\n"
+        emit_raw "  %b_val = load i64, ptr %b_ptr\n"
+        emit_raw "  %b_xor = xor i64 %b_val, %fsize\n"
+        emit_raw "  store i64 %b_xor, ptr %b_ptr\n"
+        emit_raw "  %result = call ptr @Crystal$CCHasher$Hpermute$$UInt64(ptr %fh, i64 %flast)\n"
+        emit_raw "  ret ptr %result\n"
+        emit_raw "ret_hasher:\n"
+        emit_raw "  ret ptr %real_hasher\n"
+        emit_raw "ret_raw_hasher:\n"
+        emit_raw "  ret ptr %hasher\n"
         emit_raw "}\n\n"
         return true
       end

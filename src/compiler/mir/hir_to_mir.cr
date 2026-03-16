@@ -2951,11 +2951,24 @@ module Crystal
       method_suffix : String?,
       hir_call : HIR::Call?
     ) : Phi?
-      # 1. Get type ID based on dispatch kind
+      # 1. Get type ID based on dispatch kind.
+      # For class dispatch, guard against null receiver (Nil in V2 is null).
+      # Reading type_id from a null pointer would segfault.
+      class_nil_block : BlockId? = nil
+      switch_block = dispatch_func.entry_block  # block where the switch will go
       type_id_val = case kind
         in .union?
           dispatch_builder.emit(MIR::UnionTypeIdGet.new(dispatch_builder.next_id, param_values[0]))
         in .class?
+          null_val = dispatch_builder.const_nil_typed(TypeRef::POINTER)
+          is_null = dispatch_builder.eq(param_values[0], null_val)
+          nb = dispatch_func.create_block
+          class_nil_block = nb
+          tid_block = dispatch_func.create_block
+          switch_block = tid_block
+          dispatch_builder.branch(is_null, nb, tid_block)
+
+          dispatch_builder.current_block = tid_block
           header_ptr = dispatch_builder.gep(param_values[0], [0_u32], TypeRef::POINTER)
           dispatch_builder.load(header_ptr, TypeRef::INT32)
       end
@@ -2968,6 +2981,23 @@ module Crystal
         phi = dispatch_builder.phi(dispatch_func.return_type)
       end
 
+      # Wire up nil block for class dispatch (needs end_block + phi)
+      if (nb = class_nil_block)
+        dispatch_builder.current_block = nb
+        if phi
+          # Return first argument if present (pass-through for hash(hasher) etc),
+          # otherwise return zero. This matches Nil's behavior: most Nil methods
+          # that take an accumulator return it unchanged.
+          nil_ret = if param_values.size > 1
+                      param_values[1]
+                    else
+                      dispatch_builder.const_int(0_i64, dispatch_func.return_type)
+                    end
+          phi.add_incoming(from: nb, value: nil_ret)
+        end
+        dispatch_func.get_block(nb).terminator = Jump.new(end_block)
+      end
+
       # 3. Create default block and case blocks
       default_block = dispatch_func.create_block
       cases = [] of Tuple(Int64, BlockId)
@@ -2976,9 +3006,8 @@ module Crystal
         cases << {candidate[:type_id].to_i64, case_block}
       end
 
-      # 4. Set up switch in entry block
-      dispatch_builder.current_block = dispatch_func.entry_block
-      dispatch_func.get_block(dispatch_func.entry_block).terminator = Switch.new(type_id_val, cases, default_block)
+      # 4. Set up switch in the appropriate block
+      dispatch_func.get_block(switch_block).terminator = Switch.new(type_id_val, cases, default_block)
 
       # 5. Generate each case
       candidates.each_with_index do |candidate, idx|
