@@ -41206,6 +41206,16 @@ module Crystal::HIR
             if found = find_module_def_recursive(module_base, method_name, args.size, visited, typed_lookup_arg_types)
               actual_func_def = found[0]
               def_arena = found[1]
+              if env_has?("DEBUG_SUPER_JOIN") && method_name == "join"
+                body_size = actual_func_def.body.try(&.size) || 0
+                body_preview = if (b = actual_func_def.body) && b.size > 0
+                                 first_expr = @arena[b[0]]?
+                                 first_expr ? first_expr.class.name.split("::").last : "nil"
+                               else
+                                 "empty"
+                               end
+                STDERR.puts "[SUPER_JOIN] class=#{class_name} module=#{module_base} body_size=#{body_size} first_node=#{body_preview} arena=#{def_arena.class.name.split("::").last}:#{def_arena.size}"
+              end
               if params = actual_func_def.params
                 param_count = count_params(params) { |p| !p.is_block && !named_only_separator?(p) }
                 if param_count > args.size
