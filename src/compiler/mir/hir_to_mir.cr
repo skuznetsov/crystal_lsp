@@ -1752,6 +1752,16 @@ module Crystal
     end
 
     private def select_memory_strategy(alloc : HIR::Allocate) : MemoryStrategy
+      # Value types (structs) must not use ARC — type_needs_rc? returns false
+      # for structs, so rc_inc/rc_dec is never emitted. Use Stack for locals,
+      # GC (sentinel header) for escaping values to prevent use-after-free.
+      if alloc.is_value_type
+        if alloc.lifetime.stack_local?
+          return MemoryStrategy::Stack
+        end
+        return MemoryStrategy::GC
+      end
+
       # If HIR already carries a chosen strategy, honor it.
       if strat = alloc.memory_strategy
         mapped = map_hir_strategy(strat)
@@ -1759,11 +1769,6 @@ module Crystal
           return MemoryStrategy::Slab
         end
         return mapped
-      end
-
-      # Struct (value type) always uses stack allocation
-      if alloc.is_value_type
-        return MemoryStrategy::Stack
       end
 
       # Determine strategy based on lifetime and taints
@@ -2282,6 +2287,61 @@ module Crystal
           old_val = builder.load(val_ptr, convert_type(call.type))
           builder.store(val_ptr, new_val)
           return old_val
+        elsif method_suffix == "compare_and_set" || method_suffix == "Hcompare_and_set"
+          # Atomic#compare_and_set: non-atomic CAS (sufficient for single-threaded stage2)
+          # Returns {T, Bool} — old value and whether swap succeeded
+          self_ptr = args[0]
+          expected = args.size > 2 ? args[1] : (args.size > 1 ? args[1] : builder.const_int(0, TypeRef::INT32))
+          desired = args.size > 2 ? args[2] : (args.size > 1 ? args[1] : builder.const_int(0, TypeRef::INT32))
+
+          # Determine T from the expected arg's HIR type
+          val_type = if call.args.size >= 1
+                       hir_arg_type = @hir_value_types[call.args[0]]?
+                       hir_arg_type ? convert_type(hir_arg_type) : TypeRef::UINT32
+                     else
+                       TypeRef::UINT32
+                     end
+
+          # Load current value
+          val_ptr = builder.gep(self_ptr, [0_u32], TypeRef::POINTER)
+          old_val = builder.load(val_ptr, val_type)
+
+          # Compare old_val == expected
+          is_equal = builder.eq(old_val, expected)
+
+          # Conditional store: if equal, store desired; otherwise store old (no-op)
+          store_val = builder.select(is_equal, desired, old_val, val_type)
+          builder.store(val_ptr, store_val)
+
+          # Construct {T, Bool} result tuple on stack
+          tuple_type_ref = convert_type(call.type)
+          tuple_mir_type = @mir_module.type_registry.get(tuple_type_ref)
+
+          # Compute tuple size and element offsets using alignment-aware layout
+          val_size = case val_type
+                     when TypeRef::UINT8, TypeRef::INT8, TypeRef::BOOL then 1_u64
+                     when TypeRef::UINT16, TypeRef::INT16              then 2_u64
+                     when TypeRef::UINT32, TypeRef::INT32, TypeRef::FLOAT32 then 4_u64
+                     else 8_u64
+                     end
+          val_align = val_size
+          # Bool at offset = align(val_size, 1) = val_size
+          bool_offset = val_size
+          tuple_size = bool_offset + 1_u64
+          # Round up to alignment of largest element
+          tuple_size = (tuple_size + val_align - 1) & ~(val_align - 1)
+
+          tuple_ptr = builder.alloc(MemoryStrategy::Stack, tuple_type_ref, tuple_size, val_align.to_u32)
+
+          # Store old_val at offset 0
+          field0_ptr = builder.gep(tuple_ptr, [0_u32], TypeRef::POINTER)
+          builder.store(field0_ptr, old_val)
+
+          # Store is_equal (Bool) at bool_offset
+          field1_ptr = builder.gep(tuple_ptr, [bool_offset.to_u32], TypeRef::POINTER)
+          builder.store(field1_ptr, is_equal)
+
+          return tuple_ptr
         end
       end
 
