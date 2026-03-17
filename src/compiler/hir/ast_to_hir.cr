@@ -13875,6 +13875,23 @@ module Crystal::HIR
       bump_module_defs_cache_version
       invalidate_type_cache_for_namespace(module_name) if existing_defs
 
+      # Record module-to-module includes (e.g. Indexable includes Enumerable).
+      # This is needed for yield function resolution: when looking for Enumerable#each,
+      # the reverse walk needs to find Indexable (which defines each) in
+      # @module_includers["Enumerable"]. Without this, only concrete classes
+      # (Array, Hash, etc.) appear as includers, not intermediate modules.
+      if body = node.body
+        body.each do |expr_id|
+          next if expr_id.null_ptr? || expr_id.invalid?
+          member = unwrap_visibility_member(@arena[expr_id])
+          if member.is_a?(CrystalV2::Compiler::Frontend::IncludeNode)
+            if included_module = resolve_path_like_name(member.target)
+              record_module_inclusion(included_module, module_name)
+            end
+          end
+        end
+      end
+
       # Always register nested types (classes, enums, modules) from module bodies.
       # Namespace modules like Crystal, Crystal::MachO etc. are not "class-like"
       # but still contain class definitions that must be registered.
@@ -28145,6 +28162,51 @@ module Crystal::HIR
           if mod_base != mod
             if submods = @class_included_modules[mod_base]?
               submods.each { |m| queue << m }
+            end
+          end
+        end
+
+        # Reverse walk: check modules that INCLUDE the owner module.
+        # When the owner is a CONCRETE class (e.g. Array(Int32)), and 'each' is
+        # defined in an included module (e.g. Indexable#each), the forward walk
+        # above already finds it via @class_included_modules.
+        #
+        # When the owner is a MODULE (e.g. Enumerable), the method is abstract —
+        # different includers (Indexable, Iterator) provide different implementations.
+        # Inlining any single one would be wrong. Skip the reverse walk for modules
+        # so the call uses virtual dispatch instead.
+        owner_is_module = @module_defs.has_key?(owner_base)
+        if !owner_is_module
+          includers = @module_includers[owner_base]?
+          if includers
+            includers.each do |inc|
+              inc_base = strip_generic_args(inc)
+              inc_method = "#{inc_base}##{method_short}"
+              if @function_defs.has_key?(inc_method)
+                if @yield_functions.includes?(inc_method)
+                  return inc_method
+                end
+                if inc_def = @function_defs[inc_method]?
+                  inc_arena = @function_def_arenas[inc_method]? || @arena
+                  if def_contains_yield?(inc_def, inc_arena)
+                    @yield_functions.add(inc_method)
+                    return inc_method
+                  end
+                end
+              end
+              inc_block = "#{inc_base}##{method_short}$block"
+              if @function_defs.has_key?(inc_block)
+                if @yield_functions.includes?(inc_block)
+                  return inc_block
+                end
+                if inc_def = @function_defs[inc_block]?
+                  inc_arena = @function_def_arenas[inc_block]? || @arena
+                  if def_contains_yield?(inc_def, inc_arena)
+                    @yield_functions.add(inc_block)
+                    return inc_block
+                  end
+                end
+              end
             end
           end
         end
@@ -68853,6 +68915,26 @@ module Crystal::HIR
       when CrystalV2::Compiler::Frontend::InstanceVarNode
         # Block body references an instance variable → needs `self` captured
         names.add("self")
+      when CrystalV2::Compiler::Frontend::UnlessNode
+        collect_proc_body_ident_walk(node.condition, names)
+        node.then_branch.each { |e| collect_proc_body_ident_walk(e, names) }
+        if eb = node.else_branch
+          eb.each { |e| collect_proc_body_ident_walk(e, names) }
+        end
+      when CrystalV2::Compiler::Frontend::YieldNode
+        if args = node.args
+          args.each { |a| collect_proc_body_ident_walk(a, names) }
+        end
+      when CrystalV2::Compiler::Frontend::RangeNode
+        collect_proc_body_ident_walk(node.begin_expr, names) if node.begin_expr.index >= 0
+        collect_proc_body_ident_walk(node.end_expr, names) if node.end_expr.index >= 0
+      when CrystalV2::Compiler::Frontend::TupleLiteralNode
+        node.elements.each { |e| collect_proc_body_ident_walk(e, names) }
+      when CrystalV2::Compiler::Frontend::HashLiteralNode
+        node.entries.each do |entry|
+          collect_proc_body_ident_walk(entry.key, names)
+          collect_proc_body_ident_walk(entry.value, names)
+        end
       end
     end
 
@@ -68999,6 +69081,13 @@ module Crystal::HIR
       # Detect captures: scan proc body for identifiers that reference parent locals
       referenced_names = collect_proc_body_identifiers(node.body)
       parent_locals = ctx.save_locals             # {name => ValueId}
+      # Also include function parameters that may not yet be registered as locals.
+      ctx.function.params.each do |param|
+        unless parent_locals.has_key?(param.name)
+          parent_locals[param.name] = param.id
+          ctx.register_type(param.id, param.type)
+        end
+      end
       captures = [] of {String, ValueId, TypeRef} # {name, parent_value_id, type}
       referenced_names.each do |name|
         next if proc_param_names.includes?(name)
@@ -69317,10 +69406,54 @@ module Crystal::HIR
       # Detect captures: scan block body for identifiers referencing parent locals
       saved_arena = @arena
       @arena = block_arena
+      if env_has?("DEBUG_BLOCK_PROC_CAPTURES")
+        STDERR.puts "[WALK_DEBUG] proc=#{proc_func_name} parent=#{ctx.function.name} arena_size=#{block_arena.size} body_size=#{block_node.body.size}"
+        block_node.body.each_with_index do |eid, idx|
+          if eid.index < 0 || eid.index >= block_arena.size
+            STDERR.puts "[WALK_DEBUG]   body[#{idx}] eid=#{eid.index} OUT_OF_RANGE"
+          else
+            n = block_arena[eid]
+            STDERR.puts "[WALK_DEBUG]   body[#{idx}] eid=#{eid.index} type=#{n.class.name}"
+          end
+        end
+      end
       referenced_names = collect_proc_body_identifiers(block_node.body)
+      # When the block body contains `yield`, V2 will inline the yield target's
+      # block body into this proc during lowering (via inline_block_body).
+      # The inlined block body may reference variables from the parent scope
+      # (e.g. `io`, `separator` in Enumerable#join's each_with_index block).
+      # We must scan those block bodies NOW to capture all referenced names,
+      # otherwise the variables won't be captured and will be unresolved at runtime.
+      if contains_yield?(block_node.body, block_arena)
+        yield_block_stack_idx = @inline_yield_block_stack.size - 1
+        while yield_block_stack_idx >= 0
+          yield_blk = @inline_yield_block_stack[yield_block_stack_idx]
+          yield_blk_arena = @inline_yield_block_arena_stack[yield_block_stack_idx]?
+          if yield_blk_arena
+            old_arena = @arena
+            @arena = yield_blk_arena
+            yield_block_refs = collect_proc_body_identifiers(yield_blk.body)
+            @arena = old_arena
+            yield_block_refs.each { |name| referenced_names.add(name) }
+          end
+          # If the yield target block ALSO contains yield, scan the next level
+          break unless contains_yield?(yield_blk.body, yield_blk_arena || block_arena)
+          yield_block_stack_idx -= 1
+        end
+      end
       @arena = saved_arena
 
       parent_locals = ctx.save_locals
+      # Also include function parameters that may not yet be registered as locals.
+      # Block procs compiled inside standalone yield-functions (e.g. Enumerable#join)
+      # need access to the enclosing function's params (io, separator, etc.), but
+      # those params may only exist in ctx.function.params, not in save_locals.
+      ctx.function.params.each do |param|
+        unless parent_locals.has_key?(param.name)
+          parent_locals[param.name] = param.id
+          ctx.register_type(param.id, param.type)
+        end
+      end
       captures = [] of {String, ValueId, TypeRef}
       referenced_names.each do |name|
         next if block_param_names.includes?(name)
@@ -69328,6 +69461,13 @@ module Crystal::HIR
           parent_type = ctx.type_of(parent_value_id)
           next if parent_type == TypeRef::VOID
           captures << {name, parent_value_id, parent_type}
+        end
+      end
+
+      if env_has?("DEBUG_BLOCK_PROC_CAPTURES")
+        STDERR.puts "[BLOCK_PROC_CAPTURE] proc=#{proc_func_name} parent=#{ctx.function.name} refs=#{referenced_names.to_a.join(",")} captures=#{captures.map{|c| c[0]}.join(",")}"
+        parent_locals.each do |k, v|
+          STDERR.puts "[BLOCK_PROC_CAPTURE]   local: #{k} = #{v} type=#{get_type_name_from_ref(ctx.type_of(v))}"
         end
       end
 

@@ -3889,6 +3889,21 @@ module Crystal
         parent = @hir_module.class_parents[current]?
         current = parent || ""
       end
+
+      # Class parent walk failed. Check included modules.
+      # For Array(Int32), modules like Indexable and Enumerable define methods
+      # that should be resolved here (e.g. Indexable#each$block).
+      class_base = class_name.includes?('(') ? class_name[0, class_name.index('(').not_nil!] : class_name
+      @hir_module.module_includers.each do |mod_name, incs|
+        next unless incs.any? { |i| i == class_name || i == class_base }
+        mod_base = mod_name.includes?('(') ? mod_name[0, mod_name.index('(').not_nil!] : mod_name
+        exact_name = "#{mod_base}##{method_suffix}"
+        if (func = @mir_module.get_function(exact_name)) &&
+           (arg_count.nil? || func.params.size == arg_count + 1)
+          return func
+        end
+      end
+
       nil
     end
 
@@ -4614,8 +4629,10 @@ module Crystal
       args = [] of ValueId
       yld.args.each do |arg|
         arg_type = @hir_value_types[arg]?
-        next if arg_type == HIR::TypeRef::VOID
         next unless @value_map.has_key?(arg)
+        # Don't skip VOID-typed args — when yield args cross inlined block body
+        # boundaries, the HIR type may not be propagated, but the MIR value still
+        # carries the correct type (e.g. elem in Enumerable#join's each block).
         args << get_value(arg)
       end
       block_val = get_value(block_param_id)
