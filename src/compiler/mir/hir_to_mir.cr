@@ -4405,9 +4405,20 @@ module Crystal
         end
       end
 
-      kind = if src_type == TypeRef::POINTER && int_like.call(dst_hir_type)
+      # Detect pointer-backed MIR types: generic Pointer, typed pointers (Pointer(UInt8)),
+      # reference types (String, Array), and nil. All map to LLVM "ptr".
+      src_ptr_backed = src_type == TypeRef::POINTER ||
+        (src_hir_type.id >= HIR::TypeRef::FIRST_USER_TYPE &&
+          @mir_module.type_registry.get(src_type).try { |t| t.kind.pointer? || t.kind.reference? || t.kind.array? } == true) ||
+        src_hir_type == HIR::TypeRef::NIL || src_hir_type == HIR::TypeRef::STRING
+      dst_ptr_backed = dst_type == TypeRef::POINTER ||
+        (dst_hir_type.id >= HIR::TypeRef::FIRST_USER_TYPE &&
+          @mir_module.type_registry.get(dst_type).try { |t| t.kind.pointer? || t.kind.reference? || t.kind.array? } == true) ||
+        dst_hir_type == HIR::TypeRef::NIL || dst_hir_type == HIR::TypeRef::STRING
+
+      kind = if src_ptr_backed && int_like.call(dst_hir_type)
                CastKind::PtrToInt
-             elsif dst_type == TypeRef::POINTER && int_like.call(src_hir_type)
+             elsif dst_ptr_backed && int_like.call(src_hir_type)
                CastKind::IntToPtr
              elsif int_like.call(src_hir_type) && int_like.call(dst_hir_type)
                src_size = type_size(src_hir_type)
