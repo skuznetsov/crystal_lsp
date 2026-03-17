@@ -291,7 +291,8 @@ module Crystal::MIR
 
     private def runtime_pointer_backed_union_variant?(type : Type?) : Bool
       return false unless type
-      type.kind.reference? || type.kind.array? || type.kind.pointer?
+      type.kind.reference? || type.kind.array? || type.kind.pointer? ||
+        type.kind.tuple? || type.kind.struct?
     end
 
     # Check if a variant type name represents a pointer-backed type by extracting
