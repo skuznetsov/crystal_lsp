@@ -43626,7 +43626,8 @@ module Crystal::HIR
       ctx.current_block = merge_block
 
       # Count flowing branches
-      flowing_branches = branches.select { |_, _, _, flows, _| flows }
+      # Use indexed tuple access to avoid V2 tuple destructuring issues
+      flowing_branches = branches.select { |fb| fb[3] }
 
       if flowing_branches.empty?
         merge_inline_caller_locals_after_if(
@@ -43640,7 +43641,11 @@ module Crystal::HIR
         return nil_lit.id
       elsif flowing_branches.size == 1
         # Only one branch flows - use its value and locals
-        exit_block, value, locals, _, inline_locals = flowing_branches.first
+        fb = flowing_branches.first
+        exit_block = fb[0]
+        value = fb[1]
+        locals = fb[2]
+        inline_locals = fb[4]
         locals.each { |name, val| ctx.register_local(name, val) }
         merge_inline_caller_locals_after_if(
           ctx,
@@ -43650,8 +43655,14 @@ module Crystal::HIR
         return value
       else
         # Multiple branches flow - create phi
-        incoming = flowing_branches.map { |exit_block, value, _, _| {exit_block, value} }
-        value_types = incoming.map { |(_, val)| ctx.type_of(val) }.reject { |t| t == TypeRef::VOID }.uniq
+        # Use indexed access to avoid V2 tuple destructuring issues
+        incoming_blocks = Array(BlockId).new(flowing_branches.size)
+        incoming_values = Array(ValueId).new(flowing_branches.size)
+        flowing_branches.each do |fb|
+          incoming_blocks << fb[0]
+          incoming_values << fb[1]
+        end
+        value_types = incoming_values.map { |val| ctx.type_of(val) }.reject { |t| t == TypeRef::VOID }.uniq
         phi_type = value_types.first? || TypeRef::VOID
 
         if value_types.size > 1 && !value_types.all? { |t| numeric_primitive?(t) }
@@ -43669,45 +43680,44 @@ module Crystal::HIR
           ctx.emit(nil_lit)
           # Must merge locals even when the if value itself is void/nil,
           # because variables may have been modified in the branches.
-          flowing_branch_info = flowing_branches.map { |exit_block, _, locals, _, _| {exit_block, locals} }
+          flowing_branch_info = flowing_branches.map { |fb| {fb[0], fb[2]} }
           merge_if_branch_locals(ctx, pre_branch_locals, flowing_branch_info)
-          flowing_inline_info = flowing_branches.map { |exit_block, _, _, _, inline_locals| {exit_block, inline_locals} }
+          flowing_inline_info = flowing_branches.map { |fb| {fb[0], fb[4]} }
           merge_inline_caller_locals_after_if(ctx, pre_inline_caller_locals, flowing_inline_info)
           return nil_lit.id
         end
 
-        coerced_incoming = incoming.map do |(blk, val)|
+        # Coerce values to phi_type and build phi node
+        phi = Phi.new(ctx.next_id, phi_type)
+        incoming_blocks.size.times do |i|
+          blk = incoming_blocks[i]
+          val = incoming_values[i]
           val_type = ctx.type_of(val)
           if val_type == phi_type
-            {blk, val}
+            phi.add_incoming(blk, val)
           elsif is_union_type?(phi_type)
             variant_id = get_union_variant_id(phi_type, val_type)
             if variant_id >= 0
               wrap = UnionWrap.new(ctx.next_id, phi_type, val, variant_id)
               ctx.emit_to_block(blk, wrap)
-              {blk, wrap.id}
+              phi.add_incoming(blk, wrap.id)
             else
-              {blk, val}
+              phi.add_incoming(blk, val)
             end
           elsif numeric_primitive?(val_type) && numeric_primitive?(phi_type)
             cast = Cast.new(ctx.next_id, phi_type, val, phi_type, safe: false)
             ctx.emit_to_block(blk, cast)
-            {blk, cast.id}
+            phi.add_incoming(blk, cast.id)
           else
-            {blk, val}
+            phi.add_incoming(blk, val)
           end
-        end
-
-        phi = Phi.new(ctx.next_id, phi_type)
-        coerced_incoming.each do |exit_block, value|
-          phi.add_incoming(exit_block, value)
         end
         ctx.emit(phi)
 
         # Merge local variables from flowing branches.
-        flowing_branch_info = flowing_branches.map { |exit_block, _, locals, _, _| {exit_block, locals} }
+        flowing_branch_info = flowing_branches.map { |fb| {fb[0], fb[2]} }
         merge_if_branch_locals(ctx, pre_branch_locals, flowing_branch_info)
-        flowing_inline_info = flowing_branches.map { |exit_block, _, _, _, inline_locals| {exit_block, inline_locals} }
+        flowing_inline_info = flowing_branches.map { |fb| {fb[0], fb[4]} }
         merge_inline_caller_locals_after_if(ctx, pre_inline_caller_locals, flowing_inline_info)
 
         return phi.id
