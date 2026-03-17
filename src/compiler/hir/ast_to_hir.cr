@@ -58357,8 +58357,14 @@ module Crystal::HIR
       arg_types = args.map { |arg_id| ctx.type_of(arg_id) }
       entry = lookup_function_def_for_call(func_name, args.size, has_block_call, arg_types, false, call_has_named_args)
       return args unless entry
+      # V2 workaround: validate tuple pointer before accessing elements.
+      # V2's nilable tuple handling can pass nil check with corrupted data.
+      entry_raw = pointerof(entry).as(Pointer(UInt64)).value
+      return args unless readable_address?(entry_raw)
 
       func_def = entry[1]
+      func_def_raw = pointerof(func_def).as(Pointer(UInt64)).value
+      return args unless readable_address?(func_def_raw)
       return args unless params = func_def.params
 
       double_splat_index : Int32? = nil
