@@ -27532,18 +27532,22 @@ module Crystal::HIR
     # adjacent fields. Fix by using pointer size as minimum for struct-typed fields.
     private def field_storage_size(type : TypeRef, c_context : Bool = false) : Int32
       storage = type_size(type, c_context)
-      # V2 ABI fix: non-C, non-primitive struct types are heap-allocated and stored
-      # as pointers. When inline size < pointer size, adjacent fields overlap.
-      # Only apply to user-defined types (id >= FIRST_USER_TYPE), not primitives.
+      # V2 ABI: non-C Crystal struct types are heap-allocated and stored as pointers.
+      # The field slot is always pointer-sized regardless of the struct's inline size.
+      # C lib structs (in @lib_structs) are always inlined at their full size.
       if !c_context && storage > 0 && storage < pointer_word_bytes_i32 &&
          type.id >= TypeRef::FIRST_USER_TYPE
         if info = @class_info_by_type_id[type.id]?
-          return pointer_word_bytes_i32 if info.is_struct
+          if info.is_struct && !@lib_structs.includes?(info.name)
+            return pointer_word_bytes_i32
+          end
         else
           type_name = get_type_name_from_ref(type)
           if type_name != "Unknown"
             if info2 = @class_info[type_name]?
-              return pointer_word_bytes_i32 if info2.is_struct
+              if info2.is_struct && !@lib_structs.includes?(info2.name)
+                return pointer_word_bytes_i32
+              end
             end
           end
         end
