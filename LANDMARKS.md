@@ -3,7 +3,31 @@
 Updated: 2026-03-18
 Context: compiler/bootstrap/stage2-stability
 
-[LM-185|verified]: restoring parser rewind state in
+[LM-186|verified]: after the parser rewind fix, the smallest current
+self-hosted red control is no longer `prelude.cr` but direct
+`src/stdlib/object.cr --release --no-prelude`, and it is specific to the fresh
+stage2 compiler rather than the fresh stage1 compiler. Fresh verification on
+the current artifacts:
+`/Users/sergey/Projects/Crystal/.codex_artifacts/stage1_release_funlookahead`
+survives `CRYSTAL_V2_STOP_AFTER_HIR=1 --release --no-prelude src/stdlib/object.cr`
+with `status=0` in `1.06s`, while the fresh stage2
+`/Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_funlookahead_fresh`
+hits the wrapper memory cap on the exact same command with `status=125` in
+`17.78s`. A temporary require-prefix reduction also falsified the wider
+prelude hypothesis: `require "lib_c"; require "object"; 1` reproduces the same
+runaway path, while `require "lib_c"; require "macros"; 1` does not and instead
+fails quickly with a plain compiler error (`error: Index out of bounds`). LLDB
+on the direct object control shows `Parser#initialize -> Lexer#next_token /
+lex_identifier` above hundreds of repeated
+`AstToHir#register_class(...)+1900` frames, which is narrower than the earlier
+`register_module`-heavy prelude stack. The new script
+`regression_tests/stage2_object_hir_noprelude_repro.sh` captures this direct
+boundary: current stage1 is green on it, current stage2 is red. This reduces
+the next debugging surface from general stdlib/prelude registration to the
+class/macro corridor inside `src/stdlib/object.cr`. {F/G/R: 0.96/0.80/0.98}
+[verified]
+
+[LM-185|stale]: restoring parser rewind state in
 `src/compiler/frontend/parser.cr` moved the active self-hosted frontier again.
 The key change is local but stateful: `lookahead_for_arrow?` now restores
 `@previous_token` together with `@index` on every rewind path, including the

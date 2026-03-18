@@ -13,13 +13,15 @@
   - previous fresh self-hosted release stage2 checkpoint (`stage2_release_nameprio_fresh`): `164.03s`
 - **New regression surface**:
   - `bash regression_tests/stage2_full_compiler_parse_only_repro.sh <compiler>`
+  - `bash regression_tests/stage2_object_hir_noprelude_repro.sh <compiler>`
 - **Compiler parse-only status**:
   - baseline `stage2_release_nameprio_fresh`: `rc=0,138,138,138,138`
   - fresh `stage2_release_funlookahead_fresh`: `rc=0,0,0,0,0`
 - **Stage3 bootstrap**: **FAILS** after `1.06s` with `status=139` on `/Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_funlookahead_fresh`
 - **Current smallest clean/red HIR controls**:
   - `--release --no-prelude /Users/sergey/Projects/Crystal/.codex_artifacts/stage2_simple_one.cr` is green in `0.02s`
-  - `--release --no-prelude src/stdlib/prelude.cr` hits wrapper memory cap in `14.49s`
+  - fresh stage1 survives `--release --no-prelude src/stdlib/object.cr` in `1.06s`
+  - fresh stage2 hits wrapper memory cap on `--release --no-prelude src/stdlib/object.cr` in `17.78s`
 - **Benchmark status**: blocked — stage2 compiler is still unstable and crashes before finishing stage3
 
 ### Completed In This Cycle
@@ -65,7 +67,7 @@
      ```
      Result: `exit 0` / `not reproduced`
 
-4. **The active crash frontier moved again, from whole-compiler parse-only into stdlib/prelude HIR registration**
+4. **The active crash frontier moved again, from whole-compiler parse-only into direct `object.cr` HIR registration**
    - the smallest green HIR control is now the truly trivial no-prelude file:
      ```bash
      env CRYSTAL_V2_STOP_AFTER_HIR=1 \
@@ -74,19 +76,51 @@
        -o /Users/sergey/Projects/Crystal/.codex_artifacts/funlookahead_hir_simple_noprelude_out
      ```
      Result: `status=0`, `real 0.02s`
-   - `src/stdlib/prelude.cr` is now the smallest confirmed red stdlib HIR control:
+   - the red stdlib path reduces past `prelude.cr` and into direct `src/stdlib/object.cr`:
      ```bash
      /usr/bin/time -p env CRYSTAL_V2_STOP_AFTER_HIR=1 scripts/timeout_sample_lldb.sh \
        -t 120 -m 8192 -s 5 -l 10 -n 8 --no-series \
-       -o /Users/sergey/Projects/Crystal/.codex_artifacts/logs/funlookahead_hir_prelude_noprelude \
+       -o /Users/sergey/Projects/Crystal/.codex_artifacts/logs/object_direct_hir_noprelude \
        -- /Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_funlookahead_fresh \
-       --release --no-prelude src/stdlib/prelude.cr \
-       -o /Users/sergey/Projects/Crystal/.codex_artifacts/funlookahead_hir_prelude_noprelude_out
+       --release --no-prelude src/stdlib/object.cr \
+       -o /Users/sergey/Projects/Crystal/.codex_artifacts/object_direct_hir_noprelude_out
      ```
-     Result: `status=125`, `real 14.49s`
-   - bounded LLDB/sample on the red prelude control shows `Parser#initialize -> Lexer#next_token/lex_identifier` above hundreds of repeated `AstToHir#register_module(...)+1492` frames, with hotspots still dominated by `macro_token_text_slice`, `parse_macro_body`, and lexer identifier work
+     Result: `status=125`, `real 17.78s`
+   - the same direct control stays green on fresh stage1:
+     ```bash
+     /usr/bin/time -p env CRYSTAL_V2_STOP_AFTER_HIR=1 scripts/timeout_sample_lldb.sh \
+       -t 120 -m 8192 -s 5 -l 10 -n 8 --no-series \
+       -o /Users/sergey/Projects/Crystal/.codex_artifacts/logs/object_direct_hir_noprelude_stage1 \
+       -- /Users/sergey/Projects/Crystal/.codex_artifacts/stage1_release_funlookahead \
+       --release --no-prelude src/stdlib/object.cr \
+       -o /Users/sergey/Projects/Crystal/.codex_artifacts/object_direct_hir_noprelude_stage1_out
+     ```
+     Result: `status=0`, `real 1.06s`
+   - require-prefix falsifiers now show `lib_c + object` is enough to reproduce, while `lib_c + macros` is not:
+     ```text
+     require "lib_c"
+     require "object"
+     1
+     ```
+     Result: wrapper `status=125`, `real 19.58s`
+     ```text
+     require "lib_c"
+     require "macros"
+     1
+     ```
+     Result: quick compiler error `error: Index out of bounds`, not the runaway path
+   - bounded LLDB/sample on the red object control shows `Parser#initialize -> Lexer#next_token/lex_identifier` above hundreds of repeated `AstToHir#register_class(...)+1900` frames, which is narrower than the earlier `register_module`-heavy prelude control
 
-5. **Stage3 remains blocked, but after the parser corridor**
+5. **There is now a dedicated regression script for the direct object repro**
+   - script:
+     ```bash
+     bash regression_tests/stage2_object_hir_noprelude_repro.sh /path/to/compiler
+     ```
+   - expected current behavior:
+     - fresh stage1: `exit 0` / `not reproduced`
+     - fresh stage2: `exit 1` / `reproduced: object HIR no-prelude compile failed`
+
+6. **Stage3 remains blocked, but after the parser corridor**
    - command:
      ```bash
      /usr/bin/time -p env CRYSTAL_CACHE_DIR_STAGE2_RELEASE=/Users/sergey/Projects/Crystal/.codex_artifacts/cache_stage3_release_funlookahead_fresh \
@@ -109,7 +143,7 @@ The current `ast_to_hir` branch restores a full fresh `stage1 -> stage2` release
 - reduced parser-body oracle remains green
 - fresh `stage2_release_funlookahead_fresh` is buildable and reaches LLVM backend during bootstrap
 - `src/crystal_v2.cr` no longer dies in plain parse-only mode
-- HIR-bounded no-prelude compile of `1` is clean, so the active red path now lives inside stdlib/prelude registration
+- HIR-bounded no-prelude compile of `1` is clean, and the active red path now reduces to direct `src/stdlib/object.cr`
 - stage3 still fails before a benchmark can be taken
 
 ### Current Evidence
@@ -154,22 +188,26 @@ The current `ast_to_hir` branch restores a full fresh `stage1 -> stage2` release
      --release --no-prelude /Users/sergey/Projects/Crystal/.codex_artifacts/stage2_simple_one.cr \
      -o /Users/sergey/Projects/Crystal/.codex_artifacts/funlookahead_hir_simple_noprelude_out
    env CRYSTAL_V2_STOP_AFTER_HIR=1 \
+     /Users/sergey/Projects/Crystal/.codex_artifacts/stage1_release_funlookahead \
+     --release --no-prelude src/stdlib/object.cr \
+     -o /Users/sergey/Projects/Crystal/.codex_artifacts/object_direct_hir_noprelude_stage1_out
+   env CRYSTAL_V2_STOP_AFTER_HIR=1 \
      /Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_funlookahead_fresh \
-     --release --no-prelude src/stdlib/prelude.cr \
-     -o /Users/sergey/Projects/Crystal/.codex_artifacts/funlookahead_hir_prelude_noprelude_out
+     --release --no-prelude src/stdlib/object.cr \
+     -o /Users/sergey/Projects/Crystal/.codex_artifacts/object_direct_hir_noprelude_out
    ```
-   Result: trivial no-prelude file exits `0` in `0.02s`; `prelude.cr` hits memory cap with wrapper `status=125` in `14.49s`
+   Result: trivial no-prelude file exits `0` in `0.02s`; fresh stage1 survives direct `object.cr` in `1.06s`; fresh stage2 hits memory cap on the same direct `object.cr` control in `17.78s`
 
-5. **Bounded LLDB/sample on the current red path points at prelude/stdlib module registration**
+5. **Bounded LLDB/sample on the current red path points at direct class registration**
    ```bash
    /usr/bin/time -p env CRYSTAL_V2_STOP_AFTER_HIR=1 scripts/timeout_sample_lldb.sh \
      -t 120 -m 8192 -s 5 -l 10 -n 8 --no-series \
-     -o /Users/sergey/Projects/Crystal/.codex_artifacts/logs/funlookahead_hir_prelude_noprelude \
+     -o /Users/sergey/Projects/Crystal/.codex_artifacts/logs/object_direct_hir_noprelude \
      -- /Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_funlookahead_fresh \
-     --release --no-prelude src/stdlib/prelude.cr \
-     -o /Users/sergey/Projects/Crystal/.codex_artifacts/funlookahead_hir_prelude_noprelude_out
+     --release --no-prelude src/stdlib/object.cr \
+     -o /Users/sergey/Projects/Crystal/.codex_artifacts/object_direct_hir_noprelude_out
    ```
-   Result: LLDB shows `Parser#initialize -> Lexer#next_token/lex_identifier` above repeated `AstToHir#register_module(...)+1492`; sample/hotspots stay dominated by `macro_token_text_slice`, `parse_macro_body`, and lexer identifier work
+   Result: LLDB shows `Parser#initialize -> Lexer#next_token/lex_identifier` above repeated `AstToHir#register_class(...)+1900`; this is now narrower than the earlier `register_module`-heavy prelude control
 
 6. **Stage3 self-bootstrap is still blocked**
    ```bash
@@ -186,8 +224,8 @@ The current `ast_to_hir` branch restores a full fresh `stage1 -> stage2` release
 ### What To Debug Next
 1. Keep `regression_tests/stage2_full_compiler_parse_only_repro.sh` as the strongest current parser regression surface, with `stage2_block_body_exprid_parser_repro.sh` as the smaller parser-only control
 2. Keep parser rewind commit `24bf5d7c` isolated; do **not** mix the next HIR/module experiment into that boundary shift
-3. Use `CRYSTAL_V2_STOP_AFTER_HIR=1 --release --no-prelude src/stdlib/prelude.cr` as the new smallest stdlib red control and `... stage2_simple_one.cr --no-prelude` as the new green control
-4. Falsify the leading `register_module -> module_name_from_node -> with_reparsed_module_from_current_source` recursion hypothesis before returning to another full stage3
+3. Use `bash regression_tests/stage2_object_hir_noprelude_repro.sh <compiler>` as the new direct red control and `... stage2_simple_one.cr --no-prelude` as the green control
+4. Debug `src/stdlib/object.cr` first, especially the nested macro/class corridor (`macro method_missing`, `thread_local`, `class ::Thread`) before returning to another full stage3
 
 ---
 
