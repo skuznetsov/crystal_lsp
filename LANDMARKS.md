@@ -3,6 +3,27 @@
 Updated: 2026-03-18
 Context: compiler/bootstrap/stage2-stability
 
+[LM-184|verified]: the current `ast_to_hir` worktree restores a full fresh
+release bootstrap to stage2 and moves the active self-hosted frontier out of
+the earlier HIR name-resolution stall and into frontend `parse_fun`. The key
+semantic repair is that `class_name_from_node` / `module_name_from_node` now
+prefer the parser-provided `node.name` slice before falling back to source
+headers; this matters because parser-built path wrappers (`class A::B::C`,
+`module A::B`) reuse the full outer definition span for inner wrapper nodes
+while still storing the correct inner segment in `node.name`. Fresh
+verification on the current tree:
+`stage1_release_nameprio` builds from original Crystal in `542.96s`,
+`stage2_release_nameprio_fresh` then builds from that fresh stage1 in
+`164.03s`, and the reduced parser-body oracle
+`regression_tests/stage2_block_body_exprid_parser_repro.sh` stays green on the
+fresh stage2. Boundary: stage3 is still blocked, but the crash signature moved.
+On the fresh stage2, plain `CRYSTAL_V2_STOP_AFTER_PARSE=1 src/crystal_v2.cr`
+improves to `rc=0,0,138`, both trivial and full `CRYSTAL_V2_STOP_AFTER_HIR=1`
+controls fail quickly with `status=138`, and pre-crash sampling now shows
+`CrystalV2::Compiler::Frontend::Parser#parse_fun +760` with nearby lexer token
+activity rather than the older `AstToHir#register_extern_fun` / HIR
+name-resolution corridor. {F/G/R: 0.95/0.77/0.96} [verified]
+
 [LM-178|verified]: the fresh release-stage1 parser crash on `ast_to_hir.cr` was
 not an unavoidable whole-file failure; it reduced to a smaller release-only
 oracle centered on a long parenthesized call whose last argument is

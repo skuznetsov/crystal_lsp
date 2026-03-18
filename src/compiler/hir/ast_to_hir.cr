@@ -4322,8 +4322,22 @@ module Crystal::HIR
       node : CrystalV2::Compiler::Frontend::ClassNode,
       source : String? = nil,
     ) : String?
+      # Path-based nested wrappers reuse the full definition span, so source-first
+      # recovery can return an outer header name for an inner node (e.g. A instead
+      # of B in class A::B). Prefer the parser-provided slice when present and
+      # only fall back to the source header when the slice is empty/corrupted.
       if name = safe_slice_to_string(node.name)
         return name unless name.empty?
+      end
+
+      source ||= source_text_for_arena_or_file(@arena)
+      if source
+        prefixes = node.is_struct ? ["struct "] : ["class "]
+        if header = definition_header_text_from_source(node.span, source, prefixes)
+          if name = definition_name_from_header_text(header, prefixes)
+            return name
+          end
+        end
       end
 
       nil
@@ -4335,6 +4349,15 @@ module Crystal::HIR
     ) : String?
       if name = safe_slice_to_string(node.name)
         return name unless name.empty?
+      end
+
+      source ||= source_text_for_arena_or_file(@arena)
+      if source
+        if header = definition_header_text_from_source(node.span, source, ["module "])
+          if name = definition_name_from_header_text(header, ["module "])
+            return name
+          end
+        end
       end
 
       nil
@@ -5505,20 +5528,17 @@ module Crystal::HIR
             end
           end
         end
-      when CrystalV2::Compiler::Frontend::ClassNode,
-           CrystalV2::Compiler::Frontend::ModuleNode,
-           CrystalV2::Compiler::Frontend::EnumNode,
-           CrystalV2::Compiler::Frontend::AliasNode
-        nested_name = case node
-                      when CrystalV2::Compiler::Frontend::ClassNode
-                        class_name_from_node(node) || ""
-                      when CrystalV2::Compiler::Frontend::ModuleNode
-                        module_name_from_node(node) || ""
-                      when CrystalV2::Compiler::Frontend::EnumNode
-                        enum_name_from_node(node) || ""
-                      else
-                        safe_slice_to_string(node.name) || ""
-                      end
+      when CrystalV2::Compiler::Frontend::ClassNode
+        nested_name = class_name_from_node(node) || ""
+        set << nested_name unless nested_name.empty?
+      when CrystalV2::Compiler::Frontend::ModuleNode
+        nested_name = module_name_from_node(node) || ""
+        set << nested_name unless nested_name.empty?
+      when CrystalV2::Compiler::Frontend::EnumNode
+        nested_name = enum_name_from_node(node) || ""
+        set << nested_name unless nested_name.empty?
+      when CrystalV2::Compiler::Frontend::AliasNode
+        nested_name = safe_slice_to_string(node.name) || ""
         set << nested_name unless nested_name.empty?
       end
     end
@@ -16853,12 +16873,12 @@ module Crystal::HIR
             end
           elsif member.is_a?(CrystalV2::Compiler::Frontend::ModuleNode)
             # Recursively register nested module aliases first
-            nested_name = (safe_slice_to_string(member.name) || "")
+            nested_name = module_name_from_node(member) || ""
             full_nested_name = "#{full_name}::#{nested_name}"
             register_nested_module(member, full_nested_name)
           elsif member.is_a?(CrystalV2::Compiler::Frontend::ClassNode)
             # Register class/struct type alias and any aliases inside the class
-            class_name = (safe_slice_to_string(member.name) || "")
+            class_name = class_name_from_node(member) || ""
             full_class_name = "#{full_name}::#{class_name}"
             register_type_alias(full_class_name, full_class_name)
             register_class_aliases(member, full_class_name)
@@ -17097,7 +17117,7 @@ module Crystal::HIR
                 set_function_def_arena(full_method_name, member_arena)
               end
             when CrystalV2::Compiler::Frontend::ClassNode
-              class_name = (safe_slice_to_string(member.name) || "")
+              class_name = class_name_from_node(member) || ""
               full_class_name = "#{full_name}::#{class_name}"
               register_class_with_name(member, full_class_name)
             when CrystalV2::Compiler::Frontend::EnumNode
@@ -38166,33 +38186,40 @@ module Crystal::HIR
 
       old_class = @current_class
       @current_class = lib_name if lib_name
-      # Build parameter types
-      param_types = [] of TypeRef
-      return_type = TypeRef::VOID
+      # Self-hosted release builds still corrupt some transient wrapper-heavy
+      # generic buffers. Keep the extern signature scalar while collecting it
+      # and materialize TypeRef wrappers only once at the end.
+      param_type_ids = [] of UInt32
+      return_type_id = TypeRef::VOID.id
       begin
         if params = node.params
           each_param(params) do |param|
             if type_ann = param.type_annotation
               safe_str_guard(type_ann, "next")
               type_name = (safe_slice_to_string(type_ann) || "")
-              param_types << type_ref_for_c_type(type_name)
+              param_type_ids << type_ref_for_c_type(type_name).id
             else
-              param_types << TypeRef::POINTER # Default to pointer for untyped params
+              param_type_ids << TypeRef::POINTER.id # Default to pointer for untyped params
             end
           end
         end
 
         # Return type
-        return_type = if ret = node.return_type
-                        safe_str_guard(ret, "return")
-                        ret_str = (safe_slice_to_string(ret) || "")
-                        type_ref_for_c_type(ret_str)
-                      else
-                        TypeRef::VOID
-                      end
+        return_type_id = if ret = node.return_type
+                           safe_str_guard(ret, "return")
+                           ret_str = (safe_slice_to_string(ret) || "")
+                           type_ref_for_c_type(ret_str).id
+                         else
+                           TypeRef::VOID.id
+                         end
       ensure
         @current_class = old_class
       end
+
+      param_types = Array(TypeRef).new(param_type_ids.size) do |i|
+        TypeRef.new(param_type_ids.unsafe_fetch(i))
+      end
+      return_type = TypeRef.new(return_type_id)
 
       if env_get("DEBUG_LIBC_EXTERN") && lib_name == "LibC" && fun_name == "dladdr"
         param_names = param_types.map { |t| get_type_name_from_ref(t) }.join(", ")
