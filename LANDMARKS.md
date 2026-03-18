@@ -3,7 +3,45 @@
 Updated: 2026-03-18
 Context: compiler/bootstrap/stage2-stability
 
-[LM-186|verified]: after the parser rewind fix, the smallest current
+[LM-188|verified]: the current local `ast_to_hir` branch removes the old
+empty-name reparsed-module loop for path-wrapped declarations like
+`struct A::B` and moves the active stage2 frontier later than
+`register_module` reparse recovery. The fix is two-part but still localized:
+`module_name_from_node` now accepts `class/struct/union/enum Foo::Bar` headers
+as valid namespace-wrapper sources, and `definition_header_text_from_source`
+now scans the snippet by bytes instead of relying on `each_line`/`lstrip`.
+Fresh verification uses the new cheap oracle
+`regression_tests/stage2_reparsed_module_wrapper_repro.sh`: old
+`/Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_reparse_fix_dbg2`
+returns `exit 1` / `reproduced: compiler failed before lower_main on the
+path-wrapper module repro`, while fresh local
+`/Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_reparse_clean_fix`
+returns `exit 0` / `not reproduced: compiler reached lower_main exprs=0 on the
+path-wrapper repro`. On the same minimal `--release --no-prelude struct A::B`
+control, the old binary loops through empty-name reparsing and dies under the
+wrapper memory cap, while the fresh local fix reaches `lower_main: exprs=0`
+and only then segfaults later. This is a verified boundary shift, not a full
+stage2 stabilization. {F/G/R: 0.97/0.82/0.98} [verified]
+
+[LM-187|verified]: the active stage2-specific HIR crash family can be reduced
+below `src/stdlib/object.cr` to a tiny nested-macro shape taken from
+`Object#forward_missing_to`. The new fixture
+`regression_tests/stage2_nested_macro_method_missing_repro.cr` contains only a
+class with a macro that defines nested `macro method_missing(call)` plus a
+trivial trailing `1`. Fresh verification:
+`bash regression_tests/stage2_nested_macro_method_missing_repro.sh
+/Users/sergey/Projects/Crystal/.codex_artifacts/stage1_release_funlookahead`
+returns `exit 0` / `not reproduced`, while the same script against fresh stage2
+`/Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_funlookahead_fresh`
+returns `exit 1` / `reproduced`, with wrapper `status=125` after `20.51s` and
+an underlying `Bus error: 10` before teardown. LLDB on the fresh-stage2
+micro-probe shows `Parser#initialize -> Lexer#next_token` above repeated
+`AstToHir#register_class(...)+1900`, matching the larger direct-object control
+but with a much smaller input surface. This reduces the next debugging target
+from the whole `src/stdlib/object.cr` file to the nested macro/class pattern
+itself. {F/G/R: 0.97/0.83/0.98} [verified]
+
+[LM-186|stale]: after the parser rewind fix, the smallest current
 self-hosted red control is no longer `prelude.cr` but direct
 `src/stdlib/object.cr --release --no-prelude`, and it is specific to the fresh
 stage2 compiler rather than the fresh stage1 compiler. Fresh verification on

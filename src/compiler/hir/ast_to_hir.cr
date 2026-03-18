@@ -4157,13 +4157,43 @@ module Crystal::HIR
       prefixes : Array(String),
     ) : String?
       snippet = slice_source_for_span(span, source)
-      if snippet
-        snippet.each_line do |line|
-          stripped = line.lstrip
-          next if stripped.empty?
+      return nil unless snippet
+
+      snippet_line_matching_prefixes(snippet, prefixes)
+    end
+
+    private def snippet_line_matching_prefixes(
+      snippet : String,
+      prefixes : Array(String),
+    ) : String?
+      i = 0
+      while i < snippet.bytesize
+        line_start = i
+        while i < snippet.bytesize
+          ch = snippet.byte_at(i)
+          break if ch == '\n'.ord || ch == '\r'.ord
+          i += 1
+        end
+        line_end = i
+
+        while line_start < line_end
+          ch = snippet.byte_at(line_start)
+          break unless ch == ' '.ord || ch == '\t'.ord
+          line_start += 1
+        end
+
+        if line_start < line_end
+          line = snippet.byte_slice(line_start, line_end - line_start)
           prefixes.each do |prefix|
-            return stripped if stripped.starts_with?(prefix)
+            return line if line.starts_with?(prefix)
           end
+        end
+
+        if i < snippet.bytesize && snippet.byte_at(i) == '\r'.ord
+          i += 1
+        end
+        if i < snippet.bytesize && snippet.byte_at(i) == '\n'.ord
+          i += 1
         end
       end
 
@@ -4353,8 +4383,11 @@ module Crystal::HIR
 
       source ||= source_text_for_arena_or_file(@arena)
       if source
-        if header = definition_header_text_from_source(node.span, source, ["module "])
-          if name = definition_name_from_header_text(header, ["module "])
+        # Namespace wrapper modules can come from `module Foo::Bar`, but also from
+        # path-based class/struct/union/enum forms like `struct Foo::Bar`.
+        wrapper_prefixes = ["module ", "class ", "struct ", "union ", "enum "]
+        if header = definition_header_text_from_source(node.span, source, wrapper_prefixes)
+          if name = definition_name_from_header_text(header, wrapper_prefixes)
             return name
           end
         end

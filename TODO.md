@@ -7,6 +7,7 @@
   - unrelated local diffs in `src/compiler/mir/hir_to_mir.cr` and `src/crystal_v2.cr` must stay out of the next commit
 - **Fresh release stage1 (current tree)**: `/Users/sergey/Projects/Crystal/.codex_artifacts/stage1_release_funlookahead`
 - **Fresh release stage2 (current tree)**: `/Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_funlookahead_fresh`
+- **Current local stage2 candidate (reparsed-wrapper fix)**: `/Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_reparse_clean_fix`
 - **Current timings**:
   - original Crystal -> fresh `stage1_release_funlookahead`: `544.95s`
   - fresh `stage1_release_funlookahead` -> fresh `stage2_release_funlookahead_fresh`: `174.80s`
@@ -14,18 +15,41 @@
 - **New regression surface**:
   - `bash regression_tests/stage2_full_compiler_parse_only_repro.sh <compiler>`
   - `bash regression_tests/stage2_object_hir_noprelude_repro.sh <compiler>`
+  - `bash regression_tests/stage2_nested_macro_method_missing_repro.sh <compiler>`
+  - `bash regression_tests/stage2_reparsed_module_wrapper_repro.sh <compiler>`
 - **Compiler parse-only status**:
   - baseline `stage2_release_nameprio_fresh`: `rc=0,138,138,138,138`
   - fresh `stage2_release_funlookahead_fresh`: `rc=0,0,0,0,0`
 - **Stage3 bootstrap**: **FAILS** after `1.06s` with `status=139` on `/Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_funlookahead_fresh`
 - **Current smallest clean/red HIR controls**:
   - `--release --no-prelude /Users/sergey/Projects/Crystal/.codex_artifacts/stage2_simple_one.cr` is green in `0.02s`
-  - fresh stage1 survives `--release --no-prelude src/stdlib/object.cr` in `1.06s`
-  - fresh stage2 hits wrapper memory cap on `--release --no-prelude src/stdlib/object.cr` in `17.78s`
+  - fresh stage1 survives `regression_tests/stage2_nested_macro_method_missing_repro.cr` in `1.06s`
+  - fresh stage2 reproduces on the same file in `20.51s` (`wrapper status=125`, underlying bus error before kill)
+  - the new path-wrapper oracle cleanly separates the old reparse-loop binary from the current local fix:
+    - `stage2_release_reparse_fix_dbg2`: `exit 1` / `reproduced: compiler failed before lower_main on the path-wrapper module repro`
+    - `stage2_release_reparse_clean_fix`: `exit 0` / `not reproduced: compiler reached lower_main exprs=0 on the path-wrapper repro`
 - **Benchmark status**: blocked — stage2 compiler is still unstable and crashes before finishing stage3
 
 ### Completed In This Cycle
-1. **Parser rewind hardening moved the active frontier past full-compiler parse-only**
+1. **Path-wrapper module-name recovery moved the stage2 frontier past the old reparsed-module loop**
+   - `src/compiler/hir/ast_to_hir.cr` now treats path-wrapper module headers from `class/struct/union/enum Foo::Bar` as valid module-name sources, and `definition_header_text_from_source` now uses a manual byte-scan instead of `each_line`/`lstrip`
+   - the smallest focused repro is now:
+     ```bash
+     bash regression_tests/stage2_reparsed_module_wrapper_repro.sh <compiler>
+     ```
+   - fresh verification on the old/new boundary:
+     ```bash
+     bash regression_tests/stage2_reparsed_module_wrapper_repro.sh \
+       /Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_reparse_fix_dbg2
+     bash regression_tests/stage2_reparsed_module_wrapper_repro.sh \
+       /Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_reparse_clean_fix
+     ```
+     Result:
+     - old stage2: `exit 1` / `reproduced: compiler failed before lower_main on the path-wrapper module repro`
+     - current local fix: `exit 0` / `not reproduced: compiler reached lower_main exprs=0 on the path-wrapper repro`
+   - boundary shift on the same minimal `struct A::B` no-prelude control: the old stage2 died in the empty-name reparse loop before emitting any `lower_main` trace, while the current local fix now reaches `lower_main: exprs=0` and only then dies later with `status=139`
+
+2. **Parser rewind hardening moved the active frontier past full-compiler parse-only**
    - `src/compiler/frontend/parser.cr` now restores `@previous_token` together with `@index` inside `lookahead_for_arrow?`, including the early `::Foo` false return, the generic false return, and the speculative trailing `.class` rewind
    - full compiler parse-only regression surface now cleanly separates old vs fresh stage2:
      ```bash
@@ -38,7 +62,7 @@
      - baseline `stage2_release_nameprio_fresh`: `rc=0,138,138,138,138`
      - fresh `stage2_release_funlookahead_fresh`: `rc=0,0,0,0,0`
 
-2. **Fresh release bootstrap remains green with the parser rewind patch**
+3. **Fresh release bootstrap remains green with the parser rewind patch**
    - fresh original-Crystal rebuild:
      ```bash
      /usr/bin/time -p scripts/timeout_sample_lldb.sh -t 5400 -m 40960 -s 8 -l 20 -n 12 --no-series \
@@ -59,7 +83,7 @@
      ```
      Result: `status=0`, `real 174.80s`
 
-3. **The reduced parser-body oracle remains green on the fresh stage2**
+4. **The reduced parser-body oracle remains green on the fresh stage2**
    - command:
      ```bash
      bash regression_tests/stage2_block_body_exprid_parser_repro.sh \
@@ -67,7 +91,7 @@
      ```
      Result: `exit 0` / `not reproduced`
 
-4. **The active crash frontier moved again, from whole-compiler parse-only into direct `object.cr` HIR registration**
+5. **The active crash frontier moved again, from whole-compiler parse-only into direct `object.cr` HIR registration**
    - the smallest green HIR control is now the truly trivial no-prelude file:
      ```bash
      env CRYSTAL_V2_STOP_AFTER_HIR=1 \
@@ -111,7 +135,7 @@
      Result: quick compiler error `error: Index out of bounds`, not the runaway path
    - bounded LLDB/sample on the red object control shows `Parser#initialize -> Lexer#next_token/lex_identifier` above hundreds of repeated `AstToHir#register_class(...)+1900` frames, which is narrower than the earlier `register_module`-heavy prelude control
 
-5. **There is now a dedicated regression script for the direct object repro**
+6. **There is now a dedicated regression script for the direct object repro**
    - script:
      ```bash
      bash regression_tests/stage2_object_hir_noprelude_repro.sh /path/to/compiler
@@ -120,7 +144,24 @@
      - fresh stage1: `exit 0` / `not reproduced`
      - fresh stage2: `exit 1` / `reproduced: object HIR no-prelude compile failed`
 
-6. **Stage3 remains blocked, but after the parser corridor**
+7. **A smaller nested-macro micro-probe now reproduces the same stage2-specific class corridor**
+   - fixture:
+     ```bash
+     regression_tests/stage2_nested_macro_method_missing_repro.cr
+     ```
+   - verification:
+     ```bash
+     bash regression_tests/stage2_nested_macro_method_missing_repro.sh \
+       /Users/sergey/Projects/Crystal/.codex_artifacts/stage1_release_funlookahead
+     bash regression_tests/stage2_nested_macro_method_missing_repro.sh \
+       /Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_funlookahead_fresh
+     ```
+     Result:
+     - fresh stage1: `exit 0` / `not reproduced`
+     - fresh stage2: `exit 1` / `reproduced: nested macro method_missing compile failed`
+   - bounded LLDB/sample on the fresh-stage2 failure still shows `Parser#initialize -> Lexer#next_token` above repeated `AstToHir#register_class(...)+1900`, so the active corridor is now inside the nested macro/class shape rather than `object.cr` as a whole
+
+8. **Stage3 remains blocked, but after the parser corridor**
    - command:
      ```bash
      /usr/bin/time -p env CRYSTAL_CACHE_DIR_STAGE2_RELEASE=/Users/sergey/Projects/Crystal/.codex_artifacts/cache_stage3_release_funlookahead_fresh \
@@ -143,7 +184,8 @@ The current `ast_to_hir` branch restores a full fresh `stage1 -> stage2` release
 - reduced parser-body oracle remains green
 - fresh `stage2_release_funlookahead_fresh` is buildable and reaches LLVM backend during bootstrap
 - `src/crystal_v2.cr` no longer dies in plain parse-only mode
-- HIR-bounded no-prelude compile of `1` is clean, and the active red path now reduces to direct `src/stdlib/object.cr`
+- HIR-bounded no-prelude compile of `1` is clean, and the active red path now reduces to a nested macro/class shape extracted from `src/stdlib/object.cr`
+- the older empty-name `register_module -> reparse -> register_module` loop on path-wrapped `struct A::B` is now removed on the local `reparse_clean_fix` candidate, but that same minimal control still dies later after `lower_main: exprs=0`
 - stage3 still fails before a benchmark can be taken
 
 ### Current Evidence
@@ -187,29 +229,32 @@ The current `ast_to_hir` branch restores a full fresh `stage1 -> stage2` release
      /Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_funlookahead_fresh \
      --release --no-prelude /Users/sergey/Projects/Crystal/.codex_artifacts/stage2_simple_one.cr \
      -o /Users/sergey/Projects/Crystal/.codex_artifacts/funlookahead_hir_simple_noprelude_out
-   env CRYSTAL_V2_STOP_AFTER_HIR=1 \
-     /Users/sergey/Projects/Crystal/.codex_artifacts/stage1_release_funlookahead \
-     --release --no-prelude src/stdlib/object.cr \
-     -o /Users/sergey/Projects/Crystal/.codex_artifacts/object_direct_hir_noprelude_stage1_out
-   env CRYSTAL_V2_STOP_AFTER_HIR=1 \
-     /Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_funlookahead_fresh \
-     --release --no-prelude src/stdlib/object.cr \
-     -o /Users/sergey/Projects/Crystal/.codex_artifacts/object_direct_hir_noprelude_out
+   bash regression_tests/stage2_nested_macro_method_missing_repro.sh \
+     /Users/sergey/Projects/Crystal/.codex_artifacts/stage1_release_funlookahead
+   bash regression_tests/stage2_nested_macro_method_missing_repro.sh \
+     /Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_funlookahead_fresh
    ```
-   Result: trivial no-prelude file exits `0` in `0.02s`; fresh stage1 survives direct `object.cr` in `1.06s`; fresh stage2 hits memory cap on the same direct `object.cr` control in `17.78s`
+   Result: trivial no-prelude file exits `0` in `0.02s`; fresh stage1 is green on the nested-macro micro-probe; fresh stage2 reproduces there with wrapper `status=125`
 
 5. **Bounded LLDB/sample on the current red path points at direct class registration**
    ```bash
    /usr/bin/time -p env CRYSTAL_V2_STOP_AFTER_HIR=1 scripts/timeout_sample_lldb.sh \
-     -t 120 -m 8192 -s 5 -l 10 -n 8 --no-series \
-     -o /Users/sergey/Projects/Crystal/.codex_artifacts/logs/object_direct_hir_noprelude \
+     -t 60 -m 4096 -s 5 -l 10 -n 8 --no-series \
+     -o /Users/sergey/Projects/Crystal/.codex_artifacts/logs/object_probe_method_missing_stage2 \
      -- /Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_funlookahead_fresh \
-     --release --no-prelude src/stdlib/object.cr \
-     -o /Users/sergey/Projects/Crystal/.codex_artifacts/object_direct_hir_noprelude_out
+     --release --no-prelude /Users/sergey/Projects/Crystal/.codex_artifacts/object_probe_method_missing.cr \
+     -o /Users/sergey/Projects/Crystal/.codex_artifacts/object_probe_method_missing_stage2_out
    ```
-   Result: LLDB shows `Parser#initialize -> Lexer#next_token/lex_identifier` above repeated `AstToHir#register_class(...)+1900`; this is now narrower than the earlier `register_module`-heavy prelude control
+   Result: LLDB shows `Parser#initialize -> Lexer#next_token` above repeated `AstToHir#register_class(...)+1900`; the fresh-stage2 micro-probe also logs a `Bus error: 10` before wrapper teardown
 
-6. **Stage3 self-bootstrap is still blocked**
+6. **Direct `object.cr` is still a useful larger-file corroborating control**
+   ```bash
+   bash regression_tests/stage2_object_hir_noprelude_repro.sh \
+     /Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_funlookahead_fresh
+   ```
+   Result: `exit 1` / `reproduced: object HIR no-prelude compile failed`
+
+7. **Stage3 self-bootstrap is still blocked**
    ```bash
    /usr/bin/time -p env CRYSTAL_CACHE_DIR_STAGE2_RELEASE=/Users/sergey/Projects/Crystal/.codex_artifacts/cache_stage3_release_funlookahead_fresh \
      CRYSTAL_V2_PIPELINE_CACHE=0 CRYSTAL_V2_LLVM_CACHE=0 \
@@ -224,8 +269,8 @@ The current `ast_to_hir` branch restores a full fresh `stage1 -> stage2` release
 ### What To Debug Next
 1. Keep `regression_tests/stage2_full_compiler_parse_only_repro.sh` as the strongest current parser regression surface, with `stage2_block_body_exprid_parser_repro.sh` as the smaller parser-only control
 2. Keep parser rewind commit `24bf5d7c` isolated; do **not** mix the next HIR/module experiment into that boundary shift
-3. Use `bash regression_tests/stage2_object_hir_noprelude_repro.sh <compiler>` as the new direct red control and `... stage2_simple_one.cr --no-prelude` as the green control
-4. Debug `src/stdlib/object.cr` first, especially the nested macro/class corridor (`macro method_missing`, `thread_local`, `class ::Thread`) before returning to another full stage3
+3. Use `bash regression_tests/stage2_nested_macro_method_missing_repro.sh <compiler>` as the new smallest red control and `... stage2_simple_one.cr --no-prelude` as the green control
+4. Debug the nested macro/class corridor first, with `src/stdlib/object.cr` retained only as the larger corroborating control
 
 ---
 
