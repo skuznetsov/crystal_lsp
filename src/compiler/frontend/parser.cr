@@ -15443,6 +15443,7 @@ current_token.kind == Token::Kind::Identifier &&
         # Helper: lookahead to check if there's an arrow after commas
         private def lookahead_for_arrow? : Bool
           saved_index = @index
+          saved_previous = @previous_token
 
           # Skip commas and types
           loop do
@@ -15457,7 +15458,11 @@ current_token.kind == Token::Kind::Identifier &&
                 # Global path: ::Foo::Bar
                 advance
                 skip_trivia
-                return false unless current_token.kind == Token::Kind::Identifier
+                unless current_token.kind == Token::Kind::Identifier
+                  @index = saved_index
+                  @previous_token = saved_previous
+                  return false
+                end
                 advance
                 skip_trivia
               else
@@ -15544,12 +15549,14 @@ current_token.kind == Token::Kind::Identifier &&
               skip_trivia
             else
               @index = saved_index
+              @previous_token = saved_previous
               return false
             end
           end
 
           result = current_token.kind == Token::Kind::ThinArrow
           @index = saved_index
+          @previous_token = saved_previous
           result
         end
 
@@ -15669,12 +15676,14 @@ current_token.kind == Token::Kind::Identifier &&
           # Allow trailing '.class' after type
           if current_token.kind == Token::Kind::Operator && slice_eq?(current_token.slice, ".")
             saved = @index
+            saved_previous = @previous_token
             advance
             if current_token.kind == Token::Kind::Class
               end_token = current_token
               advance
             else
               @index = saved
+              @previous_token = saved_previous
             end
           end
           start_ptr = start_token.slice.to_unsafe

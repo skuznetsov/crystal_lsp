@@ -2,90 +2,99 @@
 
 ## Current State
 - **Branch**: `bootstrap-benchmark`
-- **Latest committed baseline**: `fa4ac14e` — scalarize parser block body expr ids
+- **Latest committed baseline**: `781b7f28` — restore fresh self-hosted stage2 on nameprio branch
 - **Working tree**:
-  - uncommitted self-hosted HIR stabilization in `src/compiler/hir/ast_to_hir.cr`
+  - uncommitted parser rewind hardening in `src/compiler/frontend/parser.cr`
   - unrelated local diffs in `src/compiler/mir/hir_to_mir.cr` and `src/crystal_v2.cr` must stay out of the next commit
-- **Fresh release stage1 (current tree)**: `/Users/sergey/Projects/Crystal/.codex_artifacts/stage1_release_nameprio`
-- **Fresh release stage2 (current tree)**: `/Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_nameprio_fresh`
+- **Fresh release stage1 (current tree)**: `/Users/sergey/Projects/Crystal/.codex_artifacts/stage1_release_funlookahead`
+- **Fresh release stage2 (current tree)**: `/Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_funlookahead_fresh`
 - **Current timings**:
-  - original Crystal -> fresh `stage1_release_nameprio`: `542.96s`
-  - fresh `stage1_release_nameprio` -> fresh `stage2_release_nameprio_fresh`: `164.03s`
-  - previous self-hosted release stage2 checkpoint (`stage2_release_externsig`): `185.29s`
-- **Stage3 bootstrap**: **FAILS** after `1.07s` with `status=138` on `/Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_nameprio_fresh`
+  - original Crystal -> fresh `stage1_release_funlookahead`: `544.95s`
+  - fresh `stage1_release_funlookahead` -> fresh `stage2_release_funlookahead_fresh`: `174.80s`
+  - previous fresh self-hosted release stage2 checkpoint (`stage2_release_nameprio_fresh`): `164.03s`
+- **Compiler parse-only status**: fresh `stage2_release_funlookahead_fresh` survives `CRYSTAL_V2_STOP_AFTER_PARSE=1 src/crystal_v2.cr --release` `3/3`
+- **Stage3 bootstrap**: **FAILS** after `1.06s` with `status=139` on `/Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_funlookahead_fresh`
+- **Current smallest clean/red HIR controls**:
+  - `--release --no-prelude /Users/sergey/Projects/Crystal/.codex_artifacts/stage2_simple_one.cr` is green in `0.02s`
+  - `--release --no-prelude src/stdlib/prelude.cr` hits wrapper memory cap in `14.49s`
 - **Benchmark status**: blocked — stage2 compiler is still unstable and crashes before finishing stage3
 
 ### Completed In This Cycle
-1. **Fresh release bootstrap is restored on the current `ast_to_hir` branch**
-   - fresh original-Crystal rebuild:
-     ```bash
-     /usr/bin/time -p scripts/timeout_sample_lldb.sh -t 5400 -m 40960 -s 8 -l 20 -n 12 --no-series \
-       -o /Users/sergey/Projects/Crystal/.codex_artifacts/logs/stage1_release_nameprio_timeout \
-       -- crystal build src/crystal_v2.cr --release --error-trace \
-       -o /Users/sergey/Projects/Crystal/.codex_artifacts/stage1_release_nameprio
-     ```
-     Result: `status=0`, `real 542.96s`
-   - fresh self-hosted rebuild from that new stage1:
-     ```bash
-     /usr/bin/time -p env CRYSTAL_CACHE_DIR_STAGE2_RELEASE=/Users/sergey/Projects/Crystal/.codex_artifacts/cache_stage2_release_nameprio_fresh \
-       CRYSTAL_V2_PIPELINE_CACHE=0 CRYSTAL_V2_LLVM_CACHE=0 \
-       scripts/timeout_sample_lldb.sh -t 1800 -m 40960 -s 8 -l 20 -n 12 --no-series \
-       -o /Users/sergey/Projects/Crystal/.codex_artifacts/logs/stage2_release_nameprio_fresh_timeout \
-       -- scripts/build_stage2_release.sh \
-       /Users/sergey/Projects/Crystal/.codex_artifacts/stage1_release_nameprio \
-       /Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_nameprio_fresh
-     ```
-     Result: `status=0`, `real 164.03s`
-   - the fresh stage2 no longer stalls in HIR name-resolution during bootstrap; it reaches LLVM backend and finishes
-
-2. **The reduced parser-body oracle remains green on the fresh stage2**
-   - command:
-     ```bash
-     bash regression_tests/stage2_block_body_exprid_parser_repro.sh \
-       /Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_nameprio_fresh
-     ```
-     Result: `exit 0` / `not reproduced`
-
-3. **The active crash frontier moved again, from HIR name-resolution to parser `parse_fun` during full stdlib/compiler parsing**
-   - full compiler parse-only control on the fresh stage2 is improved but still heisenbuggy:
+1. **Parser rewind hardening moved the active frontier past full-compiler parse-only**
+   - `src/compiler/frontend/parser.cr` now restores `@previous_token` together with `@index` inside `lookahead_for_arrow?`, including the early `::Foo` false return, the generic false return, and the speculative trailing `.class` rewind
+   - full compiler parse-only on the fresh stage2 is now clean:
      ```bash
      for i in 1 2 3; do
        env CRYSTAL_V2_STOP_AFTER_PARSE=1 \
-         /Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_nameprio_fresh \
+         /Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_funlookahead_fresh \
          src/crystal_v2.cr --release \
-         -o /Users/sergey/Projects/Crystal/.codex_artifacts/stage3_nameprio_parse_only_$i
+         -o /Users/sergey/Projects/Crystal/.codex_artifacts/stage3_funlookahead_parse_only_$i
      done
      ```
-     Result: `rc=0, 0, 138`
-   - HIR-bounded controls still die quickly on both the full compiler source and the tiny simple-file control:
-     ```bash
-     env CRYSTAL_V2_STOP_AFTER_HIR=1 \
-       /Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_nameprio_fresh \
-       src/crystal_v2.cr --release -o /Users/sergey/Projects/Crystal/.codex_artifacts/nameprio_hir_full_bounded_out
-     env CRYSTAL_V2_STOP_AFTER_HIR=1 \
-       /Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_nameprio_fresh \
-       --release /Users/sergey/Projects/Crystal/.codex_artifacts/stage2_simple_one.cr \
-       -o /Users/sergey/Projects/Crystal/.codex_artifacts/nameprio_hir_simple_bounded_out
-     ```
-     Result: both fail with `status=138` in about `1.06-1.07s`
-   - pre-crash sampling on the fresh stage2 now shows:
-     ```text
-     CrystalV2::Compiler::Frontend::Parser#parse_fun +760
-     ```
-     with nearby lexer/current-token activity, which is a different frontier from the earlier `AstToHir#register_extern_fun` stop
+     Result: `rc=0, 0, 0`
 
-4. **Stage3 remains blocked, but on the new parser-side corridor**
-   - command:
+2. **Fresh release bootstrap remains green with the parser rewind patch**
+   - fresh original-Crystal rebuild:
      ```bash
-     /usr/bin/time -p env CRYSTAL_CACHE_DIR_STAGE2_RELEASE=/Users/sergey/Projects/Crystal/.codex_artifacts/cache_stage3_release_nameprio_fresh \
+     /usr/bin/time -p scripts/timeout_sample_lldb.sh -t 5400 -m 40960 -s 8 -l 20 -n 12 --no-series \
+       -o /Users/sergey/Projects/Crystal/.codex_artifacts/logs/stage1_release_funlookahead_timeout \
+       -- crystal build src/crystal_v2.cr --release --error-trace \
+       -o /Users/sergey/Projects/Crystal/.codex_artifacts/stage1_release_funlookahead
+     ```
+     Result: `status=0`, `real 544.95s`
+   - fresh self-hosted rebuild from that new stage1:
+     ```bash
+     /usr/bin/time -p env CRYSTAL_CACHE_DIR_STAGE2_RELEASE=/Users/sergey/Projects/Crystal/.codex_artifacts/cache_stage2_release_funlookahead_fresh \
        CRYSTAL_V2_PIPELINE_CACHE=0 CRYSTAL_V2_LLVM_CACHE=0 \
        scripts/timeout_sample_lldb.sh -t 1800 -m 40960 -s 8 -l 20 -n 12 --no-series \
-       -o /Users/sergey/Projects/Crystal/.codex_artifacts/logs/stage3_release_nameprio_fresh_timeout \
+       -o /Users/sergey/Projects/Crystal/.codex_artifacts/logs/stage2_release_funlookahead_fresh_timeout \
        -- scripts/build_stage2_release.sh \
-       /Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_nameprio_fresh \
-       /Users/sergey/Projects/Crystal/.codex_artifacts/stage3_release_nameprio_fresh
+       /Users/sergey/Projects/Crystal/.codex_artifacts/stage1_release_funlookahead \
+       /Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_funlookahead_fresh
      ```
-     Result: `status=138`, `real 1.07s`
+     Result: `status=0`, `real 174.80s`
+
+3. **The reduced parser-body oracle remains green on the fresh stage2**
+   - command:
+     ```bash
+     bash regression_tests/stage2_block_body_exprid_parser_repro.sh \
+       /Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_funlookahead_fresh
+     ```
+     Result: `exit 0` / `not reproduced`
+
+4. **The active crash frontier moved again, from whole-compiler parse-only into stdlib/prelude HIR registration**
+   - the smallest green HIR control is now the truly trivial no-prelude file:
+     ```bash
+     env CRYSTAL_V2_STOP_AFTER_HIR=1 \
+       /Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_funlookahead_fresh \
+       --release --no-prelude /Users/sergey/Projects/Crystal/.codex_artifacts/stage2_simple_one.cr \
+       -o /Users/sergey/Projects/Crystal/.codex_artifacts/funlookahead_hir_simple_noprelude_out
+     ```
+     Result: `status=0`, `real 0.02s`
+   - `src/stdlib/prelude.cr` is now the smallest confirmed red stdlib HIR control:
+     ```bash
+     /usr/bin/time -p env CRYSTAL_V2_STOP_AFTER_HIR=1 scripts/timeout_sample_lldb.sh \
+       -t 120 -m 8192 -s 5 -l 10 -n 8 --no-series \
+       -o /Users/sergey/Projects/Crystal/.codex_artifacts/logs/funlookahead_hir_prelude_noprelude \
+       -- /Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_funlookahead_fresh \
+       --release --no-prelude src/stdlib/prelude.cr \
+       -o /Users/sergey/Projects/Crystal/.codex_artifacts/funlookahead_hir_prelude_noprelude_out
+     ```
+     Result: `status=125`, `real 14.49s`
+   - bounded LLDB/sample on the red prelude control shows `Parser#initialize -> Lexer#next_token/lex_identifier` above hundreds of repeated `AstToHir#register_module(...)+1492` frames, with hotspots still dominated by `macro_token_text_slice`, `parse_macro_body`, and lexer identifier work
+
+5. **Stage3 remains blocked, but after the parser corridor**
+   - command:
+     ```bash
+     /usr/bin/time -p env CRYSTAL_CACHE_DIR_STAGE2_RELEASE=/Users/sergey/Projects/Crystal/.codex_artifacts/cache_stage3_release_funlookahead_fresh \
+       CRYSTAL_V2_PIPELINE_CACHE=0 CRYSTAL_V2_LLVM_CACHE=0 \
+       scripts/timeout_sample_lldb.sh -t 1800 -m 40960 -s 8 -l 20 -n 12 --no-series \
+       -o /Users/sergey/Projects/Crystal/.codex_artifacts/logs/stage3_release_funlookahead_fresh_timeout \
+       -- scripts/build_stage2_release.sh \
+       /Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_funlookahead_fresh \
+       /Users/sergey/Projects/Crystal/.codex_artifacts/stage3_release_funlookahead_fresh
+     ```
+     Result: `status=139`, `real 1.06s`
 
 ---
 
@@ -95,85 +104,87 @@
 ### Problem
 The current `ast_to_hir` branch restores a full fresh `stage1 -> stage2` release bootstrap, but the resulting fresh stage2 compiler is still unstable when it compiles the full compiler source tree:
 - reduced parser-body oracle remains green
-- fresh `stage2_release_nameprio_fresh` is buildable and reaches LLVM backend during bootstrap
-- `src/crystal_v2.cr` still dies quickly once full stdlib/compiler parsing is allowed past the plain parse-only cutoff
+- fresh `stage2_release_funlookahead_fresh` is buildable and reaches LLVM backend during bootstrap
+- `src/crystal_v2.cr` no longer dies in plain parse-only mode
+- HIR-bounded no-prelude compile of `1` is clean, so the active red path now lives inside stdlib/prelude registration
 - stage3 still fails before a benchmark can be taken
 
 ### Current Evidence
 1. **Fresh current-tree bootstrap is green again**
    ```bash
    /usr/bin/time -p scripts/timeout_sample_lldb.sh -t 5400 -m 40960 -s 8 -l 20 -n 12 --no-series \
-     -o /Users/sergey/Projects/Crystal/.codex_artifacts/logs/stage1_release_nameprio_timeout \
+     -o /Users/sergey/Projects/Crystal/.codex_artifacts/logs/stage1_release_funlookahead_timeout \
      -- crystal build src/crystal_v2.cr --release --error-trace \
-     -o /Users/sergey/Projects/Crystal/.codex_artifacts/stage1_release_nameprio
-   /usr/bin/time -p env CRYSTAL_CACHE_DIR_STAGE2_RELEASE=/Users/sergey/Projects/Crystal/.codex_artifacts/cache_stage2_release_nameprio_fresh \
+     -o /Users/sergey/Projects/Crystal/.codex_artifacts/stage1_release_funlookahead
+   /usr/bin/time -p env CRYSTAL_CACHE_DIR_STAGE2_RELEASE=/Users/sergey/Projects/Crystal/.codex_artifacts/cache_stage2_release_funlookahead_fresh \
      CRYSTAL_V2_PIPELINE_CACHE=0 CRYSTAL_V2_LLVM_CACHE=0 \
      scripts/timeout_sample_lldb.sh -t 1800 -m 40960 -s 8 -l 20 -n 12 --no-series \
-     -o /Users/sergey/Projects/Crystal/.codex_artifacts/logs/stage2_release_nameprio_fresh_timeout \
+     -o /Users/sergey/Projects/Crystal/.codex_artifacts/logs/stage2_release_funlookahead_fresh_timeout \
      -- scripts/build_stage2_release.sh \
-     /Users/sergey/Projects/Crystal/.codex_artifacts/stage1_release_nameprio \
-     /Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_nameprio_fresh
+     /Users/sergey/Projects/Crystal/.codex_artifacts/stage1_release_funlookahead \
+     /Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_funlookahead_fresh
    ```
-   Result: `stage1 real 542.96s`, `stage2 real 164.03s`, both `status=0`
+   Result: `stage1 real 544.95s`, `stage2 real 174.80s`, both `status=0`
 
 2. **Reduced parser-body oracle stays green on the fresh stage2**
    ```bash
    bash regression_tests/stage2_block_body_exprid_parser_repro.sh \
-     /Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_nameprio_fresh
+     /Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_funlookahead_fresh
    ```
    Result: `exit 0` / `not reproduced`
 
-3. **Plain parse-only on the full compiler source is improved but still unstable**
+3. **Plain parse-only on the full compiler source is now green**
    ```bash
    for i in 1 2 3; do
      env CRYSTAL_V2_STOP_AFTER_PARSE=1 \
-       /Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_nameprio_fresh \
+       /Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_funlookahead_fresh \
        src/crystal_v2.cr --release \
-       -o /Users/sergey/Projects/Crystal/.codex_artifacts/stage3_nameprio_parse_only_$i
+       -o /Users/sergey/Projects/Crystal/.codex_artifacts/stage3_funlookahead_parse_only_$i
    done
    ```
-   Result: `rc=0, 0, 138`
+   Result: `rc=0, 0, 0`
 
-4. **HIR-bounded compile still dies quickly on both trivial and full controls**
+4. **The smallest clean/red HIR controls are now separated cleanly**
    ```bash
    env CRYSTAL_V2_STOP_AFTER_HIR=1 \
-     /Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_nameprio_fresh \
-     src/crystal_v2.cr --release \
-     -o /Users/sergey/Projects/Crystal/.codex_artifacts/nameprio_hir_full_bounded_out
+     /Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_funlookahead_fresh \
+     --release --no-prelude /Users/sergey/Projects/Crystal/.codex_artifacts/stage2_simple_one.cr \
+     -o /Users/sergey/Projects/Crystal/.codex_artifacts/funlookahead_hir_simple_noprelude_out
    env CRYSTAL_V2_STOP_AFTER_HIR=1 \
-     /Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_nameprio_fresh \
-     --release /Users/sergey/Projects/Crystal/.codex_artifacts/stage2_simple_one.cr \
-     -o /Users/sergey/Projects/Crystal/.codex_artifacts/nameprio_hir_simple_bounded_out
+     /Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_funlookahead_fresh \
+     --release --no-prelude src/stdlib/prelude.cr \
+     -o /Users/sergey/Projects/Crystal/.codex_artifacts/funlookahead_hir_prelude_noprelude_out
    ```
-   Result: both fail with `status=138` in about `1.06-1.07s`
+   Result: trivial no-prelude file exits `0` in `0.02s`; `prelude.cr` hits memory cap with wrapper `status=125` in `14.49s`
 
-5. **Pre-crash sampling on the fresh stage2 now points at parser `parse_fun`**
+5. **Bounded LLDB/sample on the current red path points at prelude/stdlib module registration**
    ```bash
-   env CRYSTAL_V2_STOP_AFTER_HIR=1 \
-     /Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_nameprio_fresh \
-     src/crystal_v2.cr --release \
-     -o /Users/sergey/Projects/Crystal/.codex_artifacts/nameprio_hir_precrash_out &
-   sample $pid 1 -file /Users/sergey/Projects/Crystal/.codex_artifacts/logs/nameprio_hir_precrash_sample.txt
+   /usr/bin/time -p env CRYSTAL_V2_STOP_AFTER_HIR=1 scripts/timeout_sample_lldb.sh \
+     -t 120 -m 8192 -s 5 -l 10 -n 8 --no-series \
+     -o /Users/sergey/Projects/Crystal/.codex_artifacts/logs/funlookahead_hir_prelude_noprelude \
+     -- /Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_funlookahead_fresh \
+     --release --no-prelude src/stdlib/prelude.cr \
+     -o /Users/sergey/Projects/Crystal/.codex_artifacts/funlookahead_hir_prelude_noprelude_out
    ```
-   Result: sampled frames include `CrystalV2::Compiler::Frontend::Parser#parse_fun +760`
+   Result: LLDB shows `Parser#initialize -> Lexer#next_token/lex_identifier` above repeated `AstToHir#register_module(...)+1492`; sample/hotspots stay dominated by `macro_token_text_slice`, `parse_macro_body`, and lexer identifier work
 
 6. **Stage3 self-bootstrap is still blocked**
    ```bash
-   /usr/bin/time -p env CRYSTAL_CACHE_DIR_STAGE2_RELEASE=/Users/sergey/Projects/Crystal/.codex_artifacts/cache_stage3_release_nameprio_fresh \
+   /usr/bin/time -p env CRYSTAL_CACHE_DIR_STAGE2_RELEASE=/Users/sergey/Projects/Crystal/.codex_artifacts/cache_stage3_release_funlookahead_fresh \
      CRYSTAL_V2_PIPELINE_CACHE=0 CRYSTAL_V2_LLVM_CACHE=0 \
      scripts/timeout_sample_lldb.sh -t 1800 -m 40960 -s 8 -l 20 -n 12 --no-series \
-     -o /Users/sergey/Projects/Crystal/.codex_artifacts/logs/stage3_release_nameprio_fresh_timeout \
+     -o /Users/sergey/Projects/Crystal/.codex_artifacts/logs/stage3_release_funlookahead_fresh_timeout \
      -- scripts/build_stage2_release.sh \
-     /Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_nameprio_fresh \
-     /Users/sergey/Projects/Crystal/.codex_artifacts/stage3_release_nameprio_fresh
+     /Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_funlookahead_fresh \
+     /Users/sergey/Projects/Crystal/.codex_artifacts/stage3_release_funlookahead_fresh
    ```
-   Result: `status=138`, `real 1.07s`
+   Result: `status=139`, `real 1.06s`
 
 ### What To Debug Next
 1. Keep `regression_tests/stage2_block_body_exprid_parser_repro.sh` as the cheap parser-only control for future parser experiments
-2. Patch `src/compiler/frontend/parser.cr` `lookahead_for_arrow?` so every rewind restores `@previous_token` alongside `@index`, and patch the same invariant leak in the deeper proc-type rewind around line `15671`
-3. Re-run the fresh original-Crystal `stage1 --release` build, then fresh self-hosted `stage2`, then `stage3`
-4. Only return to the HIR-side `@defer_body_return_inference` probe if the parser `parse_fun` fix does not move the frontier
+2. Treat the current parser rewind patch as a separate boundary-shift commit; do **not** mix it with the next HIR/module experiment
+3. Use `CRYSTAL_V2_STOP_AFTER_HIR=1 --release --no-prelude src/stdlib/prelude.cr` as the new smallest stdlib red control and `... stage2_simple_one.cr --no-prelude` as the new green control
+4. Narrow the failing `require` chain inside `src/stdlib/prelude.cr` before returning to another full stage3
 
 ---
 
@@ -184,7 +195,7 @@ Goal:
 3. compare stage2-build time vs stage3-build time
 
 Current measurable data:
-- fresh stage1 compiler -> fresh stage2 compiler: `164.03s`
+- fresh stage1 compiler -> fresh stage2 compiler: `174.80s`
 - stage2 compiler -> stage3 compiler: **not yet measurable** (current binary crashes after `1.06s`)
 
 ---

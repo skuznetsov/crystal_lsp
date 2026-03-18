@@ -3,7 +3,31 @@
 Updated: 2026-03-18
 Context: compiler/bootstrap/stage2-stability
 
-[LM-184|verified]: the current `ast_to_hir` worktree restores a full fresh
+[LM-185|verified]: restoring parser rewind state in
+`src/compiler/frontend/parser.cr` moved the active self-hosted frontier again.
+The key change is local but stateful: `lookahead_for_arrow?` now restores
+`@previous_token` together with `@index` on every rewind path, including the
+early `::Foo` false return, the generic false return, and the speculative
+trailing `.class` suffix rewind in type parsing. Fresh verification on the
+current tree:
+`stage1_release_funlookahead` builds from original Crystal in `544.95s`,
+`stage2_release_funlookahead_fresh` then builds from that fresh stage1 in
+`174.80s`, and the reduced parser-body oracle
+`regression_tests/stage2_block_body_exprid_parser_repro.sh` stays green on the
+fresh stage2. Boundary shift: on the fresh stage2, plain
+`CRYSTAL_V2_STOP_AFTER_PARSE=1 src/crystal_v2.cr --release` now survives
+`3/3`, `CRYSTAL_V2_STOP_AFTER_HIR=1 --release --no-prelude
+/Users/sergey/Projects/Crystal/.codex_artifacts/stage2_simple_one.cr` exits `0`
+in `0.02s`, while the new smallest red HIR-bounded stdlib control
+`CRYSTAL_V2_STOP_AFTER_HIR=1 --release --no-prelude src/stdlib/prelude.cr`
+hits the wrapper memory cap in `14.49s`. LLDB on that red prelude control shows
+`Parser#initialize -> Lexer#next_token/lex_identifier` above hundreds of
+repeated `AstToHir#register_module(...)+1492` frames, and stage3 still fails in
+`1.06s` with `status=139`. This reduces the next frontier from the older
+whole-compiler parser `parse_fun` heisenbug to stdlib/prelude module-macro
+registration. {F/G/R: 0.95/0.78/0.97} [verified]
+
+[LM-184|stale]: the current `ast_to_hir` worktree restores a full fresh
 release bootstrap to stage2 and moves the active self-hosted frontier out of
 the earlier HIR name-resolution stall and into frontend `parse_fun`. The key
 semantic repair is that `class_name_from_node` / `module_name_from_node` now
