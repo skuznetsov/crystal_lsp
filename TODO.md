@@ -10,7 +10,8 @@
 - **Fresh release stage2 (current tree)**: `/Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_parseprogramroots_loadedreq_lazydbg_fresh_w2`
 - **Previous local stage2 checkpoint (class reparse fallback)**: `/Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_reparse_class_clean`
 - **Previous local stage2 checkpoint (require-scan index traversal)**: `/Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_reqscanidx`
-- **Current local stage2 candidate (cached input base dir + scalarized parse_program_roots root buffer)**: `/Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_rootidx_w1`
+- **Previous local stage2 candidate (cached input base dir + scalarized parse_program_roots root buffer)**: `/Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_rootidx_w1`
+- **Current local stage2 candidate (retained generic annotation spans + scalarized while body ids)**: `/Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_genericann_whileidx_w3`
 - **Current timings**:
   - original Crystal -> fresh `stage1_release_funlookahead`: `544.95s`
   - fresh `stage1_release_funlookahead` -> fresh `stage2_release_funlookahead_fresh`: `174.80s`
@@ -19,6 +20,7 @@
   - fresh `stage1_release_funlookahead` -> current local `stage2_release_current_dirty_mirtimingfix_clean`: `175.10s`
   - fresh `stage1_release_funlookahead` -> current local `stage2_release_current_dirty_orderbool_clean`: `176.83s`
   - fresh `stage1_release_funlookahead` -> current local `stage2_release_rootidx_w1`: `158.47s`
+  - fresh `stage1_release_funlookahead` -> current local `stage2_release_genericann_whileidx_w3`: `164.68s`
 - **New regression surface**:
   - `bash regression_tests/stage2_require_compiler_rt_noprelude_parse_repro.sh <compiler>`
   - `bash regression_tests/stage2_compiler_rt_fixint_float_noprelude_parse_repro.sh <compiler>`
@@ -39,6 +41,13 @@
   - baseline `stage2_release_nameprio_fresh`: `rc=0,138,138,138,138`
   - fresh `stage2_release_funlookahead_fresh`: `rc=0,0,0,0,0`
 - **Current focused parser boundary**:
+  - `bash regression_tests/stage2_symbol_table_parse_repro.sh /Users/sergey/Projects/Crystal/.codex_artifacts/stage1_release_funlookahead` -> `exit 0` / `not reproduced: compiler reached STOP_AFTER_PARSE on all 5 symbol_table parse repro attempts`
+  - `bash regression_tests/stage2_symbol_table_parse_repro.sh /Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_rootidx_w1` -> `exit 1` / reproduced on attempt `1` with wrapper `status=139`
+  - `bash regression_tests/stage2_symbol_table_parse_repro.sh /Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_genericann_whileidx_w3` -> `exit 0` / `not reproduced: compiler reached STOP_AFTER_PARSE on all 5 symbol_table parse repro attempts`
+  - `bash regression_tests/stage2_parse_args_tail_if_repro.sh /Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_genericann_whileidx_w3` -> `exit 1` / reproduced on attempt `1` with wrapper `status=139`
+  - adversary controls on `stage2_release_genericann_whileidx_w3`:
+    - `tmp_parse_args_shape_init_unknown_generic_literal_direct_ivar_read_if_true_tailand.cr` is green `5/5`
+    - generic `A(B)` alias+while-only local control is green `5/5`
   - `bash regression_tests/stage2_require_compiler_rt_noprelude_parse_repro.sh /Users/sergey/Projects/Crystal/.codex_artifacts/stage1_release_funlookahead` -> `exit 0` / `not reproduced`
   - `bash regression_tests/stage2_require_compiler_rt_noprelude_parse_repro.sh /Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_parseprogramroots_loadedreq_lazydbg_fresh_w2` -> `exit 1` / reproduced on attempt `1` with wrapper `status=138`
   - `bash regression_tests/stage2_compiler_rt_fixint_float_noprelude_parse_repro.sh /Users/sergey/Projects/Crystal/.codex_artifacts/stage1_release_funlookahead` -> `exit 0` / `not reproduced`

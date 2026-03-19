@@ -3,6 +3,33 @@
 Updated: 2026-03-19
 Context: compiler/bootstrap/stage2-stability
 
+[LM-205|verified]: retaining stable generic annotation spans for `A(B)`-style
+method parameter types, plus scalarizing the transient `while` body builder,
+clears the broader `symbol_table` parser oracle without clearing the tighter
+full generic tail-if witness. Verified boundary:
+- fresh release stage1
+  `/Users/sergey/Projects/Crystal/.codex_artifacts/stage1_release_funlookahead`:
+  green `5/5` on
+  `bash regression_tests/stage2_symbol_table_parse_repro.sh <compiler>`
+- previous local stage2 candidate
+  `/Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_rootidx_w1`:
+  red on attempt `1` with wrapper `status=139`
+- new local stage2 candidate
+  `/Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_genericann_whileidx_w3`:
+  green `5/5`
+Adversary/control checks on the new candidate:
+- `bash regression_tests/stage2_parse_args_tail_if_repro.sh <compiler>` is
+  still red on attempt `1` with wrapper `status=139`, so this is a confirmed
+  boundary shift, not a full parser fix
+- `tmp_parse_args_shape_init_unknown_generic_literal_direct_ivar_read_if_true_tailand.cr`:
+  green `5/5`, so direct ivar reads remain outside the live corridor
+- generic `A(B)` alias+while-only local control is green `5/5`, so the next
+  remaining crash still needs a later `if -> if -> tail if` conjunction
+Reusable lesson: the old `symbol_table` crash corridor depended on both the
+generic annotation path and a `while` body `ExprId` accumulator, but the next
+live parser frontier is later and still sits beyond plain `while` material-
+ization. {F/G/R: 0.97/0.82/0.98} [verified]
+
 [LM-204|verified]: the standalone parser oracle reduces again to pure generic
 annotation syntax plus ivar assignment plus local alias assignment+read. The
 current committed oracle

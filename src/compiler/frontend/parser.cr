@@ -2838,6 +2838,12 @@ module CrystalV2
           text.to_slice
         end
 
+        private def retained_token_span_slice(start_token : Token, end_token : Token) : Slice(UInt8)
+          start_ptr = start_token.slice.to_unsafe
+          end_ptr = end_token.slice.to_unsafe + end_token.slice.size
+          retain_text_slice(String.new(Slice.new(start_ptr, end_ptr - start_ptr)))
+        end
+
         private def intern_retained_text(text : String) : Slice(UInt8)
           @string_pool.intern(retain_text_slice(text))
         end
@@ -3456,8 +3462,9 @@ module CrystalV2
           end
           consume_newlines
 
-          # Parse body
-          body_ids_b = SmallVec(ExprId, 4).new
+          # Keep the transient while-body builder scalar. ExprId wrappers in
+          # growable self-hosted parser buffers remain fragile in release mode.
+          body_id_indexes = SmallVec(Int32, 4).new
           loop do
             # Allow statement separators inside class/struct bodies
             skip_statement_end
@@ -3466,7 +3473,7 @@ module CrystalV2
             break if token.kind == Token::Kind::EOF
 
             expr = parse_statement
-            body_ids_b << expr unless expr.invalid?
+            body_id_indexes << expr.index unless expr.invalid?
             # Allow separators between members
             skip_statement_end
           end
@@ -3481,11 +3488,15 @@ module CrystalV2
                          while_token.span
                        end
 
+          body_ids = Array(ExprId).new(body_id_indexes.size) do |i|
+            ExprId.new(body_id_indexes.unsafe_fetch(i))
+          end
+
           @arena.add_typed(
             WhileNode.new(
               while_span,
               condition,
-              body_ids_b.to_a
+              body_ids
             )
           )
         end
@@ -15657,19 +15668,24 @@ current_token.kind == Token::Kind::Identifier &&
           return nil if base_type.nil?
 
           # Parse type suffixes
+          had_suffix = false
           loop do
             case current_token.kind
             when Token::Kind::Question
               # Nilable: Type?
+              had_suffix = true
               advance
             when Token::Kind::Star
               # Pointer: Type*
+              had_suffix = true
               advance
             when Token::Kind::StarStar
               # Double pointer: Type**
+              had_suffix = true
               advance
             when Token::Kind::LBracket
               # Static array: Type[N]
+              had_suffix = true
               advance
               # Skip contents until ]
               bracket_depth = 1
@@ -15695,6 +15711,7 @@ current_token.kind == Token::Kind::Identifier &&
             saved_previous = @previous_token
             advance
             if current_token.kind == Token::Kind::Class
+              had_suffix = true
               end_token = current_token
               advance
             else
@@ -15702,6 +15719,7 @@ current_token.kind == Token::Kind::Identifier &&
               @previous_token = saved_previous
             end
           end
+          return base_type unless had_suffix
           start_ptr = start_token.slice.to_unsafe
           end_ptr = end_token.slice.to_unsafe + end_token.slice.size
           Slice.new(start_ptr, end_ptr - start_ptr)
@@ -15743,6 +15761,7 @@ current_token.kind == Token::Kind::Identifier &&
             return Slice.new(start_ptr, end_ptr - start_ptr)
           when Token::Kind::Identifier
             # Type name, possibly with :: path and generics
+            had_generic_args = false
             advance
             skip_trivia
 
@@ -15757,6 +15776,7 @@ current_token.kind == Token::Kind::Identifier &&
 
             # Handle generic parameters: Type(A, B, C)
             if current_token.kind == Token::Kind::LParen
+              had_generic_args = true
               advance # consume (
               paren_depth = 1
 
@@ -15772,11 +15792,15 @@ current_token.kind == Token::Kind::Identifier &&
             end
 
             end_token = previous_token.not_nil!
+            if had_generic_args
+              return retained_token_span_slice(start_token, end_token)
+            end
             start_ptr = start_token.slice.to_unsafe
             end_ptr = end_token.slice.to_unsafe + end_token.slice.size
             return Slice.new(start_ptr, end_ptr - start_ptr)
           when Token::Kind::ColonColon
             # Global path: ::Type
+            had_generic_args = false
             advance # consume ::
             skip_trivia
             return nil unless current_token.kind == Token::Kind::Identifier
@@ -15794,6 +15818,7 @@ current_token.kind == Token::Kind::Identifier &&
             end
 
             if current_token.kind == Token::Kind::LParen
+              had_generic_args = true
               advance
               paren_depth = 1
               while paren_depth > 0 && current_token.kind != Token::Kind::EOF
@@ -15808,6 +15833,9 @@ current_token.kind == Token::Kind::Identifier &&
             end
 
             end_token = previous_token.not_nil!
+            if had_generic_args
+              return retained_token_span_slice(start_token, end_token)
+            end
             start_ptr = start_token.slice.to_unsafe
             end_ptr = end_token.slice.to_unsafe + end_token.slice.size
             return Slice.new(start_ptr, end_ptr - start_ptr)
