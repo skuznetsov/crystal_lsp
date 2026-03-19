@@ -3,6 +3,35 @@
 Updated: 2026-03-19
 Context: compiler/bootstrap/stage2-stability
 
+[LM-202|verified]: the standalone parse-only oracle tightens again: the
+current rootidx parser crash no longer needs shorthand `@args` params,
+`@args.size`, `@args[i]`, string comparison, or local assignment from the
+indexed read. The current committed oracle
+`bash regression_tests/stage2_parse_args_tail_if_repro.sh <compiler>` now
+generates a temp source with `def initialize(args : Array(String)); @args =
+args; end`, then `args = @args`, then a literal-bound `while` whose body does
+only a bare `args` read plus the previously known `if -> if -> tail if`
+control skeleton. Verified split:
+- fresh release stage1
+  `/Users/sergey/Projects/Crystal/.codex_artifacts/stage1_release_funlookahead`:
+  green `10/10`
+- current local stage2 candidate
+  `/Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_rootidx_w1`:
+  red on attempt `1` with wrapper `status=139`
+Adversary/control checks on the same current candidate:
+- `tmp_parse_args_shape_local_alias_only_if_true_explicit_init_tailand.cr`:
+  green `5/5`, so `args = @args` alone is not enough; a subsequent alias read
+  is required
+- `tmp_parse_args_shape_param_size_index_compare_if_true_tailand.cr`: green
+  `5/5`, so a plain local `args` method parameter is not enough without the
+  ivar-backed alias path
+- `tmp_parse_args_shape_local_alias_literal_no_index_if_true_explicit_init_tailand.cr`:
+  red on attempt `1`, so indexed access and string comparison are no longer
+  required once the alias-read carrier is present
+Reusable lesson: the live parser frontier has shifted away from the earlier
+`@args[i]`/compare surface and into a smaller `ivar materialization -> local
+alias -> alias read` corridor. {F/G/R: 0.97/0.84/0.98} [verified]
+
 [LM-201|verified]: the current parser frontier is not specific to recursive
 `cli.cr` require-loading; there is a smaller standalone parser-shape oracle
 that reproduces on the current root-buffer candidate alone. The new oracle
