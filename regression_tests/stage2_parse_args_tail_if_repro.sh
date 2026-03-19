@@ -14,17 +14,17 @@ make_source_file() {
   local path=$1
   cat >"$path" <<'EOF'
 class Probe
-  def initialize(args : Array(String))
-    @args = 1
+  def initialize(x : A(B))
+    @y = 1
   end
 
   private def parse_args_safe : Int32
     status = 0
     opt_level_invalid = false
-    args = @args
+    z = @y
     i = 0
     while i < 4
-      args
+      z
       if true
         if i + 1 < 4
           if true

@@ -3,6 +3,36 @@
 Updated: 2026-03-19
 Context: compiler/bootstrap/stage2-stability
 
+[LM-204|verified]: the standalone parser oracle reduces again to pure generic
+annotation syntax plus ivar assignment plus local alias assignment+read. The
+current committed oracle
+`bash regression_tests/stage2_parse_args_tail_if_repro.sh <compiler>` now
+generates `def initialize(x : A(B)); @y = 1; end`, then `z = @y`, then a bare
+`z` read inside the same literal-bound `while -> if -> if -> tail if`
+skeleton. Verified split:
+- fresh release stage1
+  `/Users/sergey/Projects/Crystal/.codex_artifacts/stage1_release_funlookahead`:
+  green `10/10`
+- current local stage2 candidate
+  `/Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_rootidx_w1`:
+  red on attempt `1` with wrapper `status=139`
+Adversary/control checks on the same candidate:
+- `tmp_parse_args_shape_init_unknown_nongeneric_literal_ivar_alias_read_if_true_tailand.cr`:
+  green `5/5`, so nongeneric typed constants are not enough
+- `tmp_parse_args_shape_init_unknown_generic_literal_direct_ivar_read_if_true_tailand.cr`:
+  green `5/5`, so direct ivar reads are not enough; the red surface still
+  needs local alias assignment+read
+- `tmp_parse_args_shape_init_int_param_literal_ivar_alias_read_if_true_tailand.cr`:
+  green `5/5`, so plain typedness is not enough
+- `tmp_parse_args_shape_init_array_int_literal_ivar_alias_read_if_true_tailand.cr`:
+  red on attempt `1`, so known stdlib names and `String` specifically are not
+  required
+- `tmp_parse_args_shape_init_typed_param_literal_ivar_value_alias_read_if_true_tailand.cr`:
+  red on attempt `1`, so alias identifier names are also not required
+Reusable lesson: the live parser frontier now isolates to generic syntax
+parsing itself (`A(B)` is sufficient), plus ivar assignment, plus local alias
+assignment+read. {F/G/R: 0.98/0.88/0.98} [verified]
+
 [LM-203|verified]: the standalone parser oracle tightens once more. The active
 rootidx crash no longer needs param-to-ivar assignment; a typed generic method
 parameter plus any ivar assignment, followed by a local alias assignment from
