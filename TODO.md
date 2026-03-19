@@ -55,18 +55,22 @@
 - **Current smallest standalone parser-shape oracle**:
   - `bash regression_tests/stage2_parse_args_tail_if_repro.sh /Users/sergey/Projects/Crystal/.codex_artifacts/stage1_release_funlookahead` -> `exit 0` / `not reproduced: compiler reached STOP_AFTER_PARSE on all 10 parse_args tail-if parser-shape repro attempts`
   - `bash regression_tests/stage2_parse_args_tail_if_repro.sh /Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_genericann_whileidx_w3` -> `exit 1` / `reproduced` on attempt `1` with wrapper `status=139`
-  - the current committed witness now reduces to a pure multi-def ordering shape: `def touch; end -> def seed; x = 1; end -> private def parse_args_safe : Int32; z = 1; bare z read; while -> if -> if -> tail-if`
-  - this means the active carrier no longer requires generic syntax, typed params, ivar writes/reads, the `initialize` name, stdlib type names, indexed reads, string compare, or param-to-ivar dataflow
-  - this witness is smaller than both the old generic-annotation corridor and the repo-root `bootstrap_shims + cli` corridor, so the live parser frontier is now primarily about cross-def state plus a later local assign+read/control skeleton
+  - the current committed witness now reduces further to: `def touch; end -> def seed; x = 1; end -> private def parse_args_safe : Int32; z = 1; bare z read before loop; while literal-body with triple nested if; tail if status == 0 && opt_level_invalid`
+  - this means the active carrier no longer requires generic syntax, typed params, ivar writes/reads, the `initialize` name, stdlib type names, indexed reads, loop-carried local reads, string compare, or param-to-ivar dataflow
+  - this witness is smaller than both the old generic-annotation corridor and the previous multi-def witness, so the live parser frontier is now primarily about cross-def state plus the conjunction `visibility+return-type header` and a narrow body/control shape
   - adversary note: the same rootidx binary can go green on all attempts under `PARSER_DEBUG=1` or direct batch LLDB, so the bug is still heisenbug-sensitive parser corruption rather than a stable syntax rejection
   - local refutation ledger on this witness:
     - `stage2_release_ifwhileidx_w1` (scalarized transient `ExprId` builders in `parse_if` + `parse_while`) built cleanly but stayed red `5/5` on the tail-if oracle while the trimmed control stayed green `3/3`
     - `stage2_release_ifbranchidx_w1` (further `parse_if` carrier scalarization for `ElsifBranch` / else-body materialization) overfit and regressed the previously green trimmed control to red `3/3`
     - `init_then_body` is green `3/3`, so the new red shape still needs an earlier extra `def`, not just an assignment-bearing second method
     - `touch_empty_init_empty_alias` is green `3/3`, so the second method still needs an assignment
-    - `touch_empty_init_assign_local` is red on attempt `1`, while `touch_empty_init_assign_noalias` is green on a direct probe, so the third method still needs a local pre-loop assignment+read and not just the later control skeleton alone
+    - `touch_empty_init_assign_local` is red on attempt `1`, while `touch_empty_init_assign_noalias` is green on a direct probe, so the third method still needs some local assign+read shape and not just the later control skeleton alone
     - `seed` instead of `initialize` is red on a direct probe, so the second method name is not part of the remaining live carrier
     - `stage2_release_classbodyidx_w1` (scalarized `parse_class` body buffer) held `stage2_symbol_table_parse_repro.sh` green `5/5` but stayed red on both the committed tail-if oracle and the tighter `zeroarg_other_method` probe, so class-body `ExprId` storage alone is not the next live carrier
+    - `no_private_no_type`, `private_no_type`, and `no_private_with_type` are green `3/3`, while both `private def ... : Int32` and `protected def ... : Int32` are red on direct probes, so the live header side now specifically includes the conjunction of visibility path plus return-type parsing
+    - `no_loop_read` and `assign_no_read_loop_uses_z` are both red on direct probes, so the body still needs a local read of `z` but it no longer has to happen specifically inside the loop body
+    - `tail_if_opt_only` and `tail_if_status_only` are green on direct probes, so the exact conjunction `status == 0 && opt_level_invalid` is still part of the carrier
+    - `loop_one_if` and `loop_two_if_no_inner_true` are green on direct probes, so the third nested `if true` remains part of the current live loop shape
 - **Stage3 bootstrap**: **FAILS** after `1.06s` with `status=139` on `/Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_funlookahead_fresh`
 - **Current local stage3 probe**: pending on `/Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_parseprogramroots_loadedreq_lazydbg_fresh_w2`; last verified fast-red remains `/Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_reqscanidx` with `status=139`
 - **Current smallest clean/red HIR controls**:

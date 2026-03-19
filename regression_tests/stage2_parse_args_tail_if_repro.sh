@@ -25,9 +25,10 @@ class Probe
     status = 0
     opt_level_invalid = false
     z = 1
+    z
     i = 0
     while i < 4
-      z
+      1
       if true
         if i + 1 < 4
           if true

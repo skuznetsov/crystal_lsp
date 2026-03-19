@@ -3,6 +3,39 @@
 Updated: 2026-03-19
 Context: compiler/bootstrap/stage2-stability
 
+[LM-207|verified]: the standalone parser oracle tightens again, and the live
+carrier no longer needs the loop itself to read the local temporary. The
+current committed oracle
+`bash regression_tests/stage2_parse_args_tail_if_repro.sh <compiler>` now
+generates `def touch; end`, then `def seed; x = 1; end`, then
+`private def parse_args_safe : Int32` with `z = 1`, a standalone bare `z`
+read before the loop, a `while` body that uses literal `1`, the same triple
+nested `if` shape, and the exact tail condition `status == 0 &&
+opt_level_invalid`. Verified split:
+- fresh release stage1
+  `/Users/sergey/Projects/Crystal/.codex_artifacts/stage1_release_funlookahead`:
+  green `10/10`
+- current local stage2 candidate
+  `/Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_genericann_whileidx_w3`:
+  red on attempt `1` with wrapper `status=139`
+Adversary/control checks on the same candidate:
+- `no_private_no_type`, `private_no_type`, and `no_private_with_type`: green
+  `3/3`, while both `private def ... : Int32` and `protected def ... : Int32`
+  are red on direct probes, so the live header side specifically includes the
+  conjunction of visibility path plus return-type parsing
+- `no_loop_read` and `assign_no_read_loop_uses_z`: red on direct probes, so
+  the body still needs a local read of `z`, but it no longer has to happen
+  specifically inside the loop body
+- `tail_if_opt_only` and `tail_if_status_only`: green on direct probes, so the
+  exact conjunction `status == 0 && opt_level_invalid` remains part of the
+  carrier
+- `loop_one_if` and `loop_two_if_no_inner_true`: green on direct probes, so
+  the third nested `if true` remains part of the current live loop shape
+Reusable lesson: the live frontier has moved away from generic syntax and from
+loop-carried local reads; it now looks like a narrower interaction between
+cross-def state, visibility+return-type def headers, and a specific
+multi-branch method-body shape. {F/G/R: 0.98/0.91/0.98} [verified]
+
 [LM-206|verified]: the standalone parser oracle tightens again, and the live
 carrier is now a pure multi-def ordering shape rather than a generic-annotation
 or ivar-specific one. The current committed oracle
