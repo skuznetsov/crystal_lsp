@@ -161,11 +161,15 @@
             - keeping only the `when String` recursive call itself while removing both local bookkeeping steps `fallback_resolved += 1` and `requires << resolved` lands in between:
               - `RCS: 0 139 139 139 0 0 139 0 0 139`
               - summary: `5 green / 5 red`
-            - keeping the `when String` recursive call together with `requires << resolved` but removing only `fallback_resolved += 1` softens the strict worst-case only slightly:
-              - `RCS: 0 139 139 139 139 139 0 139 139 139`
-              - summary: `2 green / 8 red`
+            - keeping the `when String` recursive call together with `requires << resolved` but removing only `fallback_resolved += 1` never improved across reruns:
+              - first run:
+                - `RCS: 0 139 139 139 139 139 0 139 139 139`
+                - summary: `2 green / 8 red`
+              - rerun:
+                - `RCS: 139 139 139 139 139 0 139 139 139 139`
+                - summary: `1 green / 9 red`
             - wildcard requires are still a live input class in `src`, but `resolve_wildcard_require` returns `Array(String)`, so the strict `0 green / 10 red` class is not dominated by wildcard/array expansion
-          - therefore the strict `0 green / 10 red` class is not carried by scan-only or fallback-only in isolation; it currently requires the combined miss-side `require-scan + source-fallback` corridor, and within the fallback-side contribution the main remaining weight is the `when String` recursive fanout itself rather than `when Array`, with `requires << resolved` acting as an additional but weaker carrier while `fallback_resolved += 1` does not look causal and may be a weak stabilizer/perturbation
+          - therefore the strict `0 green / 10 red` class is not carried by scan-only or fallback-only in isolation; it currently requires the combined miss-side `require-scan + source-fallback` corridor, and within the fallback-side contribution the main remaining weight is the `when String` recursive fanout itself rather than `when Array`, with `requires << resolved` acting as an additional but weaker carrier while `fallback_resolved += 1` does not look causal and, if it matters at all, behaves like a weak stabilizing perturbation
     - removing the top-level require wrapper together with `Options#ast_cache` did **not** hold as a new stable class:
       - first run: `RCS: 139 139 139 139 139 139 139 139 139 0` => `1 green / 9 red`
       - rerun: `RCS: 0 139 0 139 139 139 0 139 139 139` => `3 green / 7 red`
