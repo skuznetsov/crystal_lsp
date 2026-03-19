@@ -3,6 +3,32 @@
 Updated: 2026-03-19
 Context: compiler/bootstrap/stage2-stability
 
+[LM-210|verified]: the current post-`constsegmentslice` bootstrap frontier can
+be reproduced with a much smaller `bootstrap_shims`-only no-prelude witness.
+The new committed oracle
+`bash regression_tests/stage2_bootstrap_shims_begin_puts_repro.sh <compiler>`
+generates `require "./compiler/bootstrap_shims"`, then
+`trace_bootstrap = CrystalV2::Compiler::BootstrapEnv.get?("...") == "1"`,
+then `begin; STDERR.puts "x"; rescue ex; raise ex; end`. Verified split:
+- fresh release stage1
+  `/Users/sergey/Projects/Crystal/.codex_artifacts/stage1_release_funlookahead`:
+  green `5/5`
+- current committed stage2 baseline
+  `/Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_constsegmentslice_w1`:
+  red on attempt `2` with wrapper `status=139`
+Adversary/refutation on the same surface:
+- an uncommitted `parse_member_access` receiverful no-paren arg-buffer
+  scalarization turned this oracle green `5/5`, so receiverful no-paren
+  member-call parsing is part of the live carrier
+- the same branch regressed fixed-path
+  `src/min_bootstrap_require_shims_body_cli_chain.XXXXXX.cr` from old green
+  `5/5` to new red on attempt `4`, so that direct patch was rejected
+Reusable lesson: after the nested-container name-segment fix, one remaining
+small carrier is already below `crystal_v2.cr` and does not require `cli.new`,
+`cli.run`, or the broader rescue/backtrace tail. But patching only the
+receiverful no-paren member-access builder is not sufficient and can introduce
+nearby call-parsing regressions. {F/G/R: 0.98/0.84/0.98} [verified]
+
 [LM-209|verified]: nested container name-segment storage was one real active
 parser carrier after the earlier `parse_args_tail_if` tightening. Replacing
 `parse_constant_name_segments`'s growable `Array(Token)` with plain
