@@ -3,6 +3,46 @@
 Updated: 2026-03-18
 Context: compiler/bootstrap/stage2-stability
 
+[LM-191|verified]: the field-unpacking `MacroPieceBuffer` experiment is a
+refuted path even though it temporarily moved one parser oracle. Replacing the
+growable `Array(MacroPiece)` in `parse_macro_body` with a custom buffer that
+reads out `piece.kind`, `piece.expr`, `piece.control_keyword`, and friends
+made the focused `require "gc/boehm"` parser-only control pass, but it also
+introduced a new smaller parser-only crash surface that the clean baseline does
+not have. The cheap repro
+`/Users/sergey/Projects/Crystal/.codex_artifacts/stage2_macro_begin_inline_if_repro.cr`
+(`{% begin %}` around a `def` whose args contain inline `{% if %} ... {% end %}`)
+splits cleanly: fresh stage1 and local baseline
+`stage2_release_reparse_class_clean` both exit `0`, while experimental
+`stage2_release_macro_piecebuf` dies with `status=139` and the follow-up
+`stage2_release_macro_piecebuf_spanbuf` dies with `status=138`. LLDB on the
+first bad variant reduces the crash to `CLI#evaluate_macro_condition ->
+CLI#macro_literal_require_texts -> CLI#process_require_node`, showing that the
+experiment produced invalid macro-condition `ExprId`s during require scanning.
+Reusable lesson: do not unpack `MacroPiece` fields into parallel arrays in the
+self-hosted release compiler without separate proof that `MacroPiece` field
+reads themselves are safe. {F/G/R: 0.97/0.74/0.98} [verified]
+
+[LM-190|verified]: widening the initial `Array(MacroPiece)` capacity in
+`parse_macro_body` from `16` to `128` removes a real stage2-specific parser
+frontier without regressing broader parser stability. Fresh local candidate
+`/Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_macro_piececap128`
+built from the clean baseline source in `177.18s`. The new focused regression
+`bash regression_tests/stage2_require_boehm_noprelude_parse_repro.sh <compiler>`
+cleanly separates the boundary: fresh stage1
+`stage1_release_funlookahead` exits `0`, old local checkpoint
+`stage2_release_reparse_class_clean` fails with wrapper `status=138`, and fresh
+local `stage2_release_macro_piececap128` exits `0`. Two adversary checks also
+stay green on the new candidate: the smaller `begin + inline if` parser probe
+`/Users/sergey/Projects/Crystal/.codex_artifacts/stage2_macro_begin_inline_if_repro.cr`
+exits `0`, and `bash regression_tests/stage2_full_compiler_parse_only_repro.sh
+/Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_macro_piececap128`
+returns `rcs: 0 0 0 0 0`. Boundary: this is still only a parser-side shift.
+`CRYSTAL_V2_STOP_AFTER_HIR=1 --release --no-prelude` on the same
+`require "gc/boehm"` repro still dies with wrapper `status=139`, and
+`stage2_release_macro_piececap128 -> stage3_release_macro_piececap128` still
+fails in `1.06s` with `status=139`. {F/G/R: 0.97/0.76/0.98} [verified]
+
 [LM-189|verified]: the current local `ast_to_hir` branch also removes the old
 class-side empty-name reparse loop on the focused nested-macro micro-probe.
 The fix is narrower than a general class-name rewrite: when

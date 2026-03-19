@@ -7,20 +7,28 @@
   - unrelated local diffs in `src/compiler/mir/hir_to_mir.cr` and `src/crystal_v2.cr` must stay out of the next commit
 - **Fresh release stage1 (current tree)**: `/Users/sergey/Projects/Crystal/.codex_artifacts/stage1_release_funlookahead`
 - **Fresh release stage2 (current tree)**: `/Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_funlookahead_fresh`
-- **Current local stage2 candidate (class reparse fallback)**: `/Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_reparse_class_clean`
+- **Previous local stage2 checkpoint (class reparse fallback)**: `/Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_reparse_class_clean`
+- **Current local stage2 candidate (macro-body piece capacity 128)**: `/Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_macro_piececap128`
 - **Current timings**:
   - original Crystal -> fresh `stage1_release_funlookahead`: `544.95s`
   - fresh `stage1_release_funlookahead` -> fresh `stage2_release_funlookahead_fresh`: `174.80s`
   - previous fresh self-hosted release stage2 checkpoint (`stage2_release_nameprio_fresh`): `164.03s`
+  - fresh `stage1_release_funlookahead` -> current local `stage2_release_macro_piececap128`: `177.18s`
 - **New regression surface**:
   - `bash regression_tests/stage2_full_compiler_parse_only_repro.sh <compiler>`
   - `bash regression_tests/stage2_object_hir_noprelude_repro.sh <compiler>`
   - `bash regression_tests/stage2_nested_macro_method_missing_repro.sh <compiler>`
   - `bash regression_tests/stage2_reparsed_module_wrapper_repro.sh <compiler>`
+  - `bash regression_tests/stage2_require_boehm_noprelude_parse_repro.sh <compiler>`
 - **Compiler parse-only status**:
   - baseline `stage2_release_nameprio_fresh`: `rc=0,138,138,138,138`
   - fresh `stage2_release_funlookahead_fresh`: `rc=0,0,0,0,0`
+- **Current focused parser boundary**:
+  - `bash regression_tests/stage2_require_boehm_noprelude_parse_repro.sh /Users/sergey/Projects/Crystal/.codex_artifacts/stage1_release_funlookahead` -> `exit 0` / `not reproduced`
+  - `bash regression_tests/stage2_require_boehm_noprelude_parse_repro.sh /Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_reparse_class_clean` -> `exit 1` / wrapper `status=138`
+  - `bash regression_tests/stage2_require_boehm_noprelude_parse_repro.sh /Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_macro_piececap128` -> `exit 0` / `not reproduced`
 - **Stage3 bootstrap**: **FAILS** after `1.06s` with `status=139` on `/Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_funlookahead_fresh`
+- **Current local stage3 probe**: still **FAILS** after `1.06s` with `status=139` on `/Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_macro_piececap128`
 - **Current smallest clean/red HIR controls**:
   - `--release --no-prelude /Users/sergey/Projects/Crystal/.codex_artifacts/stage2_simple_one.cr` is green in `0.02s`
   - the path-wrapper oracle stays green on the newest local candidate:
@@ -30,6 +38,52 @@
     - `bash regression_tests/stage2_nested_macro_method_missing_repro.sh /Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_reparse_class_clean`
     - Result: `exit 0` / `not reproduced`
 - **Benchmark status**: blocked — stage2 compiler is still unstable and crashes before finishing stage3
+
+### New Verified Locally (Uncommitted)
+1. **Widening `parse_macro_body`'s initial `Array(MacroPiece)` capacity to `128` removes the focused `require "gc/boehm"` parser-only crash without regressing broader parser stability**
+   - parser change:
+     - `src/compiler/frontend/parser.cr`: `pieces = Array(MacroPiece).new(128)` in `parse_macro_body`
+   - focused regression surface:
+     ```bash
+     bash regression_tests/stage2_require_boehm_noprelude_parse_repro.sh \
+       /Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_reparse_class_clean
+     bash regression_tests/stage2_require_boehm_noprelude_parse_repro.sh \
+       /Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_macro_piececap128
+     ```
+     Result:
+     - old checkpoint: `exit 1` / `reproduced: require gc/boehm parse-only compile failed with status=138`
+     - current local candidate: `exit 0` / `not reproduced`
+   - adversary checks:
+     ```bash
+     env CRYSTAL_V2_STOP_AFTER_PARSE=1 \
+       /Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_macro_piececap128 \
+       --release --no-prelude \
+       /Users/sergey/Projects/Crystal/.codex_artifacts/stage2_macro_begin_inline_if_repro.cr \
+       -o /tmp/ignore
+     bash regression_tests/stage2_full_compiler_parse_only_repro.sh \
+       /Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_macro_piececap128
+     ```
+     Result:
+     - cheap `begin + inline if` parser probe: `status=0`
+     - full compiler parse-only loop: `rcs: 0 0 0 0 0`
+   - boundary:
+     - `CRYSTAL_V2_STOP_AFTER_HIR=1 --release --no-prelude regression_tests/stage2_require_boehm_noprelude_parse_repro.cr` still fails on the same local candidate with wrapper `status=139`
+     - `stage2_release_macro_piececap128 -> stage3_release_macro_piececap128` still dies in `1.06s` with `status=139`
+
+2. **The abandoned `MacroPieceBuffer` experiment is a verified false path**
+   - the scalarizing `MacroPieceBuffer#<<` branch temporarily made the focused `gc/boehm` parse-only oracle green, but it introduced a new smaller parser-only crash surface:
+     - `/Users/sergey/Projects/Crystal/.codex_artifacts/stage2_macro_begin_inline_if_repro.cr`
+   - split:
+     - stage1 `stage1_release_funlookahead`: `status=0`
+     - baseline stage2 `stage2_release_reparse_class_clean`: `status=0`
+     - experimental `stage2_release_macro_piecebuf`: wrapper `status=139`
+     - experimental `stage2_release_macro_piecebuf_spanbuf`: wrapper `status=138`
+   - LLDB on `stage2_release_macro_piecebuf` reduces the failure to:
+     - `CLI#evaluate_macro_condition`
+     - `CLI#macro_literal_require_texts`
+     - `CLI#process_require_node`
+   - implication:
+     - do not resurrect the field-unpacking `MacroPieceBuffer` path without a separate proof that `MacroPiece` field reads are safe in self-hosted release builds
 
 ### New Verified Since `30a4a88c`
 1. **Class-side snippet fallback removes the old `register_class` reparse loop on the nested-macro micro-probe**

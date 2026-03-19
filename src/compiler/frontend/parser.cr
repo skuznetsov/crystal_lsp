@@ -7551,7 +7551,11 @@ module CrystalV2
         private def parse_macro_body(stop_on_branch : Bool = false) : Array(MacroPiece)
           @macro_mode += 1
           begin
-            pieces = Array(MacroPiece).new(16)
+            # Self-hosted release stage2 remains sensitive to early Array(MacroPiece)
+            # growth in macro-heavy parser paths. Starting with a wider capacity
+            # avoids the observed require/gc/boehm parse frontier without changing
+            # MacroPiece representation.
+            pieces = Array(MacroPiece).new(128)
             buffer = IO::Memory.new
             buffer_start_token : Token? = nil
             buffer_end_token : Token? = nil
