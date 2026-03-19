@@ -15,7 +15,7 @@ then `begin; STDERR.puts "x"; rescue ex; raise ex; end`. Verified split:
   green `5/5`
 - current committed stage2 baseline
   `/Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_constsegmentslice_w1`:
-  red on attempt `2` with wrapper `status=139`
+  red on attempt `1` with wrapper `status=139`
 Adversary/refutation on the same surface:
 - an uncommitted `parse_member_access` receiverful no-paren arg-buffer
   scalarization turned this oracle green `5/5`, so receiverful no-paren
@@ -23,11 +23,18 @@ Adversary/refutation on the same surface:
 - the same branch regressed fixed-path
   `src/min_bootstrap_require_shims_body_cli_chain.XXXXXX.cr` from old green
   `5/5` to new red on attempt `4`, so that direct patch was rejected
+- the carrier is now clearly path-sensitive even for identical source text:
+  `src/tmp_bootstrap_trace_begin_puts_raise_fixed.cr` stays green `5/5`,
+  `src/stage2_bootstrap_shims_begin_puts_repro_fixed.cr` is red on attempt
+  `1`, `src/stage2_bootstrap_shims_begin_puts_repro.AAA111.cr` is red on
+  attempt `4`, and `src/stage2_bootstrap_shims_begin_puts.cr` is red on
+  attempt `5`
 Reusable lesson: after the nested-container name-segment fix, one remaining
 small carrier is already below `crystal_v2.cr` and does not require `cli.new`,
 `cli.run`, or the broader rescue/backtrace tail. But patching only the
 receiverful no-paren member-access builder is not sufficient and can introduce
-nearby call-parsing regressions. {F/G/R: 0.98/0.84/0.98} [verified]
+nearby call-parsing regressions. The remaining crash also depends on input-path
+shape, not just source content. {F/G/R: 0.98/0.86/0.98} [verified]
 
 [LM-209|verified]: nested container name-segment storage was one real active
 parser carrier after the earlier `parse_args_tail_if` tightening. Replacing

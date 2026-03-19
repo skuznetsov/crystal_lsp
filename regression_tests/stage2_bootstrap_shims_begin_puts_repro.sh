@@ -9,6 +9,7 @@ fi
 compiler=$1
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 attempts=5
+source_file="$repo_root/src/stage2_bootstrap_shims_begin_puts_repro_fixed.cr"
 
 make_source_file() {
   local path=$1
@@ -25,12 +26,10 @@ end
 EOF
 }
 
+trap 'rm -f "$source_file"' EXIT
+
 for attempt in $(seq 1 "$attempts"); do
   log_dir=$(mktemp -d "${TMPDIR:-/tmp}/stage2_bootstrap_shims_begin_puts_repro.XXXXXX")
-  source_base=$(mktemp "$repo_root/src/stage2_bootstrap_shims_begin_puts_repro.XXXXXX")
-  rm -f "$source_base"
-  source_file="${source_base}.cr"
-  trap 'rm -f "$source_file"' EXIT
   make_source_file "$source_file"
   echo "[attempt $attempt/$attempts] $compiler"
 
@@ -48,8 +47,6 @@ for attempt in $(seq 1 "$attempts"); do
 
   case "$status" in
     0)
-      rm -f "$source_file"
-      trap - EXIT
       ;;
     133|134|138|139)
       echo "reproduced: compiler crashed before STOP_AFTER_PARSE on the bootstrap_shims begin/puts repro"

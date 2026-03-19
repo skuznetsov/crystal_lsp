@@ -50,13 +50,18 @@
   - `bash regression_tests/stage2_parse_args_tail_if_repro.sh /Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_constsegmentslice_w1` -> `exit 0` / `not reproduced: compiler reached STOP_AFTER_PARSE on all 10 parse_args tail-if parser-shape repro attempts`
   - `bash regression_tests/stage2_symbol_table_parse_repro.sh /Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_constsegmentslice_w1` -> `exit 0` / `not reproduced: compiler reached STOP_AFTER_PARSE on all 5 symbol_table parse repro attempts`
   - `bash regression_tests/stage2_bootstrap_shims_begin_puts_repro.sh /Users/sergey/Projects/Crystal/.codex_artifacts/stage1_release_funlookahead` -> `exit 0` / `not reproduced: compiler reached STOP_AFTER_PARSE on all 5 bootstrap_shims begin/puts repro attempts`
-  - `bash regression_tests/stage2_bootstrap_shims_begin_puts_repro.sh /Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_constsegmentslice_w1` -> `exit 1` / reproduced on attempt `2` with wrapper `status=139`
+  - `bash regression_tests/stage2_bootstrap_shims_begin_puts_repro.sh /Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_constsegmentslice_w1` -> `exit 1` / reproduced on attempt `1` with wrapper `status=139`
   - broader checks on `stage2_release_constsegmentslice_w1`:
     - `bash regression_tests/stage2_compiler_rt_fixint_float_noprelude_parse_repro.sh ...` -> green `5/5`
     - `bash regression_tests/stage2_require_compiler_rt_noprelude_parse_repro.sh ...` -> red on attempt `1` with wrapper `status=139`
     - `bash regression_tests/stage2_full_compiler_parse_only_repro.sh ... src/crystal_v2.cr 5` -> red on iteration `1` / `rcs: 139`
   - local refutation on the same baseline:
     - an uncommitted `parse_member_access` receiverful no-paren arg-buffer scalarization turned the new begin/puts oracle green `5/5`, but also regressed fixed-path `min_bootstrap_require_shims_body_cli_chain.XXXXXX.cr` from old green `5/5` to new red on attempt `4`, so that branch was rejected before commit
+  - path-sensitivity note on the same content:
+    - fixed `src/tmp_bootstrap_trace_begin_puts_raise_fixed.cr` stays green `5/5` on `stage2_release_constsegmentslice_w1`
+    - fixed `src/stage2_bootstrap_shims_begin_puts_repro_fixed.cr` is red on attempt `1`
+    - fixed `src/stage2_bootstrap_shims_begin_puts_repro.AAA111.cr` is red on attempt `4`
+    - fixed `src/stage2_bootstrap_shims_begin_puts.cr` is red on attempt `5`
   - adversary controls on `stage2_release_genericann_whileidx_w3`:
     - `tmp_parse_args_shape_init_unknown_generic_literal_direct_ivar_read_if_true_tailand.cr` is green `5/5`
     - generic `A(B)` alias+while-only local control is green `5/5`
