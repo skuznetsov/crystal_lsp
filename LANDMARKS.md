@@ -3,6 +3,27 @@
 Updated: 2026-03-18
 Context: compiler/bootstrap/stage2-stability
 
+[LM-196|verified]: after the MIR order-block checkpoint, the smallest current
+stage2-specific parser/file-loading frontier is no longer the `pthread_cond_*`
+wrapper but plain `1` compiled with the default prelude. The new focused oracle
+`bash regression_tests/stage2_default_prelude_parse_repro.sh <compiler>` keeps
+the source surface to one literal and relies only on ordinary prelude loading.
+It cleanly separates the current boundary: fresh release stage1
+`/Users/sergey/Projects/Crystal/.codex_artifacts/stage1_release_funlookahead`
+returns `exit 0` / `not reproduced`, pre-orderbool timing-guard stage2
+`/Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_current_dirty_mirtimingfix_clean`
+also returns `exit 0` / `not reproduced`, while the current order-block
+candidate
+`/Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_current_dirty_orderbool_clean`
+returns `exit 1` / `reproduced`, with the latest verified 5-attempt split
+`red=3, green=2`. Adversary split: the same order-block binary is green
+`5/5` on the identical file once `--no-prelude` is added, so the active crash
+corridor depends on ordinary prelude/stdlib loading rather than the bare parser
+handling of the literal file itself. This also demotes the older
+`pthread_cond_*` and broader `c/pthread` oracles from “smallest frontier” to
+“broader reproducer inside the same current corridor.” {F/G/R: 0.97/0.84/0.98}
+[verified]
+
 [LM-195|verified]: the broader `c/pthread` parser frontier reduces further to a
 two-declaration lib repro centered on `pthread_cond_init(...)` and
 `pthread_cond_timedwait_relative_np(...)`. The new oracle
