@@ -45,8 +45,8 @@
   - `bash regression_tests/stage2_compiler_rt_fixint_float_noprelude_parse_repro.sh /Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_parseprogramroots_loadedreq_lazydbg_fresh_w2` -> `exit 0` / `not reproduced: compiler reached STOP_AFTER_PARSE on all 5 compiler_rt fixint+float no-prelude repro attempts`
 - **Current smallest standalone parser-shape oracle**:
   - `bash regression_tests/stage2_parse_args_tail_if_repro.sh /Users/sergey/Projects/Crystal/.codex_artifacts/stage1_release_funlookahead` -> `exit 0` / `not reproduced: compiler reached STOP_AFTER_PARSE on all 10 parse_args tail-if parser-shape repro attempts`
-  - `bash regression_tests/stage2_parse_args_tail_if_repro.sh /Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_rootidx_w1` -> `exit 1` / `reproduced` on attempt `4` with wrapper `status=139`
-  - this witness is smaller than the current repo-root `bootstrap_shims + cli` corridor and refutes the hypothesis that the active frontier is specific to recursive `cli.cr` require-loading
+  - `bash regression_tests/stage2_parse_args_tail_if_repro.sh /Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_rootidx_w1` -> `exit 1` / `reproduced` on attempt `1` with wrapper `status=139`
+  - this witness is smaller than the current repo-root `bootstrap_shims + cli` corridor, refutes the hypothesis that the active frontier is specific to recursive `cli.cr` require-loading, and also shows that the outer `elsif` branch from the first standalone witness is not required for reproduction
   - adversary note: the same rootidx binary can go green on all attempts under `PARSER_DEBUG=1` or direct batch LLDB, so the bug is still heisenbug-sensitive parser corruption rather than a stable syntax rejection
   - local refutation ledger on this witness:
     - `stage2_release_ifwhileidx_w1` (scalarized transient `ExprId` builders in `parse_if` + `parse_while`) built cleanly but stayed red `5/5` on the tail-if oracle while the trimmed control stayed green `3/3`

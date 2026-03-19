@@ -23,13 +23,11 @@ class Probe
     i = 0
     while i < @args.size
       arg = @args[i]
-      if arg == "--release"
-        status = 3
-      elsif arg == "-O"
+      if arg == "-O"
         if i + 1 < @args.size
           parsed = @args[i + 1].to_i32?
           if parsed
-            status = 1
+            status = parsed.not_nil!
             i += 1
           else
             opt_level_invalid = true
