@@ -58,9 +58,21 @@ runs:
   AST-cache load/save makes the same exact-path distribution strictly worse:
   `RCS: 139 139 139 139 139 139 139 139 139 139`
   => `0 green / 10 red`
+- splitting those two larger wrappers reveals a non-monotonic interaction:
+  removing only the pre-parse AST-cache load wrapper yields
+  `RCS: 0 139 139 139 139 0 0 139 139 0`
+  => `4 green / 6 red`
+  and removing only the post-parse AST-cache save wrapper yields
+  `RCS: 0 139 0 139 139 0 139 139 0 139`
+  => `4 green / 6 red`
+  so neither wrapper is individually protective enough to explain the combined
+  `0 green / 10 red` result; the current frontier depends on their interaction
 - removing only the `debug_hooks` wrapper pair is effectively neutral:
   `RCS: 0 0 139 139 0 139 139 139 139 139`
   => `3 green / 7 red`
+- removing only the `Options#ast_cache` wrapper is also only a mild shift:
+  `RCS: 139 0 0 139 139 139 139 139 0 0`
+  => `4 green / 6 red`
 Adversary/refutation:
 - the standalone extracted witness with only the top-level require block,
   `src/compiler/stage2_cli_top_require_unless_repro_fixed.cr`, stayed green
@@ -70,9 +82,11 @@ Adversary/refutation:
   is not preserved by simply copying one macro island into a new file
 Reusable lesson: the surviving `cli.cr` frontier is an exact-path macro
 conjunction, not a single small witness. The top-level `lsp/ast_cache` require
-wrapper increases crash probability, while the larger AST-cache load/save macro
-blocks currently decrease it. Standalone reductions are therefore unreliable
-unless they preserve the original full-file context. {F/G/R: 0.97/0.74/0.98}
+wrapper increases crash probability, but the `bootstrap_fast` AST-cache family
+is non-monotonic: each load/save wrapper alone slightly improves odds when
+removed, while removing both together is worst-case. Standalone reductions are
+therefore unreliable unless they preserve the original full-file context.
+{F/G/R: 0.97/0.74/0.98}
 [verified]
 
 [LM-210|verified]: the current post-`constsegmentslice` bootstrap frontier can

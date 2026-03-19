@@ -101,13 +101,25 @@
       - `RCS: 139 139 139 139 139 139 139 139 139 139`
       - summary: `0 green / 10 red`
       - so those bigger macro blocks are currently protective, not causal
+    - splitting those two larger wrappers shows a non-monotonic interaction:
+      - removing only the pre-parse AST-cache load wrapper (`2400-2494`):
+        - `RCS: 0 139 139 139 139 0 0 139 139 0`
+        - summary: `4 green / 6 red`
+      - removing only the post-parse AST-cache save wrapper (`2611-2622`):
+        - `RCS: 0 139 0 139 139 0 139 139 0 139`
+        - summary: `4 green / 6 red`
+      - but removing both together was already `0 green / 10 red`
+      - so neither wrapper is individually protective enough to explain the combined effect; the current frontier depends on their interaction
     - removing only the `debug_hooks` wrapper pair is essentially neutral:
       - `RCS: 0 0 139 139 0 139 139 139 139 139`
       - summary: `3 green / 7 red`
+    - removing only the `Options#ast_cache` wrapper (`692-696`) is also only a mild shift:
+      - `RCS: 139 0 0 139 139 139 139 139 0 0`
+      - summary: `4 green / 6 red`
     - consequence:
       - the live `cli.cr` frontier is an exact-path conjunction
       - the top-level `lsp/ast_cache` require wrapper increases crash probability
-      - the larger AST-cache load/save wrappers decrease it
+      - the larger AST-cache load/save wrappers participate non-monotonically: each alone slightly improves odds when removed, but removing both together is worst-case
       - simple standalone extracts do not preserve the crash surface
   - adversary controls on `stage2_release_genericann_whileidx_w3`:
     - `tmp_parse_args_shape_init_unknown_generic_literal_direct_ivar_read_if_true_tailand.cr` is green `5/5`
