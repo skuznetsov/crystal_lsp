@@ -1,7 +1,28 @@
 # LANDMARKS
 
-Updated: 2026-03-18
+Updated: 2026-03-19
 Context: compiler/bootstrap/stage2-stability
+
+[LM-199|verified]: bypassing the `Program` wrapper in
+`CLI#parse_file_recursive` via `parser.parse_program_roots` plus
+`parser.arena`, together with hardening `source_requires_fallback?(...)` to
+test already-resolved paths via `loaded.includes?(req)` and lazily gating the
+hot `STAGE2_DEBUG` string formatting in the same recursive path, removes the
+old second-level `compiler_rt` no-prelude reproducer without clearing the
+broader corridor. On the clean candidate
+`/Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_parseprogramroots_loadedreq_lazydbg_fresh_w2`,
+`bash regression_tests/stage2_compiler_rt_fixint_float_noprelude_parse_repro.sh <compiler>`
+is green `5/5`, while the broader
+`bash regression_tests/stage2_require_compiler_rt_noprelude_parse_repro.sh <compiler>`
+still fails on attempt `1` with wrapper `status=138`. Adversary/refutation: the
+superficially cleaner rebuild
+`/Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_parseprogramroots_loadedreq_fresh_w1`
+removed only the lazy debug guard and regressed the tighter `fixint + float`
+oracle, so the guard itself is part of the live hot-path repair rather than
+disposable tracing. This is a verified boundary shift inside recursive
+`compiler_rt` loading, not a full fix: the active red path moved beyond the old
+`fixint -> float` second-file reproducer but still remains inside the broader
+`require "crystal/compiler_rt"` corridor. {F/G/R: 0.98/0.85/0.99} [verified]
 
 [LM-198|verified]: after the `reqscanidx` boundary shift, the smallest current
 stage2-specific parse/file-loading oracle moved again and now sits inside

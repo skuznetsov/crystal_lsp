@@ -207,7 +207,7 @@ module CrystalV2
           @keep_trivia = keep_trivia
         end
 
-        def parse_program : Program
+        private def parse_program_roots_impl : Array(ExprId)
           # Use SmallVec to reduce heap churn when collecting roots
           roots_builder = SmallVec(ExprId, 64).new
           while current_token.kind != Token::Kind::EOF
@@ -310,7 +310,15 @@ module CrystalV2
             advance if @index == saved_index
             skip_statement_end
           end
-          Program.new(@arena, roots_builder.to_a, @string_pool)
+          roots_builder.to_a
+        end
+
+        def parse_program_roots : Array(ExprId)
+          parse_program_roots_impl
+        end
+
+        def parse_program : Program
+          Program.new(@arena, parse_program_roots_impl, @string_pool)
         end
 
         # Parse a statement (assignment or expression)

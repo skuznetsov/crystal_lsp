@@ -1,14 +1,16 @@
-# Crystal V2 Bootstrap — TODO (Updated 2026-03-18)
+# Crystal V2 Bootstrap — TODO (Updated 2026-03-19)
 
 ## Current State
 - **Branch**: `bootstrap-benchmark`
-- **Latest committed baseline**: `b7abaf13` — default prelude parse repro
+- **Latest committed baseline**: `cb0ba092` — compiler_rt no-prelude parse repro
 - **Working tree**:
-  - unrelated local diffs in `src/compiler/mir/hir_to_mir.cr` and `src/crystal_v2.cr` must stay out of the next commit
+  - unrelated local diffs in `src/compiler/frontend/lexer.cr`, `src/compiler/hir/ast_to_hir.cr`, `src/compiler/mir/hir_to_mir.cr`, and `src/crystal_v2.cr` must stay out of the next commit
+  - untracked local benchmarks in `examples/bench_fib42_crystal` and `examples/bench_tree_crystal` must stay out of the next commit
 - **Fresh release stage1 (current tree)**: `/Users/sergey/Projects/Crystal/.codex_artifacts/stage1_release_funlookahead`
-- **Fresh release stage2 (current tree)**: `/Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_funlookahead_fresh`
+- **Fresh release stage2 (current tree)**: `/Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_parseprogramroots_loadedreq_lazydbg_fresh_w2`
 - **Previous local stage2 checkpoint (class reparse fallback)**: `/Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_reparse_class_clean`
-- **Current local stage2 candidate (require-scan index traversal)**: `/Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_reqscanidx`
+- **Previous local stage2 checkpoint (require-scan index traversal)**: `/Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_reqscanidx`
+- **Current local stage2 candidate (parse_program_roots + resolved fallback check + lazy parse debug gating)**: `/Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_parseprogramroots_loadedreq_lazydbg_fresh_w2`
 - **Current timings**:
   - original Crystal -> fresh `stage1_release_funlookahead`: `544.95s`
   - fresh `stage1_release_funlookahead` -> fresh `stage2_release_funlookahead_fresh`: `174.80s`
@@ -35,23 +37,23 @@
   - fresh `stage2_release_funlookahead_fresh`: `rc=0,0,0,0,0`
 - **Current focused parser boundary**:
   - `bash regression_tests/stage2_require_compiler_rt_noprelude_parse_repro.sh /Users/sergey/Projects/Crystal/.codex_artifacts/stage1_release_funlookahead` -> `exit 0` / `not reproduced`
-  - `bash regression_tests/stage2_require_compiler_rt_noprelude_parse_repro.sh /Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_reqscanidx` -> `exit 1` / wrapper `status=138`
+  - `bash regression_tests/stage2_require_compiler_rt_noprelude_parse_repro.sh /Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_parseprogramroots_loadedreq_lazydbg_fresh_w2` -> `exit 1` / reproduced on attempt `1` with wrapper `status=138`
   - `bash regression_tests/stage2_compiler_rt_fixint_float_noprelude_parse_repro.sh /Users/sergey/Projects/Crystal/.codex_artifacts/stage1_release_funlookahead` -> `exit 0` / `not reproduced`
-  - `bash regression_tests/stage2_compiler_rt_fixint_float_noprelude_parse_repro.sh /Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_reqscanidx` -> `exit 1` / wrapper `status=138`
+  - `bash regression_tests/stage2_compiler_rt_fixint_float_noprelude_parse_repro.sh /Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_parseprogramroots_loadedreq_lazydbg_fresh_w2` -> `exit 0` / `not reproduced: compiler reached STOP_AFTER_PARSE on all 5 compiler_rt fixint+float no-prelude repro attempts`
 - **Stage3 bootstrap**: **FAILS** after `1.06s` with `status=139` on `/Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_funlookahead_fresh`
-- **Current local stage3 probe**: still **FAILS** fast with `status=139` on `/Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_reqscanidx`
+- **Current local stage3 probe**: pending on `/Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_parseprogramroots_loadedreq_lazydbg_fresh_w2`; last verified fast-red remains `/Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_reqscanidx` with `status=139`
 - **Current smallest clean/red HIR controls**:
   - `--release --no-prelude /Users/sergey/Projects/Crystal/.codex_artifacts/stage2_simple_one.cr` is green in `0.02s`
   - the current strongest stage2-specific parse/file-loading controls are now:
     - `bash regression_tests/stage2_require_compiler_rt_noprelude_parse_repro.sh /Users/sergey/Projects/Crystal/.codex_artifacts/stage1_release_funlookahead`
     - Result: `exit 0` / `not reproduced: compiler reached STOP_AFTER_PARSE on all 5 compiler_rt no-prelude repro attempts`
-    - `bash regression_tests/stage2_require_compiler_rt_noprelude_parse_repro.sh /Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_reqscanidx`
+    - `bash regression_tests/stage2_require_compiler_rt_noprelude_parse_repro.sh /Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_parseprogramroots_loadedreq_lazydbg_fresh_w2`
     - Result: `exit 1` / `reproduced: compiler crashed before STOP_AFTER_PARSE on the compiler_rt no-prelude repro`
     - deeper second-level oracle in the same family:
       - `bash regression_tests/stage2_compiler_rt_fixint_float_noprelude_parse_repro.sh /Users/sergey/Projects/Crystal/.codex_artifacts/stage1_release_funlookahead`
       - Result: `exit 0` / `not reproduced: compiler reached STOP_AFTER_PARSE on all 5 compiler_rt fixint+float no-prelude repro attempts`
-      - `bash regression_tests/stage2_compiler_rt_fixint_float_noprelude_parse_repro.sh /Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_reqscanidx`
-      - Result: `exit 1` / `reproduced: compiler crashed before STOP_AFTER_PARSE on the compiler_rt fixint+float no-prelude repro`
+      - `bash regression_tests/stage2_compiler_rt_fixint_float_noprelude_parse_repro.sh /Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_parseprogramroots_loadedreq_lazydbg_fresh_w2`
+      - Result: `exit 0` / `not reproduced: compiler reached STOP_AFTER_PARSE on all 5 compiler_rt fixint+float no-prelude repro attempts`
   - the current smallest stage2-specific parser/file-loading control is now:
     - `bash regression_tests/stage2_prelude_prefix25_parse_repro.sh /Users/sergey/Projects/Crystal/.codex_artifacts/stage1_release_funlookahead`
     - Result: `exit 0` / `not reproduced: compiler reached STOP_AFTER_PARSE on all 5 prelude-prefix25 repro attempts`
@@ -86,6 +88,18 @@
 - **Benchmark status**: blocked — stage2 compiler is still unstable and crashes before finishing stage3
 
 ### New Verified In This Cycle
+- **Bypassing the `Program` wrapper in `parse_file_recursive` moves the `compiler_rt` boundary again, but only if the hot-path debug strings stay lazy**
+  - `src/compiler/frontend/parser.cr` now exposes `parse_program_roots`, and `src/compiler/cli.cr` keeps recursive parsing on `parser.parse_program_roots` + `parser.arena` instead of materializing a `Program` wrapper in `parse_file_recursive`
+  - `source_requires_fallback?(...)` is hardened to check already-resolved paths via `loaded.includes?(req)` rather than `loaded.includes?(File.expand_path(req))`
+  - the same live path keeps a local `debug_parse` guard, so disabled `STAGE2_DEBUG` no longer eagerly formats large debug strings while recursively loading `compiler_rt`
+  - focused result on `/Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_parseprogramroots_loadedreq_lazydbg_fresh_w2`:
+    - `bash regression_tests/stage2_compiler_rt_fixint_float_noprelude_parse_repro.sh <compiler>` -> `exit 0` / `not reproduced` across `5/5`
+    - `bash regression_tests/stage2_require_compiler_rt_noprelude_parse_repro.sh <compiler>` -> `exit 1` / reproduced on attempt `1` with wrapper `status=138`
+  - adversary/refutation:
+    - the cleaner rebuild `/Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_parseprogramroots_loadedreq_fresh_w1` dropped only the lazy debug guard and regressed the tighter `fixint + float` oracle
+  - boundary:
+    - this is a verified parse/file-loading boundary shift past the old `fixint -> float` second-file reproducer, not a full `compiler_rt` fix
+
 - **A tighter post-`reqscanidx` frontier lives inside `crystal/compiler_rt` no-prelude loading, and the strongest current corridor is `float` as the second loaded file**
   - strongest oracle:
     - `bash regression_tests/stage2_require_compiler_rt_noprelude_parse_repro.sh /Users/sergey/Projects/Crystal/.codex_artifacts/stage1_release_funlookahead` -> `exit 0`

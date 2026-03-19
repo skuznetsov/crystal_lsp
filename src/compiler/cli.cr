@@ -2358,28 +2358,31 @@ module CrystalV2
         options : Options,
         out_io : IO
       )
-        if file_path.size > 0
-          stage2_debug("[STAGE2_DEBUG] parse_file_recursive start file_path=#{file_path} size=#{file_path.size} first=#{file_path.byte_at(0)} last=#{file_path.byte_at(file_path.size - 1)}", out_io)
+        debug_parse = env_enabled?("STAGE2_DEBUG") || env_enabled?("STAGE2_BOOTSTRAP_TRACE")
+        if debug_parse && file_path.size > 0
+          out_io.puts "[STAGE2_DEBUG] parse_file_recursive start file_path=#{file_path} size=#{file_path.size} first=#{file_path.byte_at(0)} last=#{file_path.byte_at(file_path.size - 1)}"
         end
         abs_path = File.expand_path(file_path)
-        if abs_path.size > 0
-          stage2_debug("[STAGE2_DEBUG] parse_file_recursive expanded=#{abs_path} size=#{abs_path.size} first=#{abs_path.byte_at(0)} last=#{abs_path.byte_at(abs_path.size - 1)}", out_io)
+        if debug_parse && abs_path.size > 0
+          out_io.puts "[STAGE2_DEBUG] parse_file_recursive expanded=#{abs_path} size=#{abs_path.size} first=#{abs_path.byte_at(0)} last=#{abs_path.byte_at(abs_path.size - 1)}"
         end
-        stage2_debug("[STAGE2_DEBUG] parse_file_recursive checking loaded", out_io)
+        out_io.puts "[STAGE2_DEBUG] parse_file_recursive checking loaded" if debug_parse
         return if loaded.includes?(abs_path)
-        stage2_debug("[STAGE2_DEBUG] parse_file_recursive adding to loaded", out_io)
+        out_io.puts "[STAGE2_DEBUG] parse_file_recursive adding to loaded" if debug_parse
         loaded << abs_path
         log(options, out_io, "  Loading: #{abs_path}") if options.verbose
 
-        stage2_debug("[STAGE2_DEBUG] parse_file_recursive checking exists", out_io)
+        out_io.puts "[STAGE2_DEBUG] parse_file_recursive checking exists" if debug_parse
         unless File.exists?(abs_path)
           log(options, out_io, "  Warning: File not found: #{abs_path}")
           return
         end
-        stage2_debug("[STAGE2_DEBUG] parse_file_recursive exists=true, reading", out_io)
+        out_io.puts "[STAGE2_DEBUG] parse_file_recursive exists=true, reading" if debug_parse
 
         source = File.read(abs_path)
-        stage2_debug("[STAGE2_DEBUG] parse_file_recursive read done size=#{source.size}", out_io)
+        if debug_parse
+          out_io.puts "[STAGE2_DEBUG] parse_file_recursive read done size=#{source.size}"
+        end
 
         {% unless flag?(:bootstrap_fast) %}
         if options.ast_cache
@@ -2421,7 +2424,7 @@ module CrystalV2
                 if options.verbose && !requires.empty?
                   missing = 0
                   requires.each do |req|
-                    unless loaded.includes?(File.expand_path(req))
+                    unless loaded.includes?(req)
                       missing += 1
                     end
                   end
@@ -2477,16 +2480,18 @@ module CrystalV2
         end
         {% end %}
 
-        stage2_debug("[STAGE2_DEBUG] parse_file_recursive creating lexer", out_io)
+        out_io.puts "[STAGE2_DEBUG] parse_file_recursive creating lexer" if debug_parse
         lexer = Frontend::Lexer.new(source)
-        stage2_debug("[STAGE2_DEBUG] parse_file_recursive lexer created, creating parser", out_io)
+        out_io.puts "[STAGE2_DEBUG] parse_file_recursive lexer created, creating parser" if debug_parse
         parser = Frontend::Parser.new(lexer)
-        stage2_debug("[STAGE2_DEBUG] parse_file_recursive parse start abs_path=#{abs_path}", out_io)
+        if debug_parse
+          out_io.puts "[STAGE2_DEBUG] parse_file_recursive parse start abs_path=#{abs_path}"
+        end
         if @parse_trace
           STDERR.puts "[PARSE] #{abs_path}"
         end
-        program = begin
-          res = parser.parse_program
+        exprs = begin
+          res = parser.parse_program_roots
           if @parse_trace
             STDERR.puts "[PARSE_OK] #{abs_path}"
           end
@@ -2498,11 +2503,13 @@ module CrystalV2
           end
           raise ex
         end
-        stage2_debug("[STAGE2_DEBUG] parse_file_recursive parse ok abs_path=#{abs_path}", out_io)
-        arena = program.arena.as(Frontend::AstArena)
-        exprs = program.roots
+        if debug_parse
+          out_io.puts "[STAGE2_DEBUG] parse_file_recursive parse ok abs_path=#{abs_path}"
+        end
+        arena = parser.arena.as(Frontend::AstArena)
+        expr_count = exprs.size
         if @parse_trace
-          STDERR.puts "[REQSCAN] #{abs_path} exprs=#{exprs.size}"
+          STDERR.puts "[REQSCAN] #{abs_path} exprs=#{expr_count}"
         end
 
         # Bootstrap debug: always log arena/expr stats for diagnosis
@@ -2517,7 +2524,7 @@ module CrystalV2
         # (8-byte GEP stride reads past actual element boundaries). Use index-based
         # access with unsafe_fetch to work around the iteration bug.
         i = 0
-        while i < exprs.size
+        while i < expr_count
           expr_id = exprs.unsafe_fetch(i)
           begin
             process_require_node(arena, expr_id, base_dir, input_file, results, loaded, options, out_io, requires)
@@ -2536,7 +2543,7 @@ module CrystalV2
           if options.verbose && !requires.empty?
             missing = 0
             requires.each do |req|
-              unless loaded.includes?(File.expand_path(req))
+              unless loaded.includes?(req)
                 missing += 1
               end
             end
@@ -2584,7 +2591,9 @@ module CrystalV2
         end
 
         results << ParsedUnit.new(arena, exprs, abs_path, source)
-        stage2_debug("[STAGE2_DEBUG] parse_file_recursive appended abs_path=#{abs_path} results=#{results.size}", out_io)
+        if debug_parse
+          out_io.puts "[STAGE2_DEBUG] parse_file_recursive appended abs_path=#{abs_path} results=#{results.size}"
+        end
 
         {% unless flag?(:bootstrap_fast) %}
         if options.ast_cache && arena.is_a?(Frontend::AstArena)
@@ -2601,7 +2610,18 @@ module CrystalV2
       end
 
       private def source_requires_fallback?(source : String, requires : Array(String), loaded : Set(String)) : Bool
-        unresolved_requires = requires.any? { |req| !loaded.includes?(File.expand_path(req)) }
+        # `requires` stores already-resolved absolute paths, so re-expanding them
+        # here only adds extra string work in the hot recursive scan path.
+        unresolved_requires = false
+        req_i = 0
+        while req_i < requires.size
+          req = requires.unsafe_fetch(req_i)
+          unless loaded.includes?(req)
+            unresolved_requires = true
+            break
+          end
+          req_i += 1
+        end
         return true if unresolved_requires
         requires.empty? && source_might_contain_require?(source)
       end
