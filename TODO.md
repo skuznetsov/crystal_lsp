@@ -14,6 +14,7 @@
 - **Current local stage2 candidate (retained generic annotation spans + scalarized while body ids)**: `/Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_genericann_whileidx_w3`
 - **Current local stage2 fix candidate (scalarized nested container name segments)**: `/Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_constsegmentslice_w1`
 - **Current local stage2 parse-stop hardening candidate**: `/Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_lazyparse_earlyret_w1`
+- **Current local stage2 macro-text no-span falsifier candidate**: `/Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_macrotext_nospan_w1`
 - **Current timings**:
   - original Crystal -> fresh `stage1_release_funlookahead`: `544.95s`
   - fresh `stage1_release_funlookahead` -> fresh `stage2_release_funlookahead_fresh`: `174.80s`
@@ -40,6 +41,7 @@
   - `bash regression_tests/stage2_symbol_table_parse_repro.sh <compiler>`
   - `bash regression_tests/stage2_parse_args_tail_if_repro.sh <compiler>`
   - `bash regression_tests/stage2_bootstrap_shims_begin_puts_repro.sh <compiler>`
+  - `bash regression_tests/stage2_process_executable_path_parse_repro.sh <compiler>`
 - **Compiler parse-only status**:
   - baseline `stage2_release_nameprio_fresh`: `rc=0,138,138,138,138`
   - fresh `stage2_release_funlookahead_fresh`: `rc=0,0,0,0,0`
@@ -73,6 +75,20 @@
       - `stage2_release_lazyparsepostlog_w1` still red on attempt `1`, so lazy summary/debug materialization alone is not sufficient while `STOP_AFTER_PARSE` remains below post-parse bookkeeping
       - `stage2_release_lazyparse_skiplink_w1` improves the same oracle from attempt `1` to attempt `4` but does not clear it, so simply substituting `link_libs = [] of String` is still not enough
       - the winning committed shape is: lazy summary/debug string materialization plus `STOP_AFTER_PARSE` before any post-parse link-lib bookkeeping
+  - new existing-source macro-control oracle below the same baseline:
+    - `bash regression_tests/stage2_process_executable_path_parse_repro.sh /Users/sergey/Projects/Crystal/.codex_artifacts/stage1_release_funlookahead` -> `exit 0` / `not reproduced` on all `5/5`
+    - `bash regression_tests/stage2_process_executable_path_parse_repro.sh /Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_lazyparse_earlyret_w1` -> `exit 1` / reproduced on attempt `2` with wrapper `status=138`
+    - local no-span falsifier `/Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_macrotext_nospan_w1` is **not** stable enough to promote:
+      - one committed-oracle run reproduced on attempt `2`
+      - an immediate rerun of the same committed oracle then went green `5/5`
+      - a manual fixed-output `--no-lldb` loop also went green `5/5`
+      - `bash regression_tests/stage2_full_compiler_parse_only_repro.sh /Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_macrotext_nospan_w1 src/compiler/cli.cr 5` also still fails on iteration `1` with `rcs: 139`
+    - committed guards on the same no-span candidate stayed green in the manual branch check:
+      - `bash regression_tests/stage2_bootstrap_shims_begin_puts_repro.sh ...` -> green `5/5`
+      - `bash regression_tests/stage2_parse_args_tail_if_repro.sh ...` -> green `10/10`
+      - `bash regression_tests/stage2_symbol_table_parse_repro.sh ...` -> green `5/5`
+    - local refutation on the same branch:
+      - widening `parse_macro_body`'s initial `Array(MacroPiece)` capacity from `128` to `512` on top of the no-span falsifier (`/Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_macrotext_nospan_macrocap512_w1`) does **not** improve `src/compiler/cli.cr`; the reduced oracle remains red on iteration `1`
   - adversary controls on `stage2_release_genericann_whileidx_w3`:
     - `tmp_parse_args_shape_init_unknown_generic_literal_direct_ivar_read_if_true_tailand.cr` is green `5/5`
     - generic `A(B)` alias+while-only local control is green `5/5`

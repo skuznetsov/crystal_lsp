@@ -3,6 +3,43 @@
 Updated: 2026-03-19
 Context: compiler/bootstrap/stage2-stability
 
+[LM-211|verified]: the current post-`lazyparse_earlyret` macro-control
+frontier is reproducible on an existing stdlib source file below
+`crystal_v2.cr`. The new committed oracle
+`bash regression_tests/stage2_process_executable_path_parse_repro.sh <compiler>`
+uses `src/stdlib/process/executable_path.cr` under
+`CRYSTAL_V2_STOP_AFTER_PARSE=1 --release --no-prelude`. Verified split:
+- fresh release stage1
+  `/Users/sergey/Projects/Crystal/.codex_artifacts/stage1_release_funlookahead`:
+  green `5/5`
+- current committed parse-stop baseline
+  `/Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_lazyparse_earlyret_w1`:
+  red on attempt `2` with wrapper `status=138`
+Adversary/control checks:
+- an uncommitted parser falsifier that emits `MacroPiece.text(text, nil)` in
+  `flush_macro_text`
+  (`/Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_macrotext_nospan_w1`)
+  is explicitly heisenbug-sensitive and is not promoted:
+  one committed-oracle run failed on attempt `2`, an immediate rerun of the
+  same oracle went green `5/5`, and a manual fixed-output `--no-lldb` loop
+  also went green `5/5`
+- the same no-span candidate also keeps the committed guard trio green in the
+  manual branch check:
+  `stage2_bootstrap_shims_begin_puts_repro` green `5/5`,
+  `stage2_parse_args_tail_if_repro` green `10/10`,
+  `stage2_symbol_table_parse_repro` green `5/5`
+- the broader reduced bootstrap oracle
+  `bash regression_tests/stage2_full_compiler_parse_only_repro.sh <compiler> src/compiler/cli.cr 5`
+  stays red on iteration `1` for both the no-span branch and the follow-up
+  `Array(MacroPiece).new(512)` branch, so neither experiment is currently a
+  stable fix path
+Reusable lesson: one remaining stage2-specific frontier now has a committed
+existing-source oracle in `%if/%elsif/%else` stdlib control-heavy code
+(`process/executable_path.cr`), below `crystal_v2.cr` and below the earlier
+`bootstrap_shims` witness. But the tempting `nil span` interpretation is not
+yet reproducible enough to count as a verified carrier. {F/G/R: 0.98/0.83/0.98}
+[verified]
+
 [LM-210|verified]: the current post-`constsegmentslice` bootstrap frontier can
 be reproduced with a much smaller `bootstrap_shims`-only no-prelude witness.
 The new committed oracle
