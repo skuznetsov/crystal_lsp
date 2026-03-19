@@ -3,6 +3,37 @@
 Updated: 2026-03-19
 Context: compiler/bootstrap/stage2-stability
 
+[LM-203|verified]: the standalone parser oracle tightens once more. The active
+rootidx crash no longer needs param-to-ivar assignment; a typed generic method
+parameter plus any ivar assignment, followed by a local alias assignment from
+that ivar and a bare alias read, is enough. The current committed oracle
+`bash regression_tests/stage2_parse_args_tail_if_repro.sh <compiler>` now
+generates `def initialize(args : Array(String)); @args = 1; end`, then
+`args = @args`, then a bare `args` read inside the literal-bound
+`while -> if -> if -> tail if` skeleton. Verified split:
+- fresh release stage1
+  `/Users/sergey/Projects/Crystal/.codex_artifacts/stage1_release_funlookahead`:
+  green `10/10`
+- current local stage2 candidate
+  `/Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_rootidx_w1`:
+  red on attempt `1` with wrapper `status=139`
+Adversary/control checks on the same candidate:
+- `tmp_parse_args_shape_init_int_param_alias_read_if_true_tailand.cr`: green
+  `5/5`, so typedness alone is insufficient
+- `tmp_parse_args_shape_init_typed_param_no_assign_alias_read_if_true_tailand.cr`:
+  green `5/5`, so the generic annotation path alone is insufficient without an
+  ivar assignment
+- `tmp_parse_args_shape_init_typed_param_literal_ivar_no_alias_read_if_true_tailand.cr`:
+  green `5/5`, so the assignment alone is insufficient without the alias-read
+  carrier
+- `tmp_parse_args_shape_init_typed_param_literal_direct_ivar_read_if_true_tailand.cr`:
+  green `5/5`, so a direct `@args` read is also insufficient; the red surface
+  still specifically includes local alias assignment+read
+Reusable lesson: the live parser frontier now sits in the intersection of the
+generic method-annotation path and the ivar-to-local alias materialization
+path, not in raw indexing/compare syntax and not in param-to-ivar dataflow.
+{F/G/R: 0.98/0.85/0.98} [verified]
+
 [LM-202|verified]: the standalone parse-only oracle tightens again: the
 current rootidx parser crash no longer needs shorthand `@args` params,
 `@args.size`, `@args[i]`, string comparison, or local assignment from the

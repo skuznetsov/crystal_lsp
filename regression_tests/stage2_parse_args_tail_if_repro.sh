@@ -15,7 +15,7 @@ make_source_file() {
   cat >"$path" <<'EOF'
 class Probe
   def initialize(args : Array(String))
-    @args = args
+    @args = 1
   end
 
   private def parse_args_safe : Int32

@@ -46,15 +46,15 @@
 - **Current smallest standalone parser-shape oracle**:
   - `bash regression_tests/stage2_parse_args_tail_if_repro.sh /Users/sergey/Projects/Crystal/.codex_artifacts/stage1_release_funlookahead` -> `exit 0` / `not reproduced: compiler reached STOP_AFTER_PARSE on all 10 parse_args tail-if parser-shape repro attempts`
   - `bash regression_tests/stage2_parse_args_tail_if_repro.sh /Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_rootidx_w1` -> `exit 1` / `reproduced` on attempt `1` with wrapper `status=139`
-  - the current committed witness now reduces further to `explicit init(args : Array(String)) -> @args = args -> args = @args -> bare args read -> pure nested if/if/tail-if`, so the active carrier no longer requires shorthand `@args` params, `@args.size`, `@args[i]`, string compare, or local assignment from the indexed read
+  - the current committed witness now reduces further to `typed generic param(args : Array(String)) -> @args = 1 -> args = @args -> bare args read -> pure nested if/if/tail-if`, so the active carrier no longer requires param-to-ivar assignment, shorthand `@args` params, `@args.size`, `@args[i]`, string compare, or local assignment from the indexed read
   - this witness is smaller than the current repo-root `bootstrap_shims + cli` corridor and further refines the standalone parser frontier away from recursive `cli.cr` require-loading details and away from the earlier `parse_args` surface syntax
   - adversary note: the same rootidx binary can go green on all attempts under `PARSER_DEBUG=1` or direct batch LLDB, so the bug is still heisenbug-sensitive parser corruption rather than a stable syntax rejection
   - local refutation ledger on this witness:
     - `stage2_release_ifwhileidx_w1` (scalarized transient `ExprId` builders in `parse_if` + `parse_while`) built cleanly but stayed red `5/5` on the tail-if oracle while the trimmed control stayed green `3/3`
     - `stage2_release_ifbranchidx_w1` (further `parse_if` carrier scalarization for `ElsifBranch` / else-body materialization) overfit and regressed the previously green trimmed control to red `3/3`
-    - `tmp_parse_args_shape_param_size_index_compare_if_true_tailand.cr` stays green `5/5`, so a plain local `args` method parameter is not enough without the ivar-backed alias path
-    - `tmp_parse_args_shape_local_alias_only_if_true_explicit_init_tailand.cr` stays green `5/5`, so `args = @args` alone is not enough; a subsequent alias read is required
-    - `tmp_parse_args_shape_local_alias_literal_no_index_if_true_explicit_init_tailand.cr` is red at attempt `1`, so the active smallest red shape no longer needs indexed access or string comparison once the alias-read carrier is present
+    - `tmp_parse_args_shape_init_int_param_alias_read_if_true_tailand.cr` stays green `5/5`, so typedness alone is not enough without the generic annotation path
+    - `tmp_parse_args_shape_init_typed_param_no_assign_alias_read_if_true_tailand.cr` stays green `5/5`, so the generic annotation path alone is not enough without an ivar assignment in the same header
+    - `tmp_parse_args_shape_init_typed_param_literal_ivar_no_alias_read_if_true_tailand.cr` stays green `5/5`, and `tmp_parse_args_shape_init_typed_param_literal_direct_ivar_read_if_true_tailand.cr` also stays green `5/5`, so the active red shape still needs the local alias assignment+read path, not just a direct `@args` read
 - **Stage3 bootstrap**: **FAILS** after `1.06s` with `status=139` on `/Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_funlookahead_fresh`
 - **Current local stage3 probe**: pending on `/Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_parseprogramroots_loadedreq_lazydbg_fresh_w2`; last verified fast-red remains `/Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_reqscanidx` with `status=139`
 - **Current smallest clean/red HIR controls**:
