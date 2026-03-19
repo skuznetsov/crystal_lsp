@@ -197,10 +197,19 @@
               - rerun:
                 - `RCS: 0 139 139 139 0 139 139 139 139 139`
                 - summary: `2 green / 8 red`
+            - a recursive `REQSCAN_DONE -> needs_source_fallback? -> return` cut is stably **worse** than baseline:
+              - patch shape: non-top-level recursive files still compute `needs_source_fallback = source_requires_fallback?(...)`, then `save_require_cache`, `results << ParsedUnit.new(...)`, and `return` before entering the actual source-fallback branch
+              - first run:
+                - `RCS: 139 139 0 0 139 139 139 139 139 139`
+                - summary: `2 green / 8 red`
+              - rerun:
+                - `RCS: 139 139 139 0 0 139 139 139 139 139`
+                - summary: `2 green / 8 red`
             - wildcard requires are still a live input class in `src`, but `resolve_wildcard_require` returns `Array(String)`, so the strict `0 green / 10 red` class is not dominated by wildcard/array expansion
           - therefore the strict `0 green / 10 red` class is not carried by scan-only or fallback-only in isolation; it currently requires the combined miss-side `require-scan + source-fallback` corridor, and within the fallback-side contribution the main remaining weight is the `when String` recursive fanout itself rather than `when Array`, with `requires << resolved` acting as an additional but weaker carrier while `fallback_resolved += 1` does not look causal and, if it matters at all, behaves like a weak stabilizing perturbation
           - the new callee-side split sharpens that interpretation further: forcing `when String` calls down the immediate `loaded` return path lands in the milder `6/4` then `4/6` range, while a caller-side duplicate prefilter does not reliably improve over baseline; so the remaining weight is not the duplicate-return fast path itself but the deeper unseen-file work that happens after entering `parse_file_recursive`
           - the newer parser-stage split sharpens it once more: if recursive files are allowed to parse and be appended to `results`, but are cut off before their post-parse require scan/fallback walk, the corridor still softens to `6/4` then `4/6`; so the remaining strict weight is not just “recursive parser entry” but substantially includes the recursive post-parse require-walk below `parse_program_roots`
+          - but the next recursive split is non-monotonic: if recursive files are allowed through `REQSCAN_DONE` and even through `needs_source_fallback?`, yet are cut off before the actual source-fallback branch, the full `cli.cr` corridor gets worse (`2/8`, rerun `2/8`). So on this exact path the recursive source-fallback branch is not a simple harmful carrier; removing it appears to drop a weak protective/stabilizing effect, while the remaining damage still sits earlier in recursive post-parse handling
     - removing the top-level require wrapper together with `Options#ast_cache` did **not** hold as a new stable class:
       - first run: `RCS: 139 139 139 139 139 139 139 139 139 0` => `1 green / 9 red`
       - rerun: `RCS: 0 139 0 139 139 139 0 139 139 139` => `3 green / 7 red`

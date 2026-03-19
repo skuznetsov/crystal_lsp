@@ -164,6 +164,14 @@ runs:
   append is not the trustworthy version:
   first run `RCS: 139 139 139 139 0 0 139 0 139 139` => `3 green / 7 red`,
   rerun `RCS: 0 139 139 139 0 139 139 139 139 139` => `2 green / 8 red`.
+  A recursive `REQSCAN_DONE -> needs_source_fallback? -> return` cut is
+  stably worse than baseline:
+  non-top-level recursive files still compute
+  `needs_source_fallback = source_requires_fallback?(...)`, then
+  `save_require_cache`, then `results << ParsedUnit.new(...)`, then return
+  before entering the actual source-fallback branch.
+  First run `RCS: 139 139 0 0 139 139 139 139 139 139` => `2 green / 8 red`,
+  rerun `RCS: 139 139 139 0 0 139 139 139 139 139` => `2 green / 8 red`.
   Wildcard requires are still a live input class in `src`, but
   `resolve_wildcard_require` returns `Array(String)`, so the strict
   `0 green / 10 red` class is not dominated by wildcard/array expansion; the
@@ -181,7 +189,14 @@ runs:
   parse and be appended to `results`, while cutting them off before their own
   post-parse require walk, still lands in the milder `6/4` then `4/6` range.
   So the strict worst-case depends substantially on recursive post-parse
-  require-walk/fallback below `parse_program_roots`, not only on parser entry
+  require-walk/fallback below `parse_program_roots`, not only on parser entry.
+  But the next split is non-monotonic: if recursive files are allowed through
+  `REQSCAN_DONE` and even through `needs_source_fallback?`, yet are cut off
+  before the actual source-fallback branch, the full `cli.cr` corridor gets
+  worse (`2/8`, rerun `2/8`). So on this exact path the recursive
+  source-fallback branch is not a simple harmful carrier; removing it appears
+  to drop a weak protective/stabilizing effect, while the remaining damage
+  still sits earlier in recursive post-parse handling
 - removing the top-level require wrapper together with `Options#ast_cache`
   did not hold as a stable new class:
   first run `RCS: 139 139 139 139 139 139 139 139 139 0` => `1 green / 9 red`,
