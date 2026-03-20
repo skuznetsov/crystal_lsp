@@ -5261,11 +5261,11 @@ module Crystal
                       when "UInt64", "Int64", "Float64" then 8
                       when "UInt128", "Int128" then 16
                       else
-                        # Structs and classes are heap-allocated in our ABI, so
+                        # Structs, classes, and tuples are heap-allocated in V2 ABI, so
                         # Pointer(T) buffers store 8-byte pointers, not inline data.
-                        # Only use actual element size for inline types (tuples, enums).
+                        # Only enums use actual element size (enums are stored inline).
                         if elem_mir_type = @mir_module.type_registry.get_by_name(elem_name)
-                          if elem_mir_type.kind.tuple? || elem_mir_type.kind.enum?
+                          if elem_mir_type.kind.enum?
                             elem_mir_type.size > 0 ? elem_mir_type.size.to_i32 : 8
                           else
                             8 # heap-allocated → pointer-sized elements
