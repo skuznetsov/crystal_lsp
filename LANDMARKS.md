@@ -3,6 +3,44 @@
 Updated: 2026-03-20
 Context: compiler/bootstrap/stage2-stability
 
+[LM-217|verified]: constant hash literals with enum keys were dropping semantic
+enum typing during HIR synthesis, even though the same enum values kept working
+in local non-constant hashes. The verified carrier lives in
+`src/compiler/hir/ast_to_hir.cr` `lower_hash_literal`: key-type inference used
+raw `ctx.type_of(entries[0][0])`, so a literal like
+`{Token::Kind::EqEq => 7, ...}` materialized the constant as `Hash(Int32, Int32)`
+while later reads still dispatched as `Hash(Token::Kind, Int32)`. The narrow
+fix is key-only: hash-key inference and `#[]=` key coercion now consult
+`@enum_value_types` and preserve the semantic enum `TypeRef`, but the value
+path intentionally stays on the existing base-int-plus-tag representation to
+avoid broad enum ABI churn. Verified on fresh release compiler
+`/Users/sergey/Projects/Crystal/.codex_artifacts/stage1_release_enumlit_w1`:
+- `bash regression_tests/stage1_const_hash_enum_keys_repro.sh /Users/sergey/Projects/Crystal/.codex_artifacts/stage1_release_enumlit_w1`
+  => `not reproduced: constant enum-key hash literal and enum hashing are stable`
+- the same oracle on the previous verified baseline
+  `/Users/sergey/Projects/Crystal/.codex_artifacts/stage1_release_unionhdr_w1`
+  reproduces with `const_has_eq=false` / `const_lookup_eq=-1`
+- broader adversary on the fixed stage1 stays green:
+  `bash regression_tests/run_all.sh /Users/sergey/Projects/Crystal/.codex_artifacts/stage1_release_enumlit_w1 4`
+  => `85 passed, 0 failed out of 85 tests`
+Adversary note:
+- an adjacent oracle for enum-valued constant hashes,
+  `regression_tests/stage1_const_hash_enum_values_repro.sh`, stays red on both
+  the old and new stage1 checkpoints with
+  `Unhandled exception: Missing hash key: a (KeyError)`, so that value-side
+  corridor is a separate pre-existing bug and not in this fix's blame set
+- the downstream stage2/stage3 frontier did not move yet:
+  `/Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_enumlit_w1`
+  builds cleanly in `167s`, but stage3 build from that stage2 still crashes
+  immediately (`status=139`), and the existing parse-only oracles
+  `stage2_full_compiler_parse_only_repro`, `stage2_symbol_table_parse_repro`,
+  and `stage2_process_executable_path_parse_repro` remain red
+Reusable lesson: enum semantics currently live in side metadata, not only in
+`ctx.type_of`. When a container literal synthesizes a generic type from its
+elements, audit whether that synthesis needs `@enum_value_types`; otherwise a
+constant container can silently diverge from the exact same local container
+shape. {F/G/R: 0.97/0.78/0.94} [verified]
+
 [LM-216|verified]: the next self-hosted stage2 crash was a narrower frontend
 storage bug, not a generic `Array(Node)#<<` failure. The verified carrier was
 conditional ivar initialization of `@nodes : Array(TypedNode)` inside

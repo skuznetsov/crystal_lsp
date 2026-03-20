@@ -4431,6 +4431,38 @@ module Crystal::HIR
       @enum_base_types.try(&.[enum_name]?) || TypeRef::INT32
     end
 
+    private def enum_tracked_type(ctx : LoweringContext, value_id : ValueId) : TypeRef
+      if enum_name = @enum_value_types.try(&.[value_id]?)
+        enum_ref = type_ref_for_name(enum_name)
+        return enum_ref unless enum_ref == TypeRef::VOID
+      end
+      ctx.type_of(value_id)
+    end
+
+    private def coerce_enum_tracked_value_to_type(
+      ctx : LoweringContext,
+      value_id : ValueId,
+      target_type : TypeRef,
+    ) : ValueId
+      return value_id if target_type == TypeRef::VOID
+
+      if enum_name = @enum_value_types.try(&.[value_id]?)
+        enum_ref = type_ref_for_name(enum_name)
+        if enum_ref != TypeRef::VOID && enum_ref == target_type
+          raw_type = ctx.type_of(value_id)
+          unless raw_type == target_type
+            cast = Cast.new(ctx.next_id, target_type, value_id, target_type, safe: false)
+            ctx.emit(cast)
+            ctx.register_type(cast.id, target_type)
+            (@enum_value_types ||= {} of ValueId => String)[cast.id] = enum_name
+            return cast.id
+          end
+        end
+      end
+
+      coerce_value_to_type(ctx, value_id, target_type)
+    end
+
     @[AlwaysInline]
     private def invalidate_resolved_enum_name_cache : Nil
       @resolved_enum_name_cache.clear
@@ -71375,7 +71407,7 @@ module Crystal::HIR
       key_type = if key_type_expr = node.of_key_type
                    type_ref_for_name(normalize_declared_type_name((safe_slice_to_string(key_type_expr) || "")))
                  elsif entries.size > 0
-                   ctx.type_of(entries[0][0])
+                   enum_tracked_type(ctx, entries[0][0])
                  else
                    TypeRef::VOID
                  end
@@ -71403,7 +71435,8 @@ module Crystal::HIR
       # For each entry, call hash[key] = value
       set_name = "#{hash_type_name}#[]="
       entries.each do |key_id, value_id|
-        set_call = Call.new(ctx.next_id, value_type, hash_call.id, set_name, [key_id, value_id], nil, false)
+        coerced_key_id = coerce_enum_tracked_value_to_type(ctx, key_id, key_type)
+        set_call = Call.new(ctx.next_id, value_type, hash_call.id, set_name, [coerced_key_id, value_id], nil, false)
         ctx.emit(set_call)
       end
 

@@ -61,8 +61,29 @@
     - `scripts/run_safe.sh ...examples/bench_tree_crystal.cr --no-prelude...` now prints `180` and exits `0`
     - `bash regression_tests/run_all.sh /private/tmp/codex_stage1_noprelude_io_dbg 4` -> `81 passed, 0 failed`
     - emitted no-prelude IR before the fix showed `@Object__classvar__STDOUT = global ptr null` plus dead stub `define i32 @IO$Hputs$$Int32(...) { ret i32 0 }`; the new path bypasses that prelude-only surface entirely
+- **Current verified constant enum-key hash literal fix**:
+  - `src/compiler/hir/ast_to_hir.cr` `lower_hash_literal` now preserves semantic enum typing only on the hash-key path: key-type inference and `#[]=` key coercion consult `@enum_value_types` instead of raw `ctx.type_of`, but value-path lowering stays on the existing base-int-plus-tag corridor
+  - verified release compiler checkpoint: `/Users/sergey/Projects/Crystal/.codex_artifacts/stage1_release_enumlit_w1`
+  - fresh release verification on `/Users/sergey/Projects/Crystal/.codex_artifacts/stage1_release_enumlit_w1`:
+    - `bash regression_tests/stage1_const_hash_enum_keys_repro.sh /Users/sergey/Projects/Crystal/.codex_artifacts/stage1_release_enumlit_w1` -> `not reproduced: constant enum-key hash literal and enum hashing are stable`
+    - `bash regression_tests/stage1_hash_enum_key_repro.sh /Users/sergey/Projects/Crystal/.codex_artifacts/stage1_release_enumlit_w1` -> `not reproduced`
+    - `bash regression_tests/run_all.sh /Users/sergey/Projects/Crystal/.codex_artifacts/stage1_release_enumlit_w1 4` -> `85 passed, 0 failed out of 85 tests`
+  - old-vs-new split that pins blame to this fix:
+    - `bash regression_tests/stage1_const_hash_enum_keys_repro.sh /Users/sergey/Projects/Crystal/.codex_artifacts/stage1_release_unionhdr_w1` -> reproduced with `const_has_eq=false` / `const_lookup_eq=-1`
+    - the same oracle is green on `/Users/sergey/Projects/Crystal/.codex_artifacts/stage1_release_enumlit_w1`, so the fix closes a real constant-hash root cause instead of only moving a symptom
+  - adversary note:
+    - adjacent oracle `bash regression_tests/stage1_const_hash_enum_values_repro.sh <compiler>` stays red on both `/Users/sergey/Projects/Crystal/.codex_artifacts/stage1_release_unionhdr_w1` and `/Users/sergey/Projects/Crystal/.codex_artifacts/stage1_release_enumlit_w1` with `Unhandled exception: Missing hash key: a (KeyError)`, so enum-valued constant hash literals are a separate pre-existing bug, not a regression from this patch
+  - downstream checkpoint:
+    - `/Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_enumlit_w1` now builds cleanly from `/Users/sergey/Projects/Crystal/.codex_artifacts/stage1_release_enumlit_w1` in `167s`
+    - second bootstrap is still red: `scripts/run_safe.sh /private/tmp/build_stage3_enumlit_release.sh ...` -> `status=139` after `~1s`
+    - the fresh stage2 candidate still crashes in parse-only mode:
+      - `bash regression_tests/stage2_full_compiler_parse_only_repro.sh /Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_enumlit_w1 /Users/sergey/Projects/Crystal/crystal_v2_repo/src/crystal_v2.cr 3` -> red on iteration `1` with `rcs: 139`
+      - `bash regression_tests/stage2_symbol_table_parse_repro.sh /Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_enumlit_w1` -> red on attempt `1` with wrapper `status=139`
+      - `bash regression_tests/stage2_process_executable_path_parse_repro.sh /Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_enumlit_w1` -> red on attempt `1` with wrapper `status=138`
 - **Fresh release stage1 (current tree, union fix verified)**: `/Users/sergey/Projects/Crystal/.codex_artifacts/stage1_release_unionhdr_w1`
+- **Fresh release stage1 (current tree, constant enum-key hash fix verified)**: `/Users/sergey/Projects/Crystal/.codex_artifacts/stage1_release_enumlit_w1`
 - **Fresh release stage2 (built from fixed stage1, still unstable)**: `/Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_astarena_init_w1`
+- **Fresh release stage2 (built from enum-key-hash-fixed stage1, still unstable for stage3/parse-only)**: `/Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_enumlit_w1`
 - **Previous fresh release stage2 checkpoint (pre-AstArena-init fix)**: `/Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_unionhdr_fromfixedstage1_w1`
 - **Previous fresh release stage1 checkpoint**: `/Users/sergey/Projects/Crystal/.codex_artifacts/stage1_release_funlookahead`
 - **Previous fresh release stage2 checkpoint**: `/Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_parseprogramroots_loadedreq_lazydbg_fresh_w2`
@@ -75,7 +96,9 @@
 - **Current local stage2 macro-text no-span falsifier candidate**: `/Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_macrotext_nospan_w1`
 - **Current timings**:
   - original Crystal -> fresh `stage1_release_unionhdr_w1`: `534.40s`
+  - original Crystal -> fresh `stage1_release_enumlit_w1`: `~438s`
   - fresh `stage1_release_unionhdr_w1` -> fresh `stage2_release_astarena_init_w1`: `164.92s`
+  - fresh `stage1_release_enumlit_w1` -> fresh `stage2_release_enumlit_w1`: `167s`
   - fresh `stage1_release_unionhdr_w1` -> fresh `stage2_release_unionhdr_fromfixedstage1_w1`: `165.71s`
   - original Crystal -> fresh `stage1_release_funlookahead`: `544.95s`
   - fresh `stage1_release_funlookahead` -> fresh `stage2_release_funlookahead_fresh`: `174.80s`
@@ -109,6 +132,8 @@
   - `bash regression_tests/stage2_struct_union_runtime_typecheck_repro.sh <compiler>`
   - `bash regression_tests/stage2_hash_set_union_dispatch_repro.sh <compiler>`
   - `bash regression_tests/stage1_astarena_typednode_conditional_init_repro.sh <compiler>`
+  - `bash regression_tests/stage1_const_hash_enum_keys_repro.sh <compiler>`
+  - `bash regression_tests/stage1_const_hash_enum_values_repro.sh <compiler>`
 - **Compiler parse-only status**:
   - baseline `stage2_release_nameprio_fresh`: `rc=0,138,138,138,138`
   - fresh `stage2_release_funlookahead_fresh`: `rc=0,0,0,0,0`
