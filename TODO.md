@@ -9,7 +9,8 @@
   - the stronger current corroborating oracle is now direct parse-only `src/stdlib/object.cr --release --no-prelude`, which stays red `5/5` on both `/Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_parambuf_w1` and the temporary abstract-separator falsifier rebuild
   - negative finding: the reduced `object.cr` carriers are highly heisenbug-sensitive; exact doc-comment text is not a trustworthy root-cause marker, and a narrow `parse_def(is_abstract)` separator-skipping patch did not improve the main `default_prelude` / `object.cr` frontier, so that branch was reverted
   - new refutation: the follow-up field-unpacked `ParameterRecord` continuation is also a dead end. `/Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_paramrecord_w1` built cleanly from `/Users/sergey/Projects/Crystal/.codex_artifacts/stage1_release_parambuf_w1` in `164.99s`, but the reduced red/green boundary did not move (`comment_unsafe_assign_then_pointerself`, `header_tclass_forall`, `object_slice_real` still red; `header_tclass_no_forall` and `object_slice_spacefill` still green), and the earlier green control `stage2_block_body_exprid_parser_repro.cr` regressed to `status=138`; that branch was reverted
-  - next strongest parser-only frontier: the remaining widest by-value growable parser carriers are `@tokens = [] of Token`, macro `current_param_tokens = [] of Token`, `pieces = Array(MacroPiece).new(128)`, and macro-if branch arrays (`[] of NamedTuple(span: Span, condition: ExprId, body: ExprId)`), which fit the still comment/whitespace-sensitive parse-only crash family better than the reverted `ParameterRecord` continuation
+  - verified follow-up: exact token-preload capacity in both parser constructors closes one real comment-sensitive parser carrier. `/Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_tokenpreload_w1` built from `/Users/sergey/Projects/Crystal/.codex_artifacts/stage1_release_parambuf_w1` in `163.17s`; the new repo-local oracle `bash regression_tests/stage2_token_preload_method_param_repro.sh /Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_tokenpreload_w1` is green `5/5` while the same oracle is red on `/Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_parambuf_w1`, and the previously red reduced witnesses `comment_unsafe_assign_then_pointerself`, `header_tclass_forall`, and `object_slice_real` now all parse green without regressing the green controls `header_tclass_no_forall`, `object_slice_spacefill`, or `stage2_block_body_exprid_parser_repro.cr`
+  - updated frontier: the main stage2/stage3 blocker lives later than initial token preload, because `bash regression_tests/stage2_object_parse_noprelude_repro.sh /Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_tokenpreload_w1`, `bash regression_tests/stage2_default_prelude_parse_repro.sh /Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_tokenpreload_w1`, and `bash regression_tests/stage2_full_compiler_parse_only_repro.sh /Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_tokenpreload_w1` are still red on attempt `1`
 - **Current parser-buffer checkpoint**:
   - fresh release checkpoint on the current source-matching compiler pair:
     - stage1: `/Users/sergey/Projects/Crystal/.codex_artifacts/stage1_release_parambuf_w1`
@@ -22,6 +23,26 @@
     - `array_concat_string_runtime` is not attributed to this checkpoint: the same `llc ... expected '=' in global variable` failure reproduces on both `/Users/sergey/Projects/Crystal/.codex_artifacts/stage1_release_parambuf_w1` and the temporary abstract-separator falsifier rebuild
     - `test_select_map_stress` remains the known flaky `status=138` failure
     - `/Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_paramrecord_w1` is now a verified false continuation branch: it left `stage2_object_parse_noprelude_repro.sh` red on attempt `1` and regressed the smaller green control `stage2_block_body_exprid_parser_repro.cr` to `status=138`
+- **Current verified token-preload checkpoint**:
+  - `src/compiler/frontend/parser.cr` now pre-counts tokens with a temporary lexer and allocates exact `Array(Token)` capacity before the initial parser token preload in both constructors, so initial `lexer.each_token { |token| @tokens << token }` no longer performs uncontrolled array growth
+  - fresh release checkpoint on the current source-matching compiler pair:
+    - stage1: `/Users/sergey/Projects/Crystal/.codex_artifacts/stage1_release_parambuf_w1`
+    - stage2: `/Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_tokenpreload_w1`
+  - focused verification:
+    - `bash regression_tests/stage2_token_preload_method_param_repro.sh /Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_parambuf_w1` -> reproduced on attempt `1`
+    - `bash regression_tests/stage2_token_preload_method_param_repro.sh /Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_tokenpreload_w1` -> `not reproduced: compiler reached STOP_AFTER_PARSE on all 5 token-preload method-param repro attempts`
+    - direct safe-run sampling on `/Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_tokenpreload_w1`:
+      - `comment_unsafe_assign_then_pointerself` -> `exit 0`
+      - `header_tclass_forall` -> `exit 0`
+      - `object_slice_real` -> `exit 0`
+      - `header_tclass_no_forall` -> `exit 0`
+      - `object_slice_spacefill` -> `exit 0`
+      - `stage2_block_body_exprid_parser_repro.cr` -> `exit 0`
+  - boundary:
+    - `bash regression_tests/stage2_object_parse_noprelude_repro.sh /Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_tokenpreload_w1` -> reproduced on attempt `1`
+    - `bash regression_tests/stage2_default_prelude_parse_repro.sh /Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_tokenpreload_w1` -> reproduced on attempt `1`
+    - `bash regression_tests/stage2_full_compiler_parse_only_repro.sh /Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_tokenpreload_w1` -> reproduced on iteration `1/5`
+    - `bash regression_tests/stage2_symbol_table_parse_repro.sh /Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_tokenpreload_w1` still reproduces later in the run (`status=138` on attempt `3/5`), so the main self-hosted corridor clearly survives beyond the initial token preload carrier
 - **New local debug verification compiler**: `/private/tmp/codex_stage1_regex_runtime_fix_dbg`
 - **Fresh local debug verification compiler**: `/private/tmp/codex_stage1_nilguard_dbg`
 - **Newest local debug verification compiler**: `/private/tmp/codex_stage1_noprelude_io_dbg`

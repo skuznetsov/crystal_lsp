@@ -48,9 +48,18 @@ module CrystalV2
         # preventing constructs like `{ expr\n other }` from being glued into a single expression.
         @skip_newlines_in_braces : Bool = false
 
+        private def token_preload_capacity(source : String, keep_trivia : Bool) : Int32
+          count = 0
+          Lexer.new(source).each_token(skip_trivia: !keep_trivia) do |_token|
+            count += 1
+          end
+          count
+        end
+
         def initialize(lexer : Lexer, *, recovery_mode : Bool = false)
           @source = lexer.source
-          @tokens = [] of Token
+          keep_trivia = ::CrystalV2::Compiler::BootstrapEnv.enabled?("CRYSTAL_V2_PARSER_KEEP_TRIVIA")
+          @tokens = Array(Token).new(token_preload_capacity(@source, keep_trivia))
           @index = 0
           # Choose arena implementation (default: AstArena; PageArena via env)
           if ::CrystalV2::Compiler::BootstrapEnv.enabled?("CRYSTAL_V2_PAGE_ARENA")
@@ -89,7 +98,6 @@ module CrystalV2
           # Ensure lexer can emit diagnostics into this parser's buffer
           lexer.diagnostics = @diagnostics
 
-          keep_trivia = ::CrystalV2::Compiler::BootstrapEnv.enabled?("CRYSTAL_V2_PARSER_KEEP_TRIVIA")
           lexer.each_token(skip_trivia: !keep_trivia) { |token| @tokens << token }
           @lexer = nil
           @keep_trivia = keep_trivia
@@ -181,7 +189,8 @@ module CrystalV2
         # Used by macro expander to add parsed nodes to existing arena
         def initialize(lexer : Lexer, @arena : ArenaLike, *, recovery_mode : Bool = false)
           @source = lexer.source
-          @tokens = [] of Token
+          keep_trivia = ::CrystalV2::Compiler::BootstrapEnv.enabled?("CRYSTAL_V2_PARSER_KEEP_TRIVIA")
+          @tokens = Array(Token).new(token_preload_capacity(@source, keep_trivia))
           @index = 0
           @arena.retain_source(@source)
           @diagnostics = [] of Diagnostic
@@ -210,7 +219,6 @@ module CrystalV2
           @macro_expr_brace_cache = Hash(Int32, Bool).new
           @allow_inline_rescue = true
           @lib_depth = 0
-          keep_trivia = ::CrystalV2::Compiler::BootstrapEnv.enabled?("CRYSTAL_V2_PARSER_KEEP_TRIVIA")
           lexer.each_token(skip_trivia: !keep_trivia) { |token| @tokens << token }
           @lexer = nil
           @keep_trivia = keep_trivia
