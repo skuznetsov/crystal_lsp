@@ -1,11 +1,11 @@
-# Crystal V2 Bootstrap — TODO (Updated 2026-03-19)
+# Crystal V2 Bootstrap — TODO (Updated 2026-03-20)
 
 ## Current State
 - **Branch**: `bootstrap-benchmark`
-- **Latest committed baseline**: `58a85c8f` — harden recursive compiler_rt parse loading
-- **Working tree**:
-  - active uncommitted fixes currently cover source-reparsed extern recovery, arena/source matching hardening, and struct-in-union runtime tagging
-  - latest fixed stage1 is green on the new union oracles, but the self-hosted stage2 frontier still crashes on tiny compile/HIR probes
+- **Latest committed baseline**: `ea39468a` — checkpoint stage1 union tagging and bootstrap oracles
+- **Current focused slice**:
+  - verified root-cause fix for self-hosted `AstArena` typed-node storage corruption plus parser span lookup hardening
+  - latest fixed stage1 is green on the new AstArena oracle and broad regressions, while the self-hosted stage2 frontier has moved later into prelude/object parsing and later compile/HIR probes
 - **New local debug verification compiler**: `/private/tmp/codex_stage1_regex_runtime_fix_dbg`
 - **Fresh local debug verification compiler**: `/private/tmp/codex_stage1_nilguard_dbg`
 - **Newest local debug verification compiler**: `/private/tmp/codex_stage1_noprelude_io_dbg`
@@ -20,6 +20,17 @@
     - the lone `run_all` failure is still the long-standing flaky `test_select_map_stress` (`exit 138`), so there is no new broad regression signal against this fix yet
   - current boundary:
     - `/Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_unionhdr_fromfixedstage1_w1` still crashes while compiling the same tiny probes and the existing HIR oracle, so this fix closes one verified runtime root cause but does not yet stabilize stage2/stage3 bootstrap
+- **Current verified AstArena typed-node init fix**:
+  - `src/compiler/frontend/ast.cr` now avoids conditional ivar initialization for `@nodes : Array(TypedNode)` in `AstArena.initialize`; the self-hosted release crash narrowed to that exact shape rather than generic `Array(Node)#<<`, generic `ExprId` returns, or generic method-wrapped pushes
+  - `src/compiler/frontend/parser.cr` now resolves `node_span` through `@arena[id]?` instead of raw object-header probing, so invalid/stale ids fail closed to `Span.zero` instead of depending on stale runtime layout assumptions
+  - fresh verification on `/Users/sergey/Projects/Crystal/.codex_artifacts/stage1_release_unionhdr_w1`:
+    - `bash regression_tests/stage1_astarena_typednode_conditional_init_repro.sh /Users/sergey/Projects/Crystal/.codex_artifacts/stage1_release_unionhdr_w1` -> `not reproduced: AstArena typed-node conditional-init add path is stable`
+    - `bash regression_tests/run_all.sh /Users/sergey/Projects/Crystal/.codex_artifacts/stage1_release_unionhdr_w1 4` -> `85 passed, 0 failed out of 85 tests`
+  - fresh self-hosted stage2 checkpoint on current tree:
+    - `/Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_astarena_init_w1` builds cleanly from `/Users/sergey/Projects/Crystal/.codex_artifacts/stage1_release_unionhdr_w1` in `164.92s`
+    - `CRYSTAL_V2_STOP_AFTER_PARSE=1 --release --no-prelude 1` now reaches `[PARSE_OK]` / `[REQSCAN_DONE]` and exits `0`
+  - current boundary:
+    - the new stage2 candidate still segfaults while compiling the AstArena oracle and the existing `Set(String) | String` oracle, and default-prelude parse-only currently dies later while entering `src/stdlib/object.cr`
 - **Current verified no-prelude link fix**:
   - `src/compiler/mir/llvm_backend.cr` now emits PCRE2 declarations/runtime helpers only when the module actually contains regex helper extern calls or regex-specific builtin overrides
   - fresh debug verification:
@@ -51,7 +62,8 @@
     - `bash regression_tests/run_all.sh /private/tmp/codex_stage1_noprelude_io_dbg 4` -> `81 passed, 0 failed`
     - emitted no-prelude IR before the fix showed `@Object__classvar__STDOUT = global ptr null` plus dead stub `define i32 @IO$Hputs$$Int32(...) { ret i32 0 }`; the new path bypasses that prelude-only surface entirely
 - **Fresh release stage1 (current tree, union fix verified)**: `/Users/sergey/Projects/Crystal/.codex_artifacts/stage1_release_unionhdr_w1`
-- **Fresh release stage2 (built from fixed stage1, still unstable)**: `/Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_unionhdr_fromfixedstage1_w1`
+- **Fresh release stage2 (built from fixed stage1, still unstable)**: `/Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_astarena_init_w1`
+- **Previous fresh release stage2 checkpoint (pre-AstArena-init fix)**: `/Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_unionhdr_fromfixedstage1_w1`
 - **Previous fresh release stage1 checkpoint**: `/Users/sergey/Projects/Crystal/.codex_artifacts/stage1_release_funlookahead`
 - **Previous fresh release stage2 checkpoint**: `/Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_parseprogramroots_loadedreq_lazydbg_fresh_w2`
 - **Previous local stage2 checkpoint (class reparse fallback)**: `/Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_reparse_class_clean`
@@ -63,6 +75,7 @@
 - **Current local stage2 macro-text no-span falsifier candidate**: `/Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_macrotext_nospan_w1`
 - **Current timings**:
   - original Crystal -> fresh `stage1_release_unionhdr_w1`: `534.40s`
+  - fresh `stage1_release_unionhdr_w1` -> fresh `stage2_release_astarena_init_w1`: `164.92s`
   - fresh `stage1_release_unionhdr_w1` -> fresh `stage2_release_unionhdr_fromfixedstage1_w1`: `165.71s`
   - original Crystal -> fresh `stage1_release_funlookahead`: `544.95s`
   - fresh `stage1_release_funlookahead` -> fresh `stage2_release_funlookahead_fresh`: `174.80s`
@@ -95,6 +108,7 @@
   - `bash regression_tests/stage2_no_prelude_puts_runtime_repro.sh <compiler>`
   - `bash regression_tests/stage2_struct_union_runtime_typecheck_repro.sh <compiler>`
   - `bash regression_tests/stage2_hash_set_union_dispatch_repro.sh <compiler>`
+  - `bash regression_tests/stage1_astarena_typednode_conditional_init_repro.sh <compiler>`
 - **Compiler parse-only status**:
   - baseline `stage2_release_nameprio_fresh`: `rc=0,138,138,138,138`
   - fresh `stage2_release_funlookahead_fresh`: `rc=0,0,0,0,0`

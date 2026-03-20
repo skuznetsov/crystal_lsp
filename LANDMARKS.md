@@ -1,7 +1,41 @@
 # LANDMARKS
 
-Updated: 2026-03-19
+Updated: 2026-03-20
 Context: compiler/bootstrap/stage2-stability
+
+[LM-216|verified]: the next self-hosted stage2 crash was a narrower frontend
+storage bug, not a generic `Array(Node)#<<` failure. The verified carrier was
+conditional ivar initialization of `@nodes : Array(TypedNode)` inside
+`src/compiler/frontend/ast.cr` `AstArena.initialize(capacity : Int32 = 0)`:
+the shape `capacity > 0 ? Array(TypedNode).new(capacity) : [] of TypedNode`
+compiled fine under stage1 but later corrupted `@nodes << node` in self-hosted
+release code. Direct top-level pushes, method-wrapped `Array(Node)` pushes, and
+method-wrapped `ExprId` returns without that conditional typed-array ivar shape
+stayed green, which refuted the broader “generic arena add” theory. The fix is
+to initialize `@nodes` unconditionally as `[] of TypedNode`; a smaller parser
+hardening in `src/compiler/frontend/parser.cr` also now resolves `node_span`
+through `@arena[id]?` instead of raw object-header probing, so stale ids fail
+closed to `Span.zero`. Verified on fresh release compiler
+`/Users/sergey/Projects/Crystal/.codex_artifacts/stage1_release_unionhdr_w1`:
+- `bash regression_tests/stage1_astarena_typednode_conditional_init_repro.sh /Users/sergey/Projects/Crystal/.codex_artifacts/stage1_release_unionhdr_w1`
+  => `not reproduced`
+- `bash regression_tests/run_all.sh /Users/sergey/Projects/Crystal/.codex_artifacts/stage1_release_unionhdr_w1 4`
+  => `85 passed, 0 failed out of 85 tests`
+- fresh self-hosted release stage2
+  `/Users/sergey/Projects/Crystal/.codex_artifacts/stage2_release_astarena_init_w1`
+  builds cleanly in `164.92s` and now reaches
+  `CRYSTAL_V2_STOP_AFTER_PARSE=1 --release --no-prelude 1` with
+  `[PARSE_OK]` / `[REQSCAN_DONE]` and `exit 0`
+Adversary note:
+- the same new stage2 candidate still segfaults while compiling the committed
+  AstArena oracle and the older `Set(String) | String` oracle, so this closes
+  one verified frontend storage root cause but not the full stage2/stage3 path
+- default-prelude parse-only has moved later rather than disappearing; the new
+  boundary is during stdlib loading while entering `src/stdlib/object.cr`
+Reusable lesson: arena-related miscompiles can hide behind apparently generic
+push/union symptoms. Split them by storage shape first: top-level vs method,
+plain `Array(Node)` vs aliased `Array(TypedNode)`, and unconditional vs
+conditional ivar initialization. {F/G/R: 0.98/0.82/0.95} [verified]
 
 [LM-215|verified]: raw-pointer/all-ref union ABI must exclude heap-backed
 structs and tuples. Pointer-sized payload is not sufficient for runtime union

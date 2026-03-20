@@ -14649,11 +14649,8 @@ current_token.kind == Token::Kind::Identifier &&
         @[AlwaysInline]
         private def node_span(id : ExprId) : Span
           return Span.zero if id.invalid?
-          node = @arena[id]
-          # V2 defensive guard: arena lookup may return null pointer (V2 heap-allocates structs)
-          return Span.zero if node.as(Void*).address == 0
-          span_ptr = Pointer(UInt64).new(node.object_id &+ 8).value
-          return Span.zero if span_ptr == 0_u64
+          node = @arena[id]?
+          return Span.zero unless node
           node.span
         end
 

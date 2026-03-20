@@ -3734,7 +3734,9 @@ module CrystalV2
         getter extra_sources : Array(String)
 
         def initialize(capacity : Int32 = 0)
-          @nodes = capacity > 0 ? Array(TypedNode).new(capacity) : [] of TypedNode
+          # Self-hosted release builds miscompile conditional ivar initialization
+          # for Array(TypedNode), which later corrupts `@nodes << node`.
+          @nodes = [] of TypedNode
           @extra_sources = [] of String
         end
 
