@@ -1889,6 +1889,21 @@ module Crystal
       else
         field_mir_type = convert_type(field.type)
 
+        # CRITICAL: If field_mir_type maps to an all-ref union, override to POINTER.
+        # All-ref unions are stored as raw pointers (no union discriminator).
+        # Loading them as tagged union struct {i32, [2 x i32]} reads garbage.
+        if field_mir_type != TypeRef::POINTER
+          if fd_check = @mir_module.get_union_descriptor(field_mir_type)
+            if all_ref_union_descriptor?(fd_check)
+              field_mir_type = TypeRef::POINTER
+            end
+          elsif field_mir_type_info = @mir_module.type_registry.get(field_mir_type)
+            if field_mir_type_info.kind.union? && field_mir_type_info.size == pointer_word_bytes_u64
+              field_mir_type = TypeRef::POINTER
+            end
+          end
+        end
+
         # Check if the actual field storage type (from class layout) is a wider union
         # than the FieldGet result type. This happens when type widening expands a
         # declared type (e.g., ArenaLike = 3 variants, all-ref → ptr) to a wider union
