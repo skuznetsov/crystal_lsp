@@ -311,6 +311,13 @@ module Crystal::MIR
         end
         i -= 1
       end
+      # For generic instantiations, check the base class name
+      paren_idx = name.index('(')
+      if paren_idx
+        generic_base = name[0...paren_idx]
+        base_type = @type_registry.get_by_name(generic_base)
+        return runtime_header_backed_union_variant?(base_type) if base_type
+      end
       false
     end
 

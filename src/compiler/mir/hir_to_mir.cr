@@ -701,7 +701,7 @@ module Crystal
     # Check if a variant type name represents a runtime-header-backed heap object by extracting
     # the base type from an ivar-qualified name like "ClassName::ivar_name:TypeName".
     private def variant_name_is_runtime_header_backed?(name : String) : Bool
-      # Walk backwards to find the last single colon (not part of ::)
+      # 1. Check for ivar-qualified names like "ClassName::ivar:TypeName"
       i = name.bytesize - 1
       while i > 0
         if name.byte_at(i) == ':'.ord && name.byte_at(i - 1) != ':'.ord
@@ -711,6 +711,15 @@ module Crystal
           return false
         end
         i -= 1
+      end
+      # 2. For generic instantiations (Array(String), Set(UInt32), Hash(K,V), etc.),
+      #    look up the base class name. Generic classes are reference types with
+      #    runtime headers — their instantiations inherit this property.
+      paren_idx = name.index('(')
+      if paren_idx
+        generic_base = name[0...paren_idx]
+        base_type = @mir_module.type_registry.get_by_name(generic_base)
+        return runtime_header_backed_union_variant?(base_type) if base_type
       end
       false
     end
