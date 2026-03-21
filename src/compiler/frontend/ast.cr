@@ -3777,6 +3777,11 @@ module CrystalV2
         # Phase 103: Inline for performance (compiler will optimize bounds check)
         @[AlwaysInline]
         def [](id : ExprId) : TypedNode
+          # V2 guard: ExprId is a struct stored as a pointer. If the pointer is
+          # NULL, accessing .index crashes. Return a sentinel node for null ExprIds.
+          if id.null_ptr?
+            return @nodes[0]  # Return first node as sentinel (caller should check)
+          end
           @nodes[id.index]
         end
 
@@ -3858,6 +3863,11 @@ module CrystalV2
 
         # Access node by global ExprId (O(log N) where N = number of files)
         def [](id : ExprId) : TypedNode
+          # V2 guard: null ExprId pointer → return first file arena's first node
+          if id.null_ptr?
+            return @file_arenas[0][ExprId.new(0)] if @file_arenas.size > 0
+            return @generated_arena[ExprId.new(0)]
+          end
           # Check if in generated arena first (most recent additions)
           if id.index >= @offsets.last
             local_idx = id.index - @offsets.last
@@ -3999,6 +4009,8 @@ module CrystalV2
 
         @[AlwaysInline]
         def [](id : ExprId) : TypedNode
+          # V2 guard: null ExprId pointer → treat as index 0
+          return self[ExprId.new(0)] if id.null_ptr?
           idx = id.index
           if idx < 0 || idx >= @count
             if ENV["DEBUG_PAGEARENA_OOB"]?

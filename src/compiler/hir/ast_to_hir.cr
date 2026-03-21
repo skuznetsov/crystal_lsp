@@ -5577,6 +5577,7 @@ module Crystal::HIR
       end
       set = @nested_type_names[class_name]? || Set(String).new
       body.each do |expr_id|
+        next if expr_id.null_ptr? || expr_id.invalid?
         collect_nested_type_names(expr_id, set)
       end
       if debug_env_filter_match?("DEBUG_NESTED_TYPES", class_name)
@@ -5589,11 +5590,14 @@ module Crystal::HIR
       expr_id : ExprId,
       set : Set(String),
     ) : Nil
-      return if expr_id.invalid?
+      return if expr_id.null_ptr? || expr_id.invalid?
       node = unwrap_visibility_member_in_arena(@arena[expr_id], @arena)
       case node
       when CrystalV2::Compiler::Frontend::BlockNode
-        node.body.each { |child_id| collect_nested_type_names(child_id, set) }
+        node.body.each { |child_id|
+          next if child_id.null_ptr? || child_id.invalid?
+          collect_nested_type_names(child_id, set)
+        }
       when CrystalV2::Compiler::Frontend::MacroIfNode
         collect_nested_type_names(node.then_body, set)
         if else_body = node.else_body
