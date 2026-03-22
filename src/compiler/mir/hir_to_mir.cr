@@ -2147,11 +2147,27 @@ module Crystal
     end
 
     # Check if a HIR TypeRef refers to a struct (value type).
+    # Includes generic struct instantiations like Slice(UInt8), Tuple(X,Y).
     private def hir_type_is_struct?(type : HIR::TypeRef) : Bool
       return false if type.id < HIR::TypeRef::FIRST_USER_TYPE
       desc = @hir_module.get_type_descriptor(type)
       return false unless desc
-      desc.kind == HIR::TypeKind::Struct
+      return true if desc.kind == HIR::TypeKind::Struct
+      return true if desc.kind == HIR::TypeKind::Tuple
+      return true if desc.kind == HIR::TypeKind::NamedTuple
+      # Generic instantiations (Slice(UInt8), etc.) — check by MIR type registry
+      if desc.kind == HIR::TypeKind::Generic
+        mir_type = @mir_module.type_registry.get_by_name(desc.name)
+        if mir_type && mir_type.kind.struct?
+          return true
+        end
+        # Fallback: check if the MIR has a named type that's struct
+        base_name = desc.name.partition('(').first
+        if base_name == "Slice" || base_name == "Range" || base_name == "StaticArray"
+          return true
+        end
+      end
+      false
     end
 
     private def hir_type_is_static_array?(type : HIR::TypeRef) : Bool
