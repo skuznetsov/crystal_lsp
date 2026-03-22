@@ -574,8 +574,30 @@ module CrystalV2
 
         getter value : Slice(UInt8)
         getter kind : NumberKind
+        # V2 BOOTSTRAP: Pre-parsed numeric value to bypass Slice corruption in stage2.
+        # The Slice(UInt8) gets corrupted (heap-freed) between parse and HIR lowering.
+        getter parsed_int : Int64
+        getter parsed_float : Float64
 
         def initialize(@span : Span, @value : Slice(UInt8), @kind : NumberKind)
+          text = String.new(@value)
+          text = text.gsub('_', "").gsub(/[iuf]\d+$/, "")
+          if @kind.f32? || @kind.f64?
+            @parsed_float = text.to_f64? || 0.0
+            @parsed_int = 0_i64
+          else
+            raw = if text.starts_with?("0x") || text.starts_with?("0X")
+                    text[2..].to_u64?(16) || 0_u64
+                  elsif text.starts_with?("0b") || text.starts_with?("0B")
+                    text[2..].to_u64?(2) || 0_u64
+                  elsif text.starts_with?("0o") || text.starts_with?("0O")
+                    text[2..].to_u64?(8) || 0_u64
+                  else
+                    text.to_u64? || text.to_i64?.try(&.to_u64!) || 0_u64
+                  end
+            @parsed_int = raw.to_i64!
+            @parsed_float = 0.0
+          end
         end
       end
 

@@ -38287,34 +38287,16 @@ module Crystal::HIR
              else             TypeRef::INT32
              end
 
-      # Remove underscores and type suffixes (42_000i64 -> 42000)
-      value_str = (safe_slice_to_string(node.value) || "").gsub('_', "")
-      # Strip type suffix (i8, i16, i32, i64, i128, u8, u16, u32, u64, u128, f32, f64)
-      value_str = value_str.gsub(/[iuf]\d+$/, "")
-
-      # Handle empty string case (malformed number)
-      if value_str.empty?
-        value = 0_i64
-      elsif node.kind.f32? || node.kind.f64?
-        value = value_str.to_f64
+      # V2 BOOTSTRAP: Use pre-parsed numeric values from NumberNode.
+      # The Slice(UInt8) value field gets corrupted in stage2 (heap-freed struct).
+      # NumberNode now parses the text at PARSE TIME and stores Int64/Float64.
+      if node.kind.f32? || node.kind.f64?
+        value = node.parsed_float
       else
-        # Handle hex (0x), binary (0b), and octal (0o)
-        # Use UInt64 for parsing to handle large hex values, then cast to Int64
-        raw = if value_str.starts_with?("0x") || value_str.starts_with?("0X")
-                digits = value_str[2..]
-                digits.empty? ? 0_u64 : digits.to_u64(16)
-              elsif value_str.starts_with?("0b") || value_str.starts_with?("0B")
-                digits = value_str[2..]
-                digits.empty? ? 0_u64 : digits.to_u64(2)
-              elsif value_str.starts_with?("0o") || value_str.starts_with?("0O")
-                digits = value_str[2..]
-                digits.empty? ? 0_u64 : digits.to_u64(8)
-              else
-                # Try to parse as UInt64 first (handles numbers > Int64::MAX)
-                value_str.to_u64? || value_str.to_i64?.try(&.to_u64!) || 0_u64
-              end
-        value = raw.to_i64! # Bitcast to Int64
+        value = node.parsed_int
       end
+
+      # (original Slice-based parsing removed — replaced by pre-parsed values above)
 
       lit = Literal.new(ctx.next_id, type, value)
       ctx.emit(lit)
