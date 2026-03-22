@@ -21440,6 +21440,22 @@ module Crystal::HIR
         end
         init_call = Call.new(ctx.next_id, TypeRef::VOID, alloc.id, init_name, param_ids)
         ctx.emit(init_call)
+
+        # V2 BOOTSTRAP: Re-store union-typed fields after initialize.
+        # V2 passes union args as ptr → initialize wraps ptr in {tag=Nil, payload=ptr}.
+        # We fix this by re-storing the correct union value at the field offset.
+        allocator_params.each_with_index do |(param_name, param_type), idx|
+          # Check if this param maps to an ivar with union type
+          ivar_match = class_info.ivars.find { |iv| iv.name == "@#{param_name}" }
+          if ivar_match
+            type_desc = @module.get_type_descriptor(param_type)
+            if type_desc && type_desc.kind == TypeKind::Union
+              # Re-store the union value at the field offset
+              fixup_store = FieldSet.new(ctx.next_id, ivar_match.type, alloc.id, ivar_match.name, param_ids[idx], ivar_match.offset)
+              ctx.emit(fixup_store)
+            end
+          end
+        end
       end
 
       # Return allocated object
