@@ -28335,13 +28335,14 @@ module Crystal::HIR
     # adjacent fields. Fix by using pointer size as minimum for struct-typed fields.
     private def field_storage_size(type : TypeRef, c_context : Bool = false) : Int32
       storage = type_size(type, c_context)
-      # V2 ABI: non-C Crystal struct types are heap-allocated and stored as pointers.
-      # The field slot is always pointer-sized regardless of the struct's inline size.
-      # C lib structs (in @lib_structs) are always inlined at their full size.
-      # NOTE: Only upgrade structs SMALLER than pointer size for now. Large struct
-      # downgrade (> 8 bytes → 8) changes class layouts too aggressively and can
-      # cause field offset mismatches. This will be addressed separately.
-      if !c_context && storage > 0 && storage < pointer_word_bytes_i32 &&
+      # V2 ABI: ALL non-C Crystal struct types are heap-allocated and stored as pointers.
+      # The field slot is ALWAYS pointer-sized (8 bytes) regardless of the struct's
+      # inline size. This is critical: larger structs like Span (24 bytes) are also
+      # stored as pointers. Without this, field offsets diverge from the actual storage
+      # layout, causing GC to miss pointers and leading to dangling pointer corruption
+      # (the NumberNode.value bug: Span at inline 24 bytes shifts value field to offset
+      # 32, outside the LLVM type's 32-byte boundary, so GC doesn't scan it).
+      if !c_context && storage > 0 && storage != pointer_word_bytes_i32 &&
          type.id >= TypeRef::FIRST_USER_TYPE
         if info = @class_info_by_type_id[type.id]?
           if info.is_struct && !@lib_structs.includes?(info.name)
@@ -38269,6 +38270,7 @@ module Crystal::HIR
     # ═══════════════════════════════════════════════════════════════════════
 
     private def lower_number(ctx : LoweringContext, node : CrystalV2::Compiler::Frontend::NumberNode) : ValueId
+      # (debug trace removed)
       type = case node.kind
              when .i8?   then TypeRef::INT8
              when .i16?  then TypeRef::INT16
