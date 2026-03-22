@@ -37905,6 +37905,8 @@ module Crystal::HIR
       # crashes with IndexError from incorrect dispatch table generation.
       # Individual is_a? checks work correctly. Pre-dispatch the most common
       # node types via is_a? chain to avoid the case statement for hot paths.
+      # (debug trace removed)
+
       if node.is_a?(CrystalV2::Compiler::Frontend::CallNode)
         return lower_call(ctx, node)
       elsif node.is_a?(CrystalV2::Compiler::Frontend::AssignNode)
@@ -38270,7 +38272,6 @@ module Crystal::HIR
     # ═══════════════════════════════════════════════════════════════════════
 
     private def lower_number(ctx : LoweringContext, node : CrystalV2::Compiler::Frontend::NumberNode) : ValueId
-      # (debug trace removed)
       type = case node.kind
              when .i8?   then TypeRef::INT8
              when .i16?  then TypeRef::INT16
