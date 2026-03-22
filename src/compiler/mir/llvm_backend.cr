@@ -2597,12 +2597,12 @@ module Crystal::MIR
           end
           "#{declared_type} %fixarg.#{c}.val"
         elsif declared_type == "ptr" && emitted.includes?(".union")
-          # union → ptr: extract payload
+          # union → ptr: pass pointer to the FULL union (preserving tag).
+          # Previously extracted payload only (dropping tag), which caused
+          # union-typed fields in constructors to lose their type discriminator.
           emit "%fixarg.#{c}.tmp = alloca #{emitted}, align 8"
           emit "store #{emitted} #{value_str}, ptr %fixarg.#{c}.tmp"
-          emit "%fixarg.#{c}.pp = getelementptr #{emitted}, ptr %fixarg.#{c}.tmp, i32 0, i32 1"
-          emit "%fixarg.#{c}.val = load ptr, ptr %fixarg.#{c}.pp, align 4"
-          "ptr %fixarg.#{c}.val"
+          "ptr %fixarg.#{c}.tmp"
         elsif declared_type == "ptr" && (emitted == "float" || emitted == "double")
           # float/double → ptr: bitcast to int bits, then inttoptr
           if emitted == "double"
@@ -9936,10 +9936,9 @@ module Crystal::MIR
           end
         end
 
-        # Extract ptr from union: alloca → store → GEP to payload → load ptr.
-        # Use the ACTUAL emitted union type for the temporary storage, not the
-        # prepass expected union type. Different union names can share layout;
-        # forcing expected type here can emit invalid store type mismatches.
+        # Pass pointer to FULL union (preserving tag + payload).
+        # Previously extracted payload only (dropping tag), which caused
+        # union-typed fields to lose their type discriminator in constructors.
         actual_union_type = if emitted_type && emitted_type.includes?(".union")
                               emitted_type
                             else
@@ -9947,8 +9946,7 @@ module Crystal::MIR
                             end
         emit "%#{extract_name}.alloca = alloca #{actual_union_type}, align 8"
         emit "store #{actual_union_type} #{normalize_union_value(val_ref_str, actual_union_type)}, ptr %#{extract_name}.alloca"
-        emit "%#{extract_name}.pay_ptr = getelementptr #{actual_union_type}, ptr %#{extract_name}.alloca, i32 0, i32 1"
-        emit "%#{extract_name} = load ptr, ptr %#{extract_name}.pay_ptr, align 4"
+        emit "%#{extract_name} = bitcast ptr %#{extract_name}.alloca to ptr"
       end
     end
 
@@ -14225,16 +14223,14 @@ module Crystal::MIR
                      !(val_ref_emitted && val_ref_emitted.includes?(".union"))
                     "ptr #{val_ref}"
                   else
-                    # Callee expects ptr (concrete reference type) but we have a union value.
-                    # Extract the payload (field 1 of the union struct) as a ptr.
-                    # MIR type narrowing guarantees the active variant is a reference type
-                    # at this point, so the payload is always a valid pointer.
+                    # Callee expects ptr but we have a union value.
+                    # Pass ptr to the FULL union (preserving tag + payload).
+                    # Previously extracted payload only (dropping tag), which caused
+                    # union-typed fields to lose their type discriminator.
                     temp_alloca = "%alloca.#{c}"
                     emit "#{temp_alloca} = alloca #{union_storage_type}, align 8"
                     emit "store #{union_storage_type} #{normalize_union_value(val_ref, union_storage_type)}, ptr #{temp_alloca}"
-                    emit "%payload_ptr.#{c} = getelementptr #{union_storage_type}, ptr #{temp_alloca}, i32 0, i32 1"
-                    emit "%payload_val.#{c} = load ptr, ptr %payload_ptr.#{c}, align 4"
-                    "ptr %payload_val.#{c}"
+                    "ptr #{temp_alloca}"
                   end
                  elsif expected_llvm_type == "ptr" && actual_llvm_type == "i1"
                    # Bool to ptr - likely string context, convert bool to string
