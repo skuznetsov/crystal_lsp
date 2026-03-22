@@ -1535,6 +1535,16 @@ module Crystal::MIR
                "}\n"
       end
 
+      # Object#==(Object) — reference equality (pointer comparison).
+      # Crystal's default Object#== uses same? which compares object identity.
+      if name == "Object$H$EQ"
+        return "; Object#==(Object) — pointer equality\n" \
+               "define i1 @#{name}(ptr %arg0, ptr %arg1) {\n" \
+               "  %eq = icmp eq ptr %arg0, %arg1\n" \
+               "  ret i1 %eq\n" \
+               "}\n"
+      end
+
       # Object#==(T) — cross-type comparison always returns false.
       # Crystal's Object#== defaults to same? (pointer equality) which can't match
       # a reference with a primitive value. Applies to any Object#==(T).
