@@ -2538,6 +2538,15 @@ module Crystal::MIR
           @emitted_value_names.add(s[0...eq])
         end
       end
+      # V2: normalize "ptr 0" → "ptr null" (0 is invalid for ptr type in LLVM IR)
+      if s.includes?("ptr 0")
+        s = s.gsub("ptr 0,", "ptr null,")
+             .gsub("ptr 0)", "ptr null)")
+             .gsub("ptr 0 ", "ptr null ")
+        if s.ends_with?("ptr 0")
+          s = s[0...-1] + "null"
+        end
+      end
       @output << ("  " * @indent) << s << "\n"
     end
 
@@ -13634,8 +13643,11 @@ module Crystal::MIR
       cond = value_ref(inst.condition)
       then_val = value_ref(inst.then_value)
       else_val = value_ref(inst.else_value)
-      # For non-pointer types, convert "null" to appropriate zero value
-      if type != "ptr" && !type.includes?(".union")
+      # Normalize zero/null for type compatibility
+      if type == "ptr"
+        then_val = "null" if then_val == "0"
+        else_val = "null" if else_val == "0"
+      elsif !type.includes?(".union")
         if type == "double" || type == "float"
           then_val = "0.0" if then_val == "null"
           else_val = "0.0" if else_val == "null"

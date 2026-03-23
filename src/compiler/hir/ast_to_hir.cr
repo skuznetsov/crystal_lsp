@@ -38315,6 +38315,12 @@ module Crystal::HIR
       # (original Slice-based parsing removed — replaced by pre-parsed values above)
 
       lit = Literal.new(ctx.next_id, type, value)
+      # V2 BOOTSTRAP: Set primitive fields directly to bypass union tag corruption.
+      if node.kind.f32? || node.kind.f64?
+        lit.float_value = node.parsed_float
+      else
+        lit.int_value = node.parsed_int
+      end
       ctx.emit(lit)
       lit.id
     end

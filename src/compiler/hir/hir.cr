@@ -164,29 +164,47 @@ module Crystal::HIR
   # Compile-time constant value
   class Literal < Value
     getter value : LiteralValue
+    # V2 BOOTSTRAP: Separate primitive fields to avoid union tag corruption.
+    # V2's calling convention loses union tags when passing as ptr.
+    getter int_value : Int64
+    getter float_value : Float64
+    getter str_value : String?
+
+    property int_value : Int64 = 0_i64
+    property float_value : Float64 = 0.0
 
     def initialize(id : ValueId, type : TypeRef, @value : LiteralValue)
       super(id, type)
-      # Literals don't escape and aren't mutable
       @lifetime = LifetimeTag::StackLocal
+    end
     end
 
     def to_s(io : IO) : Nil
       io << "%" << @id << " = literal "
-      case v = @value
-      when Int64   then io << v
-      when Float64 then io << v
-      when String
-        # Check if this is a symbol (type = SYMBOL)
-        if @type == TypeRef::SYMBOL
-          io << ":" << v
+      # V2 BOOTSTRAP: Use primitive fields for int/float.
+      # The @value union tag gets corrupted in stage2 (V2 calling convention).
+      # For String/Bool/Char/Nil, fall back to @value.
+      case @type
+      when TypeRef::FLOAT32, TypeRef::FLOAT64
+        io << @float_value
+      when TypeRef::NIL, TypeRef::VOID
+        io << "nil"
+      when TypeRef::BOOL
+        io << (@int_value != 0)
+      when TypeRef::STRING, TypeRef::SYMBOL
+        case v = @value
+        when String
+          if @type == TypeRef::SYMBOL
+            io << ":" << v
+          else
+            io << v.inspect
+          end
         else
-          io << v.inspect
+          io << "nil"
         end
-      when Bool    then io << v
-      when Char    then io << "'" << v << "'"
-      when Nil     then io << "nil"
-      else              io << v.inspect
+      else
+        # Integer types: use @int_value directly
+        io << @int_value
       end
       # Use actual type from TypeRef
       io << " : " << type_name
