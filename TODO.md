@@ -3,7 +3,11 @@
 ## Current Status
 - **Branch**: `bootstrap-benchmark` (merged `inline-structs`)
 - **Regression baseline**: last broadly re-verified count from the earlier inline-struct phase was `87/88 + 18/20`; later parser/HIR/bootstrap changes have not re-established that full baseline yet
-- **Fresh Stage1 → Stage2 release**: still green from current repo state under `scripts/run_safe.sh` (recent stage2 rebuilds finish in ~154-156s)
+- **Fresh release bootstrap measurements**:
+  - original compiler -> current `stage1 --release`: green in `525.13s real` (~8m45s), peak memory footprint `7230019776` bytes (`max resident set size 8062320640`)
+  - current `stage1 --release` -> self-hosted `stage2 --release`: green in `[EXIT: 0] after ~163s`, `/usr/bin/time -l = 190.31s real`, output `/tmp/stage2_release_88dfb7f6`
+  - self-hosted `stage2 --release` -> `stage3 --release`: still red; `scripts/run_safe.sh ... 1200 12288` times out with no output binary after `1200s`
+  - current speed comparison is only a lower bound: `stage2` compiler is at least `1200 / 525.13 ~= 2.29x` slower than stage1 on `src/crystal_v2.cr --release`, because the stage3 build did not finish inside the safe timeout
 - **Fresh parser stabilization**: forcing `AstArena` in parser bootstrap removes the bogus self-hosted `PageArena` path (`DEBUG_ARENA_ADD` now shows sane `id=0` instead of negative PageArena ids)
 - **Fresh macro parser stabilization**:
   - boxed `parse_macro_body` depth counters survive ordinary text-token iterations in self-hosted stage2
@@ -36,13 +40,15 @@
   - `src/stdlib/object.cr --release --no-prelude` parse-only repro is green `5/5` on the new stage2 candidate
   - reduced trailing-block carrier now reaches `CRYSTAL_V2_STOP_AFTER_MIR=1` on self-hosted stage2 and matches current-source stage1 MIR output
   - full self-hosted stage2 debug bootstrap now reaches deep LLVM generation without any `LLVM_MISSING_VALUE` diagnostics on the old `PeepholePass#run` / `CopyPropagationPass#run` nil-slot frontier
+  - full self-hosted `stage2 --release` bootstrap is green from current `HEAD` via `/tmp/stage1_release_88dfb7f6 -> /tmp/stage2_release_88dfb7f6`
 - **Focused red oracles**:
   - reduced trailing-block no-prelude carrier no longer diverges in HIR/MIR, but self-hosted stage2 still segfaults in LLVM generation when allowed past MIR on the same carrier
   - stage3 bootstrap still dies while parsing `src/stdlib/object.cr`
   - `stage2_process_executable_path_parse_repro.sh` is now flaky on the new stage2 candidate (`attempt 1 = green`, `attempt 2 = 139`)
   - full `char_toplevel` compile on self-hosted stage2 still segfaults after parse
   - full self-hosted stage2 debug bootstrap under `scripts/run_safe.sh ... 600 4096` is now killed by memory growth at `4231664KB > 4096MB` after ~293s during LLVM generation
-- **Current frontier**: the old nil/void cross-block slot LLVM blocker is gone; self-hosted stage2 now gets through parser, HIR, MIR, and into deep LLVM generation, but full compiler bootstrap is still blocked by memory growth during `generate(io)` before stage3 and benchmark work can resume.
+  - self-hosted `stage2 --release` -> `stage3 --release` currently times out after `1200s` under `run_safe` with no output binary
+- **Current frontier**: the old nil/void cross-block slot LLVM blocker is gone and release stage2 now builds successfully, but the second bootstrap is still blocked by extreme stage2 compile-time slowdown (timeout-class, not crash-class). The next step is to localize why the self-hosted release compiler takes >20 minutes on the same `src/crystal_v2.cr --release` workload that stage1 finishes in ~8m45s and stage2 itself finishes in ~3m10s.
 
 ## VERIFIED: Fix `ptr 0` → `ptr null` in stage2 LLC
 
@@ -81,11 +87,11 @@ CRYSTAL_V2_STOP_AFTER_MIR=1 /tmp/crystal_v2_s2 /tmp/test.cr -o /tmp/out --no-pre
 
 1. Build fresh release stage1 from current repo state.
 2. Build fresh release stage2 with that stage1 and measure peak RSS / progress through LLVM generation under `scripts/run_safe.sh`.
-3. Decide whether the new `~4.23GB` failure is an actual leak or just a higher legitimate bootstrap watermark; if needed, add one focused memory-growth oracle around full self-hosted LLVM generation.
-4. Re-run `regression_tests/stage2_nil_slot_bootstrap_repro.sh` on the next bootstrap candidate before chasing lower LLVM issues, so the old `LLVM_MISSING_VALUE` nil-slot bug stays closed.
-5. Re-run `stage2_default_prelude_parse_repro.sh` and `stage2_process_executable_path_parse_repro.sh` after the memory frontier is understood.
-6. Retry stage3 bootstrap once full self-hosted stage2 survives LLVM generation.
-7. If stage3 goes green, benchmark stage1 vs stage2 release compile time for `src/crystal_v2.cr`.
+3. Localize why `stage2 --release` takes >1200s on the stage3 bootstrap path despite stage1 finishing the same workload in `525.13s` and stage2 itself building in `190.31s`.
+4. Re-run `regression_tests/stage2_nil_slot_bootstrap_repro.sh` on the next bootstrap candidate before chasing lower performance issues, so the old `LLVM_MISSING_VALUE` nil-slot bug stays closed.
+5. Re-run `stage2_default_prelude_parse_repro.sh` and `stage2_process_executable_path_parse_repro.sh` once the stage3 timeout-class slowdown is understood.
+6. Retry stage3 bootstrap after the self-hosted release slowdown is fixed or bounded to a smaller reproducer.
+7. When stage3 goes green, record the exact stage1 vs stage2 release compile-time delta for `src/crystal_v2.cr`.
 
 ## ROOT CAUSES FOUND
 
