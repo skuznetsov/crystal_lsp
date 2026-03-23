@@ -8,6 +8,14 @@
   - current `stage1 --release` -> self-hosted `stage2 --release`: green in `[EXIT: 0] after ~163s`, `/usr/bin/time -l = 190.31s real`, output `/tmp/stage2_release_88dfb7f6`
   - self-hosted `stage2 --release` -> `stage3 --release`: still red; `scripts/run_safe.sh ... 1200 12288` times out with no output binary after `1200s`
   - current speed comparison is only a lower bound: `stage2` compiler is at least `1200 / 525.13 ~= 2.29x` slower than stage1 on `src/crystal_v2.cr --release`, because the stage3 build did not finish inside the safe timeout
+- **Fresh self-hosted lexer stabilization**:
+  - release candidate `/tmp/stage2_release_lexerscanfix_v4` builds green from current source via original `stage1` in `194.59s real`, `[EXIT: 0] after ~167s`
+  - self-hosted `stage2 --release --no-prelude` parse-only now survives numeric literals that previously hung or blew memory in lexer preload: `1`, `1_2`, `1.5`, `1e2`, `1_f32`, `1i64`, `1u8`
+  - new green regression: `regression_tests/stage2_numeric_literal_parse_repro.sh`
+  - root-cause chain for this corridor:
+    - `lex_number` integer scan self-looped in self-hosted release on `1\n`
+    - after fixing digit scan, `lex_newline` tokenized `\n` forever without advancing
+    - after fixing newline/whitespace, decimal/exponent/`_f32` paths still leaked into `lex_operator` or suffix scanning because single-byte consumes inside `lex_number`/`lex_number_suffix` were still using fragile `advance`/loop shapes
 - **Fresh parser stabilization**: forcing `AstArena` in parser bootstrap removes the bogus self-hosted `PageArena` path (`DEBUG_ARENA_ADD` now shows sane `id=0` instead of negative PageArena ids)
 - **Fresh macro parser stabilization**:
   - boxed `parse_macro_body` depth counters survive ordinary text-token iterations in self-hosted stage2
@@ -42,13 +50,16 @@
   - full self-hosted stage2 debug bootstrap now reaches deep LLVM generation without any `LLVM_MISSING_VALUE` diagnostics on the old `PeepholePass#run` / `CopyPropagationPass#run` nil-slot frontier
   - full self-hosted `stage2 --release` bootstrap is green from current `HEAD` via `/tmp/stage1_release_88dfb7f6 -> /tmp/stage2_release_88dfb7f6`
 - **Focused red oracles**:
+  - `regression_tests/stage2_numeric_literal_mir_oracle.sh` now isolates the next post-parse blocker: self-hosted stage2 parses numeric literals but still lowers them to `const nil` in MIR (`1`, `1_2`, `1i64`, `1u8`)
+  - mixed numeric `--emit hir` on self-hosted stage2 still aborts in `Printer$Dshortest$$Float64_IO` before artifact write, so float-literal HIR diffing is blocked by a separate printer stub issue
+  - tiny `1\n --no-prelude --emit llvm-ir --no-link` on `/tmp/stage2_release_lexerscanfix_v4` still segfaults in LLVM generation after MIR succeeds
   - reduced trailing-block no-prelude carrier no longer diverges in HIR/MIR, but self-hosted stage2 still segfaults in LLVM generation when allowed past MIR on the same carrier
   - stage3 bootstrap still dies while parsing `src/stdlib/object.cr`
   - `stage2_process_executable_path_parse_repro.sh` is now flaky on the new stage2 candidate (`attempt 1 = green`, `attempt 2 = 139`)
   - full `char_toplevel` compile on self-hosted stage2 still segfaults after parse
   - full self-hosted stage2 debug bootstrap under `scripts/run_safe.sh ... 600 4096` is now killed by memory growth at `4231664KB > 4096MB` after ~293s during LLVM generation
   - self-hosted `stage2 --release` -> `stage3 --release` currently times out after `1200s` under `run_safe` with no output binary
-- **Current frontier**: the old nil/void cross-block slot LLVM blocker is gone and release stage2 now builds successfully, but the second bootstrap is still blocked by extreme stage2 compile-time slowdown (timeout-class, not crash-class). The next step is to localize why the self-hosted release compiler takes >20 minutes on the same `src/crystal_v2.cr --release` workload that stage1 finishes in ~8m45s and stage2 itself finishes in ~3m10s.
+- **Current frontier**: numeric literal lexing is no longer the blocker for self-hosted stage2 parse-only work, but the next blocker is immediately downstream: self-hosted stage2 still lowers numeric literals to `nil` in MIR and still crashes in tiny LLVM emission / float-literal HIR printing. Once literal value transport is restored past HIR/MIR printing, re-run the numeric oracles first, then go back to the stage3 timeout-class slowdown.
 
 ## VERIFIED: Fix `ptr 0` → `ptr null` in stage2 LLC
 

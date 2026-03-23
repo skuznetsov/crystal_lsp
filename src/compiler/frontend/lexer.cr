@@ -9,12 +9,12 @@ module CrystalV2
       class Lexer
         @diagnostics : Array(CrystalV2::Compiler::Frontend::Diagnostic)?
         property diagnostics
-        @last_token_kind : Token::Kind?  # Phase 57: for regex vs division disambiguation
-        @at_statement_start : Bool       # Phase 57: Track statement boundaries for regex disambiguation
-        @whitespace_before : Bool        # Track if whitespace preceded current token (for regex disambiguation)
-        @macro_expr_depth : Int32        # Track nesting of {{ ... }} macro expressions
-        @string_pool : StringPool  # String interning for memory optimization
-        getter string_pool : StringPool  # Week 1 Day 2: expose for parser generic type interning
+        @last_token_kind : Token::Kind? # Phase 57: for regex vs division disambiguation
+        @at_statement_start : Bool      # Phase 57: Track statement boundaries for regex disambiguation
+        @whitespace_before : Bool       # Track if whitespace preceded current token (for regex disambiguation)
+        @macro_expr_depth : Int32       # Track nesting of {{ ... }} macro expressions
+        @string_pool : StringPool       # String interning for memory optimization
+        getter string_pool : StringPool # Week 1 Day 2: expose for parser generic type interning
         @source : String
         getter source : String
 
@@ -24,12 +24,12 @@ module CrystalV2
           @offset = 0
           @line = 1
           @column = 1
-          @processed_strings = [] of Bytes  # Phase 54: storage for escape-processed strings
-          @last_token_kind = nil  # Phase 57: for regex vs division disambiguation
-          @at_statement_start = true  # Phase 57: Start of file is statement start
-          @whitespace_before = false  # Track if whitespace preceded current token
+          @processed_strings = [] of Bytes # Phase 54: storage for escape-processed strings
+          @last_token_kind = nil           # Phase 57: for regex vs division disambiguation
+          @at_statement_start = true       # Phase 57: Start of file is statement start
+          @whitespace_before = false       # Track if whitespace preceded current token
           @macro_expr_depth = 0
-          @string_pool = StringPool.new  # String interning for memory optimization
+          @string_pool = StringPool.new # String interning for memory optimization
           @diagnostics = diagnostics
         end
 
@@ -69,56 +69,56 @@ module CrystalV2
           end
 
           token = case
-          when whitespace?(byte)
-            lex_whitespace
-          when byte == NEWLINE
-            lex_newline
-          when byte == AT_SIGN
-            lex_instance_var
-          when byte == DOLLAR_SIGN
-            # Phase 75: Global variables
-            lex_global_var
-          when byte == COLON
-            # Phase 16: Check if this is a symbol literal
-            lex_symbol_or_colon
-          when identifier_start?(byte)
-            lex_identifier
-          when ascii_number?(byte)
-            lex_number
-          when byte == DOUBLE_QUOTE
-            lex_string
-          when byte == BACKTICK
-            # Disambiguate between backtick command literal and backtick method name.
-            # If the last significant token was `def`, a backtick denotes the
-            # special backtick operator method name (def `(args)), not a command
-            # literal. In that case, emit a single-character Operator token and
-            # let the parser handle the method name.
-            if @last_token_kind == Token::Kind::Def
-              start_offset, start_line, start_column = capture_position
-              advance # consume the backtick character
-              Token.new(
-                Token::Kind::Operator,
-                Bytes[BACKTICK],
-                build_span(start_offset, start_line, start_column)
-              )
-            else
-              # Command literal with optional interpolation: `...`
-              lex_backtick
-            end
-          when byte == LEFT_BRACE && peek_byte == LEFT_BRACE
-            @macro_expr_depth += 1
-            lex_macro_expr_start
-          when byte == RIGHT_BRACE && peek_byte == RIGHT_BRACE && @macro_expr_depth > 0
-            @macro_expr_depth -= 1
-            lex_macro_expr_end
-          when byte == SINGLE_QUOTE
-            # Phase 56: Character literals
-            lex_char
-          when byte == HASH
-            lex_comment
-          else
-            lex_operator
-          end
+                  when whitespace?(byte)
+                    lex_whitespace
+                  when byte == NEWLINE
+                    lex_newline
+                  when byte == AT_SIGN
+                    lex_instance_var
+                  when byte == DOLLAR_SIGN
+                    # Phase 75: Global variables
+                    lex_global_var
+                  when byte == COLON
+                    # Phase 16: Check if this is a symbol literal
+                    lex_symbol_or_colon
+                  when identifier_start?(byte)
+                    lex_identifier
+                  when ascii_number?(byte)
+                    lex_number
+                  when byte == DOUBLE_QUOTE
+                    lex_string
+                  when byte == BACKTICK
+                    # Disambiguate between backtick command literal and backtick method name.
+                    # If the last significant token was `def`, a backtick denotes the
+                    # special backtick operator method name (def `(args)), not a command
+                    # literal. In that case, emit a single-character Operator token and
+                    # let the parser handle the method name.
+                    if @last_token_kind == Token::Kind::Def
+                      start_offset, start_line, start_column = capture_position
+                      advance # consume the backtick character
+                      Token.new(
+                        Token::Kind::Operator,
+                        Bytes[BACKTICK],
+                        build_span(start_offset, start_line, start_column)
+                      )
+                    else
+                      # Command literal with optional interpolation: `...`
+                      lex_backtick
+                    end
+                  when byte == LEFT_BRACE && peek_byte == LEFT_BRACE
+                    @macro_expr_depth += 1
+                    lex_macro_expr_start
+                  when byte == RIGHT_BRACE && peek_byte == RIGHT_BRACE && @macro_expr_depth > 0
+                    @macro_expr_depth -= 1
+                    lex_macro_expr_end
+                  when byte == SINGLE_QUOTE
+                    # Phase 56: Character literals
+                    lex_char
+                  when byte == HASH
+                    lex_comment
+                  else
+                    lex_operator
+                  end
 
           # Phase 57: Track last significant token for regex vs division disambiguation
           # Whitespace is not significant, but Newline/Semicolon mark statement boundaries
@@ -183,20 +183,26 @@ module CrystalV2
 
         private def lex_whitespace
           start_offset, start_line, start_column = capture_position
-          from = @offset
-          while @offset < @rope.size && whitespace?(current_byte)
-            advance
+          bytes = @rope.bytes
+          size = @rope.size
+          scan = @offset
+          while scan < size && whitespace?(bytes[scan])
+            scan += 1
           end
+          @column += scan - @offset
+          @offset = scan
           Token.new(
             Token::Kind::Whitespace,
-            bytes_range(from, @offset),
+            bytes_range(start_offset, @offset),
             build_span(start_offset, start_line, start_column)
           )
         end
 
         private def lex_newline
           start_offset, start_line, start_column = capture_position
-          advance
+          @offset += 1
+          @line += 1
+          @column = 1
           Token.new(
             Token::Kind::Newline,
             bytes_range(start_offset, @offset),
@@ -236,68 +242,68 @@ module CrystalV2
         # Correct length buckets; avoid misclassification (fast-path by size, exact compare by slice)
         private def keyword_kind_for(id : Slice(UInt8)) : Token::Kind
           # Special suffix keywords with punctuation
-          return Token::Kind::AsQuestion  if id == "as?".to_slice
-          return Token::Kind::IsA         if id == "is_a?".to_slice
-          return Token::Kind::RespondsTo  if id == "responds_to?".to_slice
+          return Token::Kind::AsQuestion if id == "as?".to_slice
+          return Token::Kind::IsA if id == "is_a?".to_slice
+          return Token::Kind::RespondsTo if id == "responds_to?".to_slice
 
           case id.size
           when 2
-            return Token::Kind::If   if id == "if".to_slice
-            return Token::Kind::Do   if id == "do".to_slice
-            return Token::Kind::In   if id == "in".to_slice
-            return Token::Kind::Of   if id == "of".to_slice
-            return Token::Kind::As   if id == "as".to_slice
+            return Token::Kind::If if id == "if".to_slice
+            return Token::Kind::Do if id == "do".to_slice
+            return Token::Kind::In if id == "in".to_slice
+            return Token::Kind::Of if id == "of".to_slice
+            return Token::Kind::As if id == "as".to_slice
           when 3
-            return Token::Kind::End  if id == "end".to_slice
-            return Token::Kind::Def  if id == "def".to_slice
-            return Token::Kind::Nil  if id == "nil".to_slice
-            return Token::Kind::Lib  if id == "lib".to_slice
-            return Token::Kind::Out  if id == "out".to_slice
-            return Token::Kind::For  if id == "for".to_slice
-            return Token::Kind::Fun  if id == "fun".to_slice
-            return Token::Kind::Asm  if id == "asm".to_slice
+            return Token::Kind::End if id == "end".to_slice
+            return Token::Kind::Def if id == "def".to_slice
+            return Token::Kind::Nil if id == "nil".to_slice
+            return Token::Kind::Lib if id == "lib".to_slice
+            return Token::Kind::Out if id == "out".to_slice
+            return Token::Kind::For if id == "for".to_slice
+            return Token::Kind::Fun if id == "fun".to_slice
+            return Token::Kind::Asm if id == "asm".to_slice
           when 4
-            return Token::Kind::Then  if id == "then".to_slice
-            return Token::Kind::Case  if id == "case".to_slice
-            return Token::Kind::When  if id == "when".to_slice
-            return Token::Kind::True  if id == "true".to_slice
-            return Token::Kind::Loop  if id == "loop".to_slice
-            return Token::Kind::Next  if id == "next".to_slice
-            return Token::Kind::Enum  if id == "enum".to_slice
-            return Token::Kind::With  if id == "with".to_slice
-            return Token::Kind::Else  if id == "else".to_slice
-            return Token::Kind::Self  if id == "self".to_slice
+            return Token::Kind::Then if id == "then".to_slice
+            return Token::Kind::Case if id == "case".to_slice
+            return Token::Kind::When if id == "when".to_slice
+            return Token::Kind::True if id == "true".to_slice
+            return Token::Kind::Loop if id == "loop".to_slice
+            return Token::Kind::Next if id == "next".to_slice
+            return Token::Kind::Enum if id == "enum".to_slice
+            return Token::Kind::With if id == "with".to_slice
+            return Token::Kind::Else if id == "else".to_slice
+            return Token::Kind::Self if id == "self".to_slice
           when 5
-            return Token::Kind::Begin   if id == "begin".to_slice
-            return Token::Kind::Class   if id == "class".to_slice
-            return Token::Kind::While   if id == "while".to_slice
-            return Token::Kind::Until   if id == "until".to_slice
-            return Token::Kind::Break   if id == "break".to_slice
-            return Token::Kind::False   if id == "false".to_slice
-            return Token::Kind::Super   if id == "super".to_slice
-            return Token::Kind::Alias   if id == "alias".to_slice
-            return Token::Kind::Union   if id == "union".to_slice
-            return Token::Kind::Spawn   if id == "spawn".to_slice
-            return Token::Kind::Elsif   if id == "elsif".to_slice
-            return Token::Kind::Yield   if id == "yield".to_slice
-            return Token::Kind::Raise   if id == "raise".to_slice
-            return Token::Kind::Macro   if id == "macro".to_slice
+            return Token::Kind::Begin if id == "begin".to_slice
+            return Token::Kind::Class if id == "class".to_slice
+            return Token::Kind::While if id == "while".to_slice
+            return Token::Kind::Until if id == "until".to_slice
+            return Token::Kind::Break if id == "break".to_slice
+            return Token::Kind::False if id == "false".to_slice
+            return Token::Kind::Super if id == "super".to_slice
+            return Token::Kind::Alias if id == "alias".to_slice
+            return Token::Kind::Union if id == "union".to_slice
+            return Token::Kind::Spawn if id == "spawn".to_slice
+            return Token::Kind::Elsif if id == "elsif".to_slice
+            return Token::Kind::Yield if id == "yield".to_slice
+            return Token::Kind::Raise if id == "raise".to_slice
+            return Token::Kind::Macro if id == "macro".to_slice
           when 6
-            return Token::Kind::Ensure   if id == "ensure".to_slice
-            return Token::Kind::Return   if id == "return".to_slice
-            return Token::Kind::Struct   if id == "struct".to_slice
-            return Token::Kind::Rescue   if id == "rescue".to_slice
-            return Token::Kind::Module   if id == "module".to_slice
-            return Token::Kind::Select   if id == "select".to_slice
-            return Token::Kind::Typeof   if id == "typeof".to_slice
-            return Token::Kind::Unless   if id == "unless".to_slice
-            return Token::Kind::Sizeof   if id == "sizeof".to_slice
-            return Token::Kind::Extend   if id == "extend".to_slice
+            return Token::Kind::Ensure if id == "ensure".to_slice
+            return Token::Kind::Return if id == "return".to_slice
+            return Token::Kind::Struct if id == "struct".to_slice
+            return Token::Kind::Rescue if id == "rescue".to_slice
+            return Token::Kind::Module if id == "module".to_slice
+            return Token::Kind::Select if id == "select".to_slice
+            return Token::Kind::Typeof if id == "typeof".to_slice
+            return Token::Kind::Unless if id == "unless".to_slice
+            return Token::Kind::Sizeof if id == "sizeof".to_slice
+            return Token::Kind::Extend if id == "extend".to_slice
           when 7
-            return Token::Kind::Private  if id == "private".to_slice
-            return Token::Kind::Include  if id == "include".to_slice
-            return Token::Kind::Require  if id == "require".to_slice
-            return Token::Kind::Alignof  if id == "alignof".to_slice
+            return Token::Kind::Private if id == "private".to_slice
+            return Token::Kind::Include if id == "include".to_slice
+            return Token::Kind::Require if id == "require".to_slice
+            return Token::Kind::Alignof if id == "alignof".to_slice
           when 8
             return Token::Kind::Abstract if id == "abstract".to_slice
             return Token::Kind::Offsetof if id == "offsetof".to_slice
@@ -329,7 +335,7 @@ module CrystalV2
           # Phase 76: Check for class variable (@@var)
           if @offset < @rope.size && current_byte == AT_SIGN
             # This is a class variable
-            advance  # consume second @
+            advance # consume second @
             return lex_class_var_continued(from, start_offset, start_line, start_column)
           end
 
@@ -534,9 +540,9 @@ module CrystalV2
             advance
             if @offset < @rope.size
               if current_byte == '<'.ord.to_u8
-                advance  # :<<
+                advance # :<<
               elsif current_byte == '='.ord.to_u8
-                advance  # :<=
+                advance # :<=
               end
               # else just :<
             end
@@ -545,9 +551,9 @@ module CrystalV2
             advance
             if @offset < @rope.size
               if current_byte == '>'.ord.to_u8
-                advance  # :>>
+                advance # :>>
               elsif current_byte == '='.ord.to_u8
-                advance  # :>=
+                advance # :>=
               end
               # else just :>
             end
@@ -558,28 +564,28 @@ module CrystalV2
               if current_byte == '='.ord.to_u8
                 advance
                 if @offset < @rope.size && current_byte == '='.ord.to_u8
-                  advance  # :===
+                  advance # :===
                 else
-                  @offset -= 1  # Not valid, rewind
+                  @offset -= 1 # Not valid, rewind
                   return nil
                 end
               elsif current_byte == '~'.ord.to_u8
-                advance  # :=~
+                advance # :=~
               else
-                @offset -= 1  # Not valid, rewind
+                @offset -= 1 # Not valid, rewind
                 return nil
               end
             else
-              @offset -= 1  # Not valid, rewind
+              @offset -= 1 # Not valid, rewind
               return nil
             end
           when '!'.ord.to_u8
             # :!~
             advance
             if @offset < @rope.size && current_byte == '~'.ord.to_u8
-              advance  # :!~
+              advance # :!~
             else
-              @offset -= 1  # Not valid, rewind
+              @offset -= 1 # Not valid, rewind
               return nil
             end
           when '^'.ord.to_u8
@@ -591,13 +597,13 @@ module CrystalV2
             if @offset < @rope.size && current_byte == '*'.ord.to_u8
               advance
               if @offset < @rope.size && current_byte == '*'.ord.to_u8
-                advance  # :&**
+                advance # :&**
               else
-                @offset -= 2  # Not valid, rewind
+                @offset -= 2 # Not valid, rewind
                 return nil
               end
             else
-              @offset -= 1  # Not valid, rewind
+              @offset -= 1 # Not valid, rewind
               return nil
             end
           else
@@ -609,6 +615,48 @@ module CrystalV2
             bytes_range(from, @offset),
             build_span(start_offset, start_line, start_column)
           )
+        end
+
+        private def consume_ascii_number_run(trim_from : Int32) : Nil
+          bytes = @rope.bytes
+          size = @rope.size
+          scan = @offset
+          while scan < size
+            byte = bytes[scan]
+            break unless (byte >= '0'.ord.to_u8 && byte <= '9'.ord.to_u8) || byte == UNDERSCORE
+            scan += 1
+          end
+
+          raw_scan = scan
+          while scan > trim_from && bytes[scan - 1] == UNDERSCORE
+            scan -= 1
+          end
+
+          @column += raw_scan - @offset
+          @offset = scan
+        end
+
+        private def consume_ascii_exponent_run(exp_pos : Int32) : Bool
+          bytes = @rope.bytes
+          size = @rope.size
+          scan = @offset
+          digits = false
+          while scan < size
+            byte = bytes[scan]
+            break unless (byte >= '0'.ord.to_u8 && byte <= '9'.ord.to_u8) || byte == UNDERSCORE
+            digits = true if byte >= '0'.ord.to_u8 && byte <= '9'.ord.to_u8
+            scan += 1
+          end
+
+          raw_scan = scan
+          while scan > exp_pos && bytes[scan - 1] == UNDERSCORE
+            scan -= 1
+          end
+
+          @column += raw_scan - @offset
+          @offset = scan
+
+          digits
         end
 
         private def lex_number
@@ -629,14 +677,7 @@ module CrystalV2
           end
 
           # Phase 55: Read integer part (with underscore separators)
-          while @offset < @rope.size && (ascii_number?(current_byte) || current_byte == UNDERSCORE)
-            advance
-          end
-
-          # Phase 55: Skip trailing underscores (so suffix parser can see them)
-          while @offset > from && @rope.bytes[@offset - 1] == UNDERSCORE
-            @offset -= 1
-          end
+          consume_ascii_number_run(from)
 
           # Check for decimal point (float)
           has_decimal = false
@@ -644,80 +685,40 @@ module CrystalV2
             # Peek ahead to ensure next char is a digit (not method call like 42.abs)
             if @offset + 1 < @rope.size && ascii_number?(@rope.bytes[@offset + 1])
               has_decimal = true
-              advance  # consume '.'
-              # Phase 55: Read fractional part (with underscore separators)
-              while @offset < @rope.size && (ascii_number?(current_byte) || current_byte == UNDERSCORE)
-                advance
-              end
-              # Phase 55: Skip trailing underscores (so suffix parser can see them)
-              while @offset > from && @rope.bytes[@offset - 1] == UNDERSCORE
-                @offset -= 1
-              end
+              @offset += 1
+              @column += 1
+              consume_ascii_number_run(from)
             end
           end
 
           # Phase 103L: Exponent part for floats: [eE][+-]?digits(_ allowed)
-          if @offset < @rope.size && (current_byte == 'e'.ord.to_u8 || current_byte == 'E'.ord.to_u8)
-            exp_pos = @offset
-            advance  # consume 'e'/'E'
-            # Optional sign
-            if @offset < @rope.size && (current_byte == '+'.ord.to_u8 || current_byte == '-'.ord.to_u8)
-              advance
-            end
-            # Digits with underscores
-            digits = false
-            while @offset < @rope.size && (ascii_number?(current_byte) || current_byte == UNDERSCORE)
-              digits = true if ascii_number?(current_byte)
-              advance
-            end
-            # Trim trailing underscores
-            while @offset > exp_pos && @rope.bytes[@offset - 1] == UNDERSCORE
-              @offset -= 1
-            end
-            # If we didn't actually consume digits, rewind exponent
-            unless digits
-              @offset = exp_pos
-            else
-              has_decimal = true
+          if @offset < @rope.size
+            byte = current_byte
+            if byte == 'e'.ord.to_u8 || byte == 'E'.ord.to_u8
+              exp_pos = @offset
+              @offset += 1
+              @column += 1
+              # Optional sign
+              if @offset < @rope.size
+                sign_byte = current_byte
+                if sign_byte == '+'.ord.to_u8 || sign_byte == '-'.ord.to_u8
+                  @offset += 1
+                  @column += 1
+                end
+              end
+              # Digits with underscores
+              digits = consume_ascii_exponent_run(exp_pos)
+              # If we didn't actually consume digits, rewind exponent
+              unless digits
+                @offset = exp_pos
+              else
+                has_decimal = true
+              end
             end
           end
 
           # Phase 103J: Check for suffix (_i8, _i16, _i32, _i64, _i128, _u8, _u16, _u32, _u64, _u128, _f32, _f64)
-          number_kind : NumberKind? = nil
-          if @offset < @rope.size && current_byte == '_'.ord.to_u8
-            suffix_start = @offset
-            advance  # consume '_'
-
-            # Read suffix characters
-            suffix_from = @offset
-            while @offset < @rope.size && (ascii_letter?(current_byte) || ascii_number?(current_byte))
-              advance
-            end
-
-            suffix = String.new(bytes_range(suffix_from, @offset))
-            number_kind = case suffix
-            # Signed integers
-            when "i8"   then NumberKind::I8
-            when "i16"  then NumberKind::I16
-            when "i32"  then NumberKind::I32
-            when "i64"  then NumberKind::I64
-            when "i128" then NumberKind::I128
-            # Unsigned integers
-            when "u8"   then NumberKind::U8
-            when "u16"  then NumberKind::U16
-            when "u32"  then NumberKind::U32
-            when "u64"  then NumberKind::U64
-            when "u128" then NumberKind::U128
-            # Floats
-            when "f32"  then NumberKind::F32
-            when "f64"  then NumberKind::F64
-            else
-              # Unknown suffix - ignore and treat as separate token
-              # Reset to before underscore
-              @offset = suffix_start
-              nil
-            end
-          end
+          number_kind = lex_number_suffix
 
           # Phase 103L: Allow float suffix without underscore (e.g., 1e0f32, 1.0f64)
           if number_kind.nil? && @offset + 2 < @rope.size && ascii_letter?(current_byte)
@@ -810,8 +811,8 @@ module CrystalV2
 
         # Phase 53: Hexadecimal number literals (0xFF, 0x1A2B)
         private def lex_hex_number(start_offset : Int32, start_line : Int32, start_column : Int32, from : Int32)
-          advance  # Skip '0'
-          advance  # Skip 'x' or 'X'
+          advance # Skip '0'
+          advance # Skip 'x' or 'X'
 
           # Phase 55: Read hex digits (with underscore separators)
           while @offset < @rope.size && (hex_digit?(current_byte) || current_byte == UNDERSCORE)
@@ -832,29 +833,29 @@ module CrystalV2
             if @offset + 2 < @rope.size && ascii_letter?(current_byte)
               b0 = @rope.bytes[@offset]
               if b0 == 'i'.ord.to_u8
-                if @offset + 3 <= @rope.size && @rope.bytes[@offset,3] == "i16".to_slice
+                if @offset + 3 <= @rope.size && @rope.bytes[@offset, 3] == "i16".to_slice
                   advance(3); NumberKind::I16
-                elsif @offset + 3 <= @rope.size && @rope.bytes[@offset,3] == "i32".to_slice
+                elsif @offset + 3 <= @rope.size && @rope.bytes[@offset, 3] == "i32".to_slice
                   advance(3); NumberKind::I32
-                elsif @offset + 3 <= @rope.size && @rope.bytes[@offset,3] == "i64".to_slice
+                elsif @offset + 3 <= @rope.size && @rope.bytes[@offset, 3] == "i64".to_slice
                   advance(3); NumberKind::I64
-                elsif @offset + 4 <= @rope.size && @rope.bytes[@offset,4] == "i128".to_slice
+                elsif @offset + 4 <= @rope.size && @rope.bytes[@offset, 4] == "i128".to_slice
                   advance(4); NumberKind::I128
-                elsif @offset + 2 <= @rope.size && @rope.bytes[@offset,2] == "i8".to_slice
+                elsif @offset + 2 <= @rope.size && @rope.bytes[@offset, 2] == "i8".to_slice
                   advance(2); NumberKind::I8
                 else
                   nil
                 end
               elsif b0 == 'u'.ord.to_u8
-                if @offset + 3 <= @rope.size && @rope.bytes[@offset,3] == "u16".to_slice
+                if @offset + 3 <= @rope.size && @rope.bytes[@offset, 3] == "u16".to_slice
                   advance(3); NumberKind::U16
-                elsif @offset + 3 <= @rope.size && @rope.bytes[@offset,3] == "u32".to_slice
+                elsif @offset + 3 <= @rope.size && @rope.bytes[@offset, 3] == "u32".to_slice
                   advance(3); NumberKind::U32
-                elsif @offset + 3 <= @rope.size && @rope.bytes[@offset,3] == "u64".to_slice
+                elsif @offset + 3 <= @rope.size && @rope.bytes[@offset, 3] == "u64".to_slice
                   advance(3); NumberKind::U64
-                elsif @offset + 4 <= @rope.size && @rope.bytes[@offset,4] == "u128".to_slice
+                elsif @offset + 4 <= @rope.size && @rope.bytes[@offset, 4] == "u128".to_slice
                   advance(4); NumberKind::U128
-                elsif @offset + 2 <= @rope.size && @rope.bytes[@offset,2] == "u8".to_slice
+                elsif @offset + 2 <= @rope.size && @rope.bytes[@offset, 2] == "u8".to_slice
                   advance(2); NumberKind::U8
                 else
                   nil
@@ -875,8 +876,8 @@ module CrystalV2
 
         # Phase 53: Binary number literals (0b1010, 0B1111)
         private def lex_binary_number(start_offset : Int32, start_line : Int32, start_column : Int32, from : Int32)
-          advance  # Skip '0'
-          advance  # Skip 'b' or 'B'
+          advance # Skip '0'
+          advance # Skip 'b' or 'B'
 
           # Phase 55: Read binary digits (with underscore separators)
           while @offset < @rope.size && (binary_digit?(current_byte) || current_byte == UNDERSCORE)
@@ -897,29 +898,29 @@ module CrystalV2
             if @offset + 2 < @rope.size && ascii_letter?(current_byte)
               b0 = @rope.bytes[@offset]
               if b0 == 'i'.ord.to_u8
-                if @offset + 3 <= @rope.size && @rope.bytes[@offset,3] == "i16".to_slice
+                if @offset + 3 <= @rope.size && @rope.bytes[@offset, 3] == "i16".to_slice
                   advance(3); NumberKind::I16
-                elsif @offset + 3 <= @rope.size && @rope.bytes[@offset,3] == "i32".to_slice
+                elsif @offset + 3 <= @rope.size && @rope.bytes[@offset, 3] == "i32".to_slice
                   advance(3); NumberKind::I32
-                elsif @offset + 3 <= @rope.size && @rope.bytes[@offset,3] == "i64".to_slice
+                elsif @offset + 3 <= @rope.size && @rope.bytes[@offset, 3] == "i64".to_slice
                   advance(3); NumberKind::I64
-                elsif @offset + 4 <= @rope.size && @rope.bytes[@offset,4] == "i128".to_slice
+                elsif @offset + 4 <= @rope.size && @rope.bytes[@offset, 4] == "i128".to_slice
                   advance(4); NumberKind::I128
-                elsif @offset + 2 <= @rope.size && @rope.bytes[@offset,2] == "i8".to_slice
+                elsif @offset + 2 <= @rope.size && @rope.bytes[@offset, 2] == "i8".to_slice
                   advance(2); NumberKind::I8
                 else
                   nil
                 end
               elsif b0 == 'u'.ord.to_u8
-                if @offset + 3 <= @rope.size && @rope.bytes[@offset,3] == "u16".to_slice
+                if @offset + 3 <= @rope.size && @rope.bytes[@offset, 3] == "u16".to_slice
                   advance(3); NumberKind::U16
-                elsif @offset + 3 <= @rope.size && @rope.bytes[@offset,3] == "u32".to_slice
+                elsif @offset + 3 <= @rope.size && @rope.bytes[@offset, 3] == "u32".to_slice
                   advance(3); NumberKind::U32
-                elsif @offset + 3 <= @rope.size && @rope.bytes[@offset,3] == "u64".to_slice
+                elsif @offset + 3 <= @rope.size && @rope.bytes[@offset, 3] == "u64".to_slice
                   advance(3); NumberKind::U64
-                elsif @offset + 4 <= @rope.size && @rope.bytes[@offset,4] == "u128".to_slice
+                elsif @offset + 4 <= @rope.size && @rope.bytes[@offset, 4] == "u128".to_slice
                   advance(4); NumberKind::U128
-                elsif @offset + 2 <= @rope.size && @rope.bytes[@offset,2] == "u8".to_slice
+                elsif @offset + 2 <= @rope.size && @rope.bytes[@offset, 2] == "u8".to_slice
                   advance(2); NumberKind::U8
                 else
                   nil
@@ -940,8 +941,8 @@ module CrystalV2
 
         # Phase 53: Octal number literals (0o755, 0O644)
         private def lex_octal_number(start_offset : Int32, start_line : Int32, start_column : Int32, from : Int32)
-          advance  # Skip '0'
-          advance  # Skip 'o' or 'O'
+          advance # Skip '0'
+          advance # Skip 'o' or 'O'
 
           # Phase 55: Read octal digits (with underscore separators)
           while @offset < @rope.size && (octal_digit?(current_byte) || current_byte == UNDERSCORE)
@@ -962,29 +963,29 @@ module CrystalV2
             if @offset + 2 < @rope.size && ascii_letter?(current_byte)
               b0 = @rope.bytes[@offset]
               if b0 == 'i'.ord.to_u8
-                if @offset + 3 <= @rope.size && @rope.bytes[@offset,3] == "i16".to_slice
+                if @offset + 3 <= @rope.size && @rope.bytes[@offset, 3] == "i16".to_slice
                   advance(3); NumberKind::I16
-                elsif @offset + 3 <= @rope.size && @rope.bytes[@offset,3] == "i32".to_slice
+                elsif @offset + 3 <= @rope.size && @rope.bytes[@offset, 3] == "i32".to_slice
                   advance(3); NumberKind::I32
-                elsif @offset + 3 <= @rope.size && @rope.bytes[@offset,3] == "i64".to_slice
+                elsif @offset + 3 <= @rope.size && @rope.bytes[@offset, 3] == "i64".to_slice
                   advance(3); NumberKind::I64
-                elsif @offset + 4 <= @rope.size && @rope.bytes[@offset,4] == "i128".to_slice
+                elsif @offset + 4 <= @rope.size && @rope.bytes[@offset, 4] == "i128".to_slice
                   advance(4); NumberKind::I128
-                elsif @offset + 2 <= @rope.size && @rope.bytes[@offset,2] == "i8".to_slice
+                elsif @offset + 2 <= @rope.size && @rope.bytes[@offset, 2] == "i8".to_slice
                   advance(2); NumberKind::I8
                 else
                   nil
                 end
               elsif b0 == 'u'.ord.to_u8
-                if @offset + 3 <= @rope.size && @rope.bytes[@offset,3] == "u16".to_slice
+                if @offset + 3 <= @rope.size && @rope.bytes[@offset, 3] == "u16".to_slice
                   advance(3); NumberKind::U16
-                elsif @offset + 3 <= @rope.size && @rope.bytes[@offset,3] == "u32".to_slice
+                elsif @offset + 3 <= @rope.size && @rope.bytes[@offset, 3] == "u32".to_slice
                   advance(3); NumberKind::U32
-                elsif @offset + 3 <= @rope.size && @rope.bytes[@offset,3] == "u64".to_slice
+                elsif @offset + 3 <= @rope.size && @rope.bytes[@offset, 3] == "u64".to_slice
                   advance(3); NumberKind::U64
-                elsif @offset + 4 <= @rope.size && @rope.bytes[@offset,4] == "u128".to_slice
+                elsif @offset + 4 <= @rope.size && @rope.bytes[@offset, 4] == "u128".to_slice
                   advance(4); NumberKind::U128
-                elsif @offset + 2 <= @rope.size && @rope.bytes[@offset,2] == "u8".to_slice
+                elsif @offset + 2 <= @rope.size && @rope.bytes[@offset, 2] == "u8".to_slice
                   advance(2); NumberKind::U8
                 else
                   nil
@@ -1008,28 +1009,30 @@ module CrystalV2
         # Used by hex, binary, octal number parsers
         private def lex_number_suffix : NumberKind?
           return nil unless @offset < @rope.size && current_byte == '_'.ord.to_u8
-          suffix_start = @offset
-          advance  # consume '_'
-
-          from = @offset
-          while @offset < @rope.size && (ascii_letter?(current_byte) || ascii_number?(current_byte))
-            advance
-          end
-          len = @offset - from
           bytes = @rope.bytes
+          size = @rope.size
+          suffix_start = @offset
+          from = suffix_start + 1
+          scan = from
+          while scan < size
+            byte = bytes[scan]
+            break unless ascii_letter?(byte) || ascii_number?(byte)
+            scan += 1
+          end
+          len = scan - from
 
           # Avoid nil.as(NumberKind?) — stage1 generates type_id=-1 for nilable
           # struct unions, breaking nil checks. Use Int32 sentinel instead.
-          kind_ord = -1  # -1 = not set
+          kind_ord = -1 # -1 = not set
           case len
           when 2
             if bytes[from] == 'i'.ord.to_u8
               case bytes[from + 1]
-              when '8'.ord.to_u8  then kind_ord = NumberKind::I8.value
+              when '8'.ord.to_u8 then kind_ord = NumberKind::I8.value
               end
             elsif bytes[from] == 'u'.ord.to_u8
               case bytes[from + 1]
-              when '8'.ord.to_u8  then kind_ord = NumberKind::U8.value
+              when '8'.ord.to_u8 then kind_ord = NumberKind::U8.value
               end
             end
           when 3
@@ -1073,10 +1076,10 @@ module CrystalV2
           end
 
           if kind_ord < 0
-            # Unknown suffix - reset to before underscore and ignore
-            @offset = suffix_start
             nil
           else
+            @column += scan - @offset
+            @offset = scan
             NumberKind.new(kind_ord)
           end
         end
@@ -1108,36 +1111,36 @@ module CrystalV2
             end
 
             if brace_depth > 0
-            if byte == DOUBLE_QUOTE || byte == SINGLE_QUOTE
-              quote = byte
-              scan_offset += 1
-              while scan_offset < @rope.size
-                b = @rope.bytes[scan_offset]
-                if b == '\\'.ord.to_u8 && scan_offset + 1 < @rope.size
-                  scan_offset += 2
-                  next
-                end
+              if byte == DOUBLE_QUOTE || byte == SINGLE_QUOTE
+                quote = byte
                 scan_offset += 1
-                break if b == quote
+                while scan_offset < @rope.size
+                  b = @rope.bytes[scan_offset]
+                  if b == '\\'.ord.to_u8 && scan_offset + 1 < @rope.size
+                    scan_offset += 2
+                    next
+                  end
+                  scan_offset += 1
+                  break if b == quote
+                end
+                next
               end
-              next
-            end
-            # Detect heredoc start within interpolation for diagnostics
-            if byte == '<'.ord.to_u8 && scan_offset + 2 < @rope.size && @rope.bytes[scan_offset + 1] == '<'.ord.to_u8 && @rope.bytes[scan_offset + 2] == '-'.ord.to_u8
-              heredoc_inside_interpolation = true
-            end
-            if byte == LEFT_BRACE
-              brace_depth += 1
-            elsif byte == RIGHT_BRACE
-              brace_depth -= 1
-            end
+              # Detect heredoc start within interpolation for diagnostics
+              if byte == '<'.ord.to_u8 && scan_offset + 2 < @rope.size && @rope.bytes[scan_offset + 1] == '<'.ord.to_u8 && @rope.bytes[scan_offset + 2] == '-'.ord.to_u8
+                heredoc_inside_interpolation = true
+              end
+              if byte == LEFT_BRACE
+                brace_depth += 1
+              elsif byte == RIGHT_BRACE
+                brace_depth -= 1
+              end
               scan_offset += 1
               next
             end
 
             if byte == '\\'.ord.to_u8
               has_escapes = true
-              scan_offset += 2  # Skip backslash AND the escaped character (e.g., \" \n \t \\)
+              scan_offset += 2 # Skip backslash AND the escaped character (e.g., \" \n \t \\)
               next
             end
             scan_offset += 1
@@ -1156,34 +1159,34 @@ module CrystalV2
                 break
               end
 
-            if brace_depth_fast == 0 && current_byte == HASH && @offset + 1 < @rope.size && @rope.bytes[@offset + 1] == LEFT_BRACE
+              if brace_depth_fast == 0 && current_byte == HASH && @offset + 1 < @rope.size && @rope.bytes[@offset + 1] == LEFT_BRACE
                 if @offset + 4 < @rope.size && @rope.bytes[@offset + 2] == '<'.ord.to_u8 && @rope.bytes[@offset + 3] == '<'.ord.to_u8 && @rope.bytes[@offset + 4] == '-'.ord.to_u8
                   heredoc_inside_interpolation = true
                 end
-              brace_depth_fast = 1
-              advance(2)
-              next
-            elsif brace_depth_fast > 0
-              if current_byte == DOUBLE_QUOTE || current_byte == SINGLE_QUOTE
-                quote = current_byte
-                advance
-                while @offset < @rope.size
-                  b = current_byte
-                  if b == '\\'.ord.to_u8 && @offset + 1 < @rope.size
-                    advance(2)
-                    next
-                  end
-                  advance
-                  break if b == quote
-                end
+                brace_depth_fast = 1
+                advance(2)
                 next
+              elsif brace_depth_fast > 0
+                if current_byte == DOUBLE_QUOTE || current_byte == SINGLE_QUOTE
+                  quote = current_byte
+                  advance
+                  while @offset < @rope.size
+                    b = current_byte
+                    if b == '\\'.ord.to_u8 && @offset + 1 < @rope.size
+                      advance(2)
+                      next
+                    end
+                    advance
+                    break if b == quote
+                  end
+                  next
+                end
+                if current_byte == '<'.ord.to_u8 && @offset + 2 < @rope.size && @rope.bytes[@offset + 1] == '<'.ord.to_u8 && @rope.bytes[@offset + 2] == '-'.ord.to_u8
+                  heredoc_inside_interpolation = true
+                end
+                brace_depth_fast += 1 if current_byte == LEFT_BRACE
+                brace_depth_fast -= 1 if current_byte == RIGHT_BRACE
               end
-              if current_byte == '<'.ord.to_u8 && @offset + 2 < @rope.size && @rope.bytes[@offset + 1] == '<'.ord.to_u8 && @rope.bytes[@offset + 2] == '-'.ord.to_u8
-                heredoc_inside_interpolation = true
-              end
-              brace_depth_fast += 1 if current_byte == LEFT_BRACE
-              brace_depth_fast -= 1 if current_byte == RIGHT_BRACE
-            end
 
               advance
             end
@@ -1201,7 +1204,7 @@ module CrystalV2
           end
 
           # Phase 54: Process escape sequences
-          processed = Bytes.new(scan_offset - from)  # Allocate with estimated size
+          processed = Bytes.new(scan_offset - from) # Allocate with estimated size
           buffer = IO::Memory.new
           brace_depth_processed = 0
 
@@ -1249,7 +1252,7 @@ module CrystalV2
 
             if current_byte == '\\'.ord.to_u8 && @offset + 1 < @rope.size
               # Escape sequence
-              advance  # Skip backslash
+              advance # Skip backslash
               case current_byte
               when 'n'.ord.to_u8
                 buffer.write_byte '\n'.ord.to_u8
@@ -1266,7 +1269,7 @@ module CrystalV2
                 advance
                 if current_byte == '{'.ord.to_u8
                   # Variable length \u{X...XXXXXX}
-                  advance  # Skip '{'
+                  advance # Skip '{'
                   codepoint = parse_unicode_hex_digits('}'.ord.to_u8)
                   if codepoint
                     write_utf8(buffer, codepoint)
@@ -1286,7 +1289,7 @@ module CrystalV2
                     buffer.write_byte 'u'.ord.to_u8
                   end
                 end
-                next  # Don't advance again, helper methods already did
+                next # Don't advance again, helper methods already did
               when 'x'.ord.to_u8
                 # Phase 59: Hex escapes \xXX (2 hex digits)
                 advance
@@ -1298,7 +1301,7 @@ module CrystalV2
                   buffer.write_byte '\\'.ord.to_u8
                   buffer.write_byte 'x'.ord.to_u8
                 end
-                next  # Don't advance again, helper methods already did
+                next # Don't advance again, helper methods already did
               else
                 # Phase 62: Check for octal escapes \NNN (1-3 octal digits)
                 if octal_digit?(current_byte)
@@ -1310,7 +1313,7 @@ module CrystalV2
                     buffer.write_byte '\\'.ord.to_u8
                     buffer.write_byte current_byte
                   end
-                  next  # Don't advance again, parse_octal_fixed already did
+                  next # Don't advance again, parse_octal_fixed already did
                 else
                   # Unknown escape - keep as is
                   buffer.write_byte '\\'.ord.to_u8
@@ -1514,7 +1517,7 @@ module CrystalV2
         # Phase 57: Regex literals (/pattern/flags)
         private def lex_regex
           start_offset, start_line, start_column = capture_position
-          advance  # Skip opening /
+          advance # Skip opening /
 
           # Read pattern until closing / (handling \/ escape)
           buffer = IO::Memory.new
@@ -1540,7 +1543,7 @@ module CrystalV2
           # Read optional flags (i, m, x, s, etc.)
           # Include flags in the buffer as well
           if @offset < @rope.size && ascii_letter?(current_byte)
-            buffer.write_byte '/'.ord.to_u8  # Separator between pattern and flags
+            buffer.write_byte '/'.ord.to_u8 # Separator between pattern and flags
             while @offset < @rope.size && ascii_letter?(current_byte)
               buffer.write_byte current_byte
               advance
@@ -1561,7 +1564,7 @@ module CrystalV2
         # Phase 56: Character literals ('a', '\n', etc.)
         private def lex_char
           start_offset, start_line, start_column = capture_position
-          advance  # Skip opening '
+          advance # Skip opening '
 
           # Character literals must have exactly one character or escape sequence
           if @offset >= @rope.size
@@ -1573,7 +1576,7 @@ module CrystalV2
           if current_byte == '\\'.ord.to_u8 && @offset + 1 < @rope.size
             # Process escape sequence
             buffer = IO::Memory.new
-            advance  # Skip backslash
+            advance # Skip backslash
 
             case current_byte
             when 'n'.ord.to_u8
@@ -1591,7 +1594,7 @@ module CrystalV2
               advance
               if current_byte == '{'.ord.to_u8
                 # Variable length \u{X...XXXXXX}
-                advance  # Skip '{'
+                advance # Skip '{'
                 codepoint = parse_unicode_hex_digits('}'.ord.to_u8)
                 if codepoint
                   write_utf8(buffer, codepoint)
@@ -1793,7 +1796,7 @@ module CrystalV2
             # Check for +=
             if @offset < @rope.size && current_byte == '='.ord.to_u8
               advance
-              Token::Kind::PlusEq  # Phase 20: Compound assignment
+              Token::Kind::PlusEq # Phase 20: Compound assignment
             else
               Token::Kind::Plus
             end
@@ -1801,10 +1804,10 @@ module CrystalV2
             # Check for -> or -=
             if @offset < @rope.size && current_byte == '>'.ord.to_u8
               advance
-              Token::Kind::ThinArrow  # Phase 74: Proc literal
+              Token::Kind::ThinArrow # Phase 74: Proc literal
             elsif @offset < @rope.size && current_byte == '='.ord.to_u8
               advance
-              Token::Kind::MinusEq  # Phase 20: Compound assignment
+              Token::Kind::MinusEq # Phase 20: Compound assignment
             else
               Token::Kind::Minus
             end
@@ -1815,31 +1818,31 @@ module CrystalV2
               # Check for **=
               if @offset < @rope.size && current_byte == '='.ord.to_u8
                 advance
-                Token::Kind::StarStarEq  # Phase 20: Compound assignment
+                Token::Kind::StarStarEq # Phase 20: Compound assignment
               else
-                Token::Kind::StarStar  # Phase 19: Exponentiation
+                Token::Kind::StarStar # Phase 19: Exponentiation
               end
             elsif @offset < @rope.size && current_byte == '='.ord.to_u8
               advance
-              Token::Kind::StarEq  # Phase 20: Compound assignment
+              Token::Kind::StarEq # Phase 20: Compound assignment
             else
               Token::Kind::Star
             end
           when '/'.ord.to_u8
             # Phase 78: Check for // and //= before /=
             if @offset < @rope.size && current_byte == '/'.ord.to_u8
-              advance  # consume second /
+              advance # consume second /
               # Check for //=
               if @offset < @rope.size && current_byte == '='.ord.to_u8
                 advance
-                Token::Kind::FloorDivEq  # Phase 78: Floor division compound assignment
+                Token::Kind::FloorDivEq # Phase 78: Floor division compound assignment
               else
-                Token::Kind::FloorDiv  # Phase 78: Floor division
+                Token::Kind::FloorDiv # Phase 78: Floor division
               end
-            # Check for /=
+              # Check for /=
             elsif @offset < @rope.size && current_byte == '='.ord.to_u8
               advance
-              Token::Kind::SlashEq  # Phase 20: Compound assignment
+              Token::Kind::SlashEq # Phase 20: Compound assignment
             else
               Token::Kind::Slash
             end
@@ -1849,7 +1852,7 @@ module CrystalV2
               Token::Kind::PercentRBrace
             elsif @offset < @rope.size && current_byte == '='.ord.to_u8
               advance
-              Token::Kind::PercentEq  # Phase 20: Compound assignment
+              Token::Kind::PercentEq # Phase 20: Compound assignment
             else
               # Try to parse as percent literal (%(), %w(), %i(), etc)
               # Only when context allows starting a literal (not after 'def', etc.)
@@ -1858,7 +1861,7 @@ module CrystalV2
                 return token
               else
                 # Not a percent literal, treat as modulo operator
-                Token::Kind::Percent  # Phase 18: Modulo operator
+                Token::Kind::Percent # Phase 18: Modulo operator
               end
             end
           when '('.ord.to_u8
@@ -1889,31 +1892,31 @@ module CrystalV2
             if @offset < @rope.size
               next_byte = current_byte
               if next_byte == '<'.ord.to_u8
-                advance  # consume second '<'
+                advance # consume second '<'
                 # Check for <<- (heredoc). Allow heredoc in expression contexts too
                 # (assignment like `msg = <<-HERE`). Still keep recovery in scan_heredoc.
                 if @offset < @rope.size && current_byte == '-'.ord.to_u8
-                  advance  # consume '-'
+                  advance # consume '-'
                   # Try to scan heredoc
                   heredoc_token = scan_heredoc(start_offset, start_line, start_column)
                   if heredoc_token
                     return heredoc_token
                   else
-                    Token::Kind::LShift  # fallback
+                    Token::Kind::LShift # fallback
                   end
-                # Check for <<= (Phase 52)
+                  # Check for <<= (Phase 52)
                 elsif @offset < @rope.size && current_byte == '='.ord.to_u8
-                  advance  # consume '='
+                  advance # consume '='
                   Token::Kind::LShiftEq
                 else
                   Token::Kind::LShift
                 end
               elsif next_byte == '='.ord.to_u8
                 # Check for <=>
-                advance  # consume '='
+                advance # consume '='
                 if @offset < @rope.size && current_byte == '>'.ord.to_u8
-                  advance  # consume '>'
-                  Token::Kind::Spaceship  # Phase 48
+                  advance                # consume '>'
+                  Token::Kind::Spaceship # Phase 48
                 else
                   Token::Kind::LessEq
                 end
@@ -1928,13 +1931,13 @@ module CrystalV2
             if @offset < @rope.size
               next_byte = current_byte
               if next_byte == '>'.ord.to_u8
-                advance  # consume second '>'
+                advance # consume second '>'
                 # Check for >>= (Phase 52)
                 if @offset < @rope.size && current_byte == '='.ord.to_u8
-                  advance  # consume '='
+                  advance # consume '='
                   Token::Kind::RShiftEq
                 else
-                  Token::Kind::RShift  # Phase 22: Right shift
+                  Token::Kind::RShift # Phase 22: Right shift
                 end
               elsif next_byte == '='.ord.to_u8
                 advance
@@ -1955,18 +1958,18 @@ module CrystalV2
                 Token::Kind::Match
               elsif next_byte == '>'.ord.to_u8
                 advance
-                Token::Kind::Arrow  # =>
+                Token::Kind::Arrow # =>
               elsif next_byte == '='.ord.to_u8
                 # Check for === (Phase 50)
-                advance  # consume second '='
+                advance # consume second '='
                 if @offset < @rope.size && current_byte == '='.ord.to_u8
-                  advance  # consume third '='
-                  Token::Kind::EqEqEq  # ===
+                  advance             # consume third '='
+                  Token::Kind::EqEqEq # ===
                 else
-                  Token::Kind::EqEq  # ==
+                  Token::Kind::EqEq # ==
                 end
               else
-                Token::Kind::Eq  # =
+                Token::Kind::Eq # =
               end
             else
               Token::Kind::Eq
@@ -2003,60 +2006,60 @@ module CrystalV2
                 Token::Kind::Amp
               else
                 # Safe navigation: create AmpDot
-                advance  # consume '.'
+                advance # consume '.'
                 Token::Kind::AmpDot
               end
-            # Check for &&= and &&
+              # Check for &&= and &&
             elsif @offset < @rope.size && current_byte == '&'.ord.to_u8
-              advance  # consume second '&'
+              advance # consume second '&'
               # Check for &&= (Phase 51)
               if @offset < @rope.size && current_byte == '='.ord.to_u8
-                advance  # consume '='
+                advance # consume '='
                 Token::Kind::AndAndEq
               else
                 Token::Kind::AndAnd
               end
-            # Phase 89: Wrapping operators - check before &= and &
-            # CRITICAL: Check &** before &* (longest match first!)
+              # Phase 89: Wrapping operators - check before &= and &
+              # CRITICAL: Check &** before &* (longest match first!)
             elsif @offset < @rope.size && current_byte == '*'.ord.to_u8
-              advance  # consume first '*'
+              advance # consume first '*'
               if @offset < @rope.size && current_byte == '*'.ord.to_u8
-                advance  # consume second '*'
+                advance # consume second '*'
                 # Check for &**=
                 if @offset < @rope.size && current_byte == '='.ord.to_u8
-                  advance  # consume '='
+                  advance # consume '='
                   Token::Kind::AmpStarStarEq
                 else
-                  Token::Kind::AmpStarStar  # &**
+                  Token::Kind::AmpStarStar # &**
                 end
               elsif @offset < @rope.size && current_byte == '='.ord.to_u8
-                advance  # consume '='
-                Token::Kind::AmpStarEq  # &*=
+                advance                # consume '='
+                Token::Kind::AmpStarEq # &*=
               else
-                Token::Kind::AmpStar  # &*
+                Token::Kind::AmpStar # &*
               end
             elsif @offset < @rope.size && current_byte == '+'.ord.to_u8
-              advance  # consume '+'
+              advance # consume '+'
               # Check for &+=
               if @offset < @rope.size && current_byte == '='.ord.to_u8
-                advance  # consume '='
+                advance # consume '='
                 Token::Kind::AmpPlusEq
               else
-                Token::Kind::AmpPlus  # &+
+                Token::Kind::AmpPlus # &+
               end
             elsif @offset < @rope.size && current_byte == '-'.ord.to_u8
-              advance  # consume '-'
+              advance # consume '-'
               # Check for &-=
               if @offset < @rope.size && current_byte == '='.ord.to_u8
-                advance  # consume '='
+                advance # consume '='
                 Token::Kind::AmpMinusEq
               else
-                Token::Kind::AmpMinus  # &-
+                Token::Kind::AmpMinus # &-
               end
             else
               # Check for &= (Phase 52)
               if @offset < @rope.size && current_byte == '='.ord.to_u8
-                advance  # consume '='
+                advance # consume '='
                 Token::Kind::AmpEq
               else
                 # Phase 21: Bitwise AND
@@ -2066,10 +2069,10 @@ module CrystalV2
           when '|'.ord.to_u8
             # Check for ||= and ||
             if @offset < @rope.size && current_byte == '|'.ord.to_u8
-              advance  # consume second '|'
+              advance # consume second '|'
               # Check for ||= (Phase 51)
               if @offset < @rope.size && current_byte == '='.ord.to_u8
-                advance  # consume '='
+                advance # consume '='
                 Token::Kind::OrOrEq
               else
                 Token::Kind::OrOr
@@ -2077,7 +2080,7 @@ module CrystalV2
             else
               # Check for |= (Phase 52)
               if @offset < @rope.size && current_byte == '='.ord.to_u8
-                advance  # consume '='
+                advance # consume '='
                 Token::Kind::PipeEq
               else
                 # Phase 21: Bitwise OR
@@ -2087,7 +2090,7 @@ module CrystalV2
           when '^'.ord.to_u8
             # Check for ^= (Phase 52)
             if @offset < @rope.size && current_byte == '='.ord.to_u8
-              advance  # consume '='
+              advance # consume '='
               Token::Kind::CaretEq
             else
               # Phase 21: Bitwise XOR
@@ -2099,13 +2102,13 @@ module CrystalV2
           when '.'.ord.to_u8
             # Check for .. and ...
             if @offset < @rope.size && current_byte == '.'.ord.to_u8
-              advance  # consume second '.'
+              advance # consume second '.'
               # Check for third '.'
               if @offset < @rope.size && current_byte == '.'.ord.to_u8
-                advance  # consume third '.'
-                Token::Kind::DotDotDot  # ...
+                advance                # consume third '.'
+                Token::Kind::DotDotDot # ...
               else
-                Token::Kind::DotDot  # ..
+                Token::Kind::DotDot # ..
               end
             else
               # Standalone . - use generic Operator for now (member access)
@@ -2115,10 +2118,10 @@ module CrystalV2
             # Check for ??=, ??, and ? (longest match first)
             if @offset < @rope.size && current_byte == '?'.ord.to_u8
               # Potential ?? or ??=
-              advance  # consume second ?
+              advance # consume second ?
               if @offset < @rope.size && current_byte == '='.ord.to_u8
                 # Phase 82: ??= (nil-coalescing compound assignment)
-                advance  # consume =
+                advance # consume =
                 Token::Kind::NilCoalesceEq
               else
                 # Phase 81: ?? (nil-coalescing)
@@ -2178,7 +2181,7 @@ module CrystalV2
           when '['.ord.to_u8 then ']'.ord.to_u8
           when '{'.ord.to_u8 then '}'.ord.to_u8
           when '<'.ord.to_u8 then '>'.ord.to_u8
-          else open  # For | and other non-paired delimiters
+          else                    open # For | and other non-paired delimiters
           end
         end
 
@@ -2189,8 +2192,8 @@ module CrystalV2
           return nil if @offset >= @rope.size
 
           next_byte = current_byte
-          literal_type = Token::Kind::String  # default for %()
-          array_type : Symbol? = nil  # :word_array for %w(), :symbol_array for %i()
+          literal_type = Token::Kind::String # default for %()
+          array_type : Symbol? = nil         # :word_array for %w(), :symbol_array for %i()
           type_char : Char? = nil
 
           # Determine literal type
@@ -2199,24 +2202,24 @@ module CrystalV2
             # Plain percent literal: %(...) - creates string
             open_delim = next_byte
             close_delim = closing_delimiter(open_delim)
-            advance  # consume opening delimiter
+            advance # consume opening delimiter
           when 'q', 'Q'
             type_char = next_byte.chr
-            advance  # consume 'q' or 'Q'
+            advance # consume 'q' or 'Q'
             return nil if @offset >= @rope.size
             open_delim = current_byte
             return nil unless open_delim.chr.in?('(', '[', '{', '<', '|')
             close_delim = closing_delimiter(open_delim)
             literal_type = Token::Kind::String
-            advance  # consume opening delimiter
+            advance # consume opening delimiter
           when 'r'
             # %r(...) - regex literal
-            advance  # consume 'r'
+            advance # consume 'r'
             return nil if @offset >= @rope.size
             open_delim = current_byte
             return nil unless open_delim.chr.in?('(', '[', '{', '<', '|')
             close_delim = closing_delimiter(open_delim)
-            advance  # consume opening delimiter
+            advance # consume opening delimiter
 
             # Capture pattern content with nesting
             regex_buffer = IO::Memory.new
@@ -2225,7 +2228,7 @@ module CrystalV2
               byte = current_byte
               if byte == close_delim
                 if nesting_level == 0
-                  advance  # consume closing delimiter
+                  advance # consume closing delimiter
                   break
                 else
                   nesting_level -= 1
@@ -2270,25 +2273,25 @@ module CrystalV2
           when 'w'
             # %w(...) - word array
             type_char = 'w'
-            advance  # consume 'w'
+            advance # consume 'w'
             return nil if @offset >= @rope.size
             open_delim = current_byte
             return nil unless open_delim.chr.in?('(', '[', '{', '<', '|')
             close_delim = closing_delimiter(open_delim)
             array_type = :word_array
-            literal_type = Token::Kind::LBracket  # Will generate array tokens
-            advance  # consume opening delimiter
+            literal_type = Token::Kind::LBracket # Will generate array tokens
+            advance                              # consume opening delimiter
           when 'i'
             # %i(...) - symbol array
             type_char = 'i'
-            advance  # consume 'i'
+            advance # consume 'i'
             return nil if @offset >= @rope.size
             open_delim = current_byte
             return nil unless open_delim.chr.in?('(', '[', '{', '<', '|')
             close_delim = closing_delimiter(open_delim)
             array_type = :symbol_array
-            literal_type = Token::Kind::LBracket  # Will generate array tokens
-            advance  # consume opening delimiter
+            literal_type = Token::Kind::LBracket # Will generate array tokens
+            advance                              # consume opening delimiter
           else
             # Not a percent literal, treat as modulo operator
             return nil
@@ -2325,25 +2328,25 @@ module CrystalV2
             if byte == close_delim
               if nesting_level == 0
                 content_end = @offset
-                advance  # consume closing delimiter
+                advance # consume closing delimiter
                 break
               else
                 nesting_level -= 1
                 buffer.write_byte byte
                 advance
               end
-            # Check for opening delimiter (for nesting)
-            elsif byte == open_delim && open_delim != close_delim  # Don't nest | |
+              # Check for opening delimiter (for nesting)
+            elsif byte == open_delim && open_delim != close_delim # Don't nest | |
               nesting_level += 1
               buffer.write_byte byte
               advance
-            # Handle newlines
+              # Handle newlines
             elsif byte == NEWLINE
               buffer.write_byte byte
               advance
               @line += 1
               @column = 1
-            # Regular character
+              # Regular character
             else
               buffer.write_byte byte
               advance
@@ -2407,12 +2410,12 @@ module CrystalV2
 
           while @offset < @rope.size && digit_count < 6
             if current_byte == terminator
-              advance  # Skip terminator
+              advance # Skip terminator
               return digit_count > 0 ? codepoint : nil
             end
 
             unless hex_digit?(current_byte)
-              return nil  # Invalid hex digit
+              return nil # Invalid hex digit
             end
 
             codepoint = codepoint * 16 + hex_value(current_byte)
@@ -2425,7 +2428,7 @@ module CrystalV2
             advance
             digit_count > 0 ? codepoint : nil
           else
-            nil  # Missing terminator or too many digits
+            nil # Missing terminator or too many digits
           end
         end
 
@@ -2488,21 +2491,21 @@ module CrystalV2
 
         # Use hex literals instead of '.ord.to_u8 — the .ord.to_u8 chain
         # evaluates to 0 in stage2 because Char#ord constant init is broken.
-        SPACE        = 0x20_u8  # ' '
-        TAB          = 0x09_u8  # '\t'
-        NEWLINE      = 0x0A_u8  # '\n'
-        DOUBLE_QUOTE = 0x22_u8  # '"'
-        SINGLE_QUOTE = 0x27_u8  # '\''
-        BACKTICK     = 0x60_u8  # '`'
-        HASH         = 0x23_u8  # '#'
-        UNDERSCORE   = 0x5F_u8  # '_'
-        QUESTION     = 0x3F_u8  # '?'
-        EXCLAMATION  = 0x21_u8  # '!'
-        AT_SIGN      = 0x40_u8  # '@'
-        DOLLAR_SIGN  = 0x24_u8  # '$'
-        LEFT_BRACE   = 0x7B_u8  # '{'
-        RIGHT_BRACE  = 0x7D_u8  # '}'
-        COLON        = 0x3A_u8  # ':'
+        SPACE        = 0x20_u8 # ' '
+        TAB          = 0x09_u8 # '\t'
+        NEWLINE      = 0x0A_u8 # '\n'
+        DOUBLE_QUOTE = 0x22_u8 # '"'
+        SINGLE_QUOTE = 0x27_u8 # '\''
+        BACKTICK     = 0x60_u8 # '`'
+        HASH         = 0x23_u8 # '#'
+        UNDERSCORE   = 0x5F_u8 # '_'
+        QUESTION     = 0x3F_u8 # '?'
+        EXCLAMATION  = 0x21_u8 # '!'
+        AT_SIGN      = 0x40_u8 # '@'
+        DOLLAR_SIGN  = 0x24_u8 # '$'
+        LEFT_BRACE   = 0x7B_u8 # '{'
+        RIGHT_BRACE  = 0x7D_u8 # '}'
+        COLON        = 0x3A_u8 # ':'
 
         private def build_span(start_offset, start_line, start_column)
           Span.new(
@@ -2545,7 +2548,7 @@ module CrystalV2
           end
           if current_byte == SINGLE_QUOTE || current_byte == DOUBLE_QUOTE
             quote = current_byte
-            advance  # consume opening quote
+            advance # consume opening quote
             delimiter_start = @offset
             while @offset < @rope.size && current_byte != quote
               advance
@@ -2556,7 +2559,7 @@ module CrystalV2
             end
             delimiter_end = @offset
             delimiter = String.new(bytes_range(delimiter_start, delimiter_end))
-            advance  # consume closing quote
+            advance # consume closing quote
           else
             unless is_identifier_start?(current_byte)
               debug { "[HEREDOC] returning nil: not identifier start" }
@@ -2582,7 +2585,7 @@ module CrystalV2
             emit_diagnostic("Unterminated heredoc", Span.new(start_offset, @offset, start_line, start_column, @line, @column))
             return nil
           end
-          advance  # consume newline
+          advance # consume newline
           debug { "[HEREDOC] starting content scan at offset #{@offset}" }
 
           # Accumulate content until we find delimiter on its own line
@@ -2629,11 +2632,11 @@ module CrystalV2
                 # Found end delimiter, consume newline if present
                 if @offset < @rope.size && (current_byte == '\n'.ord.to_u8 || current_byte == '\r'.ord.to_u8)
                   advance
-                  if @offset < @rope.size && current_byte == '\n'.ord.to_u8  # handle \r\n
+                  if @offset < @rope.size && current_byte == '\n'.ord.to_u8 # handle \r\n
                     advance
                   end
                 end
-                break  # Done with heredoc
+                break # Done with heredoc
               end
               debug { "[HEREDOC] delimiter not terminated (followed by #{current_byte.chr})" }
             end
@@ -2649,7 +2652,7 @@ module CrystalV2
             if @offset >= @rope.size
               debug { "[HEREDOC] returning nil: unterminated heredoc (EOF before delimiter)" }
               emit_diagnostic("Unterminated heredoc: can't find \"#{delimiter}\" anywhere before the end of file", Span.new(start_offset, @offset, start_line, start_column, @line, @column))
-              return nil  # Unterminated heredoc
+              return nil # Unterminated heredoc
             end
 
             # Consume newline
@@ -2704,7 +2707,6 @@ module CrystalV2
       private def percent_literal_allowed? : Bool
         @last_token_kind != Token::Kind::Def
       end
-
     end
   end
 end
