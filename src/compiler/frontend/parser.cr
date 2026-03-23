@@ -62,12 +62,10 @@ module CrystalV2
           keep_trivia = ::CrystalV2::Compiler::BootstrapEnv.enabled?("CRYSTAL_V2_PARSER_KEEP_TRIVIA")
           @tokens = Array(Token).new(token_preload_capacity(@source, keep_trivia))
           @index = 0
-          # Choose arena implementation (default: AstArena; PageArena via env)
-          if ::CrystalV2::Compiler::BootstrapEnv.enabled?("CRYSTAL_V2_PAGE_ARENA")
-            @arena = AstArena.new
-          else
-            @arena = AstArena.new
-          end
+          # Self-hosted stage2 has shown unstable arena-type selection and
+          # corrupted PageArena state very early in parsing. Force AstArena
+          # during bootstrap until PageArena is re-verified.
+          @arena = AstArena.new
           @arena.retain_source(@source)
           @diagnostics = [] of Diagnostic
           @macro_terminator = nil
@@ -111,19 +109,15 @@ module CrystalV2
           elsif capacity > 32768
             capacity = 32768
           end
-          # Pre-size AstArena capacity heuristically; skip when using PageArena
-          unless @arena.is_a?(PageArena)
-            @arena = AstArena.new(capacity)
-            # Zero-copy AST slices point into the lexer source, so the resized
-            # arena must retain the source just like the initial temporary one.
-            @arena.retain_source(@source)
-          end
+          # Pre-size AstArena capacity heuristically to reduce reallocations.
+          @arena = AstArena.new(capacity)
+          # Zero-copy AST slices point into the lexer source, so the resized
+          # arena must retain the source just like the initial temporary one.
+          @arena.retain_source(@source)
         end
 
         # Recognize accessor-like macros where arguments may be type declarations
-        private def accessor_macro_callee?(callee_token : Token) : Bool
-          return false unless callee_token.kind == Token::Kind::Identifier
-          slice = callee_token.slice
+        private def accessor_macro_name?(slice : Slice(UInt8)) : Bool
           # Allow optional '?' suffix for predicate accessors (e.g., property?)
           # Allow optional '!' suffix for nilable accessors (e.g., property!) - returns non-nil, stores T|Nil
           base = slice
@@ -135,10 +129,8 @@ module CrystalV2
         end
 
         # Recognize macros that accept typed field lists: name : Type [= value]
-        private def typed_macro_args_callee?(callee_token : Token) : Bool
-          return false unless callee_token.kind == Token::Kind::Identifier
-          slice = callee_token.slice
-          accessor_macro_callee?(callee_token) || slice_eq?(slice, "record")
+        private def typed_macro_args_name?(slice : Slice(UInt8)) : Bool
+          accessor_macro_name?(slice) || slice_eq?(slice, "record")
         end
 
         private def parse_block_body_with_optional_rescue : Tuple(Array(ExprId), Array(RescueClause)?, Array(ExprId)?, Array(ExprId)?)
@@ -1695,8 +1687,12 @@ module CrystalV2
         # Phase 103: Parse type declaration from identifier: x : Type = value
         # Called from parse_prefix when identifier followed by " : " (space + colon)
         private def parse_type_declaration_from_identifier(identifier_token : Token) : ExprId
-          var_span = identifier_token.span
-          var_name = @string_pool.intern(identifier_token.slice)
+          parse_type_declaration_from_identifier(identifier_token.span, stable_identifier_token_slice(identifier_token))
+        end
+
+        private def parse_type_declaration_from_identifier(identifier_span : Span, identifier_slice : Slice(UInt8)) : ExprId
+          var_span = identifier_span
+          var_name = @string_pool.intern(identifier_slice)
 
           # Skip whitespace and consume ':'
           skip_whitespace_and_optional_newlines
@@ -1832,6 +1828,7 @@ module CrystalV2
           begin
             skip_statement_end
             macro_token = current_token
+            trace_macro_def("enter", macro_token)
             return PREFIX_ERROR unless macro_token.kind == Token::Kind::Macro
             advance
             # IMPORTANT: macro name must be read as-is after `macro`.
@@ -1853,6 +1850,7 @@ module CrystalV2
             if name_is_identifier
               macro_name_slice = name_token.slice
               advance
+              trace_macro_def("name", name_token, extra: "size=#{macro_name_slice.size}")
 
               # Macro can't have a receiver: detect identifier DOT identifier
               if current_token.kind == Token::Kind::Operator && slice_eq?(current_token.slice, ".")
@@ -1922,11 +1920,15 @@ module CrystalV2
               end
             end
 
+            trace_macro_def("before-params", current_token)
             macro_params = skip_macro_parameters(macro_token, macro_name_slice)
+            trace_macro_def("after-params", current_token, extra: "count=#{macro_params.size}")
             # Allow immediate separators after header (e.g., `struct X; end`)
             skip_statement_end
 
+            trace_macro_def("before-body", current_token)
             pieces = parse_macro_body(false)
+            trace_macro_def("after-body", current_token, extra: "pieces=#{pieces.size}")
             # Propagate trim flags from the first ControlStart piece to the body node
             trim_left = false
             trim_right = false
@@ -1969,6 +1971,7 @@ module CrystalV2
                 trim_right
               )
             )
+            trace_macro_def("body-added", nil, extra: "id=#{body_id.index}")
 
             result = @arena.add_typed(
               MacroDefNode.new(
@@ -1978,6 +1981,7 @@ module CrystalV2
                 macro_params
               )
             )
+            trace_macro_def("result-added", nil, extra: "id=#{result.index}")
             result
           rescue ex : IndexError
             @diagnostics << Diagnostic.new("Recovered from macro definition parse index error", current_token.span)
@@ -2874,6 +2878,254 @@ module CrystalV2
           @string_pool.intern(retain_text_slice(text))
         end
 
+        # Self-hosted release builds can observe raw lexer identifier slices
+        # becoming invalid after parser control flow advances. Intern eagerly
+        # when a lexeme must survive beyond the immediate current_token read.
+        private def stable_identifier_slice(slice : Slice(UInt8)) : Slice(UInt8)
+          slice.empty? ? slice : @string_pool.intern(slice)
+        end
+
+        private def stable_identifier_name_slice(slice : Slice(UInt8)) : Slice(UInt8)
+          if ::CrystalV2::Compiler::BootstrapEnv.enabled?("CRYSTAL_V2_STABLE_IDENTIFIER_NO_POOL")
+            slice
+          else
+            @string_pool.intern(slice)
+          end
+        end
+
+        private def trace_stable_identifier_enabled?(span : Span) : Bool
+          return false unless ::CrystalV2::Compiler::BootstrapEnv.enabled?("CRYSTAL_V2_TRACE_STABLE_IDENTIFIER")
+
+          line = span.start_line
+          line >= 550 && line <= 590
+        end
+
+        private def trace_stable_identifier_path(span : Span, token : Token, path : String, span_slice : Slice(UInt8)?) : Nil
+          return unless trace_stable_identifier_enabled?(span)
+
+          source_size = span_slice ? span_slice.size : -1
+          STDERR.puts "stable-ident path=#{path} kind=#{token.kind} line=#{span.start_line}:#{span.start_column}-#{span.end_line}:#{span.end_column} offs=#{span.start_offset}..#{span.end_offset} token_size=#{token.slice.size} source_size=#{source_size}"
+        end
+
+        private def trace_identifier_transition(span : Span, event : String, token : Token? = nil) : Nil
+          return unless trace_stable_identifier_enabled?(span)
+
+          if token
+            next_token = token.not_nil!
+            STDERR.puts "ident-transition event=#{event} line=#{span.start_line}:#{span.start_column}-#{span.end_line}:#{span.end_column} next_kind=#{next_token.kind} next_line=#{next_token.span.start_line}:#{next_token.span.start_column}"
+          else
+            STDERR.puts "ident-transition event=#{event} line=#{span.start_line}:#{span.start_column}-#{span.end_line}:#{span.end_column}"
+          end
+        end
+
+        private def trace_member_access_transition(span : Span, member_token : Token, event : String) : Nil
+          return unless trace_stable_identifier_enabled?(span)
+
+          STDERR.puts "member-access event=#{event} recv_line=#{span.start_line}:#{span.start_column}-#{span.end_line}:#{span.end_column} member_kind=#{member_token.kind} member_line=#{member_token.span.start_line}:#{member_token.span.start_column}-#{member_token.span.end_line}:#{member_token.span.end_column} member_size=#{member_token.slice.size}"
+        end
+
+        private def trace_call_transition(span : Span, event : String, token : Token) : Nil
+          return unless trace_stable_identifier_enabled?(span)
+
+          if @index >= 0 && @index < @tokens.size
+            raw = @tokens[@index]
+            STDERR.puts "paren-call event=#{event} callee_line=#{span.start_line}:#{span.start_column}-#{span.end_line}:#{span.end_column} index=#{@index}/#{@tokens.size} token_kind=#{token.kind} token_line=#{token.span.start_line}:#{token.span.start_column}-#{token.span.end_line}:#{token.span.end_column} raw_kind=#{raw.kind} raw_line=#{raw.span.start_line}:#{raw.span.start_column}-#{raw.span.end_line}:#{raw.span.end_column}"
+          else
+            STDERR.puts "paren-call event=#{event} callee_line=#{span.start_line}:#{span.start_column}-#{span.end_line}:#{span.end_column} index=#{@index}/#{@tokens.size} token_kind=#{token.kind} token_line=#{token.span.start_line}:#{token.span.start_column}-#{token.span.end_line}:#{token.span.end_column} raw_kind=OUT_OF_RANGE"
+          end
+        end
+
+        private def trace_macro_def_enabled? : Bool
+          ::CrystalV2::Compiler::BootstrapEnv.enabled?("CRYSTAL_V2_TRACE_MACRO_DEF")
+        end
+
+        private def trace_macro_def(event : String, token : Token? = nil, depth : Int32? = nil, extra : String? = nil) : Nil
+          return unless trace_macro_def_enabled?
+
+          if token
+            t = token.not_nil!
+            STDERR.puts "macro-def event=#{event} kind=#{t.kind} line=#{t.span.start_line}:#{t.span.start_column}-#{t.span.end_line}:#{t.span.end_column} depth=#{depth || -1} extra=#{extra || ""}"
+          else
+            STDERR.puts "macro-def event=#{event} depth=#{depth || -1} extra=#{extra || ""}"
+          end
+        end
+
+        private def stable_identifier_token_slice(token : Token) : Slice(UInt8)
+          if span_slice = source_span_slice(token.span)
+            trace_stable_identifier_path(token.span, token, "source", span_slice)
+            unless span_slice.empty?
+              if ::CrystalV2::Compiler::BootstrapEnv.enabled?("CRYSTAL_V2_STABLE_IDENTIFIER_SOURCE_DIRECT")
+                return span_slice
+              end
+              return @string_pool.intern(span_slice)
+            end
+          end
+          trace_stable_identifier_path(token.span, token, "token", nil)
+          stable_identifier_slice(token.slice)
+        end
+
+        private def source_span_slice(span : Span) : Slice(UInt8)?
+          start_offset = span.start_offset
+          end_offset = span.end_offset
+          return nil if start_offset < 0 || end_offset <= start_offset
+
+          source_slice = @source.to_slice
+          return nil if end_offset > source_slice.size
+
+          source_slice[start_offset, end_offset - start_offset]
+        end
+
+        private def rebuild_char_literal_from_span(span : Span) : ExprId?
+          literal = source_span_slice(span)
+          body : Slice(UInt8)
+
+          if literal && literal.size >= 3 &&
+             literal[0] == 0x27_u8 &&
+             literal[literal.size - 1] == 0x27_u8
+            body = literal[1, literal.size - 2]
+          else
+            return nil unless macro_context? || @in_macro_expression
+            source_slice = @source.to_slice
+            start_offset = span.start_offset
+            end_offset = span.end_offset
+            return nil if start_offset <= 0 || end_offset >= source_slice.size
+            return nil unless source_slice[start_offset - 1] == 0x27_u8 && source_slice[end_offset] == 0x27_u8
+
+            # Self-hosted macro-control parsing can degrade Char token spans to
+            # the literal body bounds instead of the full quoted range. Recover
+            # the body directly from source so Char parsing does not depend on
+            # the token's original kind/slice layout.
+            body = source_slice[start_offset, end_offset - start_offset]
+          end
+
+          decoded = decode_char_literal_body(body)
+          return nil unless decoded
+
+          @arena.add_typed(CharNode.new(span, decoded))
+        end
+
+        private def decode_char_literal_body(body : Slice(UInt8)) : Slice(UInt8)?
+          return nil if body.size == 0
+          return @string_pool.intern(body) unless body[0] == 0x5C_u8
+          return nil if body.size < 2
+
+          escape = body[1]
+          case escape
+          when 0x6E_u8
+            @string_pool.intern(Bytes[0x0A_u8])
+          when 0x74_u8
+            @string_pool.intern(Bytes[0x09_u8])
+          when 0x72_u8
+            @string_pool.intern(Bytes[0x0D_u8])
+          when 0x5C_u8
+            @string_pool.intern(Bytes[0x5C_u8])
+          when 0x27_u8
+            @string_pool.intern(Bytes[0x27_u8])
+          when 0x78_u8
+            return nil unless body.size == 4
+            hi = hex_digit_value(body[2])
+            return nil unless hi
+            lo = hex_digit_value(body[3])
+            return nil unless lo
+            @string_pool.intern(Bytes[((hi << 4) | lo).to_u8])
+          when 0x75_u8
+            codepoint : Int32? = nil
+            if body.size >= 5 && body[2] == 0x7B_u8 && body[body.size - 1] == 0x7D_u8
+              codepoint = parse_hex_codepoint(body, 3, body.size - 1)
+            elsif body.size == 6
+              codepoint = parse_hex_codepoint(body, 2, body.size)
+            end
+            return nil unless codepoint
+            utf8_slice_for_codepoint(codepoint)
+          else
+            if octal_digit_byte?(escape)
+              decode_octal_char_literal(body, 1)
+            else
+              @string_pool.intern(body)
+            end
+          end
+        end
+
+        private def parse_hex_codepoint(bytes : Slice(UInt8), start_index : Int32, end_index : Int32) : Int32?
+          return nil if start_index >= end_index
+
+          value = 0
+          idx = start_index
+          while idx < end_index
+            digit = hex_digit_value(bytes[idx])
+            return nil unless digit
+            value = value * 16 + digit
+            idx += 1
+          end
+          value
+        end
+
+        private def decode_octal_char_literal(body : Slice(UInt8), start_index : Int32) : Slice(UInt8)?
+          value = 0
+          count = 0
+          idx = start_index
+          while idx < body.size && count < 3 && octal_digit_byte?(body[idx])
+            value = value * 8 + (body[idx] - 0x30_u8).to_i32
+            idx += 1
+            count += 1
+          end
+          return nil if count == 0
+          @string_pool.intern(Bytes[value.to_u8])
+        end
+
+        private def hex_digit_value(byte : UInt8) : Int32?
+          if byte >= 0x30_u8 && byte <= 0x39_u8
+            return (byte - 0x30_u8).to_i32
+          end
+          if byte >= 0x41_u8 && byte <= 0x46_u8
+            return 10 + (byte - 0x41_u8).to_i32
+          end
+          if byte >= 0x61_u8 && byte <= 0x66_u8
+            return 10 + (byte - 0x61_u8).to_i32
+          end
+          nil
+        end
+
+        private def octal_digit_byte?(byte : UInt8) : Bool
+          byte >= 0x30_u8 && byte <= 0x37_u8
+        end
+
+        private def utf8_slice_for_codepoint(codepoint : Int32) : Slice(UInt8)?
+          return nil if codepoint < 0
+
+          if codepoint < 0x80
+            bytes = Bytes.new(1)
+            bytes[0] = codepoint.to_u8
+            return @string_pool.intern(bytes)
+          end
+
+          if codepoint < 0x800
+            bytes = Bytes.new(2)
+            bytes[0] = (0xC0 | (codepoint >> 6)).to_u8
+            bytes[1] = (0x80 | (codepoint & 0x3F)).to_u8
+            return @string_pool.intern(bytes)
+          end
+
+          if codepoint < 0x10000
+            bytes = Bytes.new(3)
+            bytes[0] = (0xE0 | (codepoint >> 12)).to_u8
+            bytes[1] = (0x80 | ((codepoint >> 6) & 0x3F)).to_u8
+            bytes[2] = (0x80 | (codepoint & 0x3F)).to_u8
+            return @string_pool.intern(bytes)
+          end
+
+          if codepoint < 0x110000
+            bytes = Bytes.new(4)
+            bytes[0] = (0xF0 | (codepoint >> 18)).to_u8
+            bytes[1] = (0x80 | ((codepoint >> 12) & 0x3F)).to_u8
+            bytes[2] = (0x80 | ((codepoint >> 6) & 0x3F)).to_u8
+            bytes[3] = (0x80 | (codepoint & 0x3F)).to_u8
+            return @string_pool.intern(bytes)
+          end
+
+          nil
+        end
+
         # Phase 2: Parse if/elsif/else
         # Phase 103: Updated to support assignment in condition
         # Grammar: if CONDITION [then] BODY [elsif CONDITION [then] BODY]* [else BODY] end
@@ -3150,7 +3402,7 @@ module CrystalV2
             loop do
               # Support Crystal shorthand: `case expr; when .foo?` => expr.foo?
               # Extended to allow operator method names: .>(0), .<(scale), etc.
-              if value && current_token.kind == Token::Kind::Operator && slice_eq?(current_token.slice, ".")
+              if current_token.kind == Token::Kind::Operator && slice_eq?(current_token.slice, ".") && value
                 dot_token = current_token
                 advance
                 skip_trivia
@@ -6022,7 +6274,7 @@ module CrystalV2
               next_token = peek_next_non_trivia
               is_accessor = (next_token.kind == Token::Kind::Identifier || is_keyword_identifier?(next_token))
 
-              if is_accessor && accessor_macro_callee?(token)
+              if is_accessor && accessor_macro_name?(token.slice)
                 name = token.slice
                 predicate = name.size > 0 && name[name.size - 1] == '?'.ord.to_u8
                 # Strip ? or ! suffix from name to get base accessor type
@@ -6202,7 +6454,7 @@ module CrystalV2
           if current_token.kind == Token::Kind::Identifier
             next_token = peek_next_non_trivia
             is_accessor = (next_token.kind == Token::Kind::Identifier || is_keyword_identifier?(next_token))
-            if is_accessor && accessor_macro_callee?(current_token)
+            if is_accessor && accessor_macro_name?(current_token.slice)
               name = current_token.slice
               predicate = name.size > 0 && name[name.size - 1] == '?'.ord.to_u8
               base = if name.size > 0 && name[name.size - 1] == '?'.ord.to_u8
@@ -6281,7 +6533,7 @@ module CrystalV2
           if current_token.kind == Token::Kind::Identifier
             next_token = peek_next_non_trivia
             is_accessor = (next_token.kind == Token::Kind::Identifier || is_keyword_identifier?(next_token))
-            if is_accessor && accessor_macro_callee?(current_token)
+            if is_accessor && accessor_macro_name?(current_token.slice)
               name = current_token.slice
               predicate = name.size > 0 && name[name.size - 1] == '?'.ord.to_u8
               base = if name.size > 0 && name[name.size - 1] == '?'.ord.to_u8
@@ -7092,7 +7344,7 @@ module CrystalV2
               next_token = peek_next_non_trivia
               is_accessor = (next_token.kind == Token::Kind::Identifier || is_keyword_identifier?(next_token))
 
-              if is_accessor && accessor_macro_callee?(token)
+              if is_accessor && accessor_macro_name?(token.slice)
                 name = token.slice
                 predicate = name.size > 0 && name[name.size - 1] == '?'.ord.to_u8
                 # Strip ? or ! suffix from name to get base accessor type
@@ -7452,6 +7704,7 @@ module CrystalV2
 
           params = [] of MacroDefNode::MacroParamDecl
           current_param_tokens = [] of Token
+          trace_macro_def("params-enter", current_token, depth: 1)
           advance
           depth = 1
           seen_bare_splat = false
@@ -7462,6 +7715,7 @@ module CrystalV2
           just_saw_double_splat = false
           while depth > 0 && current_token.kind != Token::Kind::EOF
             token = current_token
+            trace_macro_def("params-token", token, depth: depth, extra: "buf=#{current_param_tokens.size}")
             case token.kind
             when Token::Kind::LParen
               current_param_tokens << token if depth >= 1
@@ -7472,6 +7726,7 @@ module CrystalV2
                 if param = parse_macro_param_decl(current_param_tokens)
                   params << param
                 end
+                trace_macro_def("params-close", token, depth: depth, extra: "count=#{params.size}")
                 current_param_tokens.clear
               else
                 current_param_tokens << token
@@ -7521,6 +7776,7 @@ module CrystalV2
                 if param = parse_macro_param_decl(current_param_tokens)
                   params << param
                 end
+                trace_macro_def("params-comma", token, depth: depth, extra: "count=#{params.size}")
                 current_param_tokens.clear
               else
                 current_param_tokens << token
@@ -8163,7 +8419,11 @@ module CrystalV2
         # Example: def_equals value, kind
         # Returns CallNode or PREFIX_ERROR if can't parse as call
         private def try_parse_call_args_without_parens(callee_token : Token) : ExprId
-          debug { "try_parse_call_args_without_parens: callee=#{String.new(callee_token.slice)}, current_token=#{current_token.kind}" }
+          try_parse_call_args_without_parens(callee_token.span, stable_identifier_token_slice(callee_token))
+        end
+
+        private def try_parse_call_args_without_parens(callee_span : Span, callee_slice : Slice(UInt8)) : ExprId
+          debug { "try_parse_call_args_without_parens: callee=#{String.new(callee_slice)}, current_token=#{current_token.kind}" }
           # Inside brace literals (named tuples) a trailing colon usually starts a key/value entry,
           # not a named argument label. Bail out early in that shape.
           if @brace_depth > 0 && current_token.kind == Token::Kind::Colon
@@ -8394,7 +8654,7 @@ module CrystalV2
             else
               # Parse one argument
               # For typed macro callees (e.g., record), allow name : Type [= value]
-              if typed_macro_args_callee?(callee_token) && (current_token.kind == Token::Kind::Identifier || is_keyword_identifier?(current_token))
+              if typed_macro_args_name?(callee_slice) && (current_token.kind == Token::Kind::Identifier || is_keyword_identifier?(current_token))
                 # Lookahead for ':' to confirm typed field
                 save_idx = @index
                 name_tok = current_token
@@ -8441,21 +8701,21 @@ module CrystalV2
             end
             if arg.invalid?
               if ENV.has_key?("DEBUG_ARG_FLOW")
-                STDERR.puts "[DEBUG_ARG_FLOW] invalid arg detected callee=#{String.new(callee_token.slice)} idx=#{arg.index}"
+                STDERR.puts "[DEBUG_ARG_FLOW] invalid arg detected callee=#{String.new(callee_slice)} idx=#{arg.index}"
               end
               @parsing_call_args -= 1
               return PREFIX_ERROR
             end
 
             if ENV.has_key?("DEBUG_ARG_FLOW")
-              STDERR.puts "[DEBUG_ARG_FLOW] parsed arg callee=#{String.new(callee_token.slice)} idx=#{arg.index} token_after=#{current_token.kind}"
+              STDERR.puts "[DEBUG_ARG_FLOW] parsed arg callee=#{String.new(callee_slice)} idx=#{arg.index} token_after=#{current_token.kind}"
             end
 
             skip_trivia
 
             # Check if this is a named argument: identifier followed by colon
             # Accessor-like macro arguments: name : Type [= value]
-            if typed_macro_args_callee?(callee_token)
+            if typed_macro_args_name?(callee_slice)
               arg_node = @arena[arg]
               if Frontend.node_kind(arg_node) == Frontend::NodeKind::Identifier && current_token.kind == Token::Kind::Colon
                 name_span = arg_node.span
@@ -8613,7 +8873,7 @@ module CrystalV2
           end
 
           # Create CallNode
-          callee = @arena.add_typed(IdentifierNode.new(callee_token.span, @string_pool.intern(callee_token.slice)))
+          callee = @arena.add_typed(IdentifierNode.new(callee_span, @string_pool.intern(callee_slice)))
 
           # Materialize argument arrays from builders once
           args = args_b.to_a
@@ -8632,16 +8892,16 @@ module CrystalV2
           call_span = if !block_expr.nil?
                         # Include block in span
                         block_node = @arena[block_expr]
-                        callee_token.span.cover(block_node.span)
+                        callee_span.cover(block_node.span)
                       elsif named_args
                         # Last named arg
-                        callee_token.span.cover(named_args.not_nil!.last.span)
+                        callee_span.cover(named_args.not_nil!.last.span)
                       elsif args.size > 0
                         # Positional arguments were parsed successfully; keep conservative
                         # span to avoid dereferencing unstable arg ids on broken codegen paths.
-                        callee_token.span
+                        callee_span
                       else
-                        callee_token.span
+                        callee_span
                       end
 
           result = @arena.add_typed(CallNode.new(
@@ -9014,6 +9274,12 @@ module CrystalV2
           end
 
           token = current_token
+          if token.kind != Token::Kind::Char
+            if char_node = rebuild_char_literal_from_span(token.span)
+              advance
+              return char_node
+            end
+          end
           debug { "parse_prefix: token=#{token.kind}" }
           case token.kind
           when Token::Kind::True, Token::Kind::False
@@ -9042,7 +9308,7 @@ module CrystalV2
             # Phase 85: uninitialized variable
             # Treat bare `uninitialized` as identifier unless followed by '('
             if peek_token.kind != Token::Kind::LParen
-              id = @arena.add_typed(IdentifierNode.new(token.span, token.slice))
+              id = @arena.add_typed(IdentifierNode.new(token.span, stable_identifier_token_slice(token)))
               advance
               id
             else
@@ -9085,15 +9351,17 @@ module CrystalV2
             else
               # Not followed by a variable identifier - treat `out` as a regular identifier
               # This allows using `out` as a variable name (e.g., `out = 1`, `out + 2`)
+              identifier_slice = stable_identifier_token_slice(token)
               advance # consume `out`
-              @arena.add_typed(IdentifierNode.new(token.span, token.slice))
+              @arena.add_typed(IdentifierNode.new(token.span, identifier_slice))
             end
           when Token::Kind::Raise
             # Allow raise in expression context (e.g., x || raise "error")
             # In call-argument context, treat as identifier to allow usage as a variable/param name.
             if @parsing_call_args > 0
+              identifier_slice = stable_identifier_token_slice(token)
               advance
-              @arena.add_typed(IdentifierNode.new(token.span, token.slice))
+              @arena.add_typed(IdentifierNode.new(token.span, identifier_slice))
             else
               stmt = parse_raise
               parse_postfix_if_modifier(stmt)
@@ -9107,6 +9375,7 @@ module CrystalV2
             if next_comes_colon_space?
               # Treat as identifier
               identifier_token = token
+              identifier_slice = stable_identifier_token_slice(identifier_token)
               advance
               # With skip_trivia, detect space by span gap
               gap_before_colon = current_token.kind == Token::Kind::Colon &&
@@ -9114,9 +9383,9 @@ module CrystalV2
                                  current_token.span.start_column > identifier_token.span.end_column
               skip_trivia
               if gap_before_colon && current_token.kind == Token::Kind::Colon && @no_type_declaration == 0
-                parse_type_declaration_from_identifier(identifier_token)
+                parse_type_declaration_from_identifier(identifier_token.span, identifier_slice)
               else
-                @arena.add_typed(IdentifierNode.new(identifier_token.span, @string_pool.intern(identifier_token.slice)))
+                @arena.add_typed(IdentifierNode.new(identifier_token.span, identifier_slice))
               end
             else
               parse_if
@@ -9126,15 +9395,16 @@ module CrystalV2
             if next_comes_colon_space?
               # Treat as identifier
               identifier_token = token
+              identifier_slice = stable_identifier_token_slice(identifier_token)
               advance
               gap_before_colon = current_token.kind == Token::Kind::Colon &&
                                  current_token.span.start_line == identifier_token.span.end_line &&
                                  current_token.span.start_column > identifier_token.span.end_column
               skip_trivia
               if gap_before_colon && current_token.kind == Token::Kind::Colon && @no_type_declaration == 0
-                parse_type_declaration_from_identifier(identifier_token)
+                parse_type_declaration_from_identifier(identifier_token.span, identifier_slice)
               else
-                @arena.add_typed(IdentifierNode.new(identifier_token.span, @string_pool.intern(identifier_token.slice)))
+                @arena.add_typed(IdentifierNode.new(identifier_token.span, identifier_slice))
               end
             else
               # Phase 24: unless condition
@@ -9145,6 +9415,7 @@ module CrystalV2
             # Examples: getter def : Type, foo(def: value), x = def
             # Method definitions are handled in parse_op_assign via definition_start?
             identifier_token = token
+            identifier_slice = stable_identifier_token_slice(identifier_token)
             advance
             gap_before_colon = current_token.kind == Token::Kind::Colon &&
                                current_token.span.start_line == identifier_token.span.end_line &&
@@ -9152,10 +9423,10 @@ module CrystalV2
             skip_trivia
             if gap_before_colon && current_token.kind == Token::Kind::Colon && @no_type_declaration == 0
               # Type declaration: def : Type = value
-              parse_type_declaration_from_identifier(identifier_token)
+              parse_type_declaration_from_identifier(identifier_token.span, identifier_slice)
             else
               # Just an identifier reference or named arg
-              @arena.add_typed(IdentifierNode.new(identifier_token.span, @string_pool.intern(identifier_token.slice)))
+              @arena.add_typed(IdentifierNode.new(identifier_token.span, identifier_slice))
             end
           when Token::Kind::Case
             # Phase 11: case/when pattern matching
@@ -9212,7 +9483,7 @@ module CrystalV2
             parse_require
           when Token::Kind::Identifier,
                Token::Kind::Of, Token::Kind::As, Token::Kind::In
-            parse_identifier_like(token)
+            parse_identifier_like(token.span, stable_identifier_token_slice(token), @previous_token)
           when Token::Kind::InstanceVar
             # Instance variable (@var)
             id = @arena.add_typed(InstanceVarNode.new(token.span, token.slice))
@@ -9242,9 +9513,20 @@ module CrystalV2
             end
           when Token::Kind::Char
             # Phase 56: Character literals
-            id = @arena.add_typed(CharNode.new(token.span, token.slice))
-            advance
-            id
+            if ::CrystalV2::Compiler::BootstrapEnv.enabled?("CRYSTAL_V2_CHAR_SOURCE_REBUILD")
+              if rebuilt = rebuild_char_literal_from_span(token.span)
+                advance
+                rebuilt
+              else
+                id = @arena.add_typed(CharNode.new(token.span, token.slice))
+                advance
+                id
+              end
+            else
+              id = @arena.add_typed(CharNode.new(token.span, token.slice))
+              advance
+              id
+            end
           when Token::Kind::Regex
             # Phase 57: Regex literals
             id = @arena.add_typed(RegexNode.new(token.span, token.slice))
@@ -9356,6 +9638,7 @@ module CrystalV2
             if next_comes_colon_space?
               # Treat as identifier
               identifier_token = token
+              identifier_slice = stable_identifier_token_slice(identifier_token)
               advance
               space_consumed = current_token.kind == Token::Kind::Whitespace
               skip_trivia
@@ -9364,10 +9647,10 @@ module CrystalV2
               # After skip_trivia, we should be at the colon
               if space_consumed && current_token.kind == Token::Kind::Colon && @no_type_declaration == 0
                 # This is type declaration: else : Type = value
-                parse_type_declaration_from_identifier(identifier_token)
+                parse_type_declaration_from_identifier(identifier_token.span, identifier_slice)
               else
                 # Just an identifier reference
-                @arena.add_typed(IdentifierNode.new(identifier_token.span, identifier_token.slice))
+                @arena.add_typed(IdentifierNode.new(identifier_token.span, identifier_slice))
               end
             else
               # Not followed by " : ", so keyword used incorrectly
@@ -9378,8 +9661,8 @@ module CrystalV2
           when Token::Kind::EOF
             PREFIX_ERROR
           else
-            if is_keyword_identifier?(token)
-              parse_identifier_like(token)
+              if is_keyword_identifier?(token)
+                parse_identifier_like(token.span, stable_identifier_token_slice(token), @previous_token)
             else
               emit_unexpected(token)
               advance
@@ -10973,6 +11256,8 @@ module CrystalV2
         # Phase 103: Updated to support multi-line arguments
         private def parse_parenthesized_call(callee : ExprId) : ExprId
           return callee if callee.invalid?
+          callee_span = node_span(callee)
+          trace_call_transition(callee_span, "enter", current_token)
           @parsing_call_args += 1
           begin
             lparen = current_token
@@ -10989,6 +11274,7 @@ module CrystalV2
               loop do
                 skip_whitespace_and_optional_newlines
                 break if current_token.kind == Token::Kind::RParen
+                trace_call_transition(callee_span, "arg-loop", current_token)
                 # Guard: break if no token progress to prevent infinite loops
                 if arg_loop_prev_index == @index
                   break
@@ -11652,10 +11938,12 @@ current_token.kind == Token::Kind::Identifier &&
 
         private def parse_member_access(receiver : ExprId) : ExprId
           return receiver if receiver.invalid?
+          receiver_span = node_span(receiver)
           dot = current_token
           advance
           skip_trivia
           member_token = current_token
+          trace_member_access_transition(receiver_span, member_token, "enter")
 
           # Support explicit indexer call via dotted bracket syntax: obj.[]?(args)
           if member_token.kind == Token::Kind::LBracket
@@ -11701,6 +11989,7 @@ current_token.kind == Token::Kind::Identifier &&
                 member_token.slice
               )
             )
+            trace_member_access_transition(member_span, member_token, "node")
 
             # Check if this member access is followed by arguments without parentheses
             # Example: Foo.bar 1, b: 2 → CallNode with MemberAccessNode as callee
@@ -12072,12 +12361,12 @@ current_token.kind == Token::Kind::Identifier &&
           end
         end
 
-        private def parse_identifier_like(identifier_token : Token) : ExprId
-          prev_token = @previous_token
+        private def parse_identifier_like(identifier_span : Span, identifier_slice : Slice(UInt8), prev_token : Token?) : ExprId
           advance
+          trace_identifier_transition(identifier_span, "after-advance", current_token)
 
           # Allow inline macro expressions inside identifiers (e.g., foo{{bar}}: ...)
-          last_span = identifier_token.span
+          last_span = identifier_span
           while current_token.kind == Token::Kind::MacroExprStart
             fast_forward_macro_expression
             last_span = current_token.span
@@ -12106,14 +12395,14 @@ current_token.kind == Token::Kind::Identifier &&
           skip_trivia
 
           colon_immediate = current_token.kind == Token::Kind::Colon && !space_consumed
-          macro_call_candidate = typed_macro_args_callee?(identifier_token)
+          macro_call_candidate = typed_macro_args_name?(identifier_slice)
 
-          if identifier_token.slice.size > 0 &&
-             identifier_token.slice[0] >= 'A'.ord && identifier_token.slice[0] <= 'Z'.ord &&
+          if identifier_slice.size > 0 &&
+             identifier_slice[0] >= 'A'.ord && identifier_slice[0] <= 'Z'.ord &&
              current_token.kind == Token::Kind::LParen
-            parse_generic_instantiation(identifier_token)
+            parse_generic_instantiation(identifier_span, identifier_slice)
           elsif @no_type_declaration == 0 && current_token.kind == Token::Kind::Colon && space_consumed
-            parse_type_declaration_from_identifier(identifier_token)
+            parse_type_declaration_from_identifier(identifier_span, identifier_slice)
           elsif @parsing_call_args == 0 &&
                 (macro_call_candidate ||
                 colon_immediate ||
@@ -12130,18 +12419,22 @@ current_token.kind == Token::Kind::Identifier &&
                                 peeked.span.start_offset <= boundary_token.span.end_offset
                               end
             if !force_call && call_without_parens_disallowed?(boundary_token) && !is_unary_prefix
-              @arena.add_typed(IdentifierNode.new(identifier_token.span, @string_pool.intern(identifier_token.slice)))
+              trace_identifier_transition(identifier_span, "return-ident-disallowed")
+              @arena.add_typed(IdentifierNode.new(identifier_span, stable_identifier_name_slice(identifier_slice)))
             else
-              maybe_call = try_parse_call_args_without_parens(identifier_token)
+              maybe_call = try_parse_call_args_without_parens(identifier_span, identifier_slice)
               if maybe_call.invalid?
-                @arena.add_typed(IdentifierNode.new(identifier_token.span, @string_pool.intern(identifier_token.slice)))
+                trace_identifier_transition(identifier_span, "return-ident-call-fallback")
+                @arena.add_typed(IdentifierNode.new(identifier_span, stable_identifier_name_slice(identifier_slice)))
               else
-                debug { "parse_prefix: converted #{String.new(identifier_token.slice)} into call without parens" }
+                debug { "parse_prefix: converted #{String.new(identifier_slice)} into call without parens" }
+                trace_identifier_transition(identifier_span, "return-call")
                 maybe_call
               end
             end
           else
-            @arena.add_typed(IdentifierNode.new(identifier_token.span, @string_pool.intern(identifier_token.slice)))
+            trace_identifier_transition(identifier_span, "return-ident")
+            @arena.add_typed(IdentifierNode.new(identifier_span, stable_identifier_name_slice(identifier_slice)))
           end
         end
 
@@ -12563,10 +12856,14 @@ current_token.kind == Token::Kind::Identifier &&
 
         # Phase 60: Parse generic type instantiation (Box(Int32), Hash(String, Int32))
         private def parse_generic_instantiation(name_token : Token) : ExprId
+          parse_generic_instantiation(name_token.span, stable_identifier_token_slice(name_token))
+        end
+
+        private def parse_generic_instantiation(name_span : Span, name_slice : Slice(UInt8)) : ExprId
           base_expr = @arena.add_typed(
             IdentifierNode.new(
-              name_token.span,
-              @string_pool.intern(name_token.slice)
+              name_span,
+              @string_pool.intern(name_slice)
             )
           )
           parse_generic_instantiation_from_base(base_expr)

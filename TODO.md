@@ -2,17 +2,29 @@
 
 ## Current Status
 - **Branch**: `bootstrap-benchmark` (merged `inline-structs`)
-- **Regression tests**: 87/88 + 18/20 (stable, no regressions)
-- **Stage2 binary**: compiles but LLC fails on `ptr 0` — ALMOST FIXED
+- **Regression baseline**: last broadly re-verified count from the earlier inline-struct phase was `87/88 + 18/20`; later parser/HIR/bootstrap changes have not re-established that full baseline yet
+- **Fresh Stage1 → Stage2 release**: still green from current repo state under `scripts/run_safe.sh` (recent stage2 rebuilds finish in ~154-156s)
+- **Fresh parser stabilization**: forcing `AstArena` in parser bootstrap removes the bogus self-hosted `PageArena` path (`DEBUG_ARENA_ADD` now shows sane `id=0` instead of negative PageArena ids)
+- **Focused green oracles**:
+  - stage2 float literal parse/FastFloat accessor stub repro is green
+  - stage2 `case/when` with `Char` literals inside defs is green
+  - narrow literal oracle is green (`literal 42 : Int32`, not `literal nil`)
+- **Focused red oracles**:
+  - self-hosted stage2 still fails on macro/HIR paths after parse (`zero_param macro` still segfaults after `parse done`; `stage2_macro_method_char_arg_oracle` now reaches HIR and fails with `Index out of bounds`)
+  - self-hosted stage2 still segfaults while parsing `src/stdlib/object.cr`
+  - stage3 bootstrap still dies while parsing `src/stdlib/object.cr`
+  - full `char_toplevel` compile on self-hosted stage2 still segfaults after parse
+- **Current frontier**: with parser arena-selection stabilized, debug why self-hosted AST nodes are still stored/retrieved as base `Node` and why top-level macro defs leak into HIR main expressions; then retry `stage2 -> stage3` bootstrap and benchmark stage1 vs stage2
 
-## IMMEDIATE: Fix `ptr 0` → `ptr null` in stage2 LLC
+## VERIFIED: Fix `ptr 0` → `ptr null` in stage2 LLC
 
 ### Done:
 - `emit_select`: normalizes ptr 0 → ptr null ✓
 - `emit` helper: gsub normalization ✓
 - `emit_raw`: gsub normalization ✓
 - Worker temp file output (IO.copy): normalization ✓
-- Parent output (IO.copy): normalization ✓ (just added, **UNTESTED**)
+- Parent output (IO.copy): normalization ✓
+- Line-aware normalization skips LLVM string constants like `c"ptr 0,\00"` ✓
 
 ### Test:
 ```bash
@@ -23,7 +35,7 @@ bin/crystal_v2 src/crystal_v2.cr -o /tmp/crystal_v2_s2
 
 If `ptr 0` still appears, check `emit_toplevel` (@output << s at line ~2571).
 
-## NEXT: Test Stage2 Oracle
+## VERIFIED: Test Stage2 Oracle
 
 Once stage2 compiles without LLC error:
 ```bash
@@ -36,6 +48,14 @@ CRYSTAL_V2_STOP_AFTER_MIR=1 /tmp/crystal_v2_s2 /tmp/test.cr -o /tmp/out --no-pre
 - `Literal#to_s` uses `@type`-based dispatch (not `@value` union)
 - `lower_number` sets `lit.int_value = node.parsed_int`
 - `NumberNode.parsed_int` pre-parses at constructor time
+
+## NEXT: Fresh Release Bootstrap + Benchmark
+
+1. Build fresh release stage1 from current repo state.
+2. Build fresh release stage2 with that stage1.
+3. Use `regression_tests/stage2_macro_method_char_arg_oracle.sh` plus `CRYSTAL_V2_TRACE_MACRO_DEF=1` / `DEBUG_ARENA_ADD=Macro` to push the remaining failure from HIR `Index out of bounds` to a concrete AST/root-cause fix.
+4. Retry stage3 bootstrap once the macro/HIR path no longer leaks macro defs into `main_exprs`.
+5. If stage3 goes green, benchmark stage1 vs stage2 release compile time for `src/crystal_v2.cr`.
 
 ## ROOT CAUSES FOUND
 
