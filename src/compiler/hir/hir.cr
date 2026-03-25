@@ -167,15 +167,18 @@ module Crystal::HIR
     # V2 BOOTSTRAP: Separate primitive fields to avoid union tag corruption.
     # V2's calling convention loses union tags when passing as ptr.
     getter int_value : Int64
+    getter uint_value : UInt64
     getter float_value : Float64
     getter str_value : String?
 
     property int_value : Int64 = 0_i64
+    property uint_value : UInt64 = 0_u64
     property float_value : Float64 = 0.0
 
     def initialize(id : ValueId, type : TypeRef, @value : LiteralValue)
       super(id, type)
       @lifetime = LifetimeTag::StackLocal
+      sync_cached_value_fields
     end
 
     def to_s(io : IO) : Nil
@@ -190,6 +193,8 @@ module Crystal::HIR
         io << "nil"
       when TypeRef::BOOL
         io << (@int_value != 0)
+      when TypeRef::UINT8, TypeRef::UINT16, TypeRef::UINT32, TypeRef::UINT64, TypeRef::UINT128
+        io << @uint_value
       when TypeRef::STRING, TypeRef::SYMBOL
         case v = @value
         when String
@@ -207,6 +212,28 @@ module Crystal::HIR
       end
       # Use actual type from TypeRef
       io << " : " << type_name
+    end
+
+    private def sync_cached_value_fields : Nil
+      case v = @value
+      when Int64
+        @int_value = v
+        @uint_value = v >= 0 ? v.to_u64 : 0_u64
+      when UInt64
+        @uint_value = v
+        @int_value = v <= Int64::MAX.to_u64 ? v.to_i64 : 0_i64
+      when Float64
+        @float_value = v
+      when Bool
+        @int_value = v ? 1_i64 : 0_i64
+        @uint_value = v ? 1_u64 : 0_u64
+      when Char
+        codepoint = v.ord.to_i64
+        @int_value = codepoint
+        @uint_value = codepoint.to_u64
+      when String, Nil
+        # Keep default cached primitive fields.
+      end
     end
 
     private def type_name : String
@@ -1203,10 +1230,7 @@ module Crystal::HIR
     @next_block_id : BlockId = 0_u32
     @next_scope_id : ScopeId = 0_u32
     @value_locations : Hash(ValueId, SourceLocation)
-    @param_ids : Array(ValueId)
-    @param_type_ids : Array(TypeId)
-    @param_names : Array(String)
-    @param_default_literals : Array(String?)
+    @params : Array(Parameter)
 
     def initialize(id : FunctionId, name : String, return_type : TypeRef)
       @id = id
@@ -1215,10 +1239,7 @@ module Crystal::HIR
       @scopes = [] of Scope
       @blocks = [] of Block
       @value_locations = {} of ValueId => SourceLocation
-      @param_ids = [] of ValueId
-      @param_type_ids = [] of TypeId
-      @param_names = [] of String
-      @param_default_literals = [] of String?
+      @params = [] of Parameter
 
       # Create entry block and function scope
       @entry_block = create_block(create_scope(ScopeKind::Function))
@@ -1255,30 +1276,12 @@ module Crystal::HIR
     end
 
     def params : Array(Parameter)
-      result = [] of Parameter
-      i = 0
-      while i < @param_ids.size
-        param = Parameter.new(
-          @param_ids.unsafe_fetch(i),
-          TypeRef.new(@param_type_ids.unsafe_fetch(i)),
-          i,
-          @param_names.unsafe_fetch(i)
-        )
-        if default_literal = @param_default_literals.unsafe_fetch(i)
-          param.default_literal = default_literal
-        end
-        result << param
-        i += 1
-      end
-      result
+      @params
     end
 
     def add_param(name : String, type : TypeRef) : Parameter
-      param = Parameter.new(next_value_id, type, @param_ids.size, name)
-      @param_ids << param.id
-      @param_type_ids << param.type.id
-      @param_names << param.name
-      @param_default_literals << param.default_literal
+      param = Parameter.new(next_value_id, type, @params.size, name)
+      @params << param
       param
     end
 
