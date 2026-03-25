@@ -1,3 +1,4 @@
+# Symptom oracle: the clear is incidental; the real failure is Hash#[] == String.
 class HolderMap
   @h : Hash(UInt32, String)
 

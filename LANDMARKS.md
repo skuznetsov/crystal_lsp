@@ -1,6 +1,6 @@
 # LANDMARKS
 
-Updated: 2026-03-20
+Updated: 2026-03-25
 Context: compiler/bootstrap/stage2-stability
 
 [LM-218|verified]: the old `process/executable_path` / `crystal/system/windows`
@@ -2040,3 +2040,11 @@ Current hypothesis
 - object-field `Hash(UInt32, String)` with a no-IO `seed -> clear -> write -> compare` shape, committed as `regression_tests/stage1_hash_field_clear_repro.sh`, compiles but exits `1`, while the exact same source built by original `crystal` exits `0`
 - the nearby object-field `Hash(UInt32, String)` fresh-write witness without `clear` fails even earlier under the same `stage1`, with LLVM `opt` reporting undefined `@Crystal$CCHasher$Hpermute$$UInt64`
 This matters because the `puts` version of the clear/reuse witness later crashes in `Crystal::EventLoop::Kqueue#wait_writable`, but the no-IO witness still returns the wrong boolean; therefore the IO/event-loop crash is secondary damage, not the root failure. The active hypothesis should shift toward object-field reference-container lowering / field access / helper emission, which also explains why the live self-hosted frontier surfaces at the first write into backend state like `@constant_values` after reset. {F/G/R: 0.95/0.79/0.97} [verified]
+
+[LM-226|verified]: [LM-225] overfit the carrier. The stable split is `Hash#[]` lookup/equality drift, not object-field state and not `clear` semantics. Fresh controls on `/tmp/stage1_release_llvmfix_orig` and original `/opt/homebrew/bin/crystal build --release` show:
+- local state-only `h = {} of UInt32 => String; h[2u32] = "fresh"; h.has_key?(2u32) && h.size == 1` is green on both compilers
+- object-field state-only `@h.clear; @h[2u32] = "after_clear"; @h.has_key?(2u32) && @h.size == 1` is also green on current `stage1`
+- the new minimal local oracle `regression_tests/stage1_hash_lookup_string_eq_repro.sh` is red on current `stage1` but green on original `crystal build --release`
+- the older object-field oracle `regression_tests/stage1_hash_field_clear_repro.sh` stays red, but only as a wider symptom carrier
+- exact `HIR` on both the local and object-field equality carriers is already wrong: `Hash(UInt32, String)#[]$UInt32` lowers to `Union String | UInt32`, and the caller lowers `== "fresh"` as `UInt32#==$Int8`
+This shifts the reusable hypothesis away from object-field lowering and toward generic `Hash#[]` return-type / method-dispatch corruption. The earlier `undefined @Crystal$CCHasher$Hpermute$$UInt64` note was not reproduced on the narrowed no-clear carriers and is demoted until re-derived on a minimal oracle. {F/G/R: 0.97/0.84/0.97} [verified]

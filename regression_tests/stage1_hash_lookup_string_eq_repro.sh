@@ -8,12 +8,12 @@ fi
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 COMPILER="$1"
-SRC="$ROOT_DIR/regression_tests/stage1_hash_field_clear_repro.cr"
-WORKDIR="$(mktemp -d "${TMPDIR:-/tmp}/stage1_hash_field_clear.XXXXXX")"
+SRC="$ROOT_DIR/regression_tests/stage1_hash_lookup_string_eq_repro.cr"
+WORKDIR="$(mktemp -d "${TMPDIR:-/tmp}/stage1_hash_lookup_string_eq.XXXXXX")"
 WRAPPER="$WORKDIR/run_compile.sh"
 COMPILE_LOG="$WORKDIR/compile.log"
 RUN_LOG="$WORKDIR/run.log"
-OUT="$WORKDIR/hash_field_clear"
+OUT="$WORKDIR/hash_lookup_string_eq"
 
 cleanup() {
   rm -rf "$WORKDIR"
@@ -38,7 +38,7 @@ COMPILE_STATUS=$?
 set -e
 
 if [[ $COMPILE_STATUS -ne 0 ]]; then
-  echo "reproduced: compiler failed before building object-field Hash clear witness"
+  echo "reproduced: compiler failed before building Hash lookup/equality witness"
   tail -n 120 "$COMPILE_LOG"
   exit 1
 fi
@@ -49,16 +49,16 @@ RUN_STATUS=$?
 set -e
 
 if [[ $RUN_STATUS -eq 0 ]]; then
-  echo "not reproduced: object-field Hash lookup/equality carrier preserves semantics"
+  echo "not reproduced: Hash lookup/equality preserves semantics"
   exit 0
 fi
 
 if rg -q '\[EXIT: 1\]' "$RUN_LOG"; then
-  echo "reproduced: object-field Hash lookup/equality carrier returned the wrong result"
+  echo "reproduced: Hash lookup/equality returned the wrong result"
   tail -n 80 "$RUN_LOG"
   exit 1
 fi
 
-echo "reproduced: object-field Hash lookup/equality carrier crashed"
+echo "reproduced: Hash lookup/equality crashed"
 tail -n 80 "$RUN_LOG"
 exit 1

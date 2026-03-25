@@ -1,4 +1,4 @@
-# Crystal V2 Bootstrap — TODO (Updated 2026-03-23)
+# Crystal V2 Bootstrap — TODO (Updated 2026-03-25)
 
 ## Current Status
 - **Branch**: `bootstrap-benchmark` (merged `inline-structs`)
@@ -68,11 +68,12 @@
   - full self-hosted stage2 debug bootstrap under `scripts/run_safe.sh ... 600 4096` is now killed by memory growth at `4231664KB > 4096MB` after ~293s during LLVM generation
   - self-hosted `stage2 --release` -> `stage3 --release` currently times out after `1200s` under `run_safe` with no output binary
 - **Fresh root-cause matrix signal**:
-  - new no-IO oracle `regression_tests/stage1_hash_field_clear_repro.sh` proves the current frontier is not well modeled as a broad `Hash` or alias-key bug: local `Hash(ValueId, String)` clear/reuse stays green, and object-field `Array(UInt32)` clear/reuse stays green, but object-field `Hash(UInt32, String)` clear/reuse built by current `stage1` exits `1` while the same source built by original `crystal` exits `0`
-  - the `puts`-based version of the same witness crashes later in `Crystal::EventLoop::Kqueue#wait_writable`, but the no-IO witness still returns the wrong boolean, so the primary bug is semantic corruption before IO, not merely the event-loop crash
-  - adjacent object-field `Hash(UInt32, String)` fresh-write without `clear` does not even reach runtime on current `stage1`; LLVM codegen fails with undefined `@Crystal$CCHasher$Hpermute$$UInt64`
-  - this shifts the leading global hypothesis toward object-field `Hash` / reference-container field lowering and helper emission, which also matches the live `emit_constant -> @constant_values[inst.id] = value` blocker better than another isolated LLVM override bug
-- **Current frontier**: the reduced numeric literal corridor is green end-to-end through HIR and MIR, so the next blocker is pure LLVM/codegen again: tiny self-hosted `--emit llvm-ir --no-link` now crashes in `emit_primitive_binary_override`, while float-literal HIR printing still trips the separate `Printer$Dshortest$$Float64_IO` stub. After narrowing that LLVM override crash, retry tiny LLVM emit first, then go back to the stage3 timeout-class slowdown.
+  - the earlier `object-field Hash clear/reuse` interpretation was too broad. `regression_tests/stage1_hash_field_clear_repro.sh` is still a valid red symptom oracle, but clean state-only controls show that container state is not the failing invariant: both local `Hash(UInt32, String)` and object-field `Hash(UInt32, String)` stay green on `has_key?(2u32) && size == 1`, and object-field `Array(UInt32)` state control stays green too
+  - the real split is lookup/equality, not `clear`: the new minimal no-IO oracle `regression_tests/stage1_hash_lookup_string_eq_repro.sh` uses plain local `h = {} of UInt32 => String; h[2u32] = "fresh"; h[2u32] == "fresh"` and reproduces on current `stage1` while the same source built by original `crystal build --release` exits `0`
+  - exact `HIR` is already wrong on both the local and object-field carriers: `Hash(UInt32, String)#[]$UInt32` returns `Union String | UInt32`, and the caller lowers `== "fresh"` as `UInt32#==$Int8`; this is a type/lowering drift before LLVM, not merely a backend runtime glitch
+  - the older `undefined @Crystal$CCHasher$Hpermute$$UInt64` note is stale on the narrowed no-clear carriers and should not drive the next branch until it is re-derived on a minimal reproducer
+  - the leading global hypothesis is now generic `Hash#[]` return-type / method-dispatch corruption, which is a better match for compiler-side map lookups than the earlier object-field-only theory
+- **Current frontier**: stage3 bootstrap is still the top operational blocker (`stage2 --release -> stage3 --release` timing out after `1200s`), but the cleanest newly reduced correctness bug is now the HIR-level `Hash(UInt32, String)#[] -> Union String | UInt32` drift. For backend-only reducers, tiny self-hosted `--emit llvm-ir --no-link` still crashes in `emit_primitive_binary_override`, while float-literal HIR printing still trips the separate `Printer$Dshortest$$Float64_IO` stub.
 
 ## VERIFIED: Fix `ptr 0` → `ptr null` in stage2 LLC
 
