@@ -157,9 +157,19 @@
     - `scripts/run_safe.sh /tmp/build_stage2_requireuniq_probe.sh 1800 12288`
       => self-hosted `stage2 --release` green, `[EXIT: 0] after ~462s`
   - this closes one real bootstrap blocker but not the whole parse frontier: full-project `CRYSTAL_V2_STOP_AFTER_PARSE=1 --release --no-ast-cache` on `/tmp/stage2_requireuniq_probe` still fast-segfaults later after `src/stdlib/unicode/unicode.cr` `creating parser`, so the next blocker is now below require dedupe
+- **Fresh enum-member parser handoff stabilization (2026-03-26)**:
+  - old self-hosted `stage2` no-prelude HIR reducers `enum Kind; V1; V2; end` and `enum Kind; V1; V2; end; Kind::V1` were entering the bogus explicit-value path for implicit members, emitting traces like `[ENUM_MEMBER] enum=Kind member=V1 span=1 source=0 text=nil`, and then crashing downstream in `AstToHir#resolve_enum_member_value -> register_enum_with_name_in_current_arena`
+  - two tempting local explanations were falsified first: changing `Frontend::EnumMember` to raw flag-backed storage was not sufficient, and changing it from `struct` to `class` was not sufficient by itself
+  - the verified fix is narrower and parser-side: remove the nilable constructor boundary for enum members entirely, split `Frontend::EnumMember` into separate implicit/explicit constructors, branch in `Parser#parse_enum` without `ExprId?`/`Span?` call args, and mirror that contract in `LSP::ASTCache.read_enum_members`
+  - verified on fresh host `/tmp/stage1_enumctor_probe` and self-hosted `/tmp/stage2_enumctor_probe` with the new oracle `bash regression_tests/stage2_enum_member_ctor_repro.sh /tmp/stage1_enumctor_probe /tmp/stage2_enumctor_probe`
+    => `not reproduced: stage2 no longer corrupts implicit enum members on the HIR enum oracle`
+  - operational signal moved with it: stage2 tiny enum reducers no longer emit bogus per-member traces and now converge to the separate generic `STUB CALLED: Crystal$CCHIR$CCTaint...Parameter` no-prelude blocker also hit by non-enum controls
+  - stage3 also moved off the old enum-registration crash: fresh LLDB on `/tmp/stage2_enumctor_probe src/crystal_v2.cr --release` now stops later in `AstToHir#normalize_declared_type_name -> resolve_alias_target -> register_alias`
 - **Current frontier**: stage3 bootstrap is still the top operational blocker (`stage2 --release -> stage3 --release` timing out after `1200s`), but the cleanest newly reduced correctness bug is now the HIR-level `Hash(UInt32, String)#[] -> Union String | UInt32` drift. For backend-only reducers, the abstract-char llvm oracle has now moved below the old empty-block corruption and is concentrated on missing type metadata/type defs, while tiny self-hosted `--emit llvm-ir --no-link` still crashes in `emit_primitive_binary_override` and float-literal HIR printing still trips the separate `Printer$Dshortest$$Float64_IO` stub.
   - updated frontier after the macro-span + macro-body span-tracking fixes:
     `stage2 --release -> stage3 --release` no longer sits at the old crash-class frontier; the remaining reduced parser blocker is now `abstract struct + {% begin %} + do/end char loop`, and stdlib `enum.cr` parse-only now fails with the same controlled `Index out of bounds` class instead of a segfault
+  - updated frontier after the enum-member constructor fix:
+    the old self-hosted stage3 stop in `resolve_enum_member_value -> register_enum_with_name_in_current_arena` is closed; the next correctness reducer to carve out is now the alias corridor `AstToHir#normalize_declared_type_name -> resolve_alias_target -> register_alias`, preferably with a tiny no-prelude oracle before re-running full stage3 timing
 
 ## VERIFIED: Fix `ptr 0` → `ptr null` in stage2 LLC
 

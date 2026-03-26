@@ -2200,7 +2200,11 @@ module CrystalV2
             value = read_optional_expr_id(io)
             name_span = read_span(io)
             value_span = read_optional_span(io)
-            Frontend::EnumMember.new(name, value, name_span, value_span)
+            if value && value_span
+              Frontend::EnumMember.new(name, value, name_span, value_span)
+            else
+              Frontend::EnumMember.new(name, name_span)
+            end
           end
         end
 

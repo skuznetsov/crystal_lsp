@@ -7056,25 +7056,18 @@ module CrystalV2
             skip_trivia
 
             # Parse optional value: = expression
-            member_value = nil
-            member_value_span = nil
             if current_token.kind == Token::Kind::Eq
               advance # consume '='
               skip_trivia
 
               value_expr = parse_expression(0)
               return PREFIX_ERROR if value_expr.invalid?
-              member_value = value_expr
               member_value_span = node_span(value_expr)
               skip_trivia
+              members << EnumMember.new(member_name, value_expr, member_name_span, member_value_span)
+            else
+              members << EnumMember.new(member_name, member_name_span)
             end
-
-            members << EnumMember.new(
-              member_name,
-              member_value,
-              member_name_span,
-              member_value_span
-            )
 
             skip_statement_end
           end

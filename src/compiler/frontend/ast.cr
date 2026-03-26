@@ -343,18 +343,39 @@ module CrystalV2
       # - value: Optional explicit value (e.g., Red = 1)
       # - name_span: Exact location of member name
       # - value_span: Exact location of value expression (optional)
-      struct EnumMember
+      class EnumMember
         getter name : Slice(UInt8) # TIER 2.3: Zero-copy slice
-        getter value : ExprId?
         getter name_span : Span
-        getter value_span : Span?
+        @value : ExprId
+        @has_value : Bool
+        @value_span : Span
+        @has_value_span : Bool
+
+        def initialize(@name : Slice(UInt8), @name_span : Span = Span.zero)
+          @value = ExprId.new(-1)
+          @has_value = false
+          @value_span = Span.zero
+          @has_value_span = false
+        end
 
         def initialize(
           @name : Slice(UInt8),
-          @value : ExprId? = nil,
-          @name_span : Span = Span.zero,
-          @value_span : Span? = nil,
+          value : ExprId,
+          @name_span : Span,
+          value_span : Span,
         )
+          @value = value
+          @has_value = true
+          @value_span = value_span
+          @has_value_span = true
+        end
+
+        def value : ExprId?
+          @has_value ? @value : nil
+        end
+
+        def value_span : Span?
+          @has_value_span ? @value_span : nil
         end
       end
 
