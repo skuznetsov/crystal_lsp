@@ -16421,6 +16421,48 @@ module Crystal::HIR
       {def_node.as(CrystalV2::Compiler::Frontend::DefNode), program.arena}
     end
 
+    private def def_explicit_return_type_from_source(
+      node : CrystalV2::Compiler::Frontend::DefNode,
+      arena : CrystalV2::Compiler::Frontend::ArenaLike?,
+    ) : String?
+      return nil unless arena
+
+      source = source_for_arena(arena)
+      return nil unless source
+
+      snippet = slice_source_for_span(node.span, source)
+      return nil unless snippet
+
+      header_end = snippet.index('\n') || snippet.bytesize
+      header = strip_single_line_comments(snippet.byte_slice(0, header_end)).strip
+      return nil unless header.starts_with?("def ")
+
+      depth = 0
+      colon_idx : Int32? = nil
+      i = 0
+      while i < header.bytesize
+        ch = header.byte_at(i)
+        case ch
+        when '('.ord
+          depth += 1
+        when ')'.ord
+          depth -= 1 if depth > 0
+        when ':'.ord
+          prev = i > 0 ? header.byte_at(i - 1) : -1
+          nxt = i + 1 < header.bytesize ? header.byte_at(i + 1) : -1
+          if depth == 0 && prev != ':'.ord && nxt != ':'.ord
+            colon_idx = i
+          end
+        end
+        i += 1
+      end
+
+      return nil unless idx = colon_idx
+      type_name = header.byte_slice(idx + 1, header.bytesize - idx - 1).strip
+      return nil if type_name.empty?
+      type_name
+    end
+
     private def register_type_method_from_def(
       member : CrystalV2::Compiler::Frontend::DefNode,
       type_name : String,
@@ -17551,22 +17593,28 @@ module Crystal::HIR
               end
               base_name = "#{full_name}.#{method_name}"
               member_arena = registration_member_arena_for(base_name, member)
+              # Keep nested-module defs anchored to their original arena.
+              # Reparsed snippet defs are useful for source-derived metadata, but
+              # storing them as canonical function entries reintroduces ExprId/arena
+              # mismatches on self-hosted block-yield methods.
+              effective_member = member
               return_type = nil.as(TypeRef?)
               param_types = [] of TypeRef
               has_block = false
+              explicit_return_type_name = def_explicit_return_type_from_source(effective_member, member_arena)
               old_class = @current_class
               @current_class = full_name
               with_namespace_override(full_name) do
-                return_type = if rt = member.return_type
-                                rt_name = qualify_unqualified_type_in_namespace((safe_slice_to_string(rt) || ""), full_name)
-                                inferred = module_like_type_name?(rt_name) ? infer_concrete_return_type_from_body(member, nil, member_arena) : nil
+                return_type = if explicit_return_type_name
+                                rt_name = qualify_unqualified_type_in_namespace(explicit_return_type_name, full_name)
+                                inferred = module_like_type_name?(rt_name) ? infer_concrete_return_type_from_body(effective_member, nil, member_arena) : nil
                                 inferred || type_ref_for_name(rt_name)
                               elsif method_name.ends_with?('?')
                                 TypeRef::BOOL
                               else
-                                infer_concrete_return_type_from_body(member, nil, member_arena) || TypeRef::VOID
+                                infer_concrete_return_type_from_body(effective_member, nil, member_arena) || TypeRef::VOID
                               end
-                if params = member.params
+                if params = effective_member.params
                   each_param(params) do |param|
                     next if named_only_separator?(param)
                     if param.is_block
@@ -17589,7 +17637,7 @@ module Crystal::HIR
               if env_get("DEBUG_WUINT128") && full_name.includes?("Dragonbox::WUInt")
                 ret_name = get_type_name_from_ref(return_type)
                 STDERR.puts "[DEBUG_WUINT128] register return method=#{method_name} return=#{ret_name}"
-                if params = member.params
+                if params = effective_member.params
                   param_index = 0
                   each_param(params) do |param|
                     next if named_only_separator?(param)
@@ -17606,26 +17654,26 @@ module Crystal::HIR
                 end
               end
               if !has_block
-                has_block = def_contains_yield?(member, member_arena)
+                has_block = def_contains_yield?(effective_member, member_arena)
               end
-              full_method_name = function_full_name_for_def(base_name, param_types, member.params, has_block)
+              full_method_name = function_full_name_for_def(base_name, param_types, effective_member.params, has_block)
               register_function_type(full_method_name, return_type)
-              set_function_def_entry(full_method_name, member)
+              set_function_def_entry(full_method_name, effective_member)
               set_function_def_arena(full_method_name, member_arena)
-              if should_register_base_name?(full_method_name, base_name, member, has_block)
-                set_function_def_entry(base_name, member)
+              if should_register_base_name?(full_method_name, base_name, effective_member, has_block)
+                set_function_def_entry(base_name, effective_member)
                 set_function_def_arena(base_name, member_arena)
               end
 
               # Track yield-functions for inline expansion (nested module methods).
-              if def_contains_yield?(member, member_arena)
+              if def_contains_yield?(effective_member, member_arena)
                 @yield_functions.add(full_method_name)
                 debug_hook("yield.register", full_method_name)
                 unless @function_defs.has_key?(base_name)
-                  set_function_def_entry(base_name, member)
+                  set_function_def_entry(base_name, effective_member)
                   set_function_def_arena(base_name, member_arena)
                 end
-                set_function_def_entry(full_method_name, member)
+                set_function_def_entry(full_method_name, effective_member)
                 set_function_def_arena(full_method_name, member_arena)
               end
             when CrystalV2::Compiler::Frontend::ClassNode

@@ -1,6 +1,22 @@
 # Crystal V2 Bootstrap — TODO (Updated 2026-03-26)
 
 ## Current Status
+- **Fresh nested-module def reparse root cause fix (2026-03-26, current session)**:
+  - the old `LM-246` blocker was real but narrower than “nested-module block-yield arena-fit” in general: the tiny carrier
+    `module A; module B; extend self; def exec(flag, &); yield; end; end; end`
+    only stayed red while nested-module registration canonicalized a snippet-reparsed `DefNode`
+  - decisive falsifier:
+    a runtime-only bypass of nested-module `reparse_def_from_source` turned that tiny carrier from `stage1 green / stage2 red` into `stage1 green / stage2 green` with no other changes
+  - verified source fix:
+    nested-module PASS-2 registration now keeps the original `DefNode` anchored to its original arena instead of storing the snippet-reparsed `DefNode` as the canonical function entry
+  - verified regression signal:
+    `bash regression_tests/stage2_nested_module_block_yield_hir_repro.sh /tmp/stage1_release_29966272 /tmp/stage2_current_debug_skipnestedreparse`
+    => `not reproduced: stage2 succeeded on nested-module block-yield HIR repro`
+  - downstream movement is real but incomplete:
+    full `stage3 --STOP_AFTER_HIR` on `/tmp/stage2_current_debug_skipnestedreparse` still reds, but the stack has moved off the old `NodeSlot#node -> AstArena#[] -> register_module_with_name` sink and now lands in
+    `expr_id_list_matches_arena -> body_subtrees_match_arena -> arena_fits_def -> registration_member_arena_for -> register_nested_module`
+  - strongest current interpretation:
+    the closed family was “canonicalizing snippet-reparsed nested-module defs”; the new live family is a later nested-module `arena_fits_def` / `expr_id_list_matches_arena` sink on a different carrier
 - **Fresh lib-class name guard root cause fix (2026-03-26, current session)**:
   - after commit `654ed48c`, full `stage3 --STOP_AFTER_HIR` on `/tmp/stage2_current_debug_modulefix_retest` still hit the old lib corridor, but the reducer matrix was now narrower than the historical `LM-240` model:
     - `struct PthreadAttrT; x : Int32; end` was `stage1 green / stage2 green`
