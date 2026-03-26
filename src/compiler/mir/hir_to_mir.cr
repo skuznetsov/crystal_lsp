@@ -1369,7 +1369,7 @@ module Crystal
              HIR::TypeRef::UINT32,
              HIR::TypeRef::UINT64,
              HIR::TypeRef::UINT128
-          builder.const_uint(lit.int_value.to_u64, convert_type(lit.type))
+          builder.const_uint(lit.uint_value, convert_type(lit.type))
         when HIR::TypeRef::FLOAT32,
              HIR::TypeRef::FLOAT64
           builder.const_float(lit.float_value, convert_type(lit.type))

@@ -176,6 +176,15 @@
     - `bash regression_tests/stage2_alias_builtin_hir_repro.sh /tmp/stage1_enumctor_probe /tmp/stage2_aliasprefixfix_probe`
       => `not reproduced: stage2 survives the top-level alias HIR oracle past alias registration`
   - reduced operational signal moved exactly where expected: tiny no-prelude alias carriers no longer die with `exit 139` and now converge to the separate shared `STUB CALLED: Crystal$CCHIR$CCTaint...Parameter` blocker after `register_alias.after_store`
+- **Fresh clean unsigned-literal MIR stabilization (2026-03-26)**:
+  - the clean detached tree at `6af60757` still failed before producing a self-hosted `stage2` binary: guarded `stage1 -> stage2 --release` reached `step4: MIR lowering start` and then died with `error: Arithmetic overflow`
+  - the first release backtrace was misleading and pointed near `lower_pointer_realloc`; a debug-stage1 falsifier on the same clean source localized the real culprit to `src/compiler/mir/hir_to_mir.cr:lower_literal` while lowering `%180 = literal 0 : UInt64` in `__crystal_main`
+  - the verified root cause is narrower than a generic `UInt64` parse failure: unsigned MIR lowering was reading `lit.int_value.to_u64` instead of the already-carried `lit.uint_value`, so the wrong primitive cache was used on self-hosted unsigned literals
+  - the new reduced single-compiler oracle `bash regression_tests/stage1_u64_literal_mir_overflow_repro.sh <compiler>` confirms the crash class directly:
+    - old clean release host `/tmp/stage1_reltest_6af60757` => `reproduced: compiler overflowed before MIR artifact on the UInt64 literal carrier`
+    - isolated one-line fix host `/tmp/stage1_debug_u64fix_6af60757` => `not reproduced: compiler survived the UInt64 literal MIR overflow carrier`
+  - operational proof on an isolated clean worktree with only `builder.const_uint(lit.uint_value, ...)` applied is stronger than the reduced oracle alone: self-hosted `stage1 -> stage2 --debug` no longer dies in MIR, reaches `step4: MIR funcs=31221`, completes `generate(io) done`, and only then fails later in `llc` with `error: constant expression type mismatch: got type '[10 x i8]' but expected '[7 x i8]'` on `c"ptr null,\00"`
+  - caveat: this commit class closes the MIR overflow blocker but does **not** fully solve unsigned-literal correctness yet; the large-`u64` no-prelude MIR oracle still zeroes `9223372036854775808u64` and `18446744073709551615u64` to `const 0 : UInt64`, so a second unsigned-literal preservation bug remains below the crash fix
 - **Current frontier**: stage3 bootstrap is still the top operational blocker (`stage2 --release -> stage3 --release` timing out after `1200s`), but the cleanest newly reduced correctness bug is now the HIR-level `Hash(UInt32, String)#[] -> Union String | UInt32` drift. For backend-only reducers, the abstract-char llvm oracle has now moved below the old empty-block corruption and is concentrated on missing type metadata/type defs, while tiny self-hosted `--emit llvm-ir --no-link` still crashes in `emit_primitive_binary_override` and float-literal HIR printing still trips the separate `Printer$Dshortest$$Float64_IO` stub.
   - updated frontier after the macro-span + macro-body span-tracking fixes:
     `stage2 --release -> stage3 --release` no longer sits at the old crash-class frontier; the remaining reduced parser blocker is now `abstract struct + {% begin %} + do/end char loop`, and stdlib `enum.cr` parse-only now fails with the same controlled `Index out of bounds` class instead of a segfault
@@ -183,6 +192,8 @@
     the old self-hosted stage3 stop in `resolve_enum_member_value -> register_enum_with_name_in_current_arena` is closed; the next correctness reducer to carve out is now the alias corridor `AstToHir#normalize_declared_type_name -> resolve_alias_target -> register_alias`, preferably with a tiny no-prelude oracle before re-running full stage3 timing
   - updated frontier after the top-level alias extractor fix:
     the alias-specific `register_alias` segfault on tiny no-prelude carriers is closed; the next reduced stop on those carriers is the shared `HIR::Taint << Parameter` abort, while full operational `stage2 --release` stays green and is ready for another `stage2 -> stage3` measurement pass
+  - updated frontier after the clean unsigned-literal MIR fix:
+    the first clean `stage1 -> stage2` failure is no longer the old MIR `Arithmetic overflow`; the next clean bootstrap blocker is now late LLVM/llc string-constant emission, currently reproducing as `constant expression type mismatch` on `c"ptr null,\00"` after `generate(io) done`
 
 ## VERIFIED: Fix `ptr 0` → `ptr null` in stage2 LLC
 
