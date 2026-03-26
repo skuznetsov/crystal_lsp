@@ -8245,14 +8245,42 @@ module Crystal::MIR
       block_ir_output = @output
       @output = saved_output
       @toplevel_output = nil
+      block_copy_trace = ENV["CRYSTAL2_LLVM_BLOCK_COPY_TRACE"]? || ENV["CRYSTAL_V2_LLVM_BLOCK_COPY_TRACE"]?
+      if block_copy_trace
+        STDERR.puts "[LLVM_BLOCK_COPY] func=#{func.name} buffered_bytes=#{block_ir_output.pos}"
+      end
 
       # Extract alloca instructions from block IR and hoist to entry block.
       # These are scratch allocas for union operations (store→GEP→load patterns)
       # that are safe to allocate once in the entry block and reuse.
       hoisted_allocas = [] of String
-      processed_block_ir = IO::Memory.new
-      block_ir_output.rewind
-      while line = block_ir_output.gets
+      processed_block_lines = [] of String
+      processed_lines = 0
+      block_ir_bytes = block_ir_output.to_slice
+      block_line_start = 0
+      block_i = 0
+      while block_i < block_ir_bytes.size
+        if block_ir_bytes[block_i] == 10_u8
+          line = String.new(block_ir_bytes[block_line_start, block_i - block_line_start])
+          processed_lines += 1
+          # Fast-path without allocating `lstrip` per line.
+          bytes = line.to_slice
+          pos = 0
+          while pos < bytes.size && (bytes[pos] == 32_u8 || bytes[pos] == 9_u8)
+            pos += 1
+          end
+          if pos < bytes.size && bytes[pos] == 37_u8 && !line.byte_index(" = alloca ", pos).nil?
+            hoisted_allocas << line
+          else
+            processed_block_lines << line
+          end
+          block_line_start = block_i + 1
+        end
+        block_i += 1
+      end
+      if block_line_start < block_ir_bytes.size
+        line = String.new(block_ir_bytes[block_line_start, block_ir_bytes.size - block_line_start])
+        processed_lines += 1
         # Fast-path without allocating `lstrip` per line.
         bytes = line.to_slice
         pos = 0
@@ -8262,8 +8290,13 @@ module Crystal::MIR
         if pos < bytes.size && bytes[pos] == 37_u8 && !line.byte_index(" = alloca ", pos).nil?
           hoisted_allocas << line
         else
-          processed_block_ir << line << '\n'
+          processed_block_lines << line
         end
+      end
+      if block_copy_trace
+        processed_bytes = 0
+        processed_block_lines.each { |line| processed_bytes += line.bytesize + 1 }
+        STDERR.puts "[LLVM_BLOCK_COPY] func=#{func.name} processed_lines=#{processed_lines} hoisted_allocas=#{hoisted_allocas.size} processed_bytes=#{processed_bytes}"
       end
       # Emit hoisted allocas in entry block (before the br)
       hoisted_allocas.each do |alloca_line|
@@ -8279,8 +8312,7 @@ module Crystal::MIR
       # Emit block IR with allocas replaced by no-ops (comments).
       # The alloca SSA names are now defined in the entry block.
       begin
-        processed_block_ir.rewind
-        while line = processed_block_ir.gets
+        processed_block_lines.each do |line|
           emit_raw line
           emit_raw "\n"
         end
