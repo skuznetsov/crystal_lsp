@@ -115,9 +115,10 @@ module CrystalV2
                     # Phase 56: Character literals
                     #
                     # Self-hosted stage2 can corrupt aggregate Token returns from
-                    # lex_char on the simple `'x'` path before parser preload sees
-                    # the token. Keep the non-escape char fast path inline here
-                    # and leave escape-heavy literals on the existing helper.
+                    # lex_char before parser preload sees the token. Keep the
+                    # full char literal path inline here so the final Token is
+                    # constructed at the call site for both simple and escaped
+                    # chars.
                     if (next_b = peek_byte) && next_b != '\\'.ord.to_u8
                       start_offset, start_line, start_column = capture_position
                       advance # Skip opening '
@@ -142,7 +143,92 @@ module CrystalV2
                         build_span(start_offset, start_line, start_column)
                       )
                     else
-                      lex_char
+                      start_offset, start_line, start_column = capture_position
+                      advance # Skip opening '
+
+                      if @offset >= @rope.size
+                        Token.new(Token::Kind::Char, Slice(UInt8).new(0), build_span(start_offset, start_line, start_column))
+                      else
+                        buffer = IO::Memory.new
+                        advance # Skip backslash
+
+                        if @offset >= @rope.size
+                          Token.new(Token::Kind::Char, Slice(UInt8).new(0), build_span(start_offset, start_line, start_column))
+                        else
+                          case current_byte
+                          when 'n'.ord.to_u8
+                            buffer.write_byte '\n'.ord.to_u8
+                            advance
+                          when 't'.ord.to_u8
+                            buffer.write_byte '\t'.ord.to_u8
+                            advance
+                          when 'r'.ord.to_u8
+                            buffer.write_byte '\r'.ord.to_u8
+                            advance
+                          when '\\'.ord.to_u8
+                            buffer.write_byte '\\'.ord.to_u8
+                            advance
+                          when '\''.ord.to_u8
+                            buffer.write_byte '\''.ord.to_u8
+                            advance
+                          when 'u'.ord.to_u8
+                            advance
+                            if current_byte == '{'.ord.to_u8
+                              advance
+                              codepoint = parse_unicode_hex_digits('}'.ord.to_u8)
+                              if codepoint
+                                write_utf8(buffer, codepoint)
+                              else
+                                buffer.write_byte '\\'.ord.to_u8
+                                buffer.write_byte 'u'.ord.to_u8
+                              end
+                            else
+                              codepoint = parse_unicode_hex_fixed(4)
+                              if codepoint
+                                write_utf8(buffer, codepoint)
+                              else
+                                buffer.write_byte '\\'.ord.to_u8
+                                buffer.write_byte 'u'.ord.to_u8
+                              end
+                            end
+                          when 'x'.ord.to_u8
+                            advance
+                            byte_value = parse_unicode_hex_fixed(2)
+                            if byte_value
+                              buffer.write_byte byte_value.to_u8
+                            else
+                              buffer.write_byte '\\'.ord.to_u8
+                              buffer.write_byte 'x'.ord.to_u8
+                            end
+                          else
+                            if octal_digit?(current_byte)
+                              byte_value = parse_octal_fixed(3)
+                              if byte_value
+                                buffer.write_byte byte_value.to_u8
+                              else
+                                buffer.write_byte '\\'.ord.to_u8
+                                buffer.write_byte current_byte
+                              end
+                            else
+                              buffer.write_byte '\\'.ord.to_u8
+                              buffer.write_byte current_byte
+                              advance
+                            end
+                          end
+
+                          if @offset < @rope.size && current_byte == SINGLE_QUOTE
+                            advance
+                          end
+
+                          processed_bytes = buffer.to_slice
+                          @processed_strings << processed_bytes
+                          Token.new(
+                            Token::Kind::Char,
+                            processed_bytes,
+                            build_span(start_offset, start_line, start_column)
+                          )
+                        end
+                      end
                     end
                   when byte == HASH
                     lex_comment

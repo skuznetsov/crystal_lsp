@@ -42,6 +42,14 @@
     - the most precise current interpretation is no longer a generic "char token transport" failure; it is a narrower helper-return boundary bug on the simple `'x'` path through `lex_char`
     - rebuilt main-tree candidate `/tmp/stage2_release_charfix_main` keeps the reduced carrier green through parse and `src/stdlib/enum.cr` parse-only, and the new stage1-vs-stage2 oracle `regression_tests/stage2_abstract_macro_char_literal_oracle.sh` is now green at `HIR` and `MIR`
     - the same oracle still goes red in the `LLVM IR` phase on the reduced carrier because self-hosted stage2 now reaches `step5: LLVM IR generation start` and then traps before writing the `.ll` artifact; the parser blocker is gone, but a lower LLVM-generation blocker remains
+  - fresh 2026-03-26 clean-head reduction shows the same family was not actually macro-specific:
+    - direct self-hosted no-prelude parse-only on `src/stdlib/io.cr` is red on `/tmp/stage2_release_29966272`, and the minimal follower is now `abstract class IO; def escaped_char_probe; '\n'; end; end`; stage1 and the stage2 concrete-class control both stay green
+    - the old parser/StringPool stop was still only a sink: clean trace instrumentation showed the escaped-char token slot already corrupted during parser constructor preload, before parser code ever entered the corresponding token block
+    - a separate clean falsifier proved that broad processed-slice retention is not the primary fix: switching all processed token payloads to owned strings (`retain_processed_slice`) without changing the call boundary left the reducer red
+  - fresh 2026-03-26 clean-head inline-only falsifier closes that remaining escaped-char parser blocker:
+    - inlining the escaped-char path directly in `Lexer#next_token` while keeping the old `@processed_strings << buffer.to_slice` storage is sufficient to make the new reducer green, so the real root cause is the remaining helper-return boundary in `lex_char`, not generic slice ownership
+    - new regression script `regression_tests/stage2_abstract_escaped_char_parse_repro.sh` is green on clean head with `/tmp/stage1_release_29966272` vs `/tmp/stage2_release_head_charfix`
+    - the same clean-head candidate keeps `src/stdlib/io.cr --release --no-prelude --no-ast-cache` parse-only green and moves full `stage3` to `CRYSTAL_V2_STOP_AFTER_PARSE=1` green, while `CRYSTAL_V2_STOP_AFTER_HIR=1` is still red and now dies later during `src/stdlib/time.cr` parsing
 - **Fresh release bootstrap measurements**:
   - original compiler -> current `stage1 --release`: green in `525.13s real` (~8m45s), peak memory footprint `7230019776` bytes (`max resident set size 8062320640`)
   - current `stage1 --release` -> self-hosted `stage2 --release`: green in `[EXIT: 0] after ~163s`, `/usr/bin/time -l = 190.31s real`, output `/tmp/stage2_release_88dfb7f6`
@@ -207,6 +215,14 @@
     the first clean `stage1 -> stage2` failure is no longer the old MIR `Arithmetic overflow`; the next clean bootstrap blocker is now late LLVM/llc string-constant emission, currently reproducing as `constant expression type mismatch` on `c"ptr null,\00"` after `generate(io) done`
   - updated frontier after the ptr-zero string-constant hardening:
     the late `c"ptr null,\00"` length-mismatch class is now reduced and operationally fixed for clean `stage1 -> stage2 --debug`; the next useful operational checks are clean `stage1 -> stage2 --release` and then `stage2 -> stage3`, to see which frontier remains once this backend payload-corruption family is removed
+  - updated frontier after the fresh clean release bootstrap checkpoint:
+    detached `HEAD` `29966272` now gives clean `stage1 --release` green (`/tmp/stage1_release_29966272`, `546.50s real`, peak RSS `~8.12 GB`) and clean `stage2 --release` green (`/tmp/stage2_release_29966272`, `[EXIT: 0] after ~173s`), so stage2 is currently about `546.50 / 173 ≈ 3.16x` faster than stage1 on `src/crystal_v2.cr --release`
+  - updated frontier after the fresh clean release bootstrap checkpoint:
+    `stage2 -> stage3 --release` is still red, but no longer in MIR/LLVM: guarded `stage3` now dies at `[EXIT: 139] after ~2.34s`, `CRYSTAL_V2_STOP_AFTER_PARSE=1` is green, and `CRYSTAL_V2_STOP_AFTER_HIR=1` is red, so the active blocker is now in the parse/HIR corridor before MIR
+  - updated frontier after the parse-stderr falsifier:
+    a temporary clean-worktree gate that removed parse-phase `STDERR.puts/flush` from `CLI#parse_file_recursive` changed the stage3 failure shape but did not fix it; with that noise removed, LLDB on the new self-hosted compiler localizes the residual crash earlier and more cleanly to `libsystem_platform::_platform_memmove -> Frontend::StringPool#intern -> Frontend::Parser#parse_prefix`, so the strongest current root-cause cluster is parser/StringPool slice transport, not the old event-loop write path
+  - updated frontier after the escaped-char `lex_char` handoff fix:
+    the old clean stage3 parse blocker in `src/stdlib/io.cr` is closed; clean self-hosted stage2 now keeps `CRYSTAL_V2_STOP_AFTER_PARSE=1` green on `src/crystal_v2.cr --release`, and the next reducer needs to target the later `CRYSTAL_V2_STOP_AFTER_HIR=1` crash that currently reaches `src/stdlib/time.cr`
 
 ## VERIFIED: Fix `ptr 0` → `ptr null` in stage2 LLC
 
