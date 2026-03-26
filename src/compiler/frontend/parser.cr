@@ -126,6 +126,7 @@ module CrystalV2
 
           parser_init_trace("ctor1 token fill start")
           lexer.each_token(skip_trivia: !keep_trivia) { |token| @tokens << token }
+          normalize_preloaded_macro_expr_braces!
           parser_init_trace("ctor1 token fill done size=#{@tokens.size}")
           @lexer = nil
           @keep_trivia = keep_trivia
@@ -252,6 +253,7 @@ module CrystalV2
           @lib_depth = 0
           parser_init_trace("ctor2 token fill start")
           lexer.each_token(skip_trivia: !keep_trivia) { |token| @tokens << token }
+          normalize_preloaded_macro_expr_braces!
           parser_init_trace("ctor2 token fill done size=#{@tokens.size}")
           @lexer = nil
           @keep_trivia = keep_trivia
@@ -1070,54 +1072,67 @@ module CrystalV2
           elsif @index >= @tokens.size
             @index = @tokens.size - 1
           end
-          tok = @tokens[@index]
-          if @macro_mode == 0
-            case tok.kind
-            when Token::Kind::MacroExprStart
-              if macro_expr_as_braces?(@index)
-                span = tok.span
-                slice = tok.slice
-                if @macro_expr_synth_index != @index
-                  @tokens.insert(@index + 1, Token.new(Token::Kind::LBrace, slice, span))
-                  @macro_expr_synth_index = @index
-                end
-                return Token.new(Token::Kind::LBrace, slice, span)
-              end
-            when Token::Kind::MacroExprEnd
-              if (start_index = find_matching_macro_expr_start(@index)) && macro_expr_as_braces?(start_index)
-                span = tok.span
-                slice = tok.slice
-                if @macro_expr_synth_index != @index
-                  @tokens.insert(@index + 1, Token.new(Token::Kind::RBrace, slice, span))
-                  @macro_expr_synth_index = @index
-                end
-                return Token.new(Token::Kind::RBrace, slice, span)
+          @tokens[@index]
+        end
+
+        # Normalize brace-like `{{ ... }}` sequences once after token preload so
+        # the parser never mutates Array(Token) during current_token hot-paths.
+        private def normalize_preloaded_macro_expr_braces! : Nil
+          return if ::CrystalV2::Compiler::BootstrapEnv.enabled?("CRYSTAL_V2_DISABLE_MACRO_EXPR_BRACE_SYNTH")
+          return if @tokens.empty?
+
+          brace_like_starts = Hash(Int32, Bool).new
+          extra_tokens = 0
+          i = 0
+          while i < @tokens.size
+            if @tokens[i].kind == Token::Kind::MacroExprStart
+              brace_like = macro_expr_brace_heuristic(@tokens, i)
+              if brace_like
+                brace_like_starts[i] = true
+                extra_tokens += 2
               end
             end
+            i += 1
           end
-          tok
+          return if extra_tokens == 0
+
+          normalized = Array(Token).new(@tokens.size + extra_tokens)
+          macro_expr_stack = Array(Int32).new
+          i = 0
+          while i < @tokens.size
+            tok = @tokens[i]
+            case tok.kind
+            when Token::Kind::MacroExprStart
+              macro_expr_stack << i
+              if brace_like_starts[i]?
+                normalized << Token.new(Token::Kind::LBrace, tok.slice, tok.span)
+                normalized << Token.new(Token::Kind::LBrace, tok.slice, tok.span)
+              else
+                normalized << tok
+              end
+            when Token::Kind::MacroExprEnd
+              start_index = macro_expr_stack.empty? ? nil : macro_expr_stack.pop?
+              if start_index && brace_like_starts[start_index]?
+                normalized << Token.new(Token::Kind::RBrace, tok.slice, tok.span)
+                normalized << Token.new(Token::Kind::RBrace, tok.slice, tok.span)
+              else
+                normalized << tok
+              end
+            else
+              normalized << tok
+            end
+            i += 1
+          end
+
+          @tokens = normalized
         end
 
-        # Heuristic: decide if a `{{ ... }}` sequence should be treated as literal
-        # braces (tuple/hash) instead of a macro expression. We memoize by the
-        # start token index to keep the hot path cheap.
-        private def macro_expr_as_braces?(start_index : Int32) : Bool
-          return false if @macro_mode > 0
-          if cached = @macro_expr_brace_cache[start_index]?
-            return cached
-          end
-
-          brace_like = macro_expr_brace_heuristic(start_index)
-          @macro_expr_brace_cache[start_index] = brace_like
-          brace_like
-        end
-
-        private def macro_expr_brace_heuristic(start_index : Int32) : Bool
+        private def macro_expr_brace_heuristic(tokens : Array(Token), start_index : Int32) : Bool
           nest = 0
           i = start_index + 1
 
-          while i < @tokens.size
-            tok = @tokens[i]
+          while i < tokens.size
+            tok = tokens[i]
             case tok.kind
             when Token::Kind::MacroExprStart, Token::Kind::LBrace, Token::Kind::LBracket, Token::Kind::LParen
               nest += 1

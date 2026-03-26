@@ -3,6 +3,31 @@
 Updated: 2026-03-26
 Context: compiler/bootstrap/stage2-stability
 
+[LM-220|verified]: the late-moving self-hosted parse-only crashes were not
+primarily `time.cr` or source-fallback noise; one real cluster lived in
+`src/compiler/frontend/parser.cr` `Parser#current_token`, where brace-like
+`{{ ... }}` handling mutated the preloaded `Array(Token)` with
+`@tokens.insert(...)` on the hot path. The strongest falsifier was runtime-only
+on the same self-hosted probe binary: `CRYSTAL_V2_DISABLE_MACRO_EXPR_BRACE_SYNTH=1`
+moved `trivial-root + default prelude + CRYSTAL_V2_STOP_AFTER_PARSE=1` from
+`2/15` failures to `0/15`, and full `src/crystal_v2.cr --release +
+CRYSTAL_V2_STOP_AFTER_PARSE=1` from `1/5` to `0/5`. The verified code fix is
+to pre-normalize brace-like `{{ ... }}` pairs once after token preload and
+stop mutating the token array in `current_token`; fresh release
+`/tmp/stage2_release_macrobrace_normalized` still rebuilds green from
+`/tmp/stage1_release_29966272`, and `stage2_time_parse_repro.sh` turns green
+`5/5` on that fixed binary. Boundary/adversary:
+- this closes a real parser-storage family, but not the entire parse frontier;
+  repeated custom stats on the fixed binary still show residual failures
+  (`trivial-root + default prelude = 1/15`, full `src/crystal_v2.cr = 1/5`)
+  and the surviving full-project crash has moved later into
+  `src/compiler/semantic/types/*`
+- reusable lesson: if a self-hosted crash site keeps drifting forward while
+  isolated files stay green, search for hot-path mutation of preloaded
+  value-typed arrays and move that normalization to a one-time construction
+  pass before blaming the downstream file where the segfault finally lands
+{F/G/R: 0.95/0.78/0.93} [verified]
+
 [LM-219|verified]: self-hosted source-fallback require dedupe must avoid stdlib
 `Array#uniq` on large arrays. The new synthetic oracle
 `regression_tests/stage2_source_require_fallback_uniq_repro.sh` builds a

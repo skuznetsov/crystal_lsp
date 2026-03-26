@@ -3,6 +3,12 @@
 ## Current Status
 - **Branch**: `bootstrap-benchmark` (merged `inline-structs`)
 - **Regression baseline**: last broadly re-verified count from the earlier inline-struct phase was `87/88 + 18/20`; later parser/HIR/bootstrap changes have not re-established that full baseline yet
+- **Fresh macro-expr brace normalization (2026-03-26)**:
+  - the strongest falsifier finally separated root cause from `time.cr` noise: on the same self-hosted probe binary, runtime `CRYSTAL_V2_DISABLE_MACRO_EXPR_BRACE_SYNTH=1` moved `trivial-root + default prelude + CRYSTAL_V2_STOP_AFTER_PARSE=1` from `2/15` failures to `0/15`, and full `src/crystal_v2.cr --release + CRYSTAL_V2_STOP_AFTER_PARSE=1` from `1/5` to `0/5`
+  - that localized one real parse-only crash family to `src/compiler/frontend/parser.cr` `Parser#current_token`, specifically the hot-path brace synthesis that mutated `Array(Token)` with `@tokens.insert(...)` after preload
+  - the actual fix now pre-normalizes brace-like `{{ ... }}` pairs once after token preload and removes the hot-path token-array mutation entirely; fresh self-hosted release `/tmp/stage2_release_macrobrace_normalized` still builds green from `/tmp/stage1_release_29966272` in `[EXIT: 0] after ~167s`
+  - downstream signal moved exactly as expected: `bash regression_tests/stage2_time_parse_repro.sh /tmp/stage2_release_macrobrace_normalized` is now green (`not reproduced ... all 5 attempts`), and the old abstract-macro char oracle still stays green through `HIR`/`MIR` and only reaches the pre-existing `ll` diff
+  - this does **not** close the whole parse frontier: custom repeated stats on the fixed binary improved but remain non-zero (`trivial-root + default prelude = 1/15`, full `src/crystal_v2.cr --release = 1/5`), and the surviving full-project parse-only crash moved later from the old `time/unicode` corridor into `src/compiler/semantic/types/*` (latest observed failure at `array_type.cr` between `file exists, reading` and `read done`)
 - **Fresh nested-module HIR stabilization (2026-03-26)**:
   - earlier cache-version asymmetry in `register_nested_module` was real but secondary: probe-only `bump_module_defs_cache_version` alone left the minimal no-prelude `module A::B::C` carrier red
   - the actual stage3 blocker sat in the same function's `extend_nodes = body.compact_map { ... }` corridor: under self-hosted stage2, nested-module bodies with no `ExtendNode` members could still enter `extend_nodes.each`, and `lldb` showed the crash at `register_module_class_methods_for(ext.target, ...)` via `Pointer(Void)#target`
