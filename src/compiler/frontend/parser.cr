@@ -10035,8 +10035,9 @@ module CrystalV2
           @bracket_depth += 1 # Phase 103: entering brackets
           skip_whitespace_and_optional_newlines
 
-          elements_b = SmallVec(ExprId, 4).new
-          of_type_expr : ExprId? = nil
+          elements_b = ExprIdBuffer.new(4)
+          of_type_index = -1
+          has_of_type = false
 
           # Check for closing bracket (empty array)
           if current_token.kind == Token::Kind::RBracket
@@ -10048,16 +10049,18 @@ module CrystalV2
             if current_token.kind == Token::Kind::Of || (current_token.kind == Token::Kind::Identifier && slice_eq?(current_token.slice, "of"))
               advance
               skip_trivia
-              of_type_expr = parse_of_type_expression
+              of_type_index = parse_of_type_expression.index
+              has_of_type = true
             end
 
             closing_span = previous_token.try(&.span) || lbracket.span
             array_span = lbracket.span.cover(closing_span)
-            return @arena.add_typed(ArrayLiteralNode.new(
-              array_span,
-              elements_b.to_a,
-              of_type_expr
-            ))
+            elements = elements_b.to_a
+            if has_of_type
+              return @arena.add_typed(ArrayLiteralNode.new(array_span, elements, ExprId.new(of_type_index)))
+            else
+              return @arena.add_typed(ArrayLiteralNode.new(array_span, elements))
+            end
           end
 
           # Parse array elements
@@ -10146,14 +10149,16 @@ module CrystalV2
             advance
             skip_trivia
             of_type_expr = parse_of_type_expression
+            has_of_type = true
           end
 
           array_span = lbracket.span.cover(closing_bracket.span)
-          @arena.add_typed(ArrayLiteralNode.new(
-            array_span,
-            elements_b.to_a,
-            of_type_expr
-          ))
+          elements = elements_b.to_a
+          if has_of_type
+            @arena.add_typed(ArrayLiteralNode.new(array_span, elements, of_type_expr))
+          else
+            @arena.add_typed(ArrayLiteralNode.new(array_span, elements))
+          end
         end
 
         # Parse type expression after "of" keyword (e.g., `[] of Int32`, `[] of Int32 | String`)

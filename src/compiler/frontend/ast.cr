@@ -879,9 +879,22 @@ module CrystalV2
         end
 
         getter elements : Array(ExprId)
-        getter of_type : ExprId? # Phase 91: explicit type
+        @of_type_index : Int32
+        @has_of_type : Bool
 
-        def initialize(@span : Span, @elements : Array(ExprId), @of_type : ExprId? = nil)
+        def initialize(@span : Span, @elements : Array(ExprId))
+          @of_type_index = -1
+          @has_of_type = false
+        end
+
+        def initialize(@span : Span, @elements : Array(ExprId), of_type : ExprId)
+          @of_type_index = of_type.index
+          @has_of_type = true
+        end
+
+        def of_type : ExprId?
+          return nil unless @has_of_type
+          ExprId.new(@of_type_index)
         end
       end
 

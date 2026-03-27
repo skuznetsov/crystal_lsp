@@ -1547,7 +1547,11 @@ module CrystalV2
             span = read_span(io)
             elements = read_expr_id_array(io)
             of_type = read_optional_expr_id(io)
-            Frontend::ArrayLiteralNode.new(span, elements, of_type)
+            if expr = of_type
+              Frontend::ArrayLiteralNode.new(span, elements, expr)
+            else
+              Frontend::ArrayLiteralNode.new(span, elements)
+            end
 
           when .hash_literal_node?
             span = read_span(io)
