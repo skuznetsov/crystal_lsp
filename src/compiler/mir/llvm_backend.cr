@@ -2813,6 +2813,9 @@ module Crystal::MIR
       emit_raw "declare ptr @calloc(i64, i64)\n"
       emit_raw "declare ptr @realloc(ptr, i64)\n"
       emit_raw "declare void @free(ptr)\n"
+      {% if flag?(:darwin) %}
+        emit_raw "declare i64 @malloc_size(ptr)\n"
+      {% end %}
       emit_raw "declare i32 @printf(ptr, ...)\n"
       emit_raw "declare i32 @puts(ptr)\n"
       emit_raw "declare ptr @gets(ptr)\n"
@@ -2912,30 +2915,138 @@ module Crystal::MIR
 
       # ARC runtime — real reference counting with null safety
       # Layout: [i64 refcount][object data...], ptr points to object data (refcount at ptr-8)
+      #
+      # On Darwin we can cheaply check whether ptr-8 is the base of a malloc/calloc
+      # allocation before touching the header: malloc_size(raw) is non-zero for the
+      # managed raw pointer, and zero both for headerless runtime objects (raw points
+      # 8 bytes before the allocation) and for stack/static pointers. This avoids the
+      # old unsafe ptr-8 probe while letting true ARC objects reclaim memory again.
+      {% if flag?(:darwin) %}
+        # rc_inc (non-atomic): null-safe increment with raw-base validation.
+        emit_raw "define void @__crystal_v2_rc_inc(ptr %ptr) {\n"
+        emit_raw "  %is_null = icmp eq ptr %ptr, null\n"
+        emit_raw "  br i1 %is_null, label %done, label %guard\n"
+        emit_raw "guard:\n"
+        emit_raw "  %raw = getelementptr i8, ptr %ptr, i64 -8\n"
+        emit_raw "  %raw_size = call i64 @malloc_size(ptr %raw)\n"
+        emit_raw "  %has_header = icmp ne i64 %raw_size, 0\n"
+        emit_raw "  br i1 %has_header, label %check, label %done\n"
+        emit_raw "check:\n"
+        emit_raw "  %old = load i64, ptr %raw, align 8\n"
+        emit_raw "  %is_static = icmp uge i64 %old, 4611686018427387904\n"
+        emit_raw "  br i1 %is_static, label %done, label %inc\n"
+        emit_raw "inc:\n"
+        emit_raw "  %new = add i64 %old, 1\n"
+        emit_raw "  store i64 %new, ptr %raw, align 8\n"
+        emit_raw "  br label %done\n"
+        emit_raw "done:\n"
+        emit_raw "  ret void\n"
+        emit_raw "}\n\n"
 
-      # rc_inc (non-atomic): NO-OP for bootstrap safety.
-      # Many runtime-allocated objects lack the 8-byte ARC prefix, making ptr-8
-      # reads unsafe (page boundary crashes, memory corruption). Since stage2 is
-      # short-lived, skipping refcount management is safe.
-      emit_raw "define void @__crystal_v2_rc_inc(ptr %ptr) {\n"
-      emit_raw "  ret void\n"
-      emit_raw "}\n\n"
+        # rc_dec (non-atomic): null-safe decrement with raw-base validation, free at 0.
+        emit_raw "define void @__crystal_v2_rc_dec(ptr %ptr, ptr %destructor) {\n"
+        emit_raw "  %is_null = icmp eq ptr %ptr, null\n"
+        emit_raw "  br i1 %is_null, label %done, label %guard\n"
+        emit_raw "guard:\n"
+        emit_raw "  %raw = getelementptr i8, ptr %ptr, i64 -8\n"
+        emit_raw "  %raw_size = call i64 @malloc_size(ptr %raw)\n"
+        emit_raw "  %has_header = icmp ne i64 %raw_size, 0\n"
+        emit_raw "  br i1 %has_header, label %check, label %done\n"
+        emit_raw "check:\n"
+        emit_raw "  %old = load i64, ptr %raw, align 8\n"
+        emit_raw "  %is_static = icmp uge i64 %old, 4611686018427387904\n"
+        emit_raw "  br i1 %is_static, label %done, label %dec\n"
+        emit_raw "dec:\n"
+        emit_raw "  %new = sub i64 %old, 1\n"
+        emit_raw "  store i64 %new, ptr %raw, align 8\n"
+        emit_raw "  %should_free = icmp eq i64 %new, 0\n"
+        emit_raw "  br i1 %should_free, label %do_free, label %done\n"
+        emit_raw "do_free:\n"
+        emit_raw "  %has_dtor = icmp ne ptr %destructor, null\n"
+        emit_raw "  br i1 %has_dtor, label %call_dtor, label %free_only\n"
+        emit_raw "call_dtor:\n"
+        emit_raw "  call void %destructor(ptr %ptr)\n"
+        emit_raw "  br label %free_only\n"
+        emit_raw "free_only:\n"
+        emit_raw "  call void @free(ptr %raw)\n"
+        emit_raw "  br label %done\n"
+        emit_raw "done:\n"
+        emit_raw "  ret void\n"
+        emit_raw "}\n\n"
 
-      # rc_dec (non-atomic): NO-OP for bootstrap safety.
-      emit_raw "define void @__crystal_v2_rc_dec(ptr %ptr, ptr %destructor) {\n"
-      emit_raw "  ret void\n"
-      emit_raw "}\n\n"
+        # rc_inc_atomic: null-safe atomic increment with raw-base validation.
+        emit_raw "define void @__crystal_v2_rc_inc_atomic(ptr %ptr) {\n"
+        emit_raw "  %is_null = icmp eq ptr %ptr, null\n"
+        emit_raw "  br i1 %is_null, label %done, label %guard\n"
+        emit_raw "guard:\n"
+        emit_raw "  %raw = getelementptr i8, ptr %ptr, i64 -8\n"
+        emit_raw "  %raw_size = call i64 @malloc_size(ptr %raw)\n"
+        emit_raw "  %has_header = icmp ne i64 %raw_size, 0\n"
+        emit_raw "  br i1 %has_header, label %check, label %done\n"
+        emit_raw "check:\n"
+        emit_raw "  %old = load i64, ptr %raw, align 8\n"
+        emit_raw "  %is_static = icmp uge i64 %old, 4611686018427387904\n"
+        emit_raw "  br i1 %is_static, label %done, label %inc\n"
+        emit_raw "inc:\n"
+        emit_raw "  %old2 = atomicrmw add ptr %raw, i64 1 seq_cst\n"
+        emit_raw "  br label %done\n"
+        emit_raw "done:\n"
+        emit_raw "  ret void\n"
+        emit_raw "}\n\n"
 
-      # rc_inc_atomic: NO-OP for bootstrap safety.
-      emit_raw "define void @__crystal_v2_rc_inc_atomic(ptr %ptr) {\n"
-      emit_raw "  ret void\n"
-      emit_raw "}\n\n"
+        # rc_dec_atomic: null-safe atomic decrement with raw-base validation, free at 0.
+        emit_raw "define void @__crystal_v2_rc_dec_atomic(ptr %ptr, ptr %destructor) {\n"
+        emit_raw "  %is_null = icmp eq ptr %ptr, null\n"
+        emit_raw "  br i1 %is_null, label %done, label %guard\n"
+        emit_raw "guard:\n"
+        emit_raw "  %raw = getelementptr i8, ptr %ptr, i64 -8\n"
+        emit_raw "  %raw_size = call i64 @malloc_size(ptr %raw)\n"
+        emit_raw "  %has_header = icmp ne i64 %raw_size, 0\n"
+        emit_raw "  br i1 %has_header, label %check, label %done\n"
+        emit_raw "check:\n"
+        emit_raw "  %peek = load i64, ptr %raw, align 8\n"
+        emit_raw "  %is_static = icmp uge i64 %peek, 4611686018427387904\n"
+        emit_raw "  br i1 %is_static, label %done, label %dec\n"
+        emit_raw "dec:\n"
+        emit_raw "  %old = atomicrmw sub ptr %raw, i64 1 acq_rel\n"
+        emit_raw "  %should_free = icmp eq i64 %old, 1\n"
+        emit_raw "  br i1 %should_free, label %do_free, label %done\n"
+        emit_raw "do_free:\n"
+        emit_raw "  %has_dtor = icmp ne ptr %destructor, null\n"
+        emit_raw "  br i1 %has_dtor, label %call_dtor, label %free_only\n"
+        emit_raw "call_dtor:\n"
+        emit_raw "  call void %destructor(ptr %ptr)\n"
+        emit_raw "  br label %free_only\n"
+        emit_raw "free_only:\n"
+        emit_raw "  call void @free(ptr %raw)\n"
+        emit_raw "  br label %done\n"
+        emit_raw "done:\n"
+        emit_raw "  ret void\n"
+        emit_raw "}\n\n"
+        bootstrap_trace_puts "  [RT_DECL] after darwin rc runtime" if runtime_decl_trace
+      {% else %}
+        # rc_inc (non-atomic): NO-OP outside Darwin until a portable raw-base
+        # discriminator replaces the old unsafe ptr-8 probe.
+        emit_raw "define void @__crystal_v2_rc_inc(ptr %ptr) {\n"
+        emit_raw "  ret void\n"
+        emit_raw "}\n\n"
 
-      # rc_dec_atomic: NO-OP for bootstrap safety.
-      emit_raw "define void @__crystal_v2_rc_dec_atomic(ptr %ptr, ptr %destructor) {\n"
-      emit_raw "  ret void\n"
-      emit_raw "}\n\n"
-      STDERR.puts "  [RT_DECL] after rc stubs" if runtime_decl_trace
+        # rc_dec (non-atomic): NO-OP for portability safety.
+        emit_raw "define void @__crystal_v2_rc_dec(ptr %ptr, ptr %destructor) {\n"
+        emit_raw "  ret void\n"
+        emit_raw "}\n\n"
+
+        # rc_inc_atomic: NO-OP for portability safety.
+        emit_raw "define void @__crystal_v2_rc_inc_atomic(ptr %ptr) {\n"
+        emit_raw "  ret void\n"
+        emit_raw "}\n\n"
+
+        # rc_dec_atomic: NO-OP for portability safety.
+        emit_raw "define void @__crystal_v2_rc_dec_atomic(ptr %ptr, ptr %destructor) {\n"
+        emit_raw "  ret void\n"
+        emit_raw "}\n\n"
+        bootstrap_trace_puts "  [RT_DECL] after rc stubs" if runtime_decl_trace
+      {% end %}
 
       # Slab allocator - use calloc for zero-init
       emit_raw "define ptr @__crystal_v2_slab_alloc(i32 %size_class) {\n"
