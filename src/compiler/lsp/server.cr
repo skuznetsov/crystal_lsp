@@ -1740,7 +1740,6 @@ module CrystalV2
           end
           requires_ms = (Time.instant - requires_start).total_seconds * 1000
           analysis_program = program
-          analysis_program = wrap_program_with_file(program, path) if path
           # Convert parser diagnostics
           parser.diagnostics.each do |diag|
             diagnostics << Diagnostic.from_parser(diag)
@@ -1762,6 +1761,7 @@ module CrystalV2
             debug("Symbol collection complete")
 
             symbol_table = analyzer.global_context.symbol_table
+            hydrate_symbol_file_paths(symbol_table, path) if path
             inject_compiler_alias_bindings(symbol_table) if uses_compiler_module
 
             # Run name resolution even if parser reported diagnostics; useful for navigation
@@ -3038,6 +3038,54 @@ module CrystalV2
           @document_symbol_index[uri] = symbols
         end
 
+        private def hydrate_symbol_file_paths(symbol_table : Semantic::SymbolTable, file_path : String)
+          visited_tables = Set(UInt64).new
+          visited_symbols = Set(UInt64).new
+          hydrate_symbol_table_file_paths(symbol_table, File.expand_path(file_path), visited_tables, visited_symbols)
+        end
+
+        private def hydrate_symbol_table_file_paths(
+          table : Semantic::SymbolTable,
+          file_path : String,
+          visited_tables : Set(UInt64),
+          visited_symbols : Set(UInt64),
+        )
+          table_id = table.object_id
+          return if visited_tables.includes?(table_id)
+          visited_tables << table_id
+
+          table.each_local_symbol do |_name, symbol|
+            hydrate_symbol_file_path(symbol, file_path, visited_tables, visited_symbols)
+          end
+        end
+
+        private def hydrate_symbol_file_path(
+          symbol : Semantic::Symbol,
+          file_path : String,
+          visited_tables : Set(UInt64),
+          visited_symbols : Set(UInt64),
+        )
+          symbol_id = symbol.object_id
+          return if visited_symbols.includes?(symbol_id)
+          visited_symbols << symbol_id
+
+          symbol.file_path ||= file_path
+
+          case symbol
+          when Semantic::OverloadSetSymbol
+            symbol.overloads.each do |overload|
+              hydrate_symbol_file_path(overload, file_path, visited_tables, visited_symbols)
+            end
+          when Semantic::ClassSymbol
+            hydrate_symbol_table_file_paths(symbol.scope, file_path, visited_tables, visited_symbols)
+            hydrate_symbol_table_file_paths(symbol.class_scope, file_path, visited_tables, visited_symbols)
+          when Semantic::ModuleSymbol
+            hydrate_symbol_table_file_paths(symbol.scope, file_path, visited_tables, visited_symbols)
+          when Semantic::EnumSymbol
+            hydrate_symbol_table_file_paths(symbol.scope, file_path, visited_tables, visited_symbols)
+          end
+        end
+
         private def merge_dependency_symbol_tables(target : Semantic::SymbolTable, dependencies : Array(DocumentState))
           dependencies.each do |dep_state|
             next unless dep_table = dep_state.symbol_table
@@ -3452,6 +3500,44 @@ module CrystalV2
           end
 
           best_match
+        end
+
+        private def symbol_at_position(
+          doc_state : DocumentState,
+          line : Int32,
+          character : Int32,
+          expr_id : Frontend::ExprId,
+        ) : Semantic::Symbol?
+          return nil if expr_id.invalid?
+
+          arena = doc_state.program.arena
+          node = arena[expr_id]
+
+          case node
+          when Frontend::IncludeNode
+            unless node.target.invalid?
+              expr_id = node.target
+              node = arena[expr_id]
+            end
+          when Frontend::ExtendNode
+            unless node.target.invalid?
+              expr_id = node.target
+              node = arena[expr_id]
+            end
+          end
+
+          if node.is_a?(Frontend::PathNode)
+            if target_offset = position_to_offset(doc_state, line, character)
+              if symbol = resolve_path_segment_symbol(node, doc_state, target_offset)
+                return symbol
+              end
+            end
+          end
+
+          symbol = doc_state.identifier_symbols.try(&.[expr_id]?)
+          symbol ||= node_symbol_for(doc_state.program, expr_id)
+          symbol ||= resolve_type_definition_symbol(doc_state, expr_id)
+          symbol
         end
 
         # Prevent LLVM from inlining this large pattern-matching function
@@ -4968,18 +5054,7 @@ module CrystalV2
           debug("Found expr_id=#{expr_id.inspect}")
           return send_response(id, "null") unless expr_id
 
-          # Get symbol for this expression
-          identifier_symbols = doc_state.identifier_symbols
-
-          symbol : Semantic::Symbol? = nil
-          if identifier_symbols
-            symbol = identifier_symbols[expr_id]?
-          end
-
-          # Fallback: if symbol is nil, check if cursor is on a struct/class/module definition name
-          unless symbol
-            symbol = resolve_type_definition_symbol(doc_state, expr_id)
-          end
+          symbol = symbol_at_position(doc_state, line, character, expr_id)
 
           return send_response(id, "null") unless symbol
 
@@ -5009,17 +5084,7 @@ module CrystalV2
           expr_id = find_expr_at_position(doc_state, line, character)
           return send_response(id, "[]") unless expr_id
 
-          # Get symbol for this expression
-          identifier_symbols = doc_state.identifier_symbols
-          symbol : Semantic::Symbol? = nil
-          if identifier_symbols
-            symbol = identifier_symbols[expr_id]?
-          end
-
-          # Fallback: check if cursor is on a type definition name
-          unless symbol
-            symbol = resolve_type_definition_symbol(doc_state, expr_id)
-          end
+          symbol = symbol_at_position(doc_state, line, character, expr_id)
 
           return send_response(id, "[]") unless symbol
 
@@ -5151,12 +5216,7 @@ module CrystalV2
           expr_node = doc_state.program.arena[expr_id]
           debug("  Rename expr_id=#{expr_id.inspect} class=#{expr_node.class}")
 
-          # Get symbol for this expression
-          identifier_symbols = doc_state.identifier_symbols
-          return send_response(id, "null") unless identifier_symbols
-
-          symbol = identifier_symbols[expr_id]?
-          symbol ||= node_symbol_for(doc_state.program, expr_id)
+          symbol = symbol_at_position(doc_state, line, character, expr_id)
           debug("  Rename symbol=#{symbol ? symbol.class : "nil"}")
           return send_response(id, "null") unless symbol
 
@@ -5210,10 +5270,7 @@ module CrystalV2
           expr_id = find_expr_at_position(doc_state, line, character)
           return send_response(id, "null") unless expr_id
 
-          # Get symbol for this expression
-          identifier_symbols = doc_state.identifier_symbols
-          symbol = identifier_symbols ? identifier_symbols[expr_id]? : nil
-          symbol ||= node_symbol_for(doc_state.program, expr_id)
+          symbol = symbol_at_position(doc_state, line, character, expr_id)
           return send_response(id, "null") unless symbol
 
           if (uri_for_symbol = location_for_symbol(symbol).try(&.uri))
