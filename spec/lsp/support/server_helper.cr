@@ -18,7 +18,7 @@ module CrystalV2::Compiler::LSP
     # Prepare and cache a DocumentState for testing.
     # Returns the document URI.
     def spec_store_document(source : String, base_dir : String?, path : String)
-      diagnostics, program, type_context, identifier_symbols, symbol_table, requires =
+      diagnostics, program, type_context, identifier_symbols, symbol_table, requires, index =
         spec_analyze_document(source, base_dir, path)
 
       text_doc = TextDocumentItem.new(uri: file_uri(path), language_id: "crystal", version: 1, text: source)
@@ -29,8 +29,8 @@ module CrystalV2::Compiler::LSP
         identifier_symbols,
         symbol_table,
         requires,
-        nil,  # index
-        [] of Int32,  # line_offsets
+        index,
+        build_line_offsets(source),
         path
       )
       @documents[text_doc.uri] = doc_state
@@ -40,6 +40,12 @@ module CrystalV2::Compiler::LSP
         @documents[dep_uri] = dep_state
         register_document_symbols(dep_uri, dep_state)
       end
+      text_doc.uri
+    end
+
+    def spec_did_open_document(source : String, path : String) : String
+      text_doc = TextDocumentItem.new(uri: file_uri(path), language_id: "crystal", version: 1, text: source)
+      handle_did_open(JSON.parse(%({"textDocument":#{text_doc.to_json}})))
       text_doc.uri
     end
 

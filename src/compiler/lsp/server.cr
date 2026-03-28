@@ -3675,20 +3675,40 @@ module CrystalV2
         @[NoInline]
         private def refine_member_or_identifier(arena : Frontend::ArenaLike, expr_id : Frontend::ExprId, offset : Int32) : Frontend::ExprId?
           node = arena[expr_id]
-          case node
-          when Frontend::BlockNode, Frontend::CallNode, Frontend::DefNode
-            each_child_expr(arena, expr_id) do |child_id|
-              next if child_id.invalid?
-              child = arena[child_id]
-              next unless span_contains_offset?(child.span, offset)
-              if child.is_a?(Frontend::MemberAccessNode) || child.is_a?(Frontend::IdentifierNode) || child.is_a?(Frontend::PathNode)
-                return child_id
-              end
-              if nested = refine_member_or_identifier(arena, child_id, offset)
+          if node.is_a?(Frontend::MemberAccessNode)
+            object_id = node.object
+            if !object_id.invalid? && span_contains_offset?(arena[object_id].span, offset)
+              if nested = refine_member_or_identifier(arena, object_id, offset)
                 return nested
               end
             end
+            return expr_id
           end
+
+          if node.is_a?(Frontend::SafeNavigationNode)
+            object_id = node.object
+            if !object_id.invalid? && span_contains_offset?(arena[object_id].span, offset)
+              if nested = refine_member_or_identifier(arena, object_id, offset)
+                return nested
+              end
+            end
+            return expr_id
+          end
+
+          if node.is_a?(Frontend::IdentifierNode) ||
+             node.is_a?(Frontend::PathNode)
+            return expr_id
+          end
+
+          each_child_expr(arena, expr_id) do |child_id|
+            next if child_id.invalid?
+            child = arena[child_id]
+            next unless span_contains_offset?(child.span, offset)
+            if nested = refine_member_or_identifier(arena, child_id, offset)
+              return nested
+            end
+          end
+
           nil
         end
 
@@ -3923,6 +3943,52 @@ module CrystalV2
               end
             end
           end
+          nil
+        end
+
+        private def document_state_for_path(path : String) : DocumentState?
+          uri = file_uri(path)
+          @documents[uri]? || @dependency_documents[uri]?
+        end
+
+        private def definition_location_for_symbol(
+          symbol : Semantic::Symbol,
+          doc_state : DocumentState,
+          fallback_uri : String,
+          *,
+          path_segments : Array(String)? = nil,
+          method_name : String? = nil,
+        ) : Location?
+          if location = location_for_symbol(symbol) || location_for_prelude_symbol(symbol) || cached_location_for(symbol)
+            return location
+          end
+
+          if path_segments
+            if location = find_location_in_dependencies(doc_state, path_segments)
+              return location
+            end
+          end
+
+          if path = symbol.responds_to?(:file_path) ? symbol.file_path : nil
+            absolute_path = File.expand_path(path)
+
+            if method_name
+              if location = find_method_in_file(absolute_path, method_name)
+                return location
+              end
+            end
+
+            if foreign_doc = document_state_for_path(absolute_path)
+              return Location.from_symbol(symbol, foreign_doc.program, foreign_doc.text_document.uri)
+            end
+
+            if current_path = uri_to_path(fallback_uri)
+              if File.expand_path(current_path) == absolute_path
+                return Location.from_symbol(symbol, doc_state.program, fallback_uri)
+              end
+            end
+          end
+
           nil
         end
 
@@ -4194,6 +4260,27 @@ module CrystalV2
             end
           when Frontend::GroupingNode
             yield node.expression
+          when Frontend::AsNode
+            yield node.expression
+          when Frontend::AsQuestionNode
+            yield node.expression
+          when Frontend::IsANode
+            yield node.expression
+          when Frontend::RespondsToNode
+            yield node.expression
+            yield node.method_name
+          when Frontend::TypeofNode
+            node.args.each { |expr| yield expr }
+          when Frontend::SizeofNode
+            node.args.each { |expr| yield expr }
+          when Frontend::PointerofNode
+            node.args.each { |expr| yield expr }
+          when Frontend::OffsetofNode
+            node.args.each { |expr| yield expr }
+          when Frontend::AlignofNode
+            node.args.each { |expr| yield expr }
+          when Frontend::UninitializedNode
+            yield node.type
           when Frontend::ArrayLiteralNode
             node.elements.each { |expr| yield expr }
           when Frontend::TupleLiteralNode
@@ -4233,6 +4320,8 @@ module CrystalV2
             if value = node.value
               yield value unless value.invalid?
             end
+          when Frontend::VisibilityModifierNode
+            yield node.expression unless node.expression.invalid?
           when Frontend::DefNode
             if body = node.body
               body.each { |expr| yield expr }
@@ -4251,6 +4340,9 @@ module CrystalV2
             if named_args = node.named_args
               named_args.each { |arg| yield arg.value }
             end
+          when Frontend::GenericNode
+            yield node.base_type
+            node.type_args.each { |arg| yield arg }
           when Frontend::MacroExpressionNode
             yield node.expression
           when Frontend::MacroIfNode
@@ -4287,6 +4379,7 @@ module CrystalV2
           return send_response(id, "null") unless doc_state
 
           character = clamp_character(doc_state.text_document.text, line, character)
+          hover_offset = position_to_offset(doc_state, line, character)
 
           debug("Hover request: line=#{line}, char=#{character}")
           debug("Prelude state: #{current_prelude_label}")
@@ -4318,12 +4411,33 @@ module CrystalV2
           when Frontend::ExtendNode
             expr_id = node.target unless node.target.invalid?
             node = doc_state.program.arena[expr_id] unless expr_id.invalid?
+          when Frontend::MemberAccessNode
+            if hover_offset
+              object_id = node.object
+              unless object_id.invalid?
+                object_node = doc_state.program.arena[object_id]
+                if span_contains_offset?(object_node.span, hover_offset)
+                  expr_id = object_id
+                  node = object_node
+                end
+              end
+            end
+          when Frontend::SafeNavigationNode
+            if hover_offset
+              object_id = node.object
+              unless object_id.invalid?
+                object_node = doc_state.program.arena[object_id]
+                if span_contains_offset?(object_node.span, hover_offset)
+                  expr_id = object_id
+                  node = object_node
+                end
+              end
+            end
           when Frontend::PathNode
             # For PathNode, resolve the specific segment under cursor
             # e.g., hovering on M in M::A should show module M, not class A
-            target_offset = position_to_offset(doc_state, line, character)
-            if target_offset
-              symbol = resolve_path_segment_symbol(node, doc_state, target_offset)
+            if hover_offset
+              symbol = resolve_path_segment_symbol(node, doc_state, hover_offset)
             end
           end
           span = node.span
@@ -4384,6 +4498,12 @@ module CrystalV2
 
           debug("Hover method_symbol=#{method_symbol ? "#{method_symbol.name}(#{method_symbol.return_annotation.inspect})" : "nil"}")
           method_signature = method_symbol ? method_signature_for(method_symbol, doc_state, display_name) : nil
+          if method_signature.nil? && node.is_a?(Frontend::MemberAccessNode) && display_name
+            receiver_symbol = resolve_receiver_symbol(doc_state, node.object)
+            receiver_symbol ||= resolve_receiver_type_from_identifier(doc_state, node.object)
+            receiver_path = receiver_symbol.try(&.file_path)
+            method_signature = find_method_signature_by_text(doc_state, display_name, receiver_path)
+          end
           debug("Hover method_signature=#{method_signature.inspect}")
 
           type_str = type.try(&.to_s)
@@ -4429,6 +4549,39 @@ module CrystalV2
             end
 
             type_str = fallback_signature
+          end
+
+          if hover_offset
+            lexical_ident = identifier_at(doc_state.text_document.text, hover_offset)
+            lexical_ident ||= identifier_at(doc_state.text_document.text, hover_offset - 1) if hover_offset > 0
+
+            if lexical_ident
+              first_char = lexical_ident[0]?
+              is_localish = first_char && (first_char.lowercase? || first_char == '_')
+              if is_localish
+                if param_type = parameter_type_in_enclosing_callable(doc_state, lexical_ident, hover_offset)
+                  type_str = clean_type_name(param_type)
+                elsif assignment_type = preferred_local_assignment_type(doc_state, lexical_ident, hover_offset)
+                  type_str = assignment_type
+                elsif type_str.nil? || type_str == "Unknown" || node.is_a?(Frontend::DefNode)
+                  if inferred_type = resolve_type_name_for_identifier(doc_state, lexical_ident)
+                    cleaned = clean_type_name(inferred_type)
+                    if type_symbol = resolve_type_name_symbol(doc_state, cleaned)
+                      case type_symbol
+                      when Semantic::ClassSymbol
+                        type_str = format_class_symbol(type_symbol, doc_state)
+                      when Semantic::ModuleSymbol
+                        type_str = format_module_symbol(type_symbol, doc_state)
+                      else
+                        type_str = cleaned
+                      end
+                    else
+                      type_str = cleaned
+                    end
+                  end
+                end
+              end
+            end
           end
 
           if type_str.nil? && node.is_a?(Frontend::IdentifierNode)
@@ -4546,8 +4699,11 @@ module CrystalV2
               if method_style
                 location = find_method_location_by_text(doc_state, ident)
               elsif is_local_var
-                # Try efficient parameter lookup for local variables
-                location = definition_from_parameters_fast(ident, doc_state, offset)
+                location = parameter_location_in_enclosing_callable(doc_state, ident, offset)
+                location ||= indexed_scoped_var_location(doc_state, ident, offset)
+                location ||= definition_from_parameters_fast(ident, doc_state, offset)
+                location ||= definition_from_local_variable_in_enclosing_callable(ident, doc_state, offset)
+                location ||= definition_from_local_variable(ident, doc_state, offset)
               else
                 # Only do constant lookup for uppercase identifiers
                 location = definition_from_constant(ident, doc_state)
@@ -4741,6 +4897,19 @@ module CrystalV2
 
         # Resolve type name for an identifier string
         private def resolve_type_name_for_identifier(doc_state : DocumentState, ident : String) : String?
+          if identifier_symbols = doc_state.identifier_symbols
+            identifier_symbols.each_value do |sym|
+              next unless sym.is_a?(Semantic::VariableSymbol)
+              next unless sym.name == ident
+              if declared_type = sym.declared_type
+                return clean_type_name(declared_type)
+              end
+              if inferred = infer_type_from_assignment(doc_state, sym)
+                return clean_type_name(inferred)
+              end
+            end
+          end
+
           if symbol_table = doc_state.symbol_table
             symbol_table.each_local_symbol do |name, sym|
               if sym.is_a?(Semantic::VariableSymbol) && name == ident && sym.declared_type
@@ -4748,6 +4917,11 @@ module CrystalV2
               end
             end
           end
+
+          if inferred = infer_type_from_assignment_name(doc_state, ident)
+            return clean_type_name(inferred)
+          end
+
           nil
         end
 
@@ -4764,6 +4938,31 @@ module CrystalV2
             type_str = type_str[0...idx]
           end
           type_str.strip
+        end
+
+        private def meaningful_local_type_candidate(type_str : String?) : String?
+          return nil unless type_str
+
+          cleaned = clean_type_name(type_str)
+          return nil if cleaned.empty? || cleaned == "Nil" || cleaned == "Unknown"
+
+          cleaned
+        end
+
+        private def preferred_local_assignment_type(doc_state : DocumentState, name : String, target_offset : Int32) : String?
+          if candidate = meaningful_local_type_candidate(inferred_type_from_local_assignment(doc_state, name, target_offset))
+            return candidate
+          end
+
+          if candidate = meaningful_local_type_candidate(inferred_type_from_local_assignment_in_enclosing_callable(doc_state, name, target_offset))
+            return candidate
+          end
+
+          if candidate = meaningful_local_type_candidate(textual_assignment_type_in_enclosing_callable(doc_state, name, target_offset))
+            return candidate
+          end
+
+          nil
         end
 
         # Find the definition location for a type by name
@@ -6449,18 +6648,8 @@ module CrystalV2
         end
 
         private def macro_symbol_location(symbol : Semantic::MacroSymbol, doc_state : DocumentState) : Location?
-          if location = location_for_symbol(symbol)
-            return location
-          end
-          if location = location_for_prelude_symbol(symbol)
-            return location
-          end
-
-          if path = symbol.responds_to?(:file_path) ? symbol.file_path : nil
-            return cached_location_for(symbol) || Location.from_symbol(symbol, doc_state.program, file_uri(path))
-          end
-
-          cached_location_for(symbol) || Location.from_symbol(symbol, doc_state.program, doc_state.text_document.uri)
+          path_segments = symbol.name.includes?("::") ? symbol.name.split("::") : [symbol.name]
+          definition_location_for_symbol(symbol, doc_state, doc_state.text_document.uri, path_segments: path_segments)
         end
 
         private def find_definition_location(expr_id : Frontend::ExprId, doc_state : DocumentState, uri : String, depth : Int32 = 0, target_offset : Int32? = nil) : Location?
@@ -6494,25 +6683,36 @@ module CrystalV2
             end
             debug("Identifier symbol: #{symbol ? symbol.class : "nil"} (identifier_symbols nil?=#{identifier_symbols.nil?})")
             if symbol
-              if location = location_for_symbol(symbol)
-                return location
-              end
+              name_str = name_slice ? String.new(name_slice) : nil
               # For VariableSymbol (params/locals), try precise parameter lookup first
               # Location.from_symbol may return entire def span for method params
-              if symbol.is_a?(Semantic::VariableSymbol) && name_slice
+              if symbol.is_a?(Semantic::VariableSymbol) && name_str
                 name_str = String.new(name_slice)
                 if offset = target_offset
+                  if location = parameter_location_in_enclosing_callable(doc_state, name_str, offset)
+                    return location
+                  end
                   if location = definition_from_parameters_fast(name_str, doc_state, offset)
                     return location
                   end
                   if location = definition_from_parameters(name_str, doc_state, offset)
                     return location
                   end
+                  if location = definition_from_local_variable_in_enclosing_callable(name_str, doc_state, offset)
+                    return location
+                  end
+                  if location = definition_from_local_variable(name_str, doc_state, offset)
+                    return location
+                  end
                 end
+              end
+              path_segments = symbol.name.includes?("::") ? symbol.name.split("::") : [symbol.name]
+              if location = definition_location_for_symbol(symbol, doc_state, uri, path_segments: path_segments)
+                return location
               end
               # Block/proc parameters have invalid node_id - fall through to parameter lookup
               unless symbol.node_id.invalid?
-                return cached_location_for(symbol) || Location.from_symbol(symbol, doc_state.program, uri)
+                return Location.from_symbol(symbol, doc_state.program, uri)
               end
             end
 
@@ -6530,7 +6730,16 @@ module CrystalV2
                 end
                 # Local variables/parameters: try efficient parameter lookup
                 # Uses find_enclosing_def which traverses from roots (not O(n) arena scan)
+                if location = parameter_location_in_enclosing_callable(doc_state, name_str, offset)
+                  return location
+                end
                 if location = definition_from_parameters_fast(name_str, doc_state, offset)
+                  return location
+                end
+                if location = definition_from_local_variable_in_enclosing_callable(name_str, doc_state, offset)
+                  return location
+                end
+                if location = definition_from_local_variable(name_str, doc_state, offset)
                   return location
                 end
                 # Might be a method call without receiver (implicit self) - check before giving up
@@ -7282,6 +7491,36 @@ module CrystalV2
           best_location
         end
 
+        private def callable_body_exprs(callable : Frontend::TypedNode) : Array(Frontend::ExprId)?
+          case callable
+          when Frontend::DefNode
+            callable.body
+          when Frontend::BlockNode
+            callable.body
+          when Frontend::ProcLiteralNode
+            callable.body
+          else
+            nil
+          end
+        end
+
+        private def definition_from_local_variable_in_enclosing_callable(name : String, doc_state : DocumentState, target_offset : Int32) : Location?
+          callable = enclosing_callable_at_offset(doc_state, target_offset)
+          return nil unless callable
+
+          body = callable_body_exprs(callable)
+          return nil unless body
+
+          arena = doc_state.program.arena
+          body.each do |expr_id|
+            if location = find_assignment_in_expr(arena, expr_id, name, doc_state.text_document.uri, target_offset)
+              return location
+            end
+          end
+
+          nil
+        end
+
         # Recursively search for assignment to variable with given name
         private def find_assignment_in_expr(
           arena : Frontend::ArenaLike,
@@ -7436,6 +7675,91 @@ module CrystalV2
           best_location
         end
 
+        private def inferred_type_from_local_assignment_in_enclosing_callable(doc_state : DocumentState, name : String, target_offset : Int32) : String?
+          callable = enclosing_callable_at_offset(doc_state, target_offset)
+          return nil unless callable
+
+          body = callable_body_exprs(callable)
+          return nil unless body
+
+          arena = doc_state.program.arena
+          best_type = nil
+          best_offset = -1
+
+          body.each do |expr_id|
+            if result = find_assignment_type_in_expr(arena, expr_id, name, target_offset, doc_state.type_context)
+              type_name, assignment_offset = result
+              if assignment_offset > best_offset
+                best_offset = assignment_offset
+                best_type = type_name
+              end
+            end
+          end
+
+          best_type
+        end
+
+        private def inferred_type_from_local_assignment(doc_state : DocumentState, name : String, target_offset : Int32) : String?
+          program = doc_state.program
+          arena = program.arena
+          target_path = doc_state.path
+          best_type = nil
+          best_offset = -1
+
+          program.roots.each do |root_id|
+            next unless expr_in_document?(program, root_id, target_path)
+            if result = find_assignment_type_in_expr(arena, root_id, name, target_offset, doc_state.type_context)
+              type_name, assignment_offset = result
+              if assignment_offset > best_offset
+                best_offset = assignment_offset
+                best_type = type_name
+              end
+            end
+          end
+
+          best_type
+        end
+
+        private def find_assignment_type_in_expr(
+          arena : Frontend::ArenaLike,
+          expr_id : Frontend::ExprId,
+          name : String,
+          target_offset : Int32,
+          type_context : Semantic::TypeContext?,
+        ) : {String, Int32}?
+          Watchdog.check!
+          return nil if expr_id.invalid?
+
+          node = arena[expr_id]
+          case node
+          when Frontend::AssignNode
+            target = arena[node.target]
+            if target.is_a?(Frontend::IdentifierNode)
+              target_name = target.name
+              if target_name && String.new(target_name) == name && node.span.start_offset < target_offset
+                if constructor_type = extract_type_from_constructor(arena, node.value)
+                  return {clean_type_name(constructor_type), node.span.start_offset}
+                end
+                if type_context
+                  if inferred_type = type_context.get_type(node.value)
+                    return {clean_type_name(inferred_type.to_s), node.span.start_offset}
+                  end
+                end
+              end
+            end
+
+            return find_assignment_type_in_expr(arena, node.value, name, target_offset, type_context)
+          else
+            each_child_expr(arena, expr_id) do |child_id|
+              if result = find_assignment_type_in_expr(arena, child_id, name, target_offset, type_context)
+                return result
+              end
+            end
+          end
+
+          nil
+        end
+
         private def indexed_scoped_var_location(doc_state : DocumentState, name : String, target_offset : Int32?) : Location?
           index = doc_state.index
           return nil unless index && target_offset
@@ -7559,18 +7883,18 @@ module CrystalV2
                 end
               end
             end
-            if location = location_for_symbol(receiver_symbol) || location_for_prelude_symbol(receiver_symbol)
+            receiver_segments = receiver_symbol.name.includes?("::") ? receiver_symbol.name.split("::") : [receiver_symbol.name]
+            if location = definition_location_for_symbol(receiver_symbol, doc_state, uri, path_segments: receiver_segments)
               return location
             end
-            # Fallback: point to the receiver symbol itself (e.g., class definition)
-            return cached_location_for(receiver_symbol) || Location.from_symbol(receiver_symbol, doc_state.program, uri)
+            return nil
           end
 
           if method_symbol = resolve_member_access_method_symbol(node, doc_state)
-            if location = location_for_symbol(method_symbol) || location_for_prelude_symbol(method_symbol)
+            if location = definition_location_for_symbol(method_symbol, doc_state, uri, method_name: method_name)
               return location
             end
-            return cached_location_for(method_symbol) || Location.from_symbol(method_symbol, doc_state.program, uri)
+            return nil
           end
 
           if method_symbol.nil? && receiver_symbol.nil?
@@ -7604,7 +7928,8 @@ module CrystalV2
           # navigate to the constant/enum definition instead of finding wrong matches
           builtin_enum_methods = {"value", "to_s", "to_i", "to_i32", "to_i64"}
           if receiver_symbol.is_a?(Semantic::ConstantSymbol) && builtin_enum_methods.includes?(method_name)
-            return cached_location_for(receiver_symbol) || Location.from_symbol(receiver_symbol, doc_state.program, uri)
+            receiver_segments = receiver_symbol.name.includes?("::") ? receiver_symbol.name.split("::") : [receiver_symbol.name]
+            return definition_location_for_symbol(receiver_symbol, doc_state, uri, path_segments: receiver_segments)
           end
 
           # If receiver is a path expression (like SymbolKind::Class) and method is a built-in
@@ -7840,43 +8165,41 @@ module CrystalV2
                 # First check for nested types (modules, classes, structs/annotations)
                 if scope = get_symbol_scope(receiver_symbol)
                   if nested_type = find_nested_type_in_scope(scope, member_name)
-                    if location = location_for_symbol(nested_type)
+                    if location = definition_location_for_symbol(nested_type, doc_state, uri, path_segments: segments)
                       return location
                     end
-                    return cached_location_for(nested_type) || Location.from_symbol(nested_type, doc_state.program, uri)
+                    return nil
                   end
                 end
                 # Then check for methods
                 if receiver_symbol.is_a?(Semantic::ClassSymbol)
                   if method_symbol = find_class_method_in_hierarchy(receiver_symbol, member_name, doc_state.symbol_table)
-                    if location = location_for_symbol(method_symbol)
+                    if location = definition_location_for_symbol(method_symbol, doc_state, uri, method_name: member_name)
                       return location
                     end
-                    return cached_location_for(method_symbol) || Location.from_symbol(method_symbol, doc_state.program, uri)
+                    return nil
                   end
                 elsif receiver_symbol.is_a?(Semantic::ModuleSymbol)
                   if method_symbol = find_method_in_scope(receiver_symbol.scope, member_name)
-                    if location = location_for_symbol(method_symbol)
+                    if location = definition_location_for_symbol(method_symbol, doc_state, uri, method_name: member_name)
                       return location
                     end
-                    return cached_location_for(method_symbol) || Location.from_symbol(method_symbol, doc_state.program, uri)
+                    return nil
                   end
                 end
               end
             end
 
             if symbol = resolve_path_symbol(doc_state, segments)
-              if location = location_for_symbol(symbol)
+              if location = definition_location_for_symbol(symbol, doc_state, uri, path_segments: segments)
                 return location
               end
-              return cached_location_for(symbol) || Location.from_symbol(symbol, doc_state.program, uri)
             end
 
             if symbol = find_symbol_by_segments(segments)
-              if location = location_for_symbol(symbol)
+              if location = definition_location_for_symbol(symbol, doc_state, uri, path_segments: segments)
                 return location
               end
-              return cached_location_for(symbol) || Location.from_symbol(symbol, doc_state.program, uri)
             end
 
             if location = find_location_in_dependencies(doc_state, segments)
@@ -7963,10 +8286,10 @@ module CrystalV2
           method_symbol = resolve_safe_navigation_method_symbol(node, doc_state)
           return nil unless method_symbol
 
-          if location = location_for_symbol(method_symbol)
+          if location = definition_location_for_symbol(method_symbol, doc_state, uri, method_name: method_symbol.name)
             return location
           end
-          cached_location_for(method_symbol) || Location.from_symbol(method_symbol, doc_state.program, uri)
+          nil
         end
 
         private def resolve_safe_navigation_method_symbol(node : Frontend::SafeNavigationNode, doc_state : DocumentState) : Semantic::MethodSymbol?
@@ -8101,10 +8424,10 @@ module CrystalV2
           target_offset : Int32?,
         ) : Location?
           if method_symbol = resolve_call_method_symbol(node, doc_state)
-            if location = location_for_symbol(method_symbol)
+            if location = definition_location_for_symbol(method_symbol, doc_state, uri, method_name: method_symbol.name)
               return location
             end
-            return cached_location_for(method_symbol) || Location.from_symbol(method_symbol, doc_state.program, uri)
+            return nil
           end
 
           callee_id = node.callee
@@ -8344,17 +8667,15 @@ module CrystalV2
           # Split path by :: (e.g., "JSON::Serializable" -> ["JSON", "Serializable"])
           segments = name.includes?("::") ? name.split("::") : [name]
           if symbol = resolve_path_symbol(doc_state, segments)
-            if location = location_for_symbol(symbol)
+            if location = definition_location_for_symbol(symbol, doc_state, doc_state.text_document.uri, path_segments: segments)
               return location
             end
-            return cached_location_for(symbol) || Location.from_symbol(symbol, doc_state.program, doc_state.text_document.uri)
           end
 
           if symbol = find_symbol_by_segments(segments)
-            if location = location_for_symbol(symbol)
+            if location = definition_location_for_symbol(symbol, doc_state, doc_state.text_document.uri, path_segments: segments)
               return location
             end
-            return cached_location_for(symbol) || Location.from_symbol(symbol, doc_state.program, doc_state.text_document.uri)
           end
 
           if prelude = @prelude_state
@@ -8491,6 +8812,15 @@ module CrystalV2
 
         @[NoInline]
         private def resolve_receiver_symbol(doc_state : DocumentState, expr_id : Frontend::ExprId) : Semantic::Symbol?
+          if identifier_symbols = doc_state.identifier_symbols
+            if symbol = identifier_symbols[expr_id]?
+              case symbol
+              when Semantic::ClassSymbol, Semantic::ModuleSymbol, Semantic::ConstantSymbol
+                return symbol
+              end
+            end
+          end
+
           arena = doc_state.program.arena
           node = arena[expr_id]
           segments = case node
@@ -8553,21 +8883,7 @@ module CrystalV2
 
           return nil unless type_name
 
-          # Resolve the type name to a ClassSymbol
-          # Try document symbol table first, then prelude
-          if doc_table = doc_state.symbol_table
-            if class_sym = doc_table.lookup(type_name).as?(Semantic::ClassSymbol)
-              return class_sym
-            end
-          end
-
-          if prelude_table = @prelude_state.try(&.symbol_table)
-            if class_sym = prelude_table.lookup(type_name).as?(Semantic::ClassSymbol)
-              return class_sym
-            end
-          end
-
-          nil
+          resolve_type_name_symbol(doc_state, type_name).as?(Semantic::ClassSymbol)
         end
 
         # Infer type from assignment pattern (e.g., var = ClassName.new)
@@ -8580,6 +8896,48 @@ module CrystalV2
             next if root_id.invalid?
             if type_name = find_type_in_assignment(arena, root_id, var_symbol.name)
               return type_name
+            end
+          end
+
+          nil
+        end
+
+        private def infer_type_from_assignment_name(doc_state : DocumentState, var_name : String) : String?
+          arena = doc_state.program.arena
+
+          doc_state.program.roots.each do |root_id|
+            next if root_id.invalid?
+            if type_name = find_type_in_assignment(arena, root_id, var_name)
+              return type_name
+            end
+          end
+
+          nil
+        end
+
+        private def resolve_type_name_symbol(doc_state : DocumentState, type_name : String) : Semantic::Symbol?
+          segments = type_name.includes?("::") ? type_name.split("::") : [type_name]
+
+          if symbol = resolve_path_symbol(doc_state, segments)
+            return symbol
+          end
+
+          if symbol = find_symbol_by_segments(segments)
+            return symbol
+          end
+
+          if doc_table = doc_state.symbol_table
+            if symbol = doc_table.lookup(type_name)
+              return symbol
+            end
+          end
+
+          if prelude_table = @prelude_state.try(&.symbol_table)
+            if symbol = resolve_path_symbol_in_table(prelude_table, segments)
+              return symbol
+            end
+            if symbol = prelude_table.lookup(type_name)
+              return symbol
             end
           end
 
@@ -8653,6 +9011,10 @@ module CrystalV2
         private def extract_type_from_constructor(arena : Frontend::ArenaLike, expr_id : Frontend::ExprId) : String?
           node = arena[expr_id]
           case node
+          when Frontend::AsNode
+            String.new(node.target_type)
+          when Frontend::AsQuestionNode
+            "#{String.new(node.target_type)}?"
           when Frontend::CallNode
             # Check if this is a .new call
             callee = arena[node.callee]
@@ -8683,6 +9045,90 @@ module CrystalV2
                 segments = collect_path_segments(arena, obj)
                 return segments.join("::")
               end
+            end
+          end
+
+          nil
+        end
+
+        private def enclosing_callable_at_offset(doc_state : DocumentState, target_offset : Int32) : Frontend::TypedNode?
+          arena = doc_state.program.arena
+          path = doc_state.path
+          best_node = nil
+          best_size = Int32::MAX
+
+          i = 0
+          while i < arena.size
+            expr_id = Frontend::ExprId.new(i)
+            node = arena[expr_id]
+            case node
+            when Frontend::DefNode, Frontend::BlockNode, Frontend::ProcLiteralNode
+              if path
+                if virtual = arena.as?(Frontend::VirtualArena)
+                  file = virtual.file_for_id(expr_id)
+                  if file && File.expand_path(file) != path
+                    i += 1
+                    next
+                  end
+                end
+              end
+
+              span = node.span
+              if span_contains_offset?(span, target_offset)
+                size = span.end_offset - span.start_offset
+                if size < best_size
+                  best_size = size
+                  best_node = node
+                end
+              end
+            end
+            i += 1
+          end
+
+          best_node
+        end
+
+        private def parameter_location_in_enclosing_callable(doc_state : DocumentState, name : String, target_offset : Int32) : Location?
+          callable = enclosing_callable_at_offset(doc_state, target_offset)
+          return nil unless callable
+
+          params = case callable
+                   when Frontend::DefNode         then callable.params
+                   when Frontend::BlockNode       then callable.params
+                   when Frontend::ProcLiteralNode then callable.params
+                   else                                nil
+                   end
+          return nil unless params
+
+          params.each do |param|
+            p_name = param.name
+            next unless p_name
+            next unless String.new(p_name) == name
+            span = param.name_span || param.span
+            return Location.new(uri: doc_state.text_document.uri, range: Range.from_span(span))
+          end
+
+          nil
+        end
+
+        private def parameter_type_in_enclosing_callable(doc_state : DocumentState, name : String, target_offset : Int32) : String?
+          callable = enclosing_callable_at_offset(doc_state, target_offset)
+          return nil unless callable
+
+          params = case callable
+                   when Frontend::DefNode         then callable.params
+                   when Frontend::BlockNode       then callable.params
+                   when Frontend::ProcLiteralNode then callable.params
+                   else                                nil
+                   end
+          return nil unless params
+
+          params.each do |param|
+            p_name = param.name
+            next unless p_name
+            next unless String.new(p_name) == name
+            if type_annotation = param.type_annotation
+              return String.new(type_annotation)
             end
           end
 
@@ -8778,6 +9224,27 @@ module CrystalV2
               end
             end
           end
+          nil
+        end
+
+        private def find_method_signature_by_text(doc_state : DocumentState, method_name : String, receiver_path : String? = nil) : String?
+          if receiver_path && File.file?(receiver_path)
+            if signature = find_method_signature_in_file(receiver_path, method_name)
+              return signature
+            end
+          end
+
+          collect_dependency_paths(doc_state).each do |path|
+            next unless File.file?(path)
+            if signature = find_method_signature_in_file(path, method_name)
+              return signature
+            elsif method_name == "new"
+              if signature = find_method_signature_in_file(path, "initialize", display_name: "new")
+                return signature
+              end
+            end
+          end
+
           nil
         end
 
@@ -8894,6 +9361,61 @@ module CrystalV2
             line_index += 1
           end
           @method_file_cache[cache_key] = nil
+          nil
+        end
+
+        private def find_method_signature_in_file(path : String, method_name : String, display_name : String? = nil) : String?
+          deadline = Time.instant + 100.milliseconds
+          text = File.read(path)
+          pattern = /def\s+(?:self\.|[A-Za-z0-9_:]+\.)?#{Regex.escape(method_name)}\b/
+
+          text.each_line do |line|
+            Watchdog.check!
+            break if Time.instant > deadline
+            stripped = line.lstrip
+            next if stripped.starts_with?('#')
+            next unless pattern.matches?(line)
+
+            signature = stripped.chomp
+            return apply_signature_display_name(signature, method_name, display_name)
+          end
+
+          nil
+        rescue
+          nil
+        end
+
+        private def textual_assignment_type_in_enclosing_callable(doc_state : DocumentState, name : String, target_offset : Int32) : String?
+          callable = enclosing_callable_at_offset(doc_state, target_offset)
+          return nil unless callable
+
+          span = callable.span
+          source = doc_state.text_document.text
+          slice_end = Math.min(target_offset, span.end_offset)
+          return nil if slice_end <= span.start_offset
+
+          visible_source = source.byte_slice(span.start_offset, slice_end - span.start_offset)
+          assign_pattern = /^\s*#{Regex.escape(name)}\s*=\s*(.+)$/
+
+          last_rhs = nil
+          visible_source.each_line do |line|
+            if match = assign_pattern.match(line)
+              last_rhs = match[1].strip
+            end
+          end
+
+          return nil unless last_rhs
+
+          if match = /\.as\?\(([^)]+)\)/.match(last_rhs)
+            return clean_type_name(match[1].strip)
+          end
+          if match = /\.as\?\s+([A-Za-z0-9_:?]+)/.match(last_rhs)
+            return clean_type_name(match[1].strip)
+          end
+          if match = /\b([A-Z][A-Za-z0-9_:]*)\.new\b/.match(last_rhs)
+            return clean_type_name(match[1])
+          end
+
           nil
         end
 
