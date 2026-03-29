@@ -129,6 +129,7 @@
     - generated-body diagnostics now also point back to the originating macro call-site, so the old gap “shadow sees generated text but loses the origin call-site” is stale on the current tree
     - cross-file generated-body diagnostics now also point back to the macro definition site, so the old gap “shadow knows the call-site but not which macro body generated this code” is stale on the current tree
     - origin notes now live in first-class diagnostic metadata (`related_spans` / `secondary_spans`) instead of ad-hoc CLI string concatenation, so the provenance contract is less fragile
+    - generated provenance now also has a unified analyzer-side lookup (`generated_info_for`) instead of forcing telemetry/formatting to stitch together several hash tables by hand
     - the next honest work item is no longer macro-call parity, top-level generated-body traversal, generated snippet visibility, or macro-call origin notes; it is broader expanded-node ownership/provenance and how far aggregate-backed shadow can carry diagnostics/contracts without pretending to be lowering
     - replacing reparse-based aggregation is still more honest follow-up than reopening Phase 1 identity questions
 - **Fresh stage3 split: trustworthy current-debug hosts can again build `stage2 --release` green, but resulting self-hosted stage2 runtime is still broken and now clearly splits into multiple families (2026-03-28, current session)**:

@@ -12,6 +12,11 @@ module CrystalV2
     module Semantic
       class Analyzer
         alias Program = Frontend::Program
+        record GeneratedNodeInfo,
+          root_id : ExprId,
+          source : String?,
+          origin_node_id : ExprId?,
+          macro_definition_node_id : ExprId?
 
         getter program : Program
         getter global_context : Context
@@ -82,38 +87,41 @@ module CrystalV2
           @program.roots.size + @generated_top_level_roots.size
         end
 
-        def generated_source_for(node_id : ExprId) : String?
+        def generated_info_for(node_id : ExprId) : GeneratedNodeInfo?
           return nil if node_id.invalid?
           node_index = node_id.index
-          if source = @generated_root_sources[node_index]?
-            return source
-          end
-          return nil unless root_index = @generated_root_by_node[node_index]?
-          @generated_root_sources[root_index]?
+
+          root_index = if @generated_root_sources.has_key?(node_index) ||
+                          @generated_root_origins.has_key?(node_index) ||
+                          @generated_root_macro_defs.has_key?(node_index)
+                         node_index
+                       else
+                         @generated_root_by_node[node_index]?
+                       end
+          return nil unless root_index
+
+          GeneratedNodeInfo.new(
+            ExprId.new(root_index),
+            @generated_root_sources[root_index]?,
+            @generated_root_origins[root_index]?,
+            @generated_root_macro_defs[root_index]?,
+          )
+        end
+
+        def generated_source_for(node_id : ExprId) : String?
+          generated_info_for(node_id).try(&.source)
         end
 
         def generated_origin_for(node_id : ExprId) : ExprId?
-          return nil if node_id.invalid?
-          node_index = node_id.index
-          if origin = @generated_root_origins[node_index]?
-            return origin
-          end
-          return nil unless root_index = @generated_root_by_node[node_index]?
-          @generated_root_origins[root_index]?
+          generated_info_for(node_id).try(&.origin_node_id)
         end
 
         def generated_node?(node_id : ExprId) : Bool
-          !generated_origin_for(node_id).nil?
+          !generated_info_for(node_id).nil?
         end
 
         def generated_macro_definition_for(node_id : ExprId) : ExprId?
-          return nil if node_id.invalid?
-          node_index = node_id.index
-          if macro_def = @generated_root_macro_defs[node_index]?
-            return macro_def
-          end
-          return nil unless root_index = @generated_root_by_node[node_index]?
-          @generated_root_macro_defs[root_index]?
+          generated_info_for(node_id).try(&.macro_definition_node_id)
         end
       end
     end

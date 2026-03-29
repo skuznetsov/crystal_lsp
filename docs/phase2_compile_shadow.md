@@ -107,6 +107,11 @@ explicit generated-origin mapping carried by the analyzer (`generated_origin_for
 / `generated_node?`). The generated source text map is still used only for
 formatting `... [generated]` snippets, not for provenance classification.
 
+That shadow-only metadata now also has a unified analyzer lookup:
+`generated_info_for(node_id)`, which bundles the generated root, generated
+source text, macro call origin, and macro definition site into one provenance
+record for downstream telemetry/formatting code.
+
 On the current tree, that top-level macro gap is now closed for the semantic
 symbol table: a no-prelude carrier with a top-level `{% for %}` that generates
 two methods now reports `collector_total=3` and `semantic_total=3` for methods.

@@ -5729,7 +5729,8 @@ module CrystalV2
         aggregate : Semantic::CompileShadowAggregate,
         analyzer : Semantic::Analyzer
       ) : Frontend::RelatedSpan?
-        return nil unless origin_node_id = analyzer.generated_origin_for(node_id)
+        return nil unless info = analyzer.generated_info_for(node_id)
+        return nil unless origin_node_id = info.origin_node_id
         return nil unless origin_path = aggregate.path_for(origin_node_id)
         origin_span = aggregate.program.arena[origin_node_id].span
         Frontend::RelatedSpan.new(origin_span, "expanded from macro call here", origin_node_id, origin_path)
@@ -5740,9 +5741,10 @@ module CrystalV2
         aggregate : Semantic::CompileShadowAggregate,
         analyzer : Semantic::Analyzer
       ) : Frontend::RelatedSpan?
-        return nil unless macro_def_node_id = analyzer.generated_macro_definition_for(node_id)
+        return nil unless info = analyzer.generated_info_for(node_id)
+        return nil unless macro_def_node_id = info.macro_definition_node_id
         return nil unless macro_def_path = aggregate.path_for(macro_def_node_id)
-        if origin_node_id = analyzer.generated_origin_for(node_id)
+        if origin_node_id = info.origin_node_id
           if origin_path = aggregate.path_for(origin_node_id)
             return nil if origin_path == macro_def_path
           end
@@ -5758,19 +5760,21 @@ module CrystalV2
         sources_by_path : Hash(String, String)
       ) : String
         if primary_node_id = diagnostic.primary_node_id
-          if generated_source = analyzer.generated_source_for(primary_node_id)
-            display_path = shadow_generated_display_path(aggregate.path_for(primary_node_id))
-            secondary_spans = diagnostic.secondary_spans
-            if related = shadow_generated_origin_related_span(primary_node_id, aggregate, analyzer)
-              secondary_spans = secondary_spans + [Semantic::SecondarySpan.new(related.span, related.label, related.node_id, related.file_path)]
+          if info = analyzer.generated_info_for(primary_node_id)
+            if generated_source = info.source
+              display_path = shadow_generated_display_path(aggregate.path_for(primary_node_id))
+              secondary_spans = diagnostic.secondary_spans
+              if related = shadow_generated_origin_related_span(primary_node_id, aggregate, analyzer)
+                secondary_spans = secondary_spans + [Semantic::SecondarySpan.new(related.span, related.label, related.node_id, related.file_path)]
+              end
+              if related = shadow_generated_macro_definition_related_span(primary_node_id, aggregate, analyzer)
+                secondary_spans = secondary_spans + [Semantic::SecondarySpan.new(related.span, related.label, related.node_id, related.file_path)]
+              end
+              display_diagnostic = diagnostic.with_paths(display_path, secondary_spans)
+              generated_sources = sources_by_path.dup
+              generated_sources[display_path.not_nil!] = generated_source if display_path
+              return Semantic::DiagnosticFormatter.format(generated_sources, display_diagnostic)
             end
-            if related = shadow_generated_macro_definition_related_span(primary_node_id, aggregate, analyzer)
-              secondary_spans = secondary_spans + [Semantic::SecondarySpan.new(related.span, related.label, related.node_id, related.file_path)]
-            end
-            display_diagnostic = diagnostic.with_paths(display_path, secondary_spans)
-            generated_sources = sources_by_path.dup
-            generated_sources[display_path.not_nil!] = generated_source if display_path
-            return Semantic::DiagnosticFormatter.format(generated_sources, display_diagnostic)
           end
         end
         Semantic::DiagnosticFormatter.format(sources_by_path, diagnostic)
@@ -5783,19 +5787,21 @@ module CrystalV2
         sources_by_path : Hash(String, String)
       ) : String
         if node_id = diagnostic.node_id
-          if generated_source = analyzer.generated_source_for(node_id)
-            display_path = shadow_generated_display_path(aggregate.path_for(node_id))
-            related_spans = diagnostic.related_spans
-            if related = shadow_generated_origin_related_span(node_id, aggregate, analyzer)
-              related_spans = related_spans + [related]
+          if info = analyzer.generated_info_for(node_id)
+            if generated_source = info.source
+              display_path = shadow_generated_display_path(aggregate.path_for(node_id))
+              related_spans = diagnostic.related_spans
+              if related = shadow_generated_origin_related_span(node_id, aggregate, analyzer)
+                related_spans = related_spans + [related]
+              end
+              if related = shadow_generated_macro_definition_related_span(node_id, aggregate, analyzer)
+                related_spans = related_spans + [related]
+              end
+              display_diagnostic = diagnostic.with_file_path(display_path, related_spans)
+              generated_sources = sources_by_path.dup
+              generated_sources[display_path.not_nil!] = generated_source if display_path
+              return Frontend::DiagnosticFormatter.format(generated_sources, display_diagnostic)
             end
-            if related = shadow_generated_macro_definition_related_span(node_id, aggregate, analyzer)
-              related_spans = related_spans + [related]
-            end
-            display_diagnostic = diagnostic.with_file_path(display_path, related_spans)
-            generated_sources = sources_by_path.dup
-            generated_sources[display_path.not_nil!] = generated_source if display_path
-            return Frontend::DiagnosticFormatter.format(generated_sources, display_diagnostic)
           end
         end
         Frontend::DiagnosticFormatter.format(sources_by_path, diagnostic)

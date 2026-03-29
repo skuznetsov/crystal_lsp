@@ -409,6 +409,41 @@ describe "compile semantic shadow aggregate" do
     analyzer.generated_source_for(diagnostic.node_id.not_nil!).not_nil!.should contain("missing + 1")
   end
 
+  it "exposes generated node info as a unified provenance lookup" do
+    aggregate = build_shared_shadow_aggregate([
+      <<-CR,
+        macro define_bad(name)
+          def {{name.id}}
+            missing + 1
+          end
+        end
+      CR
+      <<-CR,
+        define_bad(:alpha)
+        alpha()
+      CR
+    ])
+    program = aggregate.program
+    shadow_sources = build_shadow_sources(aggregate)
+
+    analyzer = Semantic::Analyzer.new(program)
+    analyzer.collect_symbols(
+      node_file_path_provider: ->(expr_id : Frontend::ExprId) { aggregate.path_for(expr_id) },
+      source_for_path_provider: ->(path : String) { shadow_sources[path]? },
+    )
+    aggregate.attach_generated_node_paths(analyzer.generated_node_file_paths)
+    result = analyzer.resolve_names
+
+    diagnostic = result.diagnostics.first
+    node_id = diagnostic.node_id.not_nil!
+    info = analyzer.generated_info_for(node_id)
+
+    info.should_not be_nil
+    info.not_nil!.source.not_nil!.should contain("missing + 1")
+    aggregate.path_for(info.not_nil!.origin_node_id.not_nil!).should eq("unit_1.cr")
+    aggregate.path_for(info.not_nil!.macro_definition_node_id.not_nil!).should eq("unit_0.cr")
+  end
+
   it "reports type diagnostics inside generated top-level def bodies" do
     aggregate = build_shared_shadow_aggregate([
       <<-CR,
