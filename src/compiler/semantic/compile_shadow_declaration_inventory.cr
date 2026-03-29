@@ -136,6 +136,13 @@ module CrystalV2
           @origin_names[{kind, origin}].size
         end
 
+        def origin_unique_names(
+          kind : CompileShadowDeclarationKind,
+          origin : CompileShadowDeclarationOrigin
+        ) : Array(String)
+          @origin_names[{kind, origin}].to_a.sort
+        end
+
         def provenance_lines(label : String = "collector") : Array(String)
           lines = [] of String
           KINDS.each do |kind|
@@ -221,6 +228,15 @@ module CrystalV2
           semantic_names.reject { |name| parse_names.includes?(name) }
         end
 
+        def missing_in_semantic_by_origin(
+          kind : CompileShadowDeclarationKind,
+          origin : CompileShadowDeclarationOrigin
+        ) : Array(String)
+          missing = missing_in_semantic(kind)
+          origin_names = @parse_inventory.origin_unique_names(kind, origin)
+          missing.select { |name| origin_names.includes?(name) }
+        end
+
         def gap_count : Int32
           total = 0
           CompileShadowDeclarationInventory::KINDS.each do |kind|
@@ -254,6 +270,18 @@ module CrystalV2
               preview = missing.first(max_names).join(", ")
               suffix = missing.size > max_names ? ", ..." : ""
               lines << "  missing_in_semantic=#{preview}#{suffix}"
+            end
+            macro_expanded_missing = missing_in_semantic_by_origin(kind, CompileShadowDeclarationOrigin::MacroExpanded)
+            unless macro_expanded_missing.empty?
+              preview = macro_expanded_missing.first(max_names).join(", ")
+              suffix = macro_expanded_missing.size > max_names ? ", ..." : ""
+              lines << "  missing_macro_expanded_in_semantic=#{preview}#{suffix}"
+            end
+            direct_missing = missing_in_semantic_by_origin(kind, CompileShadowDeclarationOrigin::Direct)
+            unless direct_missing.empty?
+              preview = direct_missing.first(max_names).join(", ")
+              suffix = direct_missing.size > max_names ? ", ..." : ""
+              lines << "  missing_direct_in_semantic=#{preview}#{suffix}"
             end
             unless extra.empty?
               preview = extra.first(max_names).join(", ")

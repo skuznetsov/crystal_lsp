@@ -88,7 +88,8 @@ pretending that this is full macro-expansion parity with lowering.
 On the current tree this already exposes a real gap: a no-prelude carrier with
 a top-level `{% for %}` that generates two methods reports those methods on the
 collector side, while the semantic symbol table still only materializes the
-direct method declaration.
+direct method declaration. The verbose parity output now classifies those misses
+explicitly as `missing_macro_expanded_in_semantic`.
 
 ## Current limitations
 

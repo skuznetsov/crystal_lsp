@@ -158,4 +158,35 @@ describe "compile shadow declaration inventory" do
     method_line.not_nil!.should contain("collector_macro_expanded_total=2")
     method_line.not_nil!.should contain("collector_macro_expanded_unique=1")
   end
+
+  it "classifies missing semantic declarations by collector origin" do
+    collector = Semantic::CompileShadowDeclarationInventory.new
+    semantic = Semantic::CompileShadowDeclarationInventory.new
+
+    collector.record(
+      Semantic::CompileShadowDeclarationKind::Methods,
+      "direct_greet",
+      Semantic::CompileShadowDeclarationOrigin::Direct
+    )
+    collector.record(
+      Semantic::CompileShadowDeclarationKind::Methods,
+      "generated_alpha",
+      Semantic::CompileShadowDeclarationOrigin::MacroExpanded
+    )
+    collector.record(
+      Semantic::CompileShadowDeclarationKind::Methods,
+      "generated_beta",
+      Semantic::CompileShadowDeclarationOrigin::MacroExpanded
+    )
+    semantic.record(
+      Semantic::CompileShadowDeclarationKind::Methods,
+      "direct_greet"
+    )
+
+    parity = Semantic::CompileShadowDeclarationParity.compare(collector, semantic)
+    lines = parity.summary_lines(5, "collector", "semantic")
+
+    lines.should contain("  missing_macro_expanded_in_semantic=generated_alpha, generated_beta")
+    lines.none? { |line| line.includes?("missing_direct_in_semantic") }.should be_true
+  end
 end

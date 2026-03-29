@@ -53,7 +53,8 @@ Verified sequence:
     - `CRYSTAL_V2_SEMANTIC_SHADOW=1 /tmp/crystal_v2_semantic_shadow /tmp/shadow_decl_inventory_macro.cr --no-prelude --stats --verbose`
     - output includes `declaration_gaps=2`, a method parity line with
       `collector_total=3 ... semantic_total=1 ... gaps=2`,
-      `missing_in_semantic=alpha, beta`, and a provenance line with
+      `missing_in_semantic=alpha, beta`,
+      `missing_macro_expanded_in_semantic=alpha, beta`, and a provenance line with
       `collector_direct_total=1 collector_macro_expanded_total=2`
 - reusable failure pattern:
   - the current `VirtualArena` only renumbers root ids; nested `ExprId`
@@ -66,7 +67,8 @@ Verified sequence:
   - declaration parity is currently limited to comparable top-level kinds from
     the compile-side collector; collector provenance can distinguish `direct`
     vs `macro_expanded` declarations on that side, and the current shadow smoke
-    already shows semantic misses for macro-expanded top-level methods
+    already shows semantic misses for macro-expanded top-level methods via
+    `missing_macro_expanded_in_semantic`
   - this is still not a semantic-side macro-expanded parity gate or a lowering
     contract
 

@@ -39,6 +39,7 @@
         - `Semantic shadow: ... declaration_gaps=2`
         - `Semantic shadow declarations: methods collector_total=3 collector_unique=3 semantic_total=1 semantic_unique=1 gaps=2`
         - `Semantic shadow declarations:   missing_in_semantic=alpha, beta`
+        - `Semantic shadow declarations:   missing_macro_expanded_in_semantic=alpha, beta`
         - `Semantic shadow declarations: methods provenance collector_direct_total=1 collector_direct_unique=1 collector_macro_expanded_total=2 collector_macro_expanded_unique=2`
         - final compile exit `0`
   - practical consequence:
@@ -47,7 +48,8 @@
     - file-level ownership is now good enough for shadow inventory and for current diagnostic attribution across collector, name-resolution, and type-inference passes
     - shadow diagnostics remain intentionally non-gating; they are visibility/provenance infrastructure, not compile-path authority yet
     - shadow now has a first declaration-parity signal against the compile-side top-level collector plus collector-side provenance for direct vs macro-expanded declarations
-    - the current semantic global symbol table still misses top-level declarations materialized by the compile collector from macro expansion, so the next honest work item is semantic-side macro expansion parity
+    - the current semantic global symbol table still misses top-level declarations materialized by the compile collector from macro expansion, and shadow now isolates those misses explicitly via `missing_macro_expanded_in_semantic=...`
+    - the next honest work item is semantic-side macro expansion parity
     - replacing reparse-based aggregation is still more honest follow-up than reopening Phase 1 identity questions
 - **Fresh stage3 split: trustworthy current-debug hosts can again build `stage2 --release` green, but resulting self-hosted stage2 runtime is still broken and now clearly splits into multiple families (2026-03-28, current session)**:
   - trustworthy setup:
