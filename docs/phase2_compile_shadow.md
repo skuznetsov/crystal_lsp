@@ -75,6 +75,21 @@ This is intentionally limited to comparable kinds:
 
 It is an **integration substrate**, not a correctness gate for compile output.
 
+The verbose declaration inventory now also prints **collector provenance**
+for those same kinds:
+
+- declarations collected directly from compile-unit arenas
+- declarations collected from macro-expanded temporary arenas
+
+This keeps the current signal honest: we can see when the collector side is
+already materializing declarations through top-level macro expansion, without
+pretending that this is full macro-expansion parity with lowering.
+
+On the current tree this already exposes a real gap: a no-prelude carrier with
+a top-level `{% for %}` that generates two methods reports those methods on the
+collector side, while the semantic symbol table still only materializes the
+direct method declaration.
+
 ## Current limitations
 
 - reparses sources instead of reusing parsed compile arenas
@@ -84,6 +99,9 @@ It is an **integration substrate**, not a correctness gate for compile output.
 - declaration parity is currently `compile collector -> semantic symbol table`
   for comparable kinds; it is still not a full lowering contract and not yet a
   dedicated macro-expanded parity gate
+- collector provenance lines distinguish `direct` vs `macro_expanded`
+  declarations only on the collector side; semantic inventory still has no
+  matching expansion provenance contract
 - does not yet include macro-expansion parity with `AstToHir`
 - does not yet run normalized HIR comparison
 

@@ -1,7 +1,7 @@
 # Crystal V2 Bootstrap — TODO (Updated 2026-03-27)
 
 ## Current Status
-- **Fresh Phase 2 substrate result: compile-side semantic shadow now runs on a shared-AstArena aggregate under feature flag, exposes honest file-level ownership summaries, prints file-aware diagnostics for collector/name-resolution/type-inference, and now reports compile-collector vs semantic declaration parity; plain VirtualArena remains unsafe for deep semantic traversal (2026-03-29, current session)**:
+- **Fresh Phase 2 substrate result: compile-side semantic shadow now runs on a shared-AstArena aggregate under feature flag, exposes honest file-level ownership summaries, prints file-aware diagnostics for collector/name-resolution/type-inference, and now reports compile-collector declaration provenance plus collector-vs-semantic declaration parity; plain VirtualArena remains unsafe for deep semantic traversal (2026-03-29, current session)**:
   - trustworthy setup:
     - added `CRYSTAL_V2_SEMANTIC_SHADOW=1` compile-side shadow prepass in `src/compiler/cli.cr`
     - shadow aggregate is built by reparsing already-loaded compile units into one shared `Frontend::AstArena`
@@ -33,20 +33,22 @@
       - output includes:
         - `/tmp/shadow_name_error.cr:1:1-1:1 undefined local variable or method 'missing'`
         - `Semantic shadow unit: path=/tmp/shadow_name_error.cr ... resolution_diags=1`
-    - live declaration-parity smoke now shows compile-collector vs semantic inventory:
-      - `CRYSTAL_V2_SEMANTIC_SHADOW=1 /tmp/crystal_v2_semantic_shadow /tmp/shadow_decl_inventory.cr --no-prelude --stats --verbose`
+    - live declaration-parity smoke now shows compile-collector provenance plus collector-vs-semantic inventory on a top-level macro carrier:
+      - `CRYSTAL_V2_SEMANTIC_SHADOW=1 /tmp/crystal_v2_semantic_shadow /tmp/shadow_decl_inventory_macro.cr --no-prelude --stats --verbose`
       - output includes:
-        - `Semantic shadow: ... declaration_gaps=0`
-        - `Semantic shadow declarations: methods collector_total=1 collector_unique=1 semantic_total=1 semantic_unique=1 gaps=0`
-        - analogous lines for classes, macros, and constants
+        - `Semantic shadow: ... declaration_gaps=2`
+        - `Semantic shadow declarations: methods collector_total=3 collector_unique=3 semantic_total=1 semantic_unique=1 gaps=2`
+        - `Semantic shadow declarations:   missing_in_semantic=alpha, beta`
+        - `Semantic shadow declarations: methods provenance collector_direct_total=1 collector_direct_unique=1 collector_macro_expanded_total=2 collector_macro_expanded_unique=2`
         - final compile exit `0`
   - practical consequence:
     - there is now a safe, flag-gated compile semantic prepass substrate for Phase 2 work
     - the next honest step is not `VirtualArena` reuse for full semantic traversal; nested `ExprId` remapping still blocks a real shared compile graph
     - file-level ownership is now good enough for shadow inventory and for current diagnostic attribution across collector, name-resolution, and type-inference passes
     - shadow diagnostics remain intentionally non-gating; they are visibility/provenance infrastructure, not compile-path authority yet
-    - shadow now has a first declaration-parity signal against the compile-side top-level collector, but it is still not a macro-expanded parity gate or a lowering contract
-    - follow-up work should focus on macro/declaration parity beyond the current collector signal and on replacing reparse-based aggregation, not on reopening Phase 1 identity questions
+    - shadow now has a first declaration-parity signal against the compile-side top-level collector plus collector-side provenance for direct vs macro-expanded declarations
+    - the current semantic global symbol table still misses top-level declarations materialized by the compile collector from macro expansion, so the next honest work item is semantic-side macro expansion parity
+    - replacing reparse-based aggregation is still more honest follow-up than reopening Phase 1 identity questions
 - **Fresh stage3 split: trustworthy current-debug hosts can again build `stage2 --release` green, but resulting self-hosted stage2 runtime is still broken and now clearly splits into multiple families (2026-03-28, current session)**:
   - trustworthy setup:
     - current-source cheap runtime oracles stayed green on original-built current binaries:

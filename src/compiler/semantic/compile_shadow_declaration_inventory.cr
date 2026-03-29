@@ -5,6 +5,19 @@ require "./symbol"
 module CrystalV2
   module Compiler
     module Semantic
+      enum CompileShadowDeclarationOrigin
+        Direct
+        MacroExpanded
+
+        def label : String
+          case self
+          when .direct?         then "direct"
+          when .macro_expanded? then "macro_expanded"
+          else                       "unknown"
+          end
+        end
+      end
+
       enum CompileShadowDeclarationKind
         Methods
         Classes
@@ -72,15 +85,29 @@ module CrystalV2
         def initialize
           @totals = {} of CompileShadowDeclarationKind => Int32
           @names = {} of CompileShadowDeclarationKind => Set(String)
+          @origin_totals = {} of {CompileShadowDeclarationKind, CompileShadowDeclarationOrigin} => Int32
+          @origin_names = {} of {CompileShadowDeclarationKind, CompileShadowDeclarationOrigin} => Set(String)
           KINDS.each do |kind|
             @totals[kind] = 0
             @names[kind] = Set(String).new
+            CompileShadowDeclarationOrigin.each do |origin|
+              key = {kind, origin}
+              @origin_totals[key] = 0
+              @origin_names[key] = Set(String).new
+            end
           end
         end
 
-        def record(kind : CompileShadowDeclarationKind, name : String) : Nil
+        def record(
+          kind : CompileShadowDeclarationKind,
+          name : String,
+          origin : CompileShadowDeclarationOrigin = CompileShadowDeclarationOrigin::Direct
+        ) : Nil
           @totals[kind] = (@totals[kind]? || 0) + 1
           @names[kind].add(name)
+          origin_key = {kind, origin}
+          @origin_totals[origin_key] = (@origin_totals[origin_key]? || 0) + 1
+          @origin_names[origin_key].add(name)
         end
 
         def total(kind : CompileShadowDeclarationKind) : Int32
@@ -93,6 +120,43 @@ module CrystalV2
 
         def unique_names(kind : CompileShadowDeclarationKind) : Array(String)
           @names[kind].to_a.sort
+        end
+
+        def origin_total(
+          kind : CompileShadowDeclarationKind,
+          origin : CompileShadowDeclarationOrigin
+        ) : Int32
+          @origin_totals[{kind, origin}]? || 0
+        end
+
+        def origin_unique_count(
+          kind : CompileShadowDeclarationKind,
+          origin : CompileShadowDeclarationOrigin
+        ) : Int32
+          @origin_names[{kind, origin}].size
+        end
+
+        def provenance_lines(label : String = "collector") : Array(String)
+          lines = [] of String
+          KINDS.each do |kind|
+            direct_total = origin_total(kind, CompileShadowDeclarationOrigin::Direct)
+            macro_expanded_total = origin_total(kind, CompileShadowDeclarationOrigin::MacroExpanded)
+            next if direct_total == 0 && macro_expanded_total == 0
+
+            direct_unique = origin_unique_count(kind, CompileShadowDeclarationOrigin::Direct)
+            macro_expanded_unique = origin_unique_count(kind, CompileShadowDeclarationOrigin::MacroExpanded)
+
+            line = String.build do |io|
+              io << kind.label
+              io << " provenance"
+              io << " " << label << "_direct_total=" << direct_total
+              io << " " << label << "_direct_unique=" << direct_unique
+              io << " " << label << "_macro_expanded_total=" << macro_expanded_total
+              io << " " << label << "_macro_expanded_unique=" << macro_expanded_unique
+            end
+            lines << line
+          end
+          lines
         end
 
         private def self.collect_root_declaration(

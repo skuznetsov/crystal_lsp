@@ -131,4 +131,31 @@ describe "compile shadow declaration inventory" do
     method_line.not_nil!.should contain("semantic_total=1")
     method_line.not_nil!.should contain("semantic_unique=1")
   end
+
+  it "reports direct vs macro-expanded provenance counts" do
+    inventory = Semantic::CompileShadowDeclarationInventory.new
+    inventory.record(
+      Semantic::CompileShadowDeclarationKind::Methods,
+      "direct_greet",
+      Semantic::CompileShadowDeclarationOrigin::Direct
+    )
+    inventory.record(
+      Semantic::CompileShadowDeclarationKind::Methods,
+      "generated_greet",
+      Semantic::CompileShadowDeclarationOrigin::MacroExpanded
+    )
+    inventory.record(
+      Semantic::CompileShadowDeclarationKind::Methods,
+      "generated_greet",
+      Semantic::CompileShadowDeclarationOrigin::MacroExpanded
+    )
+
+    method_line = inventory.provenance_lines("collector").find { |line| line.starts_with?("methods provenance ") }
+
+    method_line.should_not be_nil
+    method_line.not_nil!.should contain("collector_direct_total=1")
+    method_line.not_nil!.should contain("collector_direct_unique=1")
+    method_line.not_nil!.should contain("collector_macro_expanded_total=2")
+    method_line.not_nil!.should contain("collector_macro_expanded_unique=1")
+  end
 end
