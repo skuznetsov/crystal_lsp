@@ -109,6 +109,12 @@ method, the global and per-unit summaries now include `generated_symbols=1`,
 which makes semantic ownership more explicit than inferring generated coverage
 from `generated_nodes` alone.
 
+That generated-symbol signal now also treats overload families honestly: if a
+top-level `OverloadSetSymbol` contains one direct overload and one
+macro-expanded overload, shadow summaries still report `generated_symbols=1`
+for that family instead of dropping the generated contribution just because the
+top-level entry is an overload set.
+
 Generated declaration provenance and `generated_*_diags` counters now use the
 explicit generated-origin mapping carried by the semantic stack. In particular,
 generated method/class/module/etc. symbols now retain generated origin metadata

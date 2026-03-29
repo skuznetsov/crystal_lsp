@@ -287,4 +287,48 @@ describe "compile shadow declaration inventory" do
     method_line.not_nil!.should contain("semantic_macro_expanded_total=1")
     method_line.not_nil!.should contain("semantic_macro_expanded_unique=1")
   end
+
+  it "marks overload families as generated when a macro-expanded overload is present" do
+    aggregate = Semantic::CompileShadowAggregate.build([
+      {
+        path: "decl_main.cr",
+        source: <<-CR,
+          def greet
+          end
+
+          macro define_greet(name)
+            def greet(value : {{name.id}})
+            end
+          end
+
+          define_greet(:Int32)
+        CR
+      },
+    ])
+    program = aggregate.program
+    shadow_sources = {} of String => String
+    aggregate.unit_summaries.each { |u| shadow_sources[u.path] = u.source }
+
+    analyzer = Semantic::Analyzer.new(program)
+    analyzer.collect_symbols(
+      node_file_path_provider: ->(expr_id : Frontend::ExprId) { aggregate.path_for(expr_id) },
+      source_for_path_provider: ->(path : String) { shadow_sources[path]? },
+    )
+
+    greet_symbol = analyzer.global_context.symbol_table.lookup_local("greet")
+    greet_symbol.should be_a(Semantic::OverloadSetSymbol)
+    greet_symbol = greet_symbol.as(Semantic::OverloadSetSymbol)
+    greet_symbol.generated?.should be_true
+    greet_symbol.overloads.size.should eq(2)
+    greet_symbol.overloads.count(&.generated?).should eq(1)
+
+    semantic_inventory = Semantic::CompileShadowDeclarationInventory.from_symbol_table(
+      analyzer.global_context.symbol_table
+    )
+    method_line = semantic_inventory.provenance_lines("semantic").find { |line| line.starts_with?("methods provenance ") }
+
+    method_line.should_not be_nil
+    method_line.not_nil!.should contain("semantic_direct_total=1")
+    method_line.not_nil!.should contain("semantic_macro_expanded_total=1")
+  end
 end

@@ -5682,17 +5682,46 @@ module CrystalV2
           unit_index_by_path[unit_summary.path] = unit_index.to_i32
         end
         table.each_local_symbol do |_name, symbol|
-          next unless symbol.generated?
-          next unless node_id = symbol.node_id
-          if unit_index = aggregate.unit_index_for(node_id)
+          generated_symbol_unit_indices(symbol, aggregate, unit_index_by_path).each do |unit_index|
             counts[unit_index] += 1
-          elsif file_path = symbol.file_path
-            if unit_index = unit_index_by_path[file_path]?
-              counts[unit_index] += 1
-            end
           end
         end
         counts
+      end
+
+      private def generated_symbol_unit_indices(
+        symbol : Semantic::Symbol,
+        aggregate : Semantic::CompileShadowAggregate,
+        unit_index_by_path : Hash(String, Int32)
+      ) : Set(Int32)
+        indices = Set(Int32).new
+        case symbol
+        when Semantic::OverloadSetSymbol
+          symbol.overloads.each do |overload|
+            next unless overload.generated?
+            add_generated_symbol_unit_index(indices, overload, aggregate, unit_index_by_path)
+          end
+        else
+          return indices unless symbol.generated?
+          add_generated_symbol_unit_index(indices, symbol, aggregate, unit_index_by_path)
+        end
+        indices
+      end
+
+      private def add_generated_symbol_unit_index(
+        indices : Set(Int32),
+        symbol : Semantic::Symbol,
+        aggregate : Semantic::CompileShadowAggregate,
+        unit_index_by_path : Hash(String, Int32)
+      ) : Nil
+        node_id = symbol.node_id
+        if unit_index = aggregate.unit_index_for(node_id)
+          indices.add(unit_index)
+        elsif file_path = symbol.file_path
+          if unit_index = unit_index_by_path[file_path]?
+            indices.add(unit_index)
+          end
+        end
       end
 
       private def count_shadow_identifiers_by_unit(

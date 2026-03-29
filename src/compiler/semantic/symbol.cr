@@ -266,6 +266,10 @@ module CrystalV2
         def add_overload(method : MethodSymbol)
           @overloads << method
         end
+
+        def generated? : Bool
+          super || @overloads.any?(&.generated?)
+        end
       end
 
       # Test-only placeholder symbol for SymbolTable specs

@@ -140,6 +140,9 @@ Verified sequence:
     - the same carrier now reports `generated_symbols=1` globally and on the
       per-unit line, so semantic ownership can distinguish generated
       declarations without inferring from `generated_nodes`
+    - mixed direct/generated overload families now contribute to that counter
+      too, so a generated overload no longer disappears just because the
+      symbol table stores the family as `OverloadSetSymbol`
   - generated provenance classification no longer depends on generated snippet
     availability:
     - semantic declaration provenance and `generated_*_diags` counters now use
