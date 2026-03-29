@@ -52799,6 +52799,9 @@ module Crystal::HIR
     # Returns true if the function was lowered, false if it couldn't be.
     private def force_lower_function_for_return_type(name : String) : Bool
       return false if @suppress_force_lower_return_type_depth > 0
+      # Note: @function_types check was considered here but can't be used alone —
+      # the type is registered before body lowering. Only has_function_with_body?
+      # (checked below) reliably indicates the function was already lowered.
       # During inline-yield/proc lowering, force-lowering return types can recurse
       # through nested call chains and blow the stack in release builds.
       return false if @inline_yield_function_depth > 0
