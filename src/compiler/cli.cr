@@ -5695,6 +5695,35 @@ module CrystalV2
         "#{file_path} [generated]"
       end
 
+      private def format_shadow_generated_origin_note(
+        node_id : Frontend::ExprId,
+        aggregate : Semantic::CompileShadowAggregate,
+        analyzer : Semantic::Analyzer,
+        sources_by_path : Hash(String, String)
+      ) : String?
+        return nil unless origin_node_id = analyzer.generated_origin_for(node_id)
+        return nil unless origin_path = aggregate.path_for(origin_node_id)
+        return nil unless origin_source = sources_by_path[origin_path]?
+
+        origin_span = aggregate.program.arena[origin_node_id].span
+        location = "#{origin_path}:#{origin_span.start_line}:#{origin_span.start_column}-#{origin_span.end_line}:#{origin_span.end_column}"
+        origin_formatted = Frontend::DiagnosticFormatter.format(
+          {origin_path => origin_source},
+          Frontend::Diagnostic.new("expanded from macro call here", origin_span, origin_node_id, origin_path)
+        )
+        lines = origin_formatted.lines
+        return nil if lines.empty?
+
+        snippet = lines[1..]? || [] of String
+        String.build do |io|
+          io << "note: expanded from macro call here\n"
+          io << "  --> " << location << "\n"
+          snippet.each do |line|
+            io << line.rstrip('\n') << "\n"
+          end
+        end
+      end
+
       private def format_shadow_semantic_diagnostic(
         diagnostic : Semantic::Diagnostic,
         aggregate : Semantic::CompileShadowAggregate,
@@ -5707,7 +5736,11 @@ module CrystalV2
             display_diagnostic = diagnostic.with_paths(display_path)
             generated_sources = sources_by_path.dup
             generated_sources[display_path.not_nil!] = generated_source if display_path
-            return Semantic::DiagnosticFormatter.format(generated_sources, display_diagnostic)
+            formatted = Semantic::DiagnosticFormatter.format(generated_sources, display_diagnostic)
+            if origin_note = format_shadow_generated_origin_note(primary_node_id, aggregate, analyzer, sources_by_path)
+              return "#{formatted}\n#{origin_note}"
+            end
+            return formatted
           end
         end
         Semantic::DiagnosticFormatter.format(sources_by_path, diagnostic)
@@ -5725,7 +5758,11 @@ module CrystalV2
             display_diagnostic = diagnostic.with_file_path(display_path)
             generated_sources = sources_by_path.dup
             generated_sources[display_path.not_nil!] = generated_source if display_path
-            return Frontend::DiagnosticFormatter.format(generated_sources, display_diagnostic)
+            formatted = Frontend::DiagnosticFormatter.format(generated_sources, display_diagnostic)
+            if origin_note = format_shadow_generated_origin_note(node_id, aggregate, analyzer, sources_by_path)
+              return "#{formatted}\n#{origin_note}"
+            end
+            return formatted
           end
         end
         Frontend::DiagnosticFormatter.format(sources_by_path, diagnostic)

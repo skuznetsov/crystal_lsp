@@ -481,6 +481,8 @@ describe "compile semantic shadow aggregate" do
     formatted.should contain("unit_1.cr [generated]:2:")
     formatted.should contain("missing + 1")
     formatted.should_not contain("define_bad(:alpha)")
+    origin_node_id = analyzer.generated_origin_for(node_id).not_nil!
+    aggregate.path_for(origin_node_id).should eq("unit_1.cr")
   end
 
   it "formats generated type diagnostics against generated source text" do
@@ -520,6 +522,103 @@ describe "compile semantic shadow aggregate" do
 
     formatted.should contain("unit_1.cr [generated]:2:")
     formatted.should contain("1 + \"x\"")
+    formatted.should_not contain("define_bad(:alpha)")
+    origin_node_id = analyzer.generated_origin_for(node_id).not_nil!
+    aggregate.path_for(origin_node_id).should eq("unit_1.cr")
+  end
+
+  it "adds origin note for generated resolution diagnostics" do
+    aggregate = build_shared_shadow_aggregate([
+      <<-CR,
+        macro define_bad(name)
+          def {{name.id}}
+            missing + 1
+          end
+        end
+      CR
+      <<-CR,
+        define_bad(:alpha)
+        alpha()
+      CR
+    ])
+    program = aggregate.program
+    shadow_sources = build_shadow_sources(aggregate)
+
+    analyzer = Semantic::Analyzer.new(program)
+    analyzer.collect_symbols(
+      node_file_path_provider: ->(expr_id : Frontend::ExprId) { aggregate.path_for(expr_id) },
+      source_for_path_provider: ->(path : String) { shadow_sources[path]? },
+    )
+    aggregate.attach_generated_node_paths(analyzer.generated_node_file_paths)
+    result = analyzer.resolve_names
+
+    diagnostic = result.diagnostics.first
+    node_id = diagnostic.node_id.not_nil!
+    generated_source = analyzer.generated_source_for(node_id).not_nil!
+    display_path = "#{aggregate.path_for(node_id)} [generated]"
+    formatted = Frontend::DiagnosticFormatter.format(
+      {display_path => generated_source},
+      diagnostic.with_file_path(display_path)
+    )
+    origin_node_id = analyzer.generated_origin_for(node_id).not_nil!
+    origin_path = aggregate.path_for(origin_node_id).not_nil!
+    origin_source = shadow_sources[origin_path]
+    origin_span = program.arena[origin_node_id].span
+    origin_formatted = Frontend::DiagnosticFormatter.format(
+      {origin_path => origin_source},
+      Frontend::Diagnostic.new("expanded from macro call here", origin_span, origin_node_id, origin_path)
+    )
+
+    origin_formatted.should contain("define_bad(:alpha)")
+    origin_formatted.should contain("expanded from macro call here")
+    formatted.should_not contain("define_bad(:alpha)")
+  end
+
+  it "adds origin note for generated type diagnostics" do
+    aggregate = build_shared_shadow_aggregate([
+      <<-CR,
+        macro define_bad(name)
+          def {{name.id}}
+            1 + "x"
+          end
+        end
+      CR
+      <<-CR,
+        define_bad(:alpha)
+        alpha()
+      CR
+    ])
+    program = aggregate.program
+    shadow_sources = build_shadow_sources(aggregate)
+
+    analyzer = Semantic::Analyzer.new(program)
+    analyzer.collect_symbols(
+      node_file_path_provider: ->(expr_id : Frontend::ExprId) { aggregate.path_for(expr_id) },
+      source_for_path_provider: ->(path : String) { shadow_sources[path]? },
+    )
+    aggregate.attach_generated_node_paths(analyzer.generated_node_file_paths)
+    result = analyzer.resolve_names
+    analyzer.infer_types(result.identifier_symbols)
+
+    diagnostic = analyzer.type_inference_diagnostics.first
+    node_id = diagnostic.primary_node_id.not_nil!
+    generated_source = analyzer.generated_source_for(node_id).not_nil!
+    display_path = "#{aggregate.path_for(node_id)} [generated]"
+    formatted = Semantic::DiagnosticFormatter.format(
+      {display_path => generated_source},
+      diagnostic.with_paths(display_path)
+    )
+    origin_node_id = analyzer.generated_origin_for(node_id).not_nil!
+    origin_path = aggregate.path_for(origin_node_id).not_nil!
+    origin_source = shadow_sources[origin_path]
+    origin_span = program.arena[origin_node_id].span
+    origin_formatted = Frontend::DiagnosticFormatter.format(
+      {origin_path => origin_source},
+      Frontend::Diagnostic.new("expanded from macro call here", origin_span, origin_node_id, origin_path)
+    )
+
+    origin_formatted.should contain("define_bad(:alpha)")
+    origin_formatted.should contain("expanded from macro call here")
     formatted.should_not contain("define_bad(:alpha)")
   end
 end

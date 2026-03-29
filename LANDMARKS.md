@@ -110,6 +110,11 @@ Verified sequence:
     - the type-error sibling carrier now includes
       `--> /tmp/shadow_generated_type_main.cr [generated]:2:5`
       with snippet line `1 + "x"`
+  - live verbose formatting now also appends the originating macro call site:
+    - output includes `note: expanded from macro call here`
+    - note location points at the caller unit, for example
+      `--> /tmp/shadow_generated_resolution_main.cr:2:1-2:8`
+      with snippet line `define_bad(:alpha)`
 - reusable failure pattern:
   - the current `VirtualArena` only renumbers root ids; nested `ExprId`
     references inside nodes remain file-local, so it is not yet a sound
@@ -137,6 +142,9 @@ Verified sequence:
   - generated diagnostics now use a synthetic `... [generated]` file path to
     format against expansion text; that improves shadow provenance, but it is
     still not a full compile-path source map contract
+  - origin call-site notes are now available in verbose shadow formatting, but
+    they are still a shadow-only presentation layer and not a first-class
+    diagnostic relation in the frontend diagnostic type
   - this is still not a full semantic-side macro-expanded parity gate or a
     lowering contract, because aggregate `nodes=` still describes the original
     parse graph while `generated_nodes=` separately describes semantic expansion provenance

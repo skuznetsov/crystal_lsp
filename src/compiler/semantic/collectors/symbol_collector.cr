@@ -17,6 +17,7 @@ module CrystalV2
         getter generated_top_level_roots : Array(Frontend::ExprId)
         getter generated_root_sources : Hash(Int32, String)
         getter generated_root_by_node : Hash(Int32, Int32)
+        getter generated_root_origins : Hash(Int32, Frontend::ExprId)
         @virtual_arena : Frontend::VirtualArena?
 
       def initialize(@program : Program, context : Context, @node_file_path_provider : Proc(Frontend::ExprId, String?)? = nil, @source_for_path_provider : Proc(String, String?)? = nil)
@@ -31,6 +32,7 @@ module CrystalV2
         @generated_top_level_roots = [] of Frontend::ExprId
         @generated_root_sources = {} of Int32 => String
         @generated_root_by_node = {} of Int32 => Int32
+        @generated_root_origins = {} of Int32 => Frontend::ExprId
         @macro_expander = MacroExpander.new(
           @program,
           @arena,
@@ -286,6 +288,7 @@ module CrystalV2
             if generated_output && !generated_output.empty?
               @generated_root_sources[expanded_id.index] = generated_output
             end
+            @generated_root_origins[expanded_id.index] = origin_node_id
 
             generated_index = generated_start
             while generated_index < arena.size

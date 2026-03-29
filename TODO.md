@@ -94,6 +94,11 @@
         - `error[E3001]: Operator '+' not defined for Int32 and String`
         - `--> /tmp/shadow_generated_type_main.cr [generated]:2:5`
         - snippet line `2 |     1 + "x"`
+    - verbose shadow diagnostics now also append the originating macro call-site as a note:
+      - output includes:
+        - `note: expanded from macro call here`
+        - `--> /tmp/shadow_generated_resolution_main.cr:2:1-2:8`
+        - snippet line `2 | define_bad(:alpha)`
   - practical consequence:
     - there is now a safe, flag-gated compile semantic prepass substrate for Phase 2 work
     - the next honest step is not `VirtualArena` reuse for full semantic traversal; nested `ExprId` remapping still blocks a real shared compile graph
@@ -108,7 +113,8 @@
     - generated top-level defs now participate in shadow `resolve_names` and `infer_types`, so the old gap “generated declarations exist but generated body diagnostics are invisible” is stale on the current tree
     - shadow summaries now separate parse roots from traversal roots via `roots=`, `generated_roots=`, and `analysis_roots=`, so the telemetry no longer hides that generated top-level defs are visited outside the original parse graph
     - generated-body diagnostics now surface with generated snippets too, so the old gap “shadow sees the error but shows the wrong source text” is stale on the current tree
-    - the next honest work item is no longer macro-call parity, top-level generated-body traversal, or generated snippet visibility; it is broader expanded-node ownership/provenance and how far aggregate-backed shadow can carry diagnostics/contracts without pretending to be lowering
+    - generated-body diagnostics now also point back to the originating macro call-site, so the old gap “shadow sees generated text but loses the origin call-site” is stale on the current tree
+    - the next honest work item is no longer macro-call parity, top-level generated-body traversal, generated snippet visibility, or macro-call origin notes; it is broader expanded-node ownership/provenance and how far aggregate-backed shadow can carry diagnostics/contracts without pretending to be lowering
     - replacing reparse-based aggregation is still more honest follow-up than reopening Phase 1 identity questions
 - **Fresh stage3 split: trustworthy current-debug hosts can again build `stage2 --release` green, but resulting self-hosted stage2 runtime is still broken and now clearly splits into multiple families (2026-03-28, current session)**:
   - trustworthy setup:

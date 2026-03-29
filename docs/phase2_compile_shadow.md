@@ -183,6 +183,16 @@ diagnostic path is rendered as `... [generated]`, for example:
     |     ^
 ```
 
+The same verbose path now also appends the originating macro call site as a
+shadow-only note:
+
+```text
+note: expanded from macro call here
+  --> /tmp/shadow_generated_resolution_main.cr:2:1-2:8
+  2 | define_bad(:alpha)
+    | ^^^^^^^
+```
+
 The remaining caveat is file attribution for post-parse macro expansion:
 the shared aggregate node graph still reflects the original parse graph, but
 symbol ownership is now rebound through the semantic shadow file-path provider,
@@ -223,6 +233,9 @@ It now also separates parse roots from actual traversal roots:
 - generated diagnostics now format against generated source text with a
   synthetic `... [generated]` path, but this is still a shadow-only
   presentation layer rather than a true compile-path source map contract
+- generated diagnostics now also show the originating macro call site as a
+  shadow-only note, but the primary span is still the generated-body span, not
+  a fully remapped compile-path source map
 - `generated_nodes` is a semantic-side provenance counter, not a replacement
   for aggregate `nodes`; `owned_nodes` is the expanded ownership count, and
   the three numbers intentionally describe different layers
