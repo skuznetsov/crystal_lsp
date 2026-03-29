@@ -120,7 +120,7 @@ describe "compile semantic shadow aggregate" do
     program = aggregate.program
 
     analyzer = Semantic::Analyzer.new(program)
-    analyzer.collect_symbols
+    analyzer.collect_symbols(node_file_path_provider: ->(expr_id : Frontend::ExprId) { aggregate.path_for(expr_id) })
     result = analyzer.resolve_names
 
     result.diagnostics.should be_empty
@@ -130,6 +130,8 @@ describe "compile semantic shadow aggregate" do
     callee_id = call_node.callee.not_nil!
     result.identifier_symbols[callee_id].should be_a(Semantic::MethodSymbol)
     aggregate.path_for(callee_id).should eq("unit_1.cr")
-    analyzer.global_context.symbol_table.lookup("alpha").should be_a(Semantic::MethodSymbol)
+    alpha_symbol = analyzer.global_context.symbol_table.lookup("alpha")
+    alpha_symbol.should be_a(Semantic::MethodSymbol)
+    alpha_symbol.not_nil!.file_path.should eq("unit_0.cr")
   end
 end

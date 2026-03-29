@@ -15,7 +15,7 @@ module CrystalV2
         getter diagnostics : Array(Diagnostic)
         @virtual_arena : Frontend::VirtualArena?
 
-      def initialize(@program : Program, context : Context)
+      def initialize(@program : Program, context : Context, @node_file_path_provider : Proc(Frontend::ExprId, String?)? = nil)
         program_arena = @program.arena
         @arena = program_arena.as(Frontend::AstArena)
         @string_pool = @program.string_pool
@@ -23,6 +23,7 @@ module CrystalV2
         @table_stack = [context.symbol_table]
         @diagnostics = [] of Diagnostic
         @source_cache = {} of String => String
+        @generated_file_paths = {} of Int32 => String
         @macro_expander = MacroExpander.new(
           @program,
           @arena,
@@ -72,6 +73,14 @@ module CrystalV2
         end
 
         private def file_path_for(node_id : Frontend::ExprId) : String?
+          if generated_path = @generated_file_paths[node_id.index]?
+            return generated_path
+          end
+          if provider = @node_file_path_provider
+            if path = provider.call(node_id)
+              return path
+            end
+          end
           return nil unless @virtual_arena
           @virtual_arena.not_nil!.file_for_id(node_id)
         rescue
@@ -179,7 +188,16 @@ module CrystalV2
         end
 
         private def handle_root_macro_expansion(node_id : Frontend::ExprId)
+          generated_start = arena.size
+          origin_path = file_path_for(node_id)
           expanded_id = @macro_expander.expand_top_level(node_id)
+          if origin_path
+            generated_index = generated_start
+            while generated_index < arena.size
+              @generated_file_paths[generated_index] = origin_path
+              generated_index += 1
+            end
+          end
           @macro_expander.diagnostics.each { |entry| @diagnostics << entry }
           visit(expanded_id) unless expanded_id.invalid?
         end

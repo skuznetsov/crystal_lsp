@@ -92,8 +92,10 @@ The collector-side provenance lines remain useful because they still distinguish
 the one direct method from the two macro-expanded ones.
 
 The remaining caveat is file attribution for post-parse macro expansion:
-the global shadow summary sees the generated symbols, but the current per-unit
-ownership map still reflects only the original aggregate parse graph.
+the shared aggregate node graph still reflects the original parse graph, but
+symbol ownership is now rebound through the semantic shadow file-path provider,
+so per-unit shadow summaries can attribute root-level macro-generated symbols
+back to the originating source file.
 
 ## Current limitations
 
@@ -107,9 +109,9 @@ ownership map still reflects only the original aggregate parse graph.
 - collector provenance lines distinguish `direct` vs `macro_expanded`
   declarations only on the collector side; semantic inventory still has no
   matching expansion provenance contract
-- post-parse macro-generated nodes and symbols are not yet folded back into the
-  shared aggregate ownership map, so per-unit shadow counts can under-report
-  macro-expanded declarations even when global semantic parity is green
+- post-parse macro-generated nodes are not yet folded back into the shared
+  aggregate ownership map, so node counts still describe the original aggregate
+  parse graph rather than an expanded semantic graph
 - does not yet include macro-expansion parity with `AstToHir`
 - does not yet run normalized HIR comparison
 

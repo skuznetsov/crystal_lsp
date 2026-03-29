@@ -1,7 +1,7 @@
 # Crystal V2 Bootstrap — TODO (Updated 2026-03-27)
 
 ## Current Status
-- **Fresh Phase 2 substrate result: compile-side semantic shadow now runs on a shared-AstArena aggregate under feature flag, exposes honest file-level ownership summaries, prints file-aware diagnostics for collector/name-resolution/type-inference, and now reports compile-collector declaration provenance plus collector-vs-semantic declaration parity; root-level macro-generated methods now materialize on the semantic side, while post-parse ownership for generated nodes remains incomplete (2026-03-29, current session)**:
+- **Fresh Phase 2 substrate result: compile-side semantic shadow now runs on a shared-AstArena aggregate under feature flag, exposes honest file-level ownership summaries, prints file-aware diagnostics for collector/name-resolution/type-inference, and now reports compile-collector declaration provenance plus collector-vs-semantic declaration parity; root-level macro-generated methods now materialize on the semantic side and are attributed back to the originating file in per-unit shadow summaries (2026-03-29, current session)**:
   - trustworthy setup:
     - added `CRYSTAL_V2_SEMANTIC_SHADOW=1` compile-side shadow prepass in `src/compiler/cli.cr`
     - shadow aggregate is built by reparsing already-loaded compile units into one shared `Frontend::AstArena`
@@ -39,7 +39,7 @@
         - `Semantic shadow: ... declaration_gaps=0`
         - `Semantic shadow declarations: methods collector_total=3 collector_unique=3 semantic_total=3 semantic_unique=3 gaps=0`
         - `Semantic shadow declarations: methods provenance collector_direct_total=1 collector_direct_unique=1 collector_macro_expanded_total=2 collector_macro_expanded_unique=2`
-        - per-unit summary still shows `symbols=1`, i.e. original parse ownership only
+        - per-unit summary now shows `symbols=3`, i.e. generated method symbols are attributed back to the source file
         - final compile exit `0`
   - practical consequence:
     - there is now a safe, flag-gated compile semantic prepass substrate for Phase 2 work
@@ -48,7 +48,8 @@
     - shadow diagnostics remain intentionally non-gating; they are visibility/provenance infrastructure, not compile-path authority yet
     - shadow now has a first declaration-parity signal against the compile-side top-level collector plus collector-side provenance for direct vs macro-expanded declarations
     - the current semantic global symbol table now materializes root-level macro-generated methods in this reducer
-    - the next honest work item is ownership/provenance for post-parse generated nodes and symbols, so per-unit shadow summaries do not under-report macro-expanded declarations
+    - per-unit shadow summaries now attribute generated method symbols back to the originating file through the semantic-side file-path provider
+    - the next honest work item is expanded-node ownership, because `nodes=` still reflects the original aggregate parse graph rather than a semantic expansion graph
     - replacing reparse-based aggregation is still more honest follow-up than reopening Phase 1 identity questions
 - **Fresh stage3 split: trustworthy current-debug hosts can again build `stage2 --release` green, but resulting self-hosted stage2 runtime is still broken and now clearly splits into multiple families (2026-03-28, current session)**:
   - trustworthy setup:

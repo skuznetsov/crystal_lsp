@@ -26,9 +26,9 @@ module CrystalV2
           @type_inference_diagnostics = [] of Diagnostic
         end
 
-        def collect_symbols
+        def collect_symbols(node_file_path_provider : Proc(ExprId, String?)? = nil)
           debug_hook("analyzer.symbols.start", "roots=#{@program.roots.size}")
-          collector = SymbolCollector.new(@program, @global_context)
+          collector = SymbolCollector.new(@program, @global_context, node_file_path_provider: node_file_path_provider)
           collector.collect
           @semantic_diagnostics = collector.diagnostics
           debug_hook("analyzer.symbols.finish", "diagnostics=#{@semantic_diagnostics.size}")

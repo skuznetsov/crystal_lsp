@@ -5592,12 +5592,20 @@ module CrystalV2
         aggregate : Semantic::CompileShadowAggregate
       ) : Array(Int32)
         counts = Array(Int32).new(aggregate.unit_summaries.size, 0)
+        unit_index_by_path = {} of String => Int32
+        aggregate.unit_summaries.each_with_index do |unit_summary, unit_index|
+          unit_index_by_path[unit_summary.path] = unit_index.to_i32
+        end
         table.each_local_symbol do |_name, symbol|
           next unless node_id = symbol.node_id
           if unit_index = aggregate.unit_index_for(node_id)
             counts[unit_index] += 1
             if symbol.file_path.nil?
               symbol.file_path = aggregate.path_for(node_id)
+            end
+          elsif file_path = symbol.file_path
+            if unit_index = unit_index_by_path[file_path]?
+              counts[unit_index] += 1
             end
           end
         end
@@ -5845,7 +5853,7 @@ module CrystalV2
         program = aggregate.program
         collector_inventory = build_shadow_collector_declaration_inventory(units)
         analyzer = Semantic::Analyzer.new(program)
-        analyzer.collect_symbols
+        analyzer.collect_symbols(node_file_path_provider: ->(expr_id : Frontend::ExprId) { aggregate.path_for(expr_id) })
         resolve_result = analyzer.resolve_names
         analyzer.infer_types(resolve_result.identifier_symbols)
         semantic_inventory = Semantic::CompileShadowDeclarationInventory.from_symbol_table(analyzer.global_context.symbol_table)
