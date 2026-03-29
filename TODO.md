@@ -122,6 +122,7 @@
     - per-unit shadow summaries now attribute generated method symbols back to the originating file through the semantic-side file-path provider
     - shadow summaries now also expose `generated_symbols`, so semantic ownership can distinguish generated declarations from direct declarations without guessing from `generated_nodes`
     - `generated_symbols` now also treats mixed direct/generated overload families honestly, so one macro-expanded overload inside an `OverloadSetSymbol` no longer disappears from shadow ownership summaries
+    - cross-file mixed overload families are now attributed to the unit that contributed the generated overload, instead of inheriting the overload-set wrapper's original file
     - shadow now also reports `generated_nodes`, so expanded semantic ownership is visible without corrupting the meaning of aggregate `nodes=`
     - collector/semantic declaration parity is now green across the currently measured macro-call shapes: bare identifier, positional args, named args, default arg, and block-yield
     - aggregate ownership now has a generated-node overlay, so per-unit shadow summaries can print both original parse `nodes=` and expanded `owned_nodes=`

@@ -143,6 +143,10 @@ Verified sequence:
     - mixed direct/generated overload families now contribute to that counter
       too, so a generated overload no longer disappears just because the
       symbol table stores the family as `OverloadSetSymbol`
+    - on a cross-file carrier where the direct overload is in `lib.cr` and the
+      generated overload comes from `main.cr`, the per-unit shadow summary now
+      reports `generated_symbols=0` for `lib.cr` and `generated_symbols=1` for
+      `main.cr`
   - generated provenance classification no longer depends on generated snippet
     availability:
     - semantic declaration provenance and `generated_*_diags` counters now use

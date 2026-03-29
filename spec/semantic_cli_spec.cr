@@ -221,6 +221,44 @@ describe CrystalV2::Compiler::CLI do
     end
   end
 
+  it "attributes generated overload families to the generated contributor unit" do
+    with_temp_shadow_project({
+      "lib.cr"  => <<-CR,
+        def greet
+        end
+
+        macro define_greet(name)
+          def greet(value : {{name.id}})
+          end
+        end
+      CR
+      "main.cr" => <<-CR,
+        require "./lib"
+        define_greet(:Int32)
+      CR
+    }) do |dir|
+      lib_path = File.join(dir, "lib.cr")
+      main_path = File.join(dir, "main.cr")
+      output_path = File.join(dir, "main")
+      out_io = IO::Memory.new
+      err_io = IO::Memory.new
+
+      with_semantic_shadow_env do
+        cli = CrystalV2::Compiler::CLI.new([main_path, "--no-prelude", "--stats", "--verbose", "--no-link", "-o", output_path])
+        cli.run(out_io: out_io, err_io: err_io)
+      end
+
+      output = out_io.to_s
+      lib_line = output.lines.find { |line| line.includes?("Semantic shadow unit: path=#{lib_path}") }
+      main_line = output.lines.find { |line| line.includes?("Semantic shadow unit: path=#{main_path}") }
+
+      lib_line.should_not be_nil
+      main_line.should_not be_nil
+      lib_line.not_nil!.should contain("generated_symbols=0")
+      main_line.not_nil!.should contain("generated_symbols=1")
+    end
+  end
+
   it "prints macro definition note for cross-file generated diagnostics" do
     with_temp_shadow_project({
       "lib.cr"  => <<-CR,

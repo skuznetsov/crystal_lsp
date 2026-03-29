@@ -113,7 +113,10 @@ That generated-symbol signal now also treats overload families honestly: if a
 top-level `OverloadSetSymbol` contains one direct overload and one
 macro-expanded overload, shadow summaries still report `generated_symbols=1`
 for that family instead of dropping the generated contribution just because the
-top-level entry is an overload set.
+top-level entry is an overload set. When the direct and generated overloads
+come from different files, the per-unit `generated_symbols` count is attributed
+to the unit that contributed the generated overload, not blindly to the
+overload-set wrapper's original `node_id`.
 
 Generated declaration provenance and `generated_*_diags` counters now use the
 explicit generated-origin mapping carried by the semantic stack. In particular,
