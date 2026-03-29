@@ -3915,6 +3915,57 @@ module Crystal::HIR
       end
     end
 
+    # Parser flattens tuple-destructured block params, for example
+    # `|(a, b), io|` becomes flat params `[a, b, io]` while callsite type info
+    # still arrives as `[Tuple(A, B), IO]`. Proc-like lowering must expand the
+    # tuple head back to per-local types before binding params by index.
+    private def expand_flat_block_param_types(
+      params : Array(CrystalV2::Compiler::Frontend::Parameter),
+      param_types : Array(TypeRef)?,
+    ) : Array(TypeRef)?
+      return param_types unless param_types
+
+      param_count = count_params(params) { true }
+      return param_types if param_count <= param_types.size
+
+      tuple_type = param_types.first?
+      return param_types unless tuple_type
+
+      tuple_desc = @module.get_type_descriptor(tuple_type)
+      return param_types unless tuple_desc
+      return param_types unless tuple_desc.kind == TypeKind::Tuple || tuple_desc.name.starts_with?("Tuple(")
+
+      tuple_params = tuple_desc.type_params.reject { |t| t == TypeRef::VOID }
+      return param_types if tuple_params.empty?
+
+      expanded = tuple_params.dup
+      param_types[1..].each { |t| expanded << t } if param_types.size > 1
+      expanded.size >= param_count ? expanded : param_types
+    end
+
+    private def leading_tuple_destruct_info(
+      params : Array(CrystalV2::Compiler::Frontend::Parameter),
+      param_types : Array(TypeRef)?,
+    ) : {Int32, Array(TypeRef)}?
+      return nil unless param_types
+      return nil unless params.size > param_types.size
+
+      tuple_type = param_types.first?
+      return nil unless tuple_type
+
+      destruct_count = params.size - param_types.size + 1
+      return nil if destruct_count <= 1
+
+      tuple_desc = @module.get_type_descriptor(tuple_type)
+      return nil unless tuple_desc
+      return nil unless tuple_desc.kind == TypeKind::Tuple || tuple_desc.name.starts_with?("Tuple(")
+
+      tuple_params = tuple_desc.type_params.reject { |t| t == TypeRef::VOID }
+      return nil unless tuple_params.size >= destruct_count
+
+      {destruct_count.to_i32, tuple_params}
+    end
+
     # Count non-null params matching a condition.
     @[AlwaysInline]
     private def count_params(params : Array(CrystalV2::Compiler::Frontend::Parameter), &) : Int32
@@ -15241,7 +15292,8 @@ module Crystal::HIR
               if block_expr || block_pass_expr
                 owner_name = split_generic_base_and_args(recv_name).try(&.base) || recv_name
                 base_name = resolve_method_with_inheritance(owner_name, member_name) || "#{owner_name}##{member_name}"
-                block_param_types = block_param_types_for_call(base_name, base_name, recv_type)
+                call_arg_types = infer_arg_types_for_call(expr_node.args, self_type_name)
+                block_param_types = block_param_types_for_call(base_name, base_name, recv_type, call_arg_types)
                 if block_return_name = infer_call_block_return_name(block_expr, block_pass_expr, expr_node.span, block_param_types, self_type_name)
                   if inferred = resolve_block_dependent_return_type(base_name, base_name, block_return_name)
                     return inferred
@@ -15976,6 +16028,7 @@ module Crystal::HIR
       expr_node : CrystalV2::Compiler::Frontend::CallNode,
       self_type_name : String?,
     ) : Array(TypeRef)?
+      call_arg_types = infer_arg_types_for_call(expr_node.args, self_type_name)
       callee_node = node_for_expr(expr_node.callee)
       if callee_node.is_a?(CrystalV2::Compiler::Frontend::MemberAccessNode)
         member_name = (safe_slice_to_string(callee_node.member) || "")
@@ -15983,7 +16036,7 @@ module Crystal::HIR
         return nil if receiver_type.nil? || receiver_type == TypeRef::VOID
         receiver_name = get_type_name_from_ref(receiver_type)
         resolved = resolve_method_with_inheritance(receiver_name, member_name) || "#{receiver_name}##{member_name}"
-        return block_param_types_for_call(resolved, resolved, receiver_type)
+        return block_param_types_for_call(resolved, resolved, receiver_type, call_arg_types)
       elsif callee_node.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode)
         method_name = (safe_slice_to_string(callee_node.name) || "")
         owner_name = self_type_name || @current_class
@@ -15991,7 +16044,7 @@ module Crystal::HIR
         base = resolve_method_with_inheritance(owner_name, method_name) || "#{owner_name}##{method_name}"
         receiver_ref = type_ref_for_name(owner_name)
         return nil if receiver_ref == TypeRef::VOID
-        return block_param_types_for_call(base, base, receiver_ref)
+        return block_param_types_for_call(base, base, receiver_ref, call_arg_types)
       end
       nil
     end
@@ -36633,6 +36686,8 @@ module Crystal::HIR
       mangled_method_name : String,
       base_method_name : String,
       receiver_type : TypeRef?,
+      call_arg_types : Array(TypeRef)? = nil,
+      call_has_named_args : Bool = false,
     ) : Array(TypeRef)?
       debug_trace_each = env_get("DEBUG_TRACE_EACH_WITH_INDEX") &&
                          (mangled_method_name.includes?("each_with_index") || base_method_name.includes?("each_with_index"))
@@ -36648,8 +36703,12 @@ module Crystal::HIR
           func_def = @function_defs[resolved_mangled]? || @function_defs[resolved_base]?
         end
       end
-      call_arg_types_for_infer = nil.as(Array(TypeRef)?)
-      if suffix = method_suffix(resolved_mangled)
+      call_arg_types_for_infer = if call_arg_types && !call_arg_types.empty?
+                                   call_arg_types
+                                 else
+                                   nil
+                                 end
+      if call_arg_types_for_infer.nil? && (suffix = method_suffix(resolved_mangled))
         stripped_suffix = strip_mangled_suffix_flags(suffix)
         unless stripped_suffix.empty?
           parsed_suffix_types = parse_types_from_suffix(stripped_suffix)
@@ -36666,6 +36725,16 @@ module Crystal::HIR
       callsite_outside_stdlib = true
       if path = source_path_for(@arena)
         callsite_outside_stdlib = !path.includes?("/src/stdlib/")
+      end
+      if call_arg_types_for_infer
+        if entry = lookup_function_def_for_call(resolved_base, arg_count_for_infer, true, call_arg_types_for_infer, false, call_has_named_args)
+          resolved_mangled = entry[0]
+          resolved_base = strip_type_suffix(resolved_mangled)
+          func_def = entry[1]
+          if debug_trace_each
+            STDERR.puts "[TRACE_EWI] resolved_via_call_lookup_exact base=#{resolved_base} mangled=#{resolved_mangled}"
+          end
+        end
       end
       if func_def.nil? && receiver_is_non_module && callsite_outside_stdlib
         if entry = lookup_function_def_for_call(resolved_base, arg_count_for_infer, true, call_arg_types_for_infer, false, false)
@@ -59083,7 +59152,13 @@ module Crystal::HIR
       if block_expr
         blk_node = node_for_expr(block_expr)
         if blk_node.is_a?(CrystalV2::Compiler::Frontend::BlockNode)
-          block_param_types_inline = block_param_types_for_call(mangled_method_name, base_method_name, receiver_id ? ctx.type_of(receiver_id) : nil)
+          block_param_types_inline = block_param_types_for_call(
+            mangled_method_name,
+            base_method_name,
+            receiver_id ? ctx.type_of(receiver_id) : nil,
+            arg_types,
+            !!call_has_named_args
+          )
           if method_name == "try" && receiver_id
             if non_nil = non_nil_type_for_union(ctx.type_of(receiver_id))
               block_param_types_inline = [non_nil]
@@ -59096,7 +59171,13 @@ module Crystal::HIR
           proc_for_inline = blk_node
         end
       elsif block_pass_expr
-        block_param_types_inline = block_param_types_for_call(mangled_method_name, base_method_name, receiver_id ? ctx.type_of(receiver_id) : nil)
+        block_param_types_inline = block_param_types_for_call(
+          mangled_method_name,
+          base_method_name,
+          receiver_id ? ctx.type_of(receiver_id) : nil,
+          arg_types,
+          !!call_has_named_args
+        )
         if method_name == "try" && receiver_id
           if non_nil = non_nil_type_for_union(ctx.type_of(receiver_id))
             block_param_types_inline = [non_nil]
@@ -59531,7 +59612,13 @@ module Crystal::HIR
       block_id = if block_expr
                    blk_node = node_for_call_expr(call_arena, block_expr)
                    if blk_node.is_a?(CrystalV2::Compiler::Frontend::BlockNode)
-                     block_param_types = block_param_types_for_call(mangled_method_name, base_method_name, receiver_id ? ctx.type_of(receiver_id) : nil)
+                     block_param_types = block_param_types_for_call(
+                       mangled_method_name,
+                       base_method_name,
+                       receiver_id ? ctx.type_of(receiver_id) : nil,
+                       arg_types,
+                       !!call_has_named_args
+                     )
                      if method_name == "try" && receiver_id
                        if non_nil = non_nil_type_for_union(ctx.type_of(receiver_id))
                          block_param_types = [non_nil]
@@ -59549,7 +59636,13 @@ module Crystal::HIR
                      nil
                    end
                  elsif block_pass_expr
-                   block_param_types = block_param_types_for_call(mangled_method_name, base_method_name, receiver_id ? ctx.type_of(receiver_id) : nil)
+                   block_param_types = block_param_types_for_call(
+                     mangled_method_name,
+                     base_method_name,
+                     receiver_id ? ctx.type_of(receiver_id) : nil,
+                     arg_types,
+                     !!call_has_named_args
+                   )
                    if method_name == "try" && receiver_id
                      if non_nil = non_nil_type_for_union(ctx.type_of(receiver_id))
                        block_param_types = [non_nil]
@@ -61836,7 +61929,13 @@ module Crystal::HIR
       if block_expr
         blk_node = node_for_call_expr(call_arena, block_expr)
         if blk_node.is_a?(CrystalV2::Compiler::Frontend::BlockNode)
-          block_param_types_for_proc = block_param_types_for_call(mangled_method_name, base_method_name, receiver_id ? ctx.type_of(receiver_id) : nil)
+          block_param_types_for_proc = block_param_types_for_call(
+            mangled_method_name,
+            base_method_name,
+            receiver_id ? ctx.type_of(receiver_id) : nil,
+            arg_types,
+            !!call_has_named_args
+          )
           if method_name == "try" && receiver_id
             if non_nil = non_nil_type_for_union(ctx.type_of(receiver_id))
               block_param_types_for_proc = [non_nil]
@@ -73023,17 +73122,7 @@ module Crystal::HIR
       # Add block parameters (params can be nil)
       # Default to POINTER type since block parameters are typically objects (IO, etc.)
       if params = node.params
-        effective_param_types = param_types
-        if effective_param_types && effective_param_types.size == 1 && params.size > 1
-          if tuple_desc = @module.get_type_descriptor(effective_param_types[0])
-            if tuple_desc.kind == TypeKind::Tuple || tuple_desc.name.starts_with?("Tuple(")
-              tuple_params = tuple_desc.type_params.reject { |t| t == TypeRef::VOID }
-              if tuple_params.size >= params.size
-                effective_param_types = tuple_params
-              end
-            end
-          end
-        end
+        effective_param_types = expand_flat_block_param_types(params, param_types)
         each_param_with_index(params) do |param, idx|
           if param_name = param.name
             name = (safe_slice_to_string(param_name) || "")
@@ -73489,11 +73578,12 @@ module Crystal::HIR
       # Determine param types
       proc_param_types = [] of TypeRef
       if params = node.params
+        effective_param_types = expand_flat_block_param_types(params, param_type_override)
         each_param_with_index(params) do |param, idx|
           if param_name = param.name
             param_type = if ta = param.type_annotation
                            type_ref_for_name((safe_slice_to_string(ta) || ""))
-                         elsif param_type_override && (override = param_type_override[idx]?)
+                         elsif effective_param_types && (override = effective_param_types[idx]?)
                            override
                          else
                            TypeRef::VOID
@@ -73626,10 +73716,11 @@ module Crystal::HIR
 
       # Add parameters to the standalone function
       if params = node.params
+        effective_param_types = expand_flat_block_param_types(params, proc_param_types)
         each_param_with_index(params) do |param, idx|
           if param_name = param.name
             name = (safe_slice_to_string(param_name) || "")
-            param_type = proc_param_types[idx]? || TypeRef::VOID
+            param_type = effective_param_types[idx]? || TypeRef::VOID
             hir_param = proc_func.add_param(name, param_type)
             proc_ctx.register_local(name, hir_param.id)
             proc_ctx.register_type(hir_param.id, param_type)
@@ -73765,17 +73856,24 @@ module Crystal::HIR
 
       # Determine param types from annotation or override
       proc_param_types = [] of TypeRef
+      tuple_destruct_info = nil.as({Int32, Array(TypeRef)}?)
       if params = block_node.params
-        each_param_with_index(params) do |param, idx|
-          if param_name = param.name
-            param_type = if ta = param.type_annotation
-                           type_ref_for_name((safe_slice_to_string(ta) || ""))
-                         elsif param_types && (override = param_types[idx]?)
-                           override
-                         else
-                           TypeRef::VOID
-                         end
-            proc_param_types << param_type
+        tuple_destruct_info = leading_tuple_destruct_info(params, param_types)
+        if tuple_destruct_info && param_types
+          proc_param_types = param_types.dup
+        else
+          effective_param_types = expand_flat_block_param_types(params, param_types)
+          each_param_with_index(params) do |param, idx|
+            if param_name = param.name
+              param_type = if ta = param.type_annotation
+                             type_ref_for_name((safe_slice_to_string(ta) || ""))
+                           elsif effective_param_types && (override = effective_param_types[idx]?)
+                             override
+                           else
+                             TypeRef::VOID
+                           end
+              proc_param_types << param_type
+            end
           end
         end
       elsif param_types
@@ -73997,13 +74095,74 @@ module Crystal::HIR
 
       # Add parameters to the standalone function
       if params = block_node.params
-        each_param_with_index(params) do |param, idx|
-          if pname = param.name
+        if tuple_destruct = tuple_destruct_info
+          destruct_count, tuple_elem_types = tuple_destruct
+          tuple_param_type = proc_param_types[0]? || TypeRef::VOID
+          tuple_param = proc_func.add_param("__tuple_arg0", tuple_param_type)
+          proc_ctx.register_local("__tuple_arg0", tuple_param.id)
+          proc_ctx.register_type(tuple_param.id, tuple_param_type)
+
+          destruct_count.times do |idx|
+            param = params[idx]?
+            next unless param
+            pname = param.name
+            next unless pname
             name = (safe_slice_to_string(pname) || "")
-            param_type = proc_param_types[idx]? || TypeRef::VOID
-            hir_param = proc_func.add_param(name, param_type)
-            proc_ctx.register_local(name, hir_param.id)
-            proc_ctx.register_type(hir_param.id, param_type)
+            elem_type = tuple_elem_types[idx]? || TypeRef::VOID
+            idx_lit = Literal.new(proc_ctx.next_id, TypeRef::INT32, idx.to_i64)
+            proc_ctx.emit(idx_lit)
+            proc_ctx.register_type(idx_lit.id, TypeRef::INT32)
+            elem_extract = IndexGet.new(proc_ctx.next_id, elem_type, tuple_param.id, idx_lit.id)
+            proc_ctx.emit(elem_extract)
+            proc_ctx.register_type(elem_extract.id, elem_type)
+            proc_ctx.register_local(name, elem_extract.id)
+            update_typeof_local(name, elem_type)
+            if elem_type != TypeRef::VOID
+              update_typeof_local_name(name, get_type_name_from_ref(elem_type))
+              track_enum_value(elem_extract.id, get_type_name_from_ref(elem_type))
+            end
+          end
+
+          flat_idx = destruct_count
+          proc_param_types[1..].each do |param_type|
+            param = params[flat_idx]?
+            break unless param
+            if pname = param.name
+              name = (safe_slice_to_string(pname) || "")
+              hir_param = proc_func.add_param(name, param_type)
+              proc_ctx.register_local(name, hir_param.id)
+              proc_ctx.register_type(hir_param.id, param_type)
+              update_typeof_local(name, param_type)
+              if ta = param.type_annotation
+                update_typeof_local_name(name, (safe_slice_to_string(ta) || ""))
+              elsif param_type != TypeRef::VOID
+                update_typeof_local_name(name, get_type_name_from_ref(param_type))
+              end
+              if param_type != TypeRef::VOID
+                track_enum_value(hir_param.id, get_type_name_from_ref(param_type))
+              end
+            end
+            flat_idx += 1
+          end
+        else
+          effective_param_types = expand_flat_block_param_types(params, proc_param_types)
+          each_param_with_index(params) do |param, idx|
+            if pname = param.name
+              name = (safe_slice_to_string(pname) || "")
+              param_type = effective_param_types[idx]? || TypeRef::VOID
+              hir_param = proc_func.add_param(name, param_type)
+              proc_ctx.register_local(name, hir_param.id)
+              proc_ctx.register_type(hir_param.id, param_type)
+              update_typeof_local(name, param_type)
+              if ta = param.type_annotation
+                update_typeof_local_name(name, (safe_slice_to_string(ta) || ""))
+              elsif param_type != TypeRef::VOID
+                update_typeof_local_name(name, get_type_name_from_ref(param_type))
+              end
+              if param_type != TypeRef::VOID
+                track_enum_value(hir_param.id, get_type_name_from_ref(param_type))
+              end
+            end
           end
         end
       elsif param_types
