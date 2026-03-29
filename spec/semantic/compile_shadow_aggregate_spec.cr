@@ -133,5 +133,7 @@ describe "compile semantic shadow aggregate" do
     alpha_symbol = analyzer.global_context.symbol_table.lookup("alpha")
     alpha_symbol.should be_a(Semantic::MethodSymbol)
     alpha_symbol.not_nil!.file_path.should eq("unit_0.cr")
+    analyzer.generated_node_file_paths.values.uniq.should eq(["unit_0.cr"])
+    analyzer.generated_node_file_paths.size.should be > 0
   end
 end

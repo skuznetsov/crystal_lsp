@@ -95,7 +95,9 @@ The remaining caveat is file attribution for post-parse macro expansion:
 the shared aggregate node graph still reflects the original parse graph, but
 symbol ownership is now rebound through the semantic shadow file-path provider,
 so per-unit shadow summaries can attribute root-level macro-generated symbols
-back to the originating source file.
+back to the originating source file. The shadow summary now also reports
+`generated_nodes`, both globally and per unit, so expanded semantic ownership
+is visible without pretending that the aggregate parse graph itself changed.
 
 ## Current limitations
 
@@ -112,6 +114,8 @@ back to the originating source file.
 - post-parse macro-generated nodes are not yet folded back into the shared
   aggregate ownership map, so node counts still describe the original aggregate
   parse graph rather than an expanded semantic graph
+- `generated_nodes` is a semantic-side provenance counter, not a replacement
+  for aggregate `nodes`; the two numbers intentionally describe different layers
 - does not yet include macro-expansion parity with `AstToHir`
 - does not yet run normalized HIR comparison
 

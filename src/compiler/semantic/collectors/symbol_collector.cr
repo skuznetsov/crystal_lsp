@@ -13,6 +13,7 @@ module CrystalV2
         alias TypedNode = Frontend::TypedNode
 
         getter diagnostics : Array(Diagnostic)
+        getter generated_file_paths : Hash(Int32, String)
         @virtual_arena : Frontend::VirtualArena?
 
       def initialize(@program : Program, context : Context, @node_file_path_provider : Proc(Frontend::ExprId, String?)? = nil)
@@ -188,9 +189,18 @@ module CrystalV2
         end
 
         private def handle_root_macro_expansion(node_id : Frontend::ExprId)
+          expanded_id = track_generated_nodes(node_id) do
+            @macro_expander.expand_top_level(node_id)
+          end
+          @macro_expander.diagnostics.each { |entry| @diagnostics << entry }
+          visit(expanded_id) unless expanded_id.invalid?
+        end
+
+        private def track_generated_nodes(origin_node_id : Frontend::ExprId, &)
           generated_start = arena.size
-          origin_path = file_path_for(node_id)
-          expanded_id = @macro_expander.expand_top_level(node_id)
+          origin_path = file_path_for(origin_node_id)
+          expanded_id = yield
+
           if origin_path
             generated_index = generated_start
             while generated_index < arena.size
@@ -198,8 +208,8 @@ module CrystalV2
               generated_index += 1
             end
           end
-          @macro_expander.diagnostics.each { |entry| @diagnostics << entry }
-          visit(expanded_id) unless expanded_id.invalid?
+
+          expanded_id
         end
 
         private def handle_macro_def(node_id : Frontend::ExprId, node : Frontend::MacroDefNode)
@@ -668,13 +678,15 @@ module CrystalV2
             owner_type = @class_stack.empty? ? nil : @class_stack.last
 
             # Expand macro with optional owner_type
-            expanded_id = @macro_expander.expand(
-              symbol,
-              args,
-              owner_type,
-              named_args: node.named_args,
-              block_id: node.block
-            )
+            expanded_id = track_generated_nodes(node_id) do
+              @macro_expander.expand(
+                symbol,
+                args,
+                owner_type,
+                named_args: node.named_args,
+                block_id: node.block
+              )
+            end
 
             # Collect diagnostics from expander
             @macro_expander.diagnostics.each { |entry| @diagnostics << entry }

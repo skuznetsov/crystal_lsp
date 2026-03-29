@@ -18,12 +18,14 @@ module CrystalV2
         getter semantic_diagnostics : Array(Diagnostic)
         getter name_resolver_diagnostics : Array(Frontend::Diagnostic)
         getter type_inference_diagnostics : Array(Diagnostic)
+        getter generated_node_file_paths : Hash(Int32, String)
 
         def initialize(@program : Program, context : Context? = nil)
           @global_context = context || Context.new(SymbolTable.new)
           @semantic_diagnostics = [] of Diagnostic
           @name_resolver_diagnostics = [] of Frontend::Diagnostic
           @type_inference_diagnostics = [] of Diagnostic
+          @generated_node_file_paths = {} of Int32 => String
         end
 
         def collect_symbols(node_file_path_provider : Proc(ExprId, String?)? = nil)
@@ -31,6 +33,7 @@ module CrystalV2
           collector = SymbolCollector.new(@program, @global_context, node_file_path_provider: node_file_path_provider)
           collector.collect
           @semantic_diagnostics = collector.diagnostics
+          @generated_node_file_paths = collector.generated_file_paths.dup
           debug_hook("analyzer.symbols.finish", "diagnostics=#{@semantic_diagnostics.size}")
           self
         end

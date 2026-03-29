@@ -9,9 +9,10 @@ shared-AstArena aggregate, file-aware collector/name-resolution/type
 diagnostics in shadow mode, compile-collector declaration provenance, and a
 first compile-collector vs semantic declaration-parity signal. Root-level
 macro-generated methods now materialize on the semantic side for the shadow
-reducer and are attributed back to the originating file in per-unit symbol
-counts. The right short-term substrate is still reparse into that aggregate,
-not deep traversal over the current `VirtualArena`.
+reducer, are attributed back to the originating file in per-unit symbol
+counts, and surface as `generated_nodes` in shadow summaries. The right
+short-term substrate is still reparse into that aggregate, not deep traversal
+over the current `VirtualArena`.
 
 Verified sequence:
 - implementation:
@@ -56,8 +57,9 @@ Verified sequence:
     - output includes `declaration_gaps=0`, a method parity line with
       `collector_total=3 ... semantic_total=3 ... gaps=0`, and a provenance line with
       `collector_direct_total=1 collector_macro_expanded_total=2`
-    - the same smoke now reports `symbols=3` in the per-unit summary, proving
-      that generated method symbols are attributed back to the source file
+    - the same smoke now reports `generated_nodes=3` globally and
+      `generated_nodes=3 symbols=3` in the per-unit summary, proving that
+      generated method nodes/symbols are attributed back to the source file
 - reusable failure pattern:
   - the current `VirtualArena` only renumbers root ids; nested `ExprId`
     references inside nodes remain file-local, so it is not yet a sound
@@ -71,13 +73,13 @@ Verified sequence:
     vs `macro_expanded` declarations on that side, and the current shadow smoke
     now shows semantic parity for top-level macro-generated methods
   - this is still not a full semantic-side macro-expanded parity gate or a
-    lowering contract, because generated nodes are not yet folded into the
-    aggregate ownership map itself; `nodes=` still describes the original parse graph
+    lowering contract, because aggregate `nodes=` still describes the original
+    parse graph while `generated_nodes=` separately describes semantic expansion provenance
 
 Practical consequence:
 - Phase 2 can progress without touching lowering or default compile behavior
-- the next honest work item is expanded-node ownership/provenance on top of the
-  current collector provenance signal, not more identity-layer surgery
+- the next honest work item is broader semantic-side macro parity beyond this
+  root-level reducer, not more identity-layer surgery
 {F/G/R: 0.92/0.72/0.95} [active]
 
 [LM-343|verified]: current source can again complete a trustworthy

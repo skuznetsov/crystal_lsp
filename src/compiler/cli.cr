@@ -154,6 +154,7 @@ module CrystalV2
         getter files_count : Int32
         getter roots_count : Int32
         getter arena_size : Int32
+        getter generated_node_count : Int32
         getter symbol_count : Int32
         getter identifier_count : Int32
         getter semantic_diagnostic_count : Int32
@@ -167,6 +168,7 @@ module CrystalV2
           @files_count : Int32,
           @roots_count : Int32,
           @arena_size : Int32,
+          @generated_node_count : Int32,
           @symbol_count : Int32,
           @identifier_count : Int32,
           @semantic_diagnostic_count : Int32,
@@ -180,6 +182,7 @@ module CrystalV2
         getter path : String
         getter roots_count : Int32
         getter node_count : Int32
+        getter generated_node_count : Int32
         getter symbol_count : Int32
         getter identifier_count : Int32
         getter semantic_diagnostic_count : Int32
@@ -190,6 +193,7 @@ module CrystalV2
           @path : String,
           @roots_count : Int32,
           @node_count : Int32,
+          @generated_node_count : Int32,
           @symbol_count : Int32,
           @identifier_count : Int32,
           @semantic_diagnostic_count : Int32,
@@ -1274,6 +1278,7 @@ module CrystalV2
                 "files=#{shadow_summary.files_count}",
                 "roots=#{shadow_summary.roots_count}",
                 "nodes=#{shadow_summary.arena_size}",
+                "generated_nodes=#{shadow_summary.generated_node_count}",
                 "symbols=#{shadow_summary.symbol_count}",
                 "identifiers=#{shadow_summary.identifier_count}",
                 "semantic_diags=#{shadow_summary.semantic_diagnostic_count}",
@@ -1290,14 +1295,15 @@ module CrystalV2
                 out_io.puts [
                   "  Semantic shadow unit:",
                   "path=#{unit_summary.path}",
-                "roots=#{unit_summary.roots_count}",
-                "nodes=#{unit_summary.node_count}",
-                "symbols=#{unit_summary.symbol_count}",
-                "identifiers=#{unit_summary.identifier_count}",
-                "semantic_diags=#{unit_summary.semantic_diagnostic_count}",
-                "resolution_diags=#{unit_summary.resolution_diagnostic_count}",
-                "type_diags=#{unit_summary.type_diagnostic_count}",
-              ].join(" ")
+                  "roots=#{unit_summary.roots_count}",
+                  "nodes=#{unit_summary.node_count}",
+                  "generated_nodes=#{unit_summary.generated_node_count}",
+                  "symbols=#{unit_summary.symbol_count}",
+                  "identifiers=#{unit_summary.identifier_count}",
+                  "semantic_diags=#{unit_summary.semantic_diagnostic_count}",
+                  "resolution_diags=#{unit_summary.resolution_diagnostic_count}",
+                  "type_diags=#{unit_summary.type_diagnostic_count}",
+                ].join(" ")
               end
             end
           end
@@ -5625,6 +5631,25 @@ module CrystalV2
         counts
       end
 
+      private def count_shadow_generated_nodes_by_unit(
+        generated_node_file_paths : Hash(Int32, String),
+        aggregate : Semantic::CompileShadowAggregate
+      ) : Array(Int32)
+        counts = Array(Int32).new(aggregate.unit_summaries.size, 0)
+        unit_index_by_path = {} of String => Int32
+        aggregate.unit_summaries.each_with_index do |unit_summary, unit_index|
+          unit_index_by_path[unit_summary.path] = unit_index.to_i32
+        end
+
+        generated_node_file_paths.each_value do |file_path|
+          if unit_index = unit_index_by_path[file_path]?
+            counts[unit_index] += 1
+          end
+        end
+
+        counts
+      end
+
       private def enrich_shadow_semantic_diagnostic(
         diagnostic : Semantic::Diagnostic,
         aggregate : Semantic::CompileShadowAggregate
@@ -5861,6 +5886,7 @@ module CrystalV2
         semantic_diagnostics = analyzer.semantic_diagnostics.map { |diagnostic| enrich_shadow_semantic_diagnostic(diagnostic, aggregate) }
         resolution_diagnostics = resolve_result.diagnostics.map { |diagnostic| enrich_shadow_resolution_diagnostic(diagnostic, aggregate) }
         type_diagnostics = analyzer.type_inference_diagnostics.map { |diagnostic| enrich_shadow_semantic_diagnostic(diagnostic, aggregate) }
+        generated_nodes_by_unit = count_shadow_generated_nodes_by_unit(analyzer.generated_node_file_paths, aggregate)
         symbols_by_unit = count_shadow_symbols_by_unit(analyzer.global_context.symbol_table, aggregate)
         identifiers_by_unit = count_shadow_identifiers_by_unit(resolve_result.identifier_symbols, aggregate)
         semantic_diagnostics_by_unit = count_shadow_diagnostics_by_unit(semantic_diagnostics, aggregate)
@@ -5874,6 +5900,7 @@ module CrystalV2
             path: unit_summary.path,
             roots_count: unit_summary.roots.size,
             node_count: unit_summary.node_count,
+            generated_node_count: generated_nodes_by_unit.unsafe_fetch(unit_index),
             symbol_count: symbols_by_unit.unsafe_fetch(unit_index),
             identifier_count: identifiers_by_unit.unsafe_fetch(unit_index),
             semantic_diagnostic_count: semantic_diagnostics_by_unit.unsafe_fetch(unit_index),
@@ -5901,6 +5928,7 @@ module CrystalV2
           files_count: units.size,
           roots_count: program.roots.size,
           arena_size: program.arena.size,
+          generated_node_count: analyzer.generated_node_file_paths.size,
           symbol_count: count_local_symbols(analyzer.global_context.symbol_table),
           identifier_count: resolve_result.identifier_symbols.size,
           semantic_diagnostic_count: semantic_diagnostics.size,
