@@ -150,6 +150,27 @@ the same aggregate-based shadow path is green across the currently measured
 macro-call shapes: bare identifier, positional args, named args, default arg,
 and block-yield.
 
+Generated top-level roots now participate in shadow `resolve_names` and
+`infer_types`, not just in collector parity. For example, a carrier like:
+
+```crystal
+# shadow_generated_resolution_lib.cr
+macro define_bad(name)
+  def {{name.id}}
+    missing + 1
+  end
+end
+
+# shadow_generated_resolution_main.cr
+require "./shadow_generated_resolution_lib"
+define_bad(:alpha)
+alpha()
+```
+
+now reports `resolution_diags=1` and the generated-body diagnostic is
+attributed back to the caller unit. Likewise a generated body containing
+`1 + "x"` now surfaces `type_diags=1` in shadow mode.
+
 The remaining caveat is file attribution for post-parse macro expansion:
 the shared aggregate node graph still reflects the original parse graph, but
 symbol ownership is now rebound through the semantic shadow file-path provider,
@@ -179,6 +200,9 @@ itself changed.
 - post-parse macro-generated nodes are now folded back into an ownership
   overlay for the shared aggregate, but the original parse graph is still
   preserved as a separate layer
+- generated top-level defs are now walked by shadow name resolution and type
+  inference via explicit `generated_top_level_roots`, but generated nodes are
+  still not spliced back into the aggregate parse graph itself
 - `generated_nodes` is a semantic-side provenance counter, not a replacement
   for aggregate `nodes`; `owned_nodes` is the expanded ownership count, and
   the three numbers intentionally describe different layers
@@ -189,8 +213,10 @@ itself changed.
 
 ## Next step after this spike
 
-The next honest move is to replace the reparse-based aggregate with a real
-compile-path program graph substrate that preserves:
+The next honest move is no longer “make generated top-level defs visible”;
+that part now works in shadow mode. The remaining honest move is to replace the
+reparse-based aggregate with a real compile-path program graph substrate that
+preserves:
 
 - multi-file provenance
 - prelude/require ordering

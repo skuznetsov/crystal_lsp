@@ -1,7 +1,7 @@
 # Crystal V2 Bootstrap — TODO (Updated 2026-03-27)
 
 ## Current Status
-- **Fresh Phase 2 substrate result: compile-side semantic shadow now runs on a shared-AstArena aggregate under feature flag, exposes honest file-level ownership summaries, prints file-aware diagnostics for collector/name-resolution/type-inference, and now reports compile-collector declaration provenance plus collector-vs-semantic declaration parity; root-level macro-generated methods and bare top-level macro calls now materialize on the semantic side, are attributed back to the originating file, and surface separately as `generated_nodes` in shadow summaries (2026-03-29, current session)**:
+- **Fresh Phase 2 substrate result: compile-side semantic shadow now runs on a shared-AstArena aggregate under feature flag, exposes honest file-level ownership summaries, prints file-aware diagnostics for collector/name-resolution/type-inference, reports compile-collector declaration provenance plus collector-vs-semantic declaration parity, and now traverses generated top-level defs during shadow name resolution/type inference; root-level macro-generated methods and bare top-level macro calls materialize on the semantic side, are attributed back to the originating file, and surface separately as `generated_nodes` in shadow summaries (2026-03-29, current session)**:
   - trustworthy setup:
     - added `CRYSTAL_V2_SEMANTIC_SHADOW=1` compile-side shadow prepass in `src/compiler/cli.cr`
     - shadow aggregate is built by reparsing already-loaded compile units into one shared `Frontend::AstArena`
@@ -68,6 +68,23 @@
         - per-unit summary now shows expanded ownership separately from parse ownership:
           `path=/tmp/shadow_macro_main.cr roots=3 nodes=7 owned_nodes=8 generated_nodes=1 ...`
         - final compile exit `0`
+    - live generated-body diagnostics now surface from generated top-level defs too:
+      - unresolved-name carrier:
+        - `/tmp/shadow_generated_resolution_lib.cr` defines `macro define_bad(name) ... missing + 1 ... end`
+        - `/tmp/shadow_generated_resolution_main.cr` does `require "./shadow_generated_resolution_lib"; define_bad(:alpha); alpha()`
+        - `CRYSTAL_V2_SEMANTIC_SHADOW=1 /tmp/crystal_v2_semantic_shadow_generated /tmp/shadow_generated_resolution_main.cr --no-prelude --stats --verbose`
+        - output includes:
+          - `/tmp/shadow_generated_resolution_main.cr:2:5-2:5 undefined local variable or method 'missing'`
+          - `Semantic shadow: ... resolution_diags=1 type_diags=1 declaration_gaps=0`
+          - `Semantic shadow unit: path=/tmp/shadow_generated_resolution_main.cr ... owned_nodes=11 generated_nodes=4 ... resolution_diags=1 type_diags=1`
+      - type-error carrier:
+        - `/tmp/shadow_generated_type_lib.cr` defines `macro define_bad(name) ... 1 + "x" ... end`
+        - `/tmp/shadow_generated_type_main.cr` does `require "./shadow_generated_type_lib"; define_bad(:alpha); alpha()`
+        - `CRYSTAL_V2_SEMANTIC_SHADOW=1 /tmp/crystal_v2_semantic_shadow_generated /tmp/shadow_generated_type_main.cr --no-prelude --stats --verbose`
+        - output includes:
+          - `error[E3001]: Operator '+' not defined for Int32 and String`
+          - `Semantic shadow: ... resolution_diags=0 type_diags=1 declaration_gaps=0`
+          - `Semantic shadow unit: path=/tmp/shadow_generated_type_main.cr ... owned_nodes=11 generated_nodes=4 ... type_diags=1`
   - practical consequence:
     - there is now a safe, flag-gated compile semantic prepass substrate for Phase 2 work
     - the next honest step is not `VirtualArena` reuse for full semantic traversal; nested `ExprId` remapping still blocks a real shared compile graph
@@ -79,7 +96,8 @@
     - shadow now also reports `generated_nodes`, so expanded semantic ownership is visible without corrupting the meaning of aggregate `nodes=`
     - collector/semantic declaration parity is now green across the currently measured macro-call shapes: bare identifier, positional args, named args, default arg, and block-yield
     - aggregate ownership now has a generated-node overlay, so per-unit shadow summaries can print both original parse `nodes=` and expanded `owned_nodes=`
-    - the next honest work item is no longer macro-call parity; it is broader expanded-node ownership/provenance and how far aggregate-backed shadow can carry diagnostics/contracts without pretending to be lowering
+    - generated top-level defs now participate in shadow `resolve_names` and `infer_types`, so the old gap “generated declarations exist but generated body diagnostics are invisible” is stale on the current tree
+    - the next honest work item is no longer macro-call parity or top-level generated-body traversal; it is broader expanded-node ownership/provenance and how far aggregate-backed shadow can carry diagnostics/contracts without pretending to be lowering
     - replacing reparse-based aggregation is still more honest follow-up than reopening Phase 1 identity questions
 - **Fresh stage3 split: trustworthy current-debug hosts can again build `stage2 --release` green, but resulting self-hosted stage2 runtime is still broken and now clearly splits into multiple families (2026-03-28, current session)**:
   - trustworthy setup:

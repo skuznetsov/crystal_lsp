@@ -11,9 +11,11 @@ first compile-collector vs semantic declaration-parity signal. Root-level
 macro-generated methods now materialize on the semantic side for the shadow
 reducer, are attributed back to the originating file in per-unit symbol
 counts, surface as `generated_nodes` in shadow summaries, and bare top-level
-macro calls no longer produce semantic shadow resolution/type errors. The right
-short-term substrate is still reparse into that aggregate, not deep traversal
-over the current `VirtualArena`.
+macro calls no longer produce semantic shadow resolution/type errors.
+Generated top-level defs are now also traversed by shadow name resolution and
+type inference, so generated-body diagnostics surface in the caller unit too.
+The right short-term substrate is still reparse into that aggregate, not deep
+traversal over the current `VirtualArena`.
 
 Verified sequence:
 - implementation:
@@ -86,6 +88,19 @@ Verified sequence:
     - the per-unit line for the caller file now separates original parse
       ownership from expanded ownership:
       `nodes=7 owned_nodes=8 generated_nodes=1`
+  - live generated-body diagnostics now surface from generated top-level defs:
+    - `/tmp/shadow_generated_resolution_lib.cr` defines
+      `macro define_bad(name) ... missing + 1 ... end`
+    - `/tmp/shadow_generated_resolution_main.cr` requires that file, then calls
+      `define_bad(:alpha)` and `alpha()`
+    - `CRYSTAL_V2_SEMANTIC_SHADOW=1 /tmp/crystal_v2_semantic_shadow_generated /tmp/shadow_generated_resolution_main.cr --no-prelude --stats --verbose`
+    - output now includes
+      `/tmp/shadow_generated_resolution_main.cr:2:5-2:5 undefined local variable or method 'missing'`
+      plus `resolution_diags=1` on the caller unit
+    - the type-error sibling carrier
+      `/tmp/shadow_generated_type_main.cr`
+      now reports `type_diags=1` from inside the generated body while keeping
+      `declaration_gaps=0`
 - reusable failure pattern:
   - the current `VirtualArena` only renumbers root ids; nested `ExprId`
     references inside nodes remain file-local, so it is not yet a sound
@@ -104,6 +119,9 @@ Verified sequence:
     `unit_index_for` can attribute generated semantic nodes after collection,
     and per-unit summaries can print both original `nodes` and expanded
     `owned_nodes`
+  - generated top-level defs now reach shadow `resolve_names` / `infer_types`
+    through explicit generated-root propagation, but generated nodes are still
+    not spliced back into the aggregate parse graph itself
   - this is still not a full semantic-side macro-expanded parity gate or a
     lowering contract, because aggregate `nodes=` still describes the original
     parse graph while `generated_nodes=` separately describes semantic expansion provenance
@@ -111,7 +129,8 @@ Verified sequence:
 Practical consequence:
 - Phase 2 can progress without touching lowering or default compile behavior
 - the next honest work item is expanded-node ownership/provenance beyond the
-  new overlay counts, not more identity-layer surgery
+  new overlay counts and top-level generated-body traversal, not more
+  identity-layer surgery
 {F/G/R: 0.92/0.72/0.95} [active]
 
 [LM-343|verified]: current source can again complete a trustworthy

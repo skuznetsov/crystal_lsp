@@ -14,6 +14,7 @@ module CrystalV2
 
         getter diagnostics : Array(Diagnostic)
         getter generated_file_paths : Hash(Int32, String)
+        getter generated_top_level_roots : Array(Frontend::ExprId)
         @virtual_arena : Frontend::VirtualArena?
 
       def initialize(@program : Program, context : Context, @node_file_path_provider : Proc(Frontend::ExprId, String?)? = nil, @source_for_path_provider : Proc(String, String?)? = nil)
@@ -25,6 +26,7 @@ module CrystalV2
         @diagnostics = [] of Diagnostic
         @source_cache = {} of String => String
         @generated_file_paths = {} of Int32 => String
+        @generated_top_level_roots = [] of Frontend::ExprId
         @macro_expander = MacroExpander.new(
           @program,
           @arena,
@@ -210,6 +212,7 @@ module CrystalV2
             @macro_expander.expand_top_level(node_id)
           end
           @macro_expander.diagnostics.each { |entry| @diagnostics << entry }
+          remember_generated_top_level_root(expanded_id)
           visit(expanded_id) unless expanded_id.invalid?
         end
 
@@ -236,6 +239,7 @@ module CrystalV2
             )
           end
           @macro_expander.diagnostics.each { |entry| @diagnostics << entry }
+          remember_generated_top_level_root(expanded_id)
           visit(expanded_id) unless expanded_id.invalid?
           true
         end
@@ -249,8 +253,15 @@ module CrystalV2
             @macro_expander.expand(symbol, [] of Frontend::ExprId, nil)
           end
           @macro_expander.diagnostics.each { |entry| @diagnostics << entry }
+          remember_generated_top_level_root(expanded_id)
           visit(expanded_id) unless expanded_id.invalid?
           true
+        end
+
+        private def remember_generated_top_level_root(node_id : Frontend::ExprId) : Nil
+          return if node_id.invalid?
+          return if @generated_top_level_roots.includes?(node_id)
+          @generated_top_level_roots << node_id
         end
 
         private def track_generated_nodes(origin_node_id : Frontend::ExprId, &)

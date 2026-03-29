@@ -23,7 +23,7 @@ module CrystalV2
           end
         end
 
-        def initialize(@program : Program, root_table : SymbolTable)
+        def initialize(@program : Program, root_table : SymbolTable, @extra_roots : Array(ExprId) = [] of ExprId)
           @arena = @program.ast_arena
           @string_pool = @program.string_pool
           @root_table = root_table
@@ -34,10 +34,15 @@ module CrystalV2
 
         def resolve : Result
           @current_table = @root_table
-          @program.roots.each do |root_id|
+          each_analysis_root do |root_id|
             visit(root_id)
           end
           Result.new(@identifier_symbols, @diagnostics)
+        end
+
+        private def each_analysis_root(& : ExprId ->)
+          @program.roots.each { |root_id| yield root_id }
+          @extra_roots.each { |root_id| yield root_id }
         end
 
         private def visit(node_id : ExprId)

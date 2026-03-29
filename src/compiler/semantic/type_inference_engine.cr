@@ -113,6 +113,7 @@ module CrystalV2
           @identifier_symbols : Hash(ExprId, Symbol),
           @global_table : SymbolTable? = nil,
           @context : TypeContext = TypeContext.new,
+          @extra_roots : Array(ExprId) = [] of ExprId,
         )
           # Self-hosted binaries have shown unstable reads through Program#arena.
           # Type inference only operates on parser-built AstArena programs here.
@@ -152,8 +153,8 @@ module CrystalV2
 
         # Main entry point: Infer types for all root expressions
         def infer_types
-          debug_hook("infer.start", "roots=#{@program.roots.size}")
-          @program.roots.each do |root_id|
+          debug_hook("infer.start", "roots=#{analysis_root_count}")
+          each_analysis_root do |root_id|
             debug_hook("infer.root", "expr_id=#{root_id}")
             type = begin
                      infer_expression(root_id)
@@ -163,7 +164,16 @@ module CrystalV2
                    end
             @context.set_type(root_id, type)
           end
-          debug_hook("infer.finish", "roots=#{@program.roots.size} diagnostics=#{@diagnostics.size}")
+          debug_hook("infer.finish", "roots=#{analysis_root_count} diagnostics=#{@diagnostics.size}")
+        end
+
+        private def each_analysis_root(& : ExprId ->)
+          @program.roots.each { |root_id| yield root_id }
+          @extra_roots.each { |root_id| yield root_id }
+        end
+
+        private def analysis_root_count : Int32
+          @program.roots.size + @extra_roots.size
         end
 
         # Recursive type inference for a single expression
