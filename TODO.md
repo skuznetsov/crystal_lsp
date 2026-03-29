@@ -112,7 +112,7 @@
     - file-level ownership is now good enough for shadow inventory and for current diagnostic attribution across collector, name-resolution, and type-inference passes
     - generated-body diagnostics are now distinguishable from parse-graph diagnostics in both global and per-unit shadow telemetry; the remaining provenance gap is compile-authoritative source mapping, not visibility/counting
     - shadow diagnostics remain intentionally non-gating; they are visibility/provenance infrastructure, not compile-path authority yet
-    - shadow now has a first declaration-parity signal against the compile-side top-level collector plus collector-side provenance for direct vs macro-expanded declarations
+    - shadow now has a first declaration-parity signal against the compile-side top-level collector plus symmetric collector/semantic provenance for direct vs macro-expanded declarations
     - the current semantic global symbol table now materializes root-level macro-generated methods in this reducer
     - per-unit shadow summaries now attribute generated method symbols back to the originating file through the semantic-side file-path provider
     - shadow now also reports `generated_nodes`, so expanded semantic ownership is visible without corrupting the meaning of aggregate `nodes=`

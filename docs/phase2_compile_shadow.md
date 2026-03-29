@@ -91,6 +91,17 @@ This keeps the current signal honest: we can see when the collector side is
 already materializing declarations through top-level macro expansion, without
 pretending that this is full macro-expansion parity with lowering.
 
+The semantic-side declaration inventory now prints matching provenance lines
+too. On a carrier with one direct method and one macro-expanded method, verbose
+shadow output now includes:
+
+```text
+Semantic shadow declarations: methods provenance semantic_direct_total=1 semantic_direct_unique=1 semantic_macro_expanded_total=1 semantic_macro_expanded_unique=1
+```
+
+This closes the old asymmetry where only the collector side could distinguish
+`direct` from `macro_expanded` declarations.
+
 On the current tree, that top-level macro gap is now closed for the semantic
 symbol table: a no-prelude carrier with a top-level `{% for %}` that generates
 two methods now reports `collector_total=3` and `semantic_total=3` for methods.
@@ -250,8 +261,9 @@ It now also separates parse roots from actual traversal roots:
   for comparable kinds; it is still not a full lowering contract and not yet a
   dedicated macro-expanded parity gate
 - collector provenance lines distinguish `direct` vs `macro_expanded`
-  declarations only on the collector side; semantic inventory still has no
-  matching expansion provenance contract
+  declarations on both the collector and semantic sides, but the semantic
+  origin still comes from shadow-side generated-source detection rather than a
+  compile-authoritative expansion provenance contract
 - post-parse macro-generated nodes are now folded back into an ownership
   overlay for the shared aggregate, but the original parse graph is still
   preserved as a separate layer

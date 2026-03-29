@@ -233,4 +233,48 @@ describe "compile shadow declaration inventory" do
     lines.should contain("  missing_macro_expanded_in_semantic=generated_alpha, generated_beta")
     lines.none? { |line| line.includes?("missing_direct_in_semantic") }.should be_true
   end
+
+  it "records semantic provenance for direct and macro-expanded declarations" do
+    aggregate = Semantic::CompileShadowAggregate.build([
+      {
+        path: "decl_0.cr",
+        source: <<-CR,
+          def direct_greet
+          end
+
+          macro define_alpha
+            def alpha
+            end
+          end
+
+          define_alpha
+        CR
+      },
+    ])
+    program = aggregate.program
+    shadow_sources = {} of String => String
+    aggregate.unit_summaries.each { |u| shadow_sources[u.path] = u.source }
+
+    analyzer = Semantic::Analyzer.new(program)
+    analyzer.collect_symbols(
+      node_file_path_provider: ->(expr_id : Frontend::ExprId) { aggregate.path_for(expr_id) },
+      source_for_path_provider: ->(path : String) { shadow_sources[path]? },
+    )
+
+    semantic_inventory = Semantic::CompileShadowDeclarationInventory.from_symbol_table(analyzer.global_context.symbol_table) do |node_id|
+      if analyzer.generated_source_for(node_id)
+        Semantic::CompileShadowDeclarationOrigin::MacroExpanded
+      else
+        Semantic::CompileShadowDeclarationOrigin::Direct
+      end
+    end
+
+    method_line = semantic_inventory.provenance_lines("semantic").find { |line| line.starts_with?("methods provenance ") }
+
+    method_line.should_not be_nil
+    method_line.not_nil!.should contain("semantic_direct_total=1")
+    method_line.not_nil!.should contain("semantic_direct_unique=1")
+    method_line.not_nil!.should contain("semantic_macro_expanded_total=1")
+    method_line.not_nil!.should contain("semantic_macro_expanded_unique=1")
+  end
 end

@@ -126,6 +126,10 @@ Verified sequence:
     shadow path:
     - frontend diagnostics use `related_spans`
     - semantic diagnostics reuse `secondary_spans`
+  - live verbose declaration inventory now prints semantic provenance too:
+    - on a carrier with one direct method and one macro-expanded method,
+      output includes
+      `methods provenance semantic_direct_total=1 semantic_direct_unique=1 semantic_macro_expanded_total=1 semantic_macro_expanded_unique=1`
 - reusable failure pattern:
   - the current `VirtualArena` only renumbers root ids; nested `ExprId`
     references inside nodes remain file-local, so it is not yet a sound
@@ -135,11 +139,12 @@ Verified sequence:
     - current shadow diagnostics are file-aware
     - the shadow path is still observational only, not compile-authoritative
   - declaration parity is currently limited to comparable top-level kinds from
-    the compile-side collector; collector provenance can distinguish `direct`
-    vs `macro_expanded` declarations on that side, and the current shadow smoke
-    now shows collector-vs-semantic parity for top-level macro-generated
-    methods plus the currently measured macro-call shapes: bare identifier,
-    positional args, named args, default arg, and block-yield
+    the compile-side collector; collector and semantic provenance can now both
+    distinguish `direct` vs `macro_expanded` declarations, and the current
+    shadow smoke now shows collector-vs-semantic parity plus symmetric
+    provenance for top-level macro-generated methods and the currently measured
+    macro-call shapes: bare identifier, positional args, named args, default
+    arg, and block-yield
   - aggregate ownership now has a generated-node overlay, so `path_for` and
     `unit_index_for` can attribute generated semantic nodes after collection,
     and per-unit summaries can print both original `nodes` and expanded

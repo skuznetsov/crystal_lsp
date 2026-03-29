@@ -6196,7 +6196,13 @@ module CrystalV2
         aggregate.attach_generated_node_paths(analyzer.generated_node_file_paths)
         resolve_result = analyzer.resolve_names
         analyzer.infer_types(resolve_result.identifier_symbols)
-        semantic_inventory = Semantic::CompileShadowDeclarationInventory.from_symbol_table(analyzer.global_context.symbol_table)
+        semantic_inventory = Semantic::CompileShadowDeclarationInventory.from_symbol_table(analyzer.global_context.symbol_table) do |node_id|
+          if analyzer.generated_source_for(node_id)
+            Semantic::CompileShadowDeclarationOrigin::MacroExpanded
+          else
+            Semantic::CompileShadowDeclarationOrigin::Direct
+          end
+        end
         declaration_parity = Semantic::CompileShadowDeclarationParity.compare(collector_inventory, semantic_inventory)
         semantic_diagnostics = analyzer.semantic_diagnostics.map { |diagnostic| enrich_shadow_semantic_diagnostic(diagnostic, aggregate) }
         resolution_diagnostics = resolve_result.diagnostics.map { |diagnostic| enrich_shadow_resolution_diagnostic(diagnostic, aggregate) }
@@ -6212,6 +6218,7 @@ module CrystalV2
         generated_roots_by_unit = count_shadow_generated_roots_by_unit(analyzer.generated_top_level_roots, aggregate)
         declaration_summary_lines = declaration_parity.summary_lines(5, "collector", "semantic")
         declaration_summary_lines.concat(collector_inventory.provenance_lines("collector"))
+        declaration_summary_lines.concat(semantic_inventory.provenance_lines("semantic"))
         unit_summaries = [] of SemanticShadowUnitSummary
         aggregate.unit_summaries.each_with_index do |unit_summary, unit_index|
           generated_root_count = generated_roots_by_unit.unsafe_fetch(unit_index)

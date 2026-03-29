@@ -61,25 +61,58 @@ module CrystalV2
           inventory
         end
 
-        def self.from_symbol_table(table : SymbolTable) : self
+        def self.from_symbol_table(
+          table : SymbolTable,
+          &origin_for_node : Frontend::ExprId -> CompileShadowDeclarationOrigin
+        ) : self
           inventory = new
           table.each_local_symbol do |name, symbol|
             case symbol
-            when MethodSymbol, OverloadSetSymbol
-              inventory.record(CompileShadowDeclarationKind::Methods, name)
+            when MethodSymbol
+              inventory.record(
+                CompileShadowDeclarationKind::Methods,
+                name,
+                origin_for_node.call(symbol.node_id)
+              )
+            when OverloadSetSymbol
+              record_overload_set(inventory, name, symbol, origin_for_node)
             when ClassSymbol
-              inventory.record(CompileShadowDeclarationKind::Classes, name)
+              inventory.record(
+                CompileShadowDeclarationKind::Classes,
+                name,
+                origin_for_node.call(symbol.node_id)
+              )
             when ModuleSymbol
-              inventory.record(CompileShadowDeclarationKind::Modules, name)
+              inventory.record(
+                CompileShadowDeclarationKind::Modules,
+                name,
+                origin_for_node.call(symbol.node_id)
+              )
             when EnumSymbol
-              inventory.record(CompileShadowDeclarationKind::Enums, name)
+              inventory.record(
+                CompileShadowDeclarationKind::Enums,
+                name,
+                origin_for_node.call(symbol.node_id)
+              )
             when MacroSymbol
-              inventory.record(CompileShadowDeclarationKind::Macros, name)
+              inventory.record(
+                CompileShadowDeclarationKind::Macros,
+                name,
+                origin_for_node.call(symbol.node_id)
+              )
             when ConstantSymbol
-              inventory.record(CompileShadowDeclarationKind::Constants, name)
+              inventory.record(
+                CompileShadowDeclarationKind::Constants,
+                name,
+                origin_for_node.call(symbol.node_id)
+              )
             end
           end
           inventory
+        end
+
+        def self.from_symbol_table(table : SymbolTable) : self
+          from_symbol_table(table) { CompileShadowDeclarationOrigin::Direct }
         end
 
         def initialize
@@ -195,6 +228,26 @@ module CrystalV2
             collect_root_declaration(inventory, arena, node.expression)
           when Frontend::VisibilityModifierNode
             collect_root_declaration(inventory, arena, node.expression)
+          end
+        end
+
+        private def self.record_overload_set(
+          inventory : self,
+          name : String,
+          symbol : OverloadSetSymbol,
+          origin_for_node : Frontend::ExprId -> CompileShadowDeclarationOrigin
+        ) : Nil
+          origins = Set(CompileShadowDeclarationOrigin).new
+          symbol.overloads.each do |overload|
+            origins.add(origin_for_node.call(overload.node_id))
+          end
+
+          if origins.empty?
+            inventory.record(CompileShadowDeclarationKind::Methods, name)
+          else
+            origins.each do |origin|
+              inventory.record(CompileShadowDeclarationKind::Methods, name, origin)
+            end
           end
         end
       end
