@@ -70,8 +70,11 @@ These are passed separately through CLI orchestration:
 | `unique_forced` | `@phase0_forced_lower_names.size` | same | Distinct function names that were force-lowered |
 | `pending_queue_max` | `@phase0_pending_queue_max` | `process_pending_lower_functions` inner loop | Peak pending function queue size |
 | `safety_net_functions` | `@phase0_safety_net_functions` | `emit_all_tracked_signatures` per iteration | Functions emitted by safety-net signature emission |
-| `body_analysis_total` | `@phase0_lower_name_counts.values.sum` | `lower_function_if_needed_impl` (PAST all skip guards) | Total body analysis attempts that reached actual lowering |
-| `duplicate_bodies` | count of names with count>1 | same | Function names whose body was analyzed more than once |
+| `lower_def_calls` | `@phase0_lower_def_counts.values.sum` | Before `lower_def()` call, keyed by canonical name | Full HIR body emission entries |
+| `lower_def_dupes` | count with count>1 | same | Bodies emitted more than once |
+| `body_infer_walks` | `@phase0_body_infer_counts.values.sum` | `infer_concrete_return_type_from_body` PAST body guard | Actual body walks for return type inference |
+| `unique_defs` | `@phase0_body_infer_counts.size` | same | Unique def identities inferred |
+| `body_infer_dupes` | count with count>1 | same, keyed by def identity (arena+node) | Same def body inferred >1 time |
 | `total_hir_functions` | `@module.function_count` | dumped AFTER allocator flush + RTA pruning | Final emitted HIR function count |
 
 ### 2.2 Future metrics (not yet instrumented)
@@ -88,12 +91,18 @@ These are passed separately through CLI orchestration:
 [PHASE0] forced_lowers=N unique_forced=M
 [PHASE0] pending_queue_max=N
 [PHASE0] safety_net_functions=N
-[PHASE0] body_analysis_total=N duplicate_bodies=M
+[PHASE0] lower_def_calls=N lower_def_dupes=M
+[PHASE0] body_infer_walks=N unique_defs=M body_infer_dupes=K
 [PHASE0] total_hir_functions=N
 ```
 
 Dump is triggered by `CRYSTAL_V2_PHASE0_METRICS=1` and occurs AFTER
 allocator flush and RTA pruning (in cli.cr, post-RTA section).
+
+Notes:
+- `body_infer_walks`: counts PAST body-presence guard (real walks, not attempts)
+- `body_infer_dupes`: keyed by def identity (arena+node object_id), not label string
+- `lower_def_calls`: keyed by canonical target_name (post-lookup resolution)
 
 ## 3. SemanticTypeId Design
 

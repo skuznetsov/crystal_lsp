@@ -1955,7 +1955,8 @@ module Crystal::HIR
     @phase0_lower_def_counts : Hash(String, Int32) = Hash(String, Int32).new(0)
     # Separate counter for return-type body inference (infer_concrete_return_type_from_body).
     # This walks method bodies to infer return types WITHOUT full lower_def.
-    @phase0_body_infer_counts : Hash(String, Int32) = Hash(String, Int32).new(0)
+    # Keyed by def identity (arena_object_id ^ node_object_id), not label strings.
+    @phase0_body_infer_counts : Hash(UInt64, Int32) = Hash(UInt64, Int32).new(0)
 
     # Tracks nesting depth of force_lower_function_for_return_type to prevent
     # unbounded recursion when inferring return types triggers more return type inferences.
@@ -13838,16 +13839,19 @@ module Crystal::HIR
       return nil if @defer_body_return_inference
       body = node.body
       method_name = (safe_slice_to_string(node.name) || "")
-      # Phase 0 metric: count return-type body inference attempts.
-      # Keyed by method name + self type for canonical identity.
-      infer_key = self_type_name ? "#{self_type_name}##{method_name}" : method_name
-      @phase0_body_infer_counts[infer_key] = (@phase0_body_infer_counts[infer_key]? || 0) + 1
       debug_name = env_get("DEBUG_INFER_BODY_NAME")
       debug_infer = debug_name ? method_name.includes?(debug_name) : false
       if env_get("DEBUG_INFER_BODY") && method_name.includes?("internal_representation")
         STDERR.puts "[INFER_BODY] method=#{method_name} body_size=#{body.try(&.size) || 0} self=#{self_type_name || "nil"}"
       end
       return nil unless body && !body.empty?
+
+      # Phase 0 metric: count ACTUAL body inference walks (past body-presence guard).
+      # Keyed by def identity (arena + expr_id), not label, to avoid conflating
+      # overloads, reopened defs, and class-vs-instance methods.
+      arena_for_infer = preferred_arena || @arena
+      infer_def_key = arena_for_infer.object_id ^ (node.object_id.to_u64 << 16)
+      @phase0_body_infer_counts[infer_def_key] = (@phase0_body_infer_counts[infer_def_key]? || 0) + 1
       old_body_context = @infer_body_context
       old_method = @current_method
       old_class = @current_class
@@ -39689,15 +39693,16 @@ module Crystal::HIR
       # lower_def: full HIR body emission
       lower_def_total = @phase0_lower_def_counts.values.sum
       lower_def_dupes = @phase0_lower_def_counts.count { |_, c| c > 1 }
-      # infer_concrete_return_type_from_body: body walk for return type (no full lowering)
+      # infer_concrete_return_type_from_body: actual body walks for return type (past body guard)
       body_infer_total = @phase0_body_infer_counts.values.sum
+      body_infer_unique = @phase0_body_infer_counts.size
       body_infer_dupes = @phase0_body_infer_counts.count { |_, c| c > 1 }
 
       io.puts "[PHASE0] forced_lowers=#{@phase0_forced_lower_count} unique_forced=#{@phase0_forced_lower_names.size}"
       io.puts "[PHASE0] pending_queue_max=#{@phase0_pending_queue_max}"
       io.puts "[PHASE0] safety_net_functions=#{@phase0_safety_net_functions}"
       io.puts "[PHASE0] lower_def_calls=#{lower_def_total} lower_def_dupes=#{lower_def_dupes}"
-      io.puts "[PHASE0] body_infer_calls=#{body_infer_total} body_infer_dupes=#{body_infer_dupes}"
+      io.puts "[PHASE0] body_infer_walks=#{body_infer_total} unique_defs=#{body_infer_unique} body_infer_dupes=#{body_infer_dupes}"
       io.puts "[PHASE0] total_hir_functions=#{@module.function_count}"
     end
 
