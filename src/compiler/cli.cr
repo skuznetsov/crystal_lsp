@@ -4,7 +4,9 @@ require "file_utils"
 require "./frontend/diagnostic_formatter"
 require "./frontend/lexer"
 require "./frontend/parser"
+require "./frontend/dispatch"
 require "./semantic/analyzer"
+require "./semantic/compile_shadow_aggregate"
 require "./semantic/diagnostic_formatter"
 require "./hir/hir"
 require "./hir/ast_to_hir"
@@ -144,6 +146,48 @@ module CrystalV2
         end
       end
 
+      private class SemanticShadowSummary
+        getter unit_summaries : Array(SemanticShadowUnitSummary)
+        getter files_count : Int32
+        getter roots_count : Int32
+        getter arena_size : Int32
+        getter symbol_count : Int32
+        getter identifier_count : Int32
+        getter semantic_diagnostic_count : Int32
+        getter resolution_diagnostic_count : Int32
+        getter type_diagnostic_count : Int32
+
+        def initialize(
+          @unit_summaries : Array(SemanticShadowUnitSummary),
+          @files_count : Int32,
+          @roots_count : Int32,
+          @arena_size : Int32,
+          @symbol_count : Int32,
+          @identifier_count : Int32,
+          @semantic_diagnostic_count : Int32,
+          @resolution_diagnostic_count : Int32,
+          @type_diagnostic_count : Int32,
+        )
+        end
+      end
+
+      private class SemanticShadowUnitSummary
+        getter path : String
+        getter roots_count : Int32
+        getter node_count : Int32
+        getter symbol_count : Int32
+        getter identifier_count : Int32
+
+        def initialize(
+          @path : String,
+          @roots_count : Int32,
+          @node_count : Int32,
+          @symbol_count : Int32,
+          @identifier_count : Int32,
+        )
+        end
+      end
+
       private class LibEntry
         getter node : Frontend::LibNode
         getter arena : Frontend::ArenaLike
@@ -158,6 +202,14 @@ module CrystalV2
       end
 
       def initialize(@args : Array(String))
+      end
+
+      private def semantic_shadow_enabled? : Bool
+        BootstrapEnv.enabled?("CRYSTAL_V2_SEMANTIC_SHADOW")
+      end
+
+      private def semantic_shadow_strict? : Bool
+        BootstrapEnv.enabled?("CRYSTAL_V2_SEMANTIC_SHADOW_STRICT")
       end
 
       private def bootstrap_trace_puts(value = "") : Nil
@@ -1198,6 +1250,39 @@ module CrystalV2
           log(options, out_io, "  Stop after parse (CRYSTAL_V2_STOP_AFTER_PARSE)")
           emit_timings(options, out_io, timings, total_start)
           return 0
+        end
+
+        if semantic_shadow_enabled?
+          shadow_start = Time.instant
+          shadow_summary = run_semantic_compile_shadow(all_arenas, options, out_io, err_io)
+          if shadow_summary
+            timings["semantic_shadow"] = (Time.instant - shadow_start).total_milliseconds if options.stats
+            if options.verbose || options.stats
+              out_io.puts [
+                "Semantic shadow:",
+                "files=#{shadow_summary.files_count}",
+                "roots=#{shadow_summary.roots_count}",
+                "nodes=#{shadow_summary.arena_size}",
+                "symbols=#{shadow_summary.symbol_count}",
+                "identifiers=#{shadow_summary.identifier_count}",
+                "semantic_diags=#{shadow_summary.semantic_diagnostic_count}",
+                "resolution_diags=#{shadow_summary.resolution_diagnostic_count}",
+                "type_diags=#{shadow_summary.type_diagnostic_count}",
+              ].join(" ")
+            end
+            if options.verbose
+              shadow_summary.unit_summaries.each do |unit_summary|
+                out_io.puts [
+                  "  Semantic shadow unit:",
+                  "path=#{unit_summary.path}",
+                  "roots=#{unit_summary.roots_count}",
+                  "nodes=#{unit_summary.node_count}",
+                  "symbols=#{unit_summary.symbol_count}",
+                  "identifiers=#{unit_summary.identifier_count}",
+                ].join(" ")
+              end
+            end
+          end
         end
 
         if debug_trace_enabled
@@ -5290,6 +5375,9 @@ module CrystalV2
         if (parse = timings["parse_total"]?)
           parts << "parse=#{parse.round(1)}"
         end
+        if (semantic_shadow = timings["semantic_shadow"]?)
+          parts << "semantic_shadow=#{semantic_shadow.round(1)}"
+        end
         if (prelude = timings["parse_prelude"]?)
           parts << "prelude=#{prelude.round(1)}"
         end
@@ -5463,6 +5551,99 @@ module CrystalV2
 
       private def report_type_inference_diagnostics(diagnostics, source, err_io)
         diagnostics.each { |d| err_io.puts Semantic::DiagnosticFormatter.format(source, d) }
+      end
+
+      private def build_semantic_shadow_aggregate(units : Array(ParsedUnit)) : Semantic::CompileShadowAggregate
+        shadow_units = [] of NamedTuple(path: String, source: String)
+        units.each do |unit|
+          shadow_units << {path: unit.path, source: unit.source}
+        end
+        Semantic::CompileShadowAggregate.build(shadow_units)
+      end
+
+      private def count_local_symbols(table : Semantic::SymbolTable) : Int32
+        count = 0
+        table.each_local_symbol do |_name, _symbol|
+          count += 1
+        end
+        count
+      end
+
+      private def count_shadow_symbols_by_unit(
+        table : Semantic::SymbolTable,
+        aggregate : Semantic::CompileShadowAggregate
+      ) : Array(Int32)
+        counts = Array(Int32).new(aggregate.unit_summaries.size, 0)
+        table.each_local_symbol do |_name, symbol|
+          next unless node_id = symbol.node_id
+          if unit_index = aggregate.unit_index_for(node_id)
+            counts[unit_index] += 1
+            if symbol.file_path.nil?
+              symbol.file_path = aggregate.path_for(node_id)
+            end
+          end
+        end
+        counts
+      end
+
+      private def count_shadow_identifiers_by_unit(
+        identifier_symbols : Hash(Frontend::ExprId, Semantic::Symbol),
+        aggregate : Semantic::CompileShadowAggregate
+      ) : Array(Int32)
+        counts = Array(Int32).new(aggregate.unit_summaries.size, 0)
+        identifier_symbols.each_key do |expr_id|
+          if unit_index = aggregate.unit_index_for(expr_id)
+            counts[unit_index] += 1
+          end
+        end
+        counts
+      end
+
+      private def run_semantic_compile_shadow(
+        units : Array(ParsedUnit),
+        options : Options,
+        out_io : IO,
+        err_io : IO,
+      ) : SemanticShadowSummary?
+        aggregate = build_semantic_shadow_aggregate(units)
+        program = aggregate.program
+        analyzer = Semantic::Analyzer.new(program)
+        analyzer.collect_symbols
+        resolve_result = analyzer.resolve_names
+        analyzer.infer_types(resolve_result.identifier_symbols)
+        symbols_by_unit = count_shadow_symbols_by_unit(analyzer.global_context.symbol_table, aggregate)
+        identifiers_by_unit = count_shadow_identifiers_by_unit(resolve_result.identifier_symbols, aggregate)
+        unit_summaries = [] of SemanticShadowUnitSummary
+        aggregate.unit_summaries.each_with_index do |unit_summary, unit_index|
+          unit_summaries << SemanticShadowUnitSummary.new(
+            path: unit_summary.path,
+            roots_count: unit_summary.roots.size,
+            node_count: unit_summary.node_count,
+            symbol_count: symbols_by_unit.unsafe_fetch(unit_index),
+            identifier_count: identifiers_by_unit.unsafe_fetch(unit_index),
+          )
+        end
+
+        SemanticShadowSummary.new(
+          unit_summaries: unit_summaries,
+          files_count: units.size,
+          roots_count: program.roots.size,
+          arena_size: program.arena.size,
+          symbol_count: count_local_symbols(analyzer.global_context.symbol_table),
+          identifier_count: resolve_result.identifier_symbols.size,
+          semantic_diagnostic_count: analyzer.semantic_diagnostics.size,
+          resolution_diagnostic_count: resolve_result.diagnostics.size,
+          type_diagnostic_count: analyzer.type_inference_diagnostics.size,
+        )
+      rescue ex
+        raise ex if semantic_shadow_strict?
+
+        err_io.puts "warning: semantic shadow failed: #{ex.message}"
+        if options.verbose
+          bt = ex.backtrace?.try(&.first(10).join("\n"))
+          err_io.puts bt if bt
+        end
+        nil
       end
     end
   end

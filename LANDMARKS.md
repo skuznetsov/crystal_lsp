@@ -1,7 +1,47 @@
 # LANDMARKS
 
-Updated: 2026-03-28
+Updated: 2026-03-29
 Context: compiler/bootstrap/stage2-stability
+
+[LM-344|verified]: Phase 2 now has a safe compile-side semantic shadow
+substrate under feature flag, with honest file-level ownership summaries on a
+shared-AstArena aggregate; the right short-term substrate is still reparse into
+that aggregate, not deep traversal over the current `VirtualArena`.
+
+Verified sequence:
+- implementation:
+  - `src/compiler/cli.cr` now supports `CRYSTAL_V2_SEMANTIC_SHADOW=1`
+  - the shadow path reparses already-loaded compile units into one shared
+    `Frontend::AstArena`, then runs `Analyzer -> resolve -> infer`
+  - `src/compiler/semantic/compile_shadow_aggregate.cr` now tracks per-unit
+    root/node ownership inside that shared aggregate
+  - the design rationale is documented in `docs/phase2_compile_shadow.md`
+- decisive evidence:
+  - targeted multi-file aggregate spec is green:
+    - `../crystal/bin/crystal spec spec/semantic/compile_shadow_aggregate_spec.cr`
+  - compile safety gate stayed green:
+    - `../crystal/bin/crystal build src/crystal_v2.cr --no-codegen --error-trace`
+  - live compile-path smoke with the built compiler is green:
+    - `../crystal/bin/crystal build src/crystal_v2.cr -o /tmp/crystal_v2_semantic_shadow --error-trace`
+    - `CRYSTAL_V2_SEMANTIC_SHADOW=1 /tmp/crystal_v2_semantic_shadow /tmp/semantic_shadow_one.cr --no-prelude --stats --verbose`
+    - output prints the semantic shadow summary and compilation exits `0`
+  - live multi-file smoke now also prints per-file shadow ownership:
+    - `CRYSTAL_V2_SEMANTIC_SHADOW=1 /tmp/crystal_v2_semantic_shadow /tmp/semantic_shadow_main.cr --no-prelude --stats --verbose`
+    - output includes one `Semantic shadow unit:` line per compile unit with
+      per-file `roots`, `nodes`, `symbols`, and `identifiers`
+- reusable failure pattern:
+  - the current `VirtualArena` only renumbers root ids; nested `ExprId`
+    references inside nodes remain file-local, so it is not yet a sound
+    substrate for deep multi-file semantic traversal
+  - file-level ownership is now available for aggregate nodes, but full
+    semantic diagnostic provenance is still blocked because diagnostics only
+    carry `Span`, not canonical `ExprId` identities
+
+Practical consequence:
+- Phase 2 can progress without touching lowering or default compile behavior
+- the next honest work item is diagnostic/macro parity on top of the shadow
+  substrate, not more identity-layer surgery
+{F/G/R: 0.92/0.72/0.95} [active]
 
 [LM-343|verified]: current source can again complete a trustworthy
 `stage1_current_debug -> stage2 --release` bootstrap, but the resulting

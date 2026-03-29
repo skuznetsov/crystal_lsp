@@ -1,6 +1,33 @@
 # Crystal V2 Bootstrap — TODO (Updated 2026-03-27)
 
 ## Current Status
+- **Fresh Phase 2 substrate result: compile-side semantic shadow now runs on a shared-AstArena aggregate under feature flag and already exposes honest file-level ownership summaries, while plain VirtualArena remains unsafe for deep semantic traversal (2026-03-29, current session)**:
+  - trustworthy setup:
+    - added `CRYSTAL_V2_SEMANTIC_SHADOW=1` compile-side shadow prepass in `src/compiler/cli.cr`
+    - shadow aggregate is built by reparsing already-loaded compile units into one shared `Frontend::AstArena`
+    - aggregate ownership/provenance is now tracked per unit via `src/compiler/semantic/compile_shadow_aggregate.cr`
+    - documented in `docs/phase2_compile_shadow.md`
+  - decisive evidence:
+    - targeted multi-file semantic aggregate spec is green:
+      - `../crystal/bin/crystal spec spec/semantic/compile_shadow_aggregate_spec.cr`
+    - compile safety gate stayed green:
+      - `../crystal/bin/crystal build src/crystal_v2.cr --no-codegen --error-trace`
+    - live compile-path smoke using the built compiler is green:
+      - `../crystal/bin/crystal build src/crystal_v2.cr -o /tmp/crystal_v2_semantic_shadow --error-trace`
+      - `CRYSTAL_V2_SEMANTIC_SHADOW=1 /tmp/crystal_v2_semantic_shadow /tmp/semantic_shadow_one.cr --no-prelude --stats --verbose`
+      - output includes:
+        - `Semantic shadow: files=1 roots=1 nodes=1 symbols=0 identifiers=0 semantic_diags=0 resolution_diags=0 type_diags=0`
+    - live multi-file smoke now shows per-file ownership breakdown:
+      - `CRYSTAL_V2_SEMANTIC_SHADOW=1 /tmp/crystal_v2_semantic_shadow /tmp/semantic_shadow_main.cr --no-prelude --stats --verbose`
+      - output includes:
+        - `Semantic shadow unit: path=/tmp/semantic_shadow_lib.cr roots=1 nodes=2 symbols=1 identifiers=1`
+        - `Semantic shadow unit: path=/tmp/semantic_shadow_main.cr roots=2 nodes=6 symbols=0 identifiers=1`
+        - final compile exit `0`
+  - practical consequence:
+    - there is now a safe, flag-gated compile semantic prepass substrate for Phase 2 work
+    - the next honest step is not `VirtualArena` reuse for full semantic traversal; nested `ExprId` remapping still blocks a real shared compile graph
+    - file-level ownership is now good enough for shadow inventory and symbol/identifier attribution, but not yet for true semantic diagnostic provenance because current diagnostics still carry only `Span`
+    - follow-up work should focus on diagnostic/macro parity and replacing reparse-based aggregation, not on reopening Phase 1 identity questions
 - **Fresh stage3 split: trustworthy current-debug hosts can again build `stage2 --release` green, but resulting self-hosted stage2 runtime is still broken and now clearly splits into multiple families (2026-03-28, current session)**:
   - trustworthy setup:
     - current-source cheap runtime oracles stayed green on original-built current binaries:
