@@ -27,10 +27,14 @@ module CrystalV2::Compiler::Semantic
     def initialize(
       @def_identity : DefIdentity,
       @receiver_type : SemanticTypeId? = nil,
-      @arg_types : Array(SemanticTypeId) = [] of SemanticTypeId,
+      arg_types : Array(SemanticTypeId) = [] of SemanticTypeId,
       @block_type : SemanticTypeId? = nil,
-      @named_arg_types : Array({String, SemanticTypeId})? = nil
+      named_arg_types : Array({String, SemanticTypeId})? = nil
     )
+      # Defensive copy: keys must be immutable once constructed.
+      # Caller-owned arrays could be mutated later, invalidating hash/equality.
+      @arg_types = arg_types.dup
+      @named_arg_types = named_arg_types.try(&.dup)
     end
 
     def ==(other : DefInstanceKey) : Bool

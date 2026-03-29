@@ -135,14 +135,15 @@ module CrystalV2::Compiler::Semantic
       return "Unknown" unless key
 
       case key.kind
-      when .primitive?, .class?, .struct?, .module?, .enum?, .lib?, .alias?
+      when .primitive?, .class?, .struct?, .module?, .enum?, .lib?, .alias?, .array?, .hash?
         if key.type_params.empty?
           key.name
         else
           "#{key.name}(#{key.type_params.map { |p| normalized_name(p) }.join(", ")})"
         end
       when .union?
-        key.type_params.map { |p| normalized_name(p) }.join(" | ")
+        # Sort by printable name (not intern id) for stable display across runs
+        key.type_params.map { |p| normalized_name(p) }.sort.join(" | ")
       when .tuple?
         "Tuple(#{key.type_params.map { |p| normalized_name(p) }.join(", ")})"
       when .named_tuple?

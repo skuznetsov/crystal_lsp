@@ -8,6 +8,7 @@
 require "./hir"
 require "./debug_hooks"
 require "../frontend/ast"
+require "../semantic/identity/dry_run_tracker"
 require "../mir/mir"
 require "../../runtime"
 require "../semantic/macro_expander"
@@ -1958,6 +1959,9 @@ module Crystal::HIR
     # Keyed by def identity (arena_object_id ^ node_object_id), not label strings.
     @phase0_body_infer_counts : Hash(UInt64, Int32) = Hash(UInt64, Int32).new(0)
 
+    # Phase 1: Identity dry-run tracker (side-channel, no behavior change)
+    getter identity_tracker : CrystalV2::Compiler::Semantic::IdentityDryRunTracker?
+
     # Tracks nesting depth of force_lower_function_for_return_type to prevent
     # unbounded recursion when inferring return types triggers more return type inferences.
     @force_lower_return_type_depth : Int32 = 0
@@ -3310,6 +3314,10 @@ module Crystal::HIR
       @force_lower_return_type_depth = 0
       @suppress_force_lower_return_type_depth = 0
       @defer_body_return_inference = false
+      # Phase 1: identity dry-run tracker
+      if ::CrystalV2::Compiler::BootstrapEnv.get?("CRYSTAL_V2_IDENTITY_DRY_RUN") == "1"
+        @identity_tracker = CrystalV2::Compiler::Semantic::IdentityDryRunTracker.new
+      end
       # --- End: explicit init for ALL remaining inline-default ivars ---
     end
 
@@ -13850,6 +13858,21 @@ module Crystal::HIR
       # Keyed by DefNode object_id — unique per heap object, stable, injective.
       # No arena/XOR needed: each DefNode is a distinct class instance.
       @phase0_body_infer_counts[node.object_id] = (@phase0_body_infer_counts[node.object_id]? || 0) + 1
+
+      # Phase 1: identity dry-run — build DefInstanceKey and track potential cache hits
+      if tracker = @identity_tracker
+        arena_for_key = preferred_arena || @arena
+        def_id = tracker.def_identity(arena_for_key, CrystalV2::Compiler::Frontend::ExprId.new(0))
+        recv_type = self_type_name ? tracker.intern_type_name(self_type_name) : nil
+        arg_sem_types = [] of CrystalV2::Compiler::Semantic::SemanticTypeId
+        key = CrystalV2::Compiler::Semantic::DefInstanceKey.new(
+          def_identity: def_id,
+          receiver_type: recv_type,
+          arg_types: arg_sem_types,
+        )
+        tracker.record_inference(key)
+      end
+
       old_body_context = @infer_body_context
       old_method = @current_method
       old_class = @current_class

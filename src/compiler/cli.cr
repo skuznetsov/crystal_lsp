@@ -1970,6 +1970,14 @@ module CrystalV2
         if BootstrapEnv.enabled?("CRYSTAL_V2_PHASE0_METRICS")
           hir_converter.dump_phase0_metrics(STDERR)
         end
+
+        # Phase 1: identity dry-run stats (side-channel, no behavior change)
+        if BootstrapEnv.enabled?("CRYSTAL_V2_IDENTITY_DRY_RUN")
+          if tracker = hir_converter.identity_tracker
+            tracker.dump(STDERR)
+          end
+        end
+
         if options.stats
           hir_details = [] of String
           if options.verbose
