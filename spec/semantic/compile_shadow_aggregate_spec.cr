@@ -170,4 +170,65 @@ describe "compile semantic shadow aggregate" do
     analyzer.global_context.symbol_table.lookup("alpha").should be_a(Semantic::MethodSymbol)
     engine.context.get_type(call_root).should be_a(Semantic::PrimitiveType)
   end
+
+  it "resolves cross-file argful macro expansion in aggregate" do
+    aggregate = build_shared_shadow_aggregate([
+      <<-CR,
+        macro define_alpha(dummy)
+          def alpha
+            42
+          end
+        end
+      CR
+      <<-CR,
+        define_alpha(1)
+        alpha()
+      CR
+    ])
+    program = aggregate.program
+
+    analyzer = Semantic::Analyzer.new(program)
+    analyzer.collect_symbols(node_file_path_provider: ->(expr_id : Frontend::ExprId) { aggregate.path_for(expr_id) })
+    result = analyzer.resolve_names
+
+    # The macro is defined in unit_0, called with arg in unit_1.
+    # After expansion, `alpha` should be resolvable.
+    alpha = analyzer.global_context.symbol_table.lookup("alpha")
+    alpha.should be_a(Semantic::MethodSymbol)
+
+    # The call `alpha()` in unit_1 should resolve without errors
+    call_root = program.roots.last
+    call_node = program.arena[call_root].as(Frontend::CallNode)
+    callee_id = call_node.callee.not_nil!
+    result.identifier_symbols[callee_id].should be_a(Semantic::MethodSymbol)
+  end
+
+  it "resolves cross-file zero-arg macro call in aggregate" do
+    aggregate = build_shared_shadow_aggregate([
+      <<-CR,
+        macro define_beta
+          def beta
+            99
+          end
+        end
+      CR
+      <<-CR,
+        define_beta
+        beta()
+      CR
+    ])
+    program = aggregate.program
+
+    analyzer = Semantic::Analyzer.new(program)
+    analyzer.collect_symbols(node_file_path_provider: ->(expr_id : Frontend::ExprId) { aggregate.path_for(expr_id) })
+    result = analyzer.resolve_names
+
+    beta = analyzer.global_context.symbol_table.lookup("beta")
+    beta.should be_a(Semantic::MethodSymbol)
+
+    call_root = program.roots.last
+    call_node = program.arena[call_root].as(Frontend::CallNode)
+    callee_id = call_node.callee.not_nil!
+    result.identifier_symbols[callee_id].should be_a(Semantic::MethodSymbol)
+  end
 end

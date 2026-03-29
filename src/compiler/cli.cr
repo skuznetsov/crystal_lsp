@@ -6057,7 +6057,12 @@ module CrystalV2
         program = aggregate.program
         collector_inventory = build_shadow_collector_declaration_inventory(aggregate)
         analyzer = Semantic::Analyzer.new(program)
-        analyzer.collect_symbols(node_file_path_provider: ->(expr_id : Frontend::ExprId) { aggregate.path_for(expr_id) })
+        shadow_sources_by_path = {} of String => String
+        aggregate.unit_summaries.each { |u| shadow_sources_by_path[u.path] = u.source }
+        analyzer.collect_symbols(
+          node_file_path_provider: ->(expr_id : Frontend::ExprId) { aggregate.path_for(expr_id) },
+          source_for_path_provider: ->(path : String) { shadow_sources_by_path[path]? },
+        )
         resolve_result = analyzer.resolve_names
         analyzer.infer_types(resolve_result.identifier_symbols)
         semantic_inventory = Semantic::CompileShadowDeclarationInventory.from_symbol_table(analyzer.global_context.symbol_table)

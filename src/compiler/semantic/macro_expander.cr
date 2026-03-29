@@ -58,6 +58,7 @@ module CrystalV2
           @recovery_mode = recovery_mode
           @source_provider = source_provider
           @macro_source = macro_source
+          @macro_source_provider = nil.as(Proc(Frontend::ExprId, String?)?)
           @source_sink = source_sink
           @string_pool = @program.string_pool
         end
@@ -127,6 +128,12 @@ module CrystalV2
         # Takes a MacroSymbol and arguments, returns expanded AST node.
         # Optional owner_type is the class in which the macro is expanded and
         # is used to support @type.* reflection macros.
+        # Set a callback to resolve per-node source text (for multi-file aggregates).
+        # When set, expand() uses this to find the macro definition's source.
+        def macro_source_provider=(provider : Proc(Frontend::ExprId, String?)?)
+          @macro_source_provider = provider
+        end
+
         def expand(macro_symbol : MacroSymbol, args : Array(ExprId), owner_type : ClassSymbol? = nil, *, named_args : Array(Frontend::NamedArgument)? = nil, block_id : ExprId? = nil) : ExprId
           # Clear diagnostics from previous expansions
           @diagnostics.clear
@@ -139,6 +146,14 @@ module CrystalV2
           end
 
           @depth += 1
+          # For multi-file aggregates: temporarily set @macro_source to the
+          # defining file's source so span-based text extraction works correctly.
+          saved_macro_source = @macro_source
+          if provider = @macro_source_provider
+            if resolved_source = provider.call(macro_symbol.node_id)
+              @macro_source = resolved_source
+            end
+          end
           begin
             # Bind parameters to arguments
             context = build_context(macro_symbol, args, owner_type, named_args, block_id)
@@ -158,6 +173,7 @@ module CrystalV2
             reparse(output, macro_symbol.node_id)
           ensure
             @depth -= 1
+            @macro_source = saved_macro_source
           end
         end
 

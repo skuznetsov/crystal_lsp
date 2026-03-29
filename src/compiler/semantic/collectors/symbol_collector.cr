@@ -16,7 +16,7 @@ module CrystalV2
         getter generated_file_paths : Hash(Int32, String)
         @virtual_arena : Frontend::VirtualArena?
 
-      def initialize(@program : Program, context : Context, @node_file_path_provider : Proc(Frontend::ExprId, String?)? = nil)
+      def initialize(@program : Program, context : Context, @node_file_path_provider : Proc(Frontend::ExprId, String?)? = nil, @source_for_path_provider : Proc(String, String?)? = nil)
         program_arena = @program.arena
         @arena = program_arena.as(Frontend::AstArena)
         @string_pool = @program.string_pool
@@ -31,6 +31,15 @@ module CrystalV2
           context.flags,
           source_provider: ->(block_id : Frontend::ExprId) { macro_block_source(block_id) }
         )
+        # For multi-file aggregates: wire per-node source resolution so the
+        # macro expander can read span-based text from the correct file.
+        if (path_prov = @node_file_path_provider) && (src_prov = @source_for_path_provider)
+          @macro_expander.macro_source_provider = ->(node_id : Frontend::ExprId) {
+            if path = path_prov.call(node_id)
+              src_prov.call(path)
+            end
+          }
+        end
         @class_stack = [] of ClassSymbol
         @enum_stack = [] of EnumSymbol
           # Pending root-level annotations (for example,
@@ -50,6 +59,10 @@ module CrystalV2
               @pending_root_annotations << root_id
             when Frontend::IdentifierNode
               unless handle_root_macro_identifier(root_id, node)
+                visit(root_id)
+              end
+            when Frontend::CallNode
+              unless handle_root_macro_call(root_id, node)
                 visit(root_id)
               end
             when Frontend::MacroLiteralNode, Frontend::MacroIfNode, Frontend::MacroForNode
@@ -198,6 +211,33 @@ module CrystalV2
           end
           @macro_expander.diagnostics.each { |entry| @diagnostics << entry }
           visit(expanded_id) unless expanded_id.invalid?
+        end
+
+        private def handle_root_macro_call(node_id : Frontend::ExprId, node : Frontend::CallNode) : Bool
+          callee_node = arena[node.callee]
+          name = case callee_node
+                 when Frontend::IdentifierNode
+                   intern_name(callee_node.name)
+                 when Frontend::MemberAccessNode
+                   intern_name(callee_node.member)
+                 else
+                   return false
+                 end
+          symbol = current_table.lookup(name)
+          return false unless symbol.is_a?(MacroSymbol)
+
+          expanded_id = track_generated_nodes(node_id) do
+            @macro_expander.expand(
+              symbol,
+              node.args,
+              nil,
+              named_args: node.named_args,
+              block_id: node.block
+            )
+          end
+          @macro_expander.diagnostics.each { |entry| @diagnostics << entry }
+          visit(expanded_id) unless expanded_id.invalid?
+          true
         end
 
         private def handle_root_macro_identifier(node_id : Frontend::ExprId, node : Frontend::IdentifierNode) : Bool

@@ -28,9 +28,9 @@ module CrystalV2
           @generated_node_file_paths = {} of Int32 => String
         end
 
-        def collect_symbols(node_file_path_provider : Proc(ExprId, String?)? = nil)
+        def collect_symbols(node_file_path_provider : Proc(ExprId, String?)? = nil, source_for_path_provider : Proc(String, String?)? = nil)
           debug_hook("analyzer.symbols.start", "roots=#{@program.roots.size}")
-          collector = SymbolCollector.new(@program, @global_context, node_file_path_provider: node_file_path_provider)
+          collector = SymbolCollector.new(@program, @global_context, node_file_path_provider: node_file_path_provider, source_for_path_provider: source_for_path_provider)
           collector.collect
           @semantic_diagnostics = collector.diagnostics
           @generated_node_file_paths = collector.generated_file_paths.dup
