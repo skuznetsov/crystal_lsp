@@ -546,7 +546,7 @@ module CrystalV2
         end
 
         # Phase 102: Handle enum definitions
-        private def handle_enum(node_id : Frontend::ExprId, node : Frontend::EnumNode)
+        private def handle_enum(node_id : Frontend::ExprId, node : Frontend::EnumNode, annotation_ids : Array(Frontend::ExprId)? = nil)
           name_slice = node.name
           return unless name_slice
 
@@ -584,6 +584,13 @@ module CrystalV2
           enum_scope = SymbolTable.new(table)
           enum_symbol = EnumSymbol.new(name, node_id, scope: enum_scope, members: members, base_type: base_type)
           assign_symbol_file(enum_symbol, node_id)
+
+          if annotation_ids
+            attach_enum_annotations(enum_symbol, annotation_ids)
+          elsif !@pending_root_annotations.empty?
+            attach_enum_annotations(enum_symbol, @pending_root_annotations)
+            @pending_root_annotations.clear
+          end
 
           if existing = table.lookup_local(name)
             enum_symbol.merge_declaration_origins_from(existing) if existing.is_a?(EnumSymbol)
@@ -875,6 +882,17 @@ module CrystalV2
           end
         end
 
+        private def attach_enum_annotations(enum_symbol : EnumSymbol, annotation_ids : Array(Frontend::ExprId))
+          annotation_ids.each do |ann_id|
+            node = arena[ann_id]
+            next unless node.is_a?(Frontend::AnnotationNode)
+
+            if info = build_annotation_info(node)
+              enum_symbol.add_annotation(info)
+            end
+          end
+        end
+
         # Attach pending annotations to an explicit instance variable
         # declaration inside a class body.
         private def attach_ivar_annotations(class_symbol : ClassSymbol, node : Frontend::InstanceVarDeclNode, annotation_ids : Array(Frontend::ExprId))
@@ -1026,6 +1044,10 @@ module CrystalV2
             when Frontend::ModuleNode
               pending_annotations.clear
               handle_module(expr_id, node)
+
+            when Frontend::EnumNode
+              handle_enum(expr_id, node, pending_annotations)
+              pending_annotations.clear
 
             when Frontend::CallNode
               pending_annotations.clear

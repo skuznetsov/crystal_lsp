@@ -3,6 +3,25 @@
 Updated: 2026-03-30
 Context: compiler/bootstrap/stage2-stability
 
+[LM-355|verified]: The new inferer was still missing a precise enum-helper
+contract: enum type receivers such as `Errno.new(code)` and nested flags enums
+such as `Regex::MatchOptions.new(0).none?` were degrading to “method not
+found”, because `EnumType` conflated enum values and enum type references, and
+the semantic collector was not preserving enum annotations such as `@[Flags]`.
+The verified fix is split but bounded: `EnumSymbol` now retains attached
+annotations, `SymbolCollector` attaches pending annotations to enums, and
+`TypeInferenceEngine` now treats enum type receivers as a dedicated constructor
+corridor while exposing enum `#value` plus flags-only `#none?` on the instance
+surface. Focused regression `spec/semantic/type_inference_enum_builtin_spec.cr`
+is green, the exact reducer `/tmp/semantic_enum_helper_probe.cr` now reports
+`type_diags=0` and compiles through the full pipeline, the rebuild gate for
+`/tmp/crystal_v2_semantic_stage3probe` is green, and the full semantic stage3
+probe moved from `semantic_diags=0 resolution_diags=0 type_diags=831` to
+`semantic_diags=0 resolution_diags=0 type_diags=827`. Boundary: this closes
+the old `Errno.new` / flags-`none?` corridor, but stage3 is still not green
+because the denser `ryu_printf` / `time/tz` Nil-arithmetic and runtime API
+families remain. {F/G/R: 0.95/0.68/0.96} [verified]
+
 [LM-354|verified]: On-demand body inference for primitive integer left shifts
 was still using an overly narrow builtin surface: `TypeInferenceEngine`
 required the RHS of primitive integer `<<` to have the receiver's exact width,

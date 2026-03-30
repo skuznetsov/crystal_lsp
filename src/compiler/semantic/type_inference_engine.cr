@@ -1452,7 +1452,7 @@ module CrystalV2
             end
           when Frontend::PathNode
             if symbol = resolve_path_symbol(node)
-              symbol.is_a?(ClassSymbol) || symbol.is_a?(ModuleSymbol) || symbol.is_a?(AliasSymbol)
+              symbol.is_a?(ClassSymbol) || symbol.is_a?(ModuleSymbol) || symbol.is_a?(AliasSymbol) || symbol.is_a?(EnumSymbol)
             else
               false
             end
@@ -4550,11 +4550,13 @@ module CrystalV2
 
           receiver_type : Type?
           method_name : String?
+          receiver_is_type_reference = false
 
           case callee_node
           when Frontend::MemberAccessNode
             receiver_type = infer_expression(callee_node.object)
-            receiver_type = class_receiver_type_for_expression(receiver_type) if type_receiver_expression?(callee_node.object)
+            receiver_is_type_reference = type_receiver_expression?(callee_node.object)
+            receiver_type = class_receiver_type_for_expression(receiver_type) if receiver_is_type_reference
             method_name = member_name_for(node.callee, callee_node)
             debug("  receiver_type = #{receiver_type.class.name}: #{receiver_type}")
             debug("  method_name = #{method_name}")
@@ -4731,6 +4733,16 @@ module CrystalV2
               if value_type = primitive_metaclass_value_type(receiver_type.as(PrimitiveType))
                 return value_type
               end
+            elsif receiver_is_type_reference && receiver_type.is_a?(EnumType)
+              arg_types = Array(Type).new(node.args.size)
+              node.args.each { |arg_id| arg_types << infer_expression(arg_id) }
+
+              if enum_constructor_arguments_match?(receiver_type, arg_types)
+                return receiver_type
+              end
+
+              emit_error("No overload matches '#{receiver_type}.#{method_name}'", expr_id)
+              return @context.nil_type
             elsif receiver_type.is_a?(ArrayType) || receiver_type.is_a?(HashType) || receiver_type.is_a?(TupleType) || receiver_type.is_a?(PointerType)
               return receiver_type
             end
@@ -7233,6 +7245,7 @@ module CrystalV2
           dummy_node_id = ExprId.new(0)
           dummy_scope = SymbolTable.new(nil)
           enum_name = enum_type.symbol.name
+          base_type = enum_type.symbol.base_type
 
           case method_name
           when "&", "|", "^"
@@ -7253,10 +7266,26 @@ module CrystalV2
               return_annotation: "Bool",
               scope: dummy_scope
             )
+          when "value"
+            methods << MethodSymbol.new(
+              method_name,
+              dummy_node_id,
+              params: [] of Frontend::Parameter,
+              return_annotation: base_type,
+              scope: dummy_scope
+            )
           else
             if method_name.ends_with?("?")
               predicate_name = method_name[0...-1]
-              if enum_type.symbol.members.keys.any? { |member_name| member_name.underscore == predicate_name }
+              if enum_type.symbol.flags? && predicate_name == "none"
+                methods << MethodSymbol.new(
+                  method_name,
+                  dummy_node_id,
+                  params: [] of Frontend::Parameter,
+                  return_annotation: "Bool",
+                  scope: dummy_scope
+                )
+              elsif enum_type.symbol.members.keys.any? { |member_name| member_name.underscore == predicate_name }
                 methods << MethodSymbol.new(
                   method_name,
                   dummy_node_id,
@@ -7269,6 +7298,16 @@ module CrystalV2
           end
 
           methods
+        end
+
+        private def enum_constructor_arguments_match?(enum_type : EnumType, arg_types : Array(Type)) : Bool
+          return false unless arg_types.size == 1
+
+          arg_type = arg_types.first
+          return true if type_matches?(arg_type, enum_type)
+
+          base_type = parse_type_name(enum_type.symbol.base_type)
+          type_matches?(arg_type, base_type)
         end
 
         # ============================================================

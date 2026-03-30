@@ -181,12 +181,24 @@ module CrystalV2
         getter scope : SymbolTable                  # Scope for methods defined in enum
         getter members : Hash(String, Int64)        # Member name → integer value
         getter base_type : String                   # Base type (Int32, etc.)
+        getter annotations : Array(AnnotationInfo)  # Attached enum annotations (for example @[Flags])
 
         def initialize(name : String, node_id : ExprId, *, scope : SymbolTable, members : Hash(String, Int64) = {} of String => Int64, base_type : String = "Int32")
           super(name, node_id)
           @scope = scope
           @members = members
           @base_type = base_type
+          @annotations = [] of AnnotationInfo
+        end
+
+        def add_annotation(annotation_info : AnnotationInfo)
+          @annotations << annotation_info
+        end
+
+        def flags? : Bool
+          @annotations.any? do |info|
+            info.full_name == "Flags" || info.full_name.ends_with?("::Flags")
+          end
         end
       end
 

@@ -1,6 +1,36 @@
 # Crystal V2 Bootstrap — TODO (Updated 2026-03-30)
 
 ## Current Status
+- **Fresh semantic prepass checkpoint: enum constructor/value helpers and flags-only `none?` now survive the new inferer (2026-03-30, current session)**:
+  - trustworthy setup:
+    - `src/compiler/semantic/type_inference_engine.cr` now recognizes enum type receivers more precisely, so `EnumName.new(...)` no longer falls through the generic “method missing on enum instance” path
+    - `src/compiler/semantic/symbol.cr` and `src/compiler/semantic/collectors/symbol_collector.cr` now preserve enum annotations, letting the inferer distinguish flags enums from regular enums for helper methods such as `none?`
+    - focused regression coverage lives in `spec/semantic/type_inference_enum_builtin_spec.cr`
+  - decisive evidence:
+    - focused enum regressions are green:
+      - `../crystal/bin/crystal spec spec/semantic/type_inference_enum_builtin_spec.cr --error-trace`
+    - rebuild gate is green:
+      - `../crystal/bin/crystal build src/crystal_v2.cr -o /tmp/crystal_v2_semantic_stage3probe --error-trace`
+    - exact reducer is green and compiles through the full pipeline:
+      - `CRYSTAL_V2_SEMANTIC_COMPILE=1 /tmp/crystal_v2_semantic_stage3probe /tmp/semantic_enum_helper_probe.cr --no-prelude --stats --verbose`
+      - summary now reports `type_diags=0`
+    - full semantic stage3 probe moved again:
+      - `bash /tmp/run_semantic_compile_stage3probe_log.sh`
+      - summary moved from:
+        - `semantic_diags=0`
+        - `resolution_diags=0`
+        - `type_diags=831`
+      - to:
+        - `semantic_diags=0`
+        - `resolution_diags=0`
+        - `type_diags=827`
+    - the old `Errno.new` / flags-`none?` family no longer appears in `/tmp/stage3_semantic_probe.log`
+  - practical boundary:
+    - stage3 with the new inferer is still **not** green
+    - the live frontier is still dominated by denser `ryu_printf` / `time/tz` / runtime-surface families:
+      - `Method 'copy_to' not found on Pointer(UInt8)`
+      - Nil arithmetic / indexing cascades
+      - `File`, `Location`, `LibPCRE2`, `LibUnwind`
 - **Fresh semantic prepass checkpoint: on-demand integer left shifts no longer degrade to false Nil cascades in the new inferer (2026-03-30, current session)**:
   - trustworthy setup:
     - `src/compiler/semantic/type_inference_engine.cr` now models primitive integer `<<` with an integer-count contract (`Int | UInt`) instead of requiring the receiver's exact width on the RHS
