@@ -6411,6 +6411,46 @@ module CrystalV2
           dummy_node_id = ExprId.new(0)
           dummy_scope = SymbolTable.new(nil)
 
+          if appender_element_type = pointer_appender_element_type_name(type_name)
+            case method_name
+            when "size"
+              methods << MethodSymbol.new(
+                method_name,
+                dummy_node_id,
+                params: [] of Frontend::Parameter,
+                return_annotation: "Int64",
+                scope: dummy_scope
+              )
+            when "to_slice"
+              methods << MethodSymbol.new(
+                method_name,
+                dummy_node_id,
+                params: [] of Frontend::Parameter,
+                return_annotation: "Slice(#{appender_element_type})",
+                scope: dummy_scope
+              )
+            when "pointer"
+              methods << MethodSymbol.new(
+                method_name,
+                dummy_node_id,
+                params: [] of Frontend::Parameter,
+                return_annotation: "Pointer(#{appender_element_type})",
+                scope: dummy_scope
+              )
+            when "<<"
+              value_param = Frontend::Parameter.new(name: "value".to_slice, type_annotation: appender_element_type.to_slice)
+              methods << MethodSymbol.new(
+                method_name,
+                dummy_node_id,
+                params: [value_param],
+                return_annotation: type_name,
+                scope: dummy_scope
+              )
+            end
+
+            return methods unless methods.empty?
+          end
+
           if integer_primitive_name?(type_name)
             # Integer arithmetic and bitwise operators
             case method_name
@@ -6996,6 +7036,14 @@ module CrystalV2
           element_type_name = pointer_type.element_type.to_s
 
           case method_name
+          when "appender"
+            methods << MethodSymbol.new(
+              method_name,
+              dummy_node_id,
+              params: [] of Frontend::Parameter,
+              return_annotation: pointer_appender_type_name(element_type_name),
+              scope: dummy_scope
+            )
           when "copy_to", "copy_from"
             target_param = Frontend::Parameter.new(name: "target".to_slice, type_annotation: "Pointer(#{element_type_name})".to_slice)
             count_param = Frontend::Parameter.new(name: "count".to_slice, type_annotation: "_".to_slice)
@@ -7062,6 +7110,17 @@ module CrystalV2
           end
 
           methods
+        end
+
+        private def pointer_appender_type_name(element_type_name : String) : String
+          "Pointer::Appender(#{element_type_name})"
+        end
+
+        private def pointer_appender_element_type_name(type_name : String) : String?
+          prefix = "Pointer::Appender("
+          return nil unless type_name.starts_with?(prefix) && type_name.ends_with?(")")
+
+          type_name[prefix.bytesize...-1]
         end
 
         # Phase 103C: Built-in methods for Hash(K, V)
@@ -7538,6 +7597,8 @@ module CrystalV2
               return ArrayType.new(resolved_args.first? || @context.nil_type)
             when "Pointer"
               return PointerType.new(resolved_args.first? || @context.nil_type)
+            when "Pointer::Appender"
+              return PrimitiveType.new(pointer_appender_type_name((resolved_args.first? || @context.nil_type).to_s))
             when "Tuple"
               return TupleType.new(resolved_args)
             end
@@ -7801,6 +7862,8 @@ module CrystalV2
             ArrayType.new(resolved_args.first? || @context.nil_type)
           when "Pointer"
             PointerType.new(resolved_args.first? || @context.nil_type)
+          when "Pointer::Appender"
+            PrimitiveType.new(pointer_appender_type_name((resolved_args.first? || @context.nil_type).to_s))
           when "StaticArray"
             ArrayType.new(resolved_args.first? || @context.nil_type)
           when "Tuple"

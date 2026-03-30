@@ -1,6 +1,30 @@
 # Crystal V2 Bootstrap — TODO (Updated 2026-03-30)
 
 ## Current Status
+- **Fresh semantic prepass checkpoint: `Pointer#appender` now survives the new inferer and the live stage3 probe dropped another small but real type-family (2026-03-30, current session)**:
+  - trustworthy setup:
+    - `src/compiler/semantic/type_inference_engine.cr` now models `Pointer#appender` and the nested nominal helper type `Pointer::Appender(T)` as semantic builtins
+    - that helper now carries builtin method surfaces for `size`, `<<`, `to_slice`, and `pointer`
+    - focused regression coverage lives in `spec/semantic/type_inference_pointer_appender_spec.cr`
+  - decisive evidence:
+    - focused pointer-appender regressions are green:
+      - `../crystal/bin/crystal spec spec/semantic/type_inference_pointer_appender_spec.cr --error-trace`
+    - rebuild gate is green:
+      - `../crystal/bin/crystal build src/crystal_v2.cr -o /tmp/crystal_v2_semantic_stage3probe --error-trace`
+    - full semantic stage3 probe moved again:
+      - `bash /tmp/run_semantic_compile_stage3probe_log.sh`
+      - summary moved from:
+        - `semantic_diags=0`
+        - `resolution_diags=0`
+        - `type_diags=930`
+      - to:
+        - `semantic_diags=0`
+        - `resolution_diags=0`
+        - `type_diags=926`
+    - the old `Method 'appender' not found on Pointer(UInt8)` family disappeared from `/tmp/stage3_semantic_probe.log`
+  - practical boundary:
+    - stage3 with the new inferer is still **not** green
+    - the next honest frontier is still the denser type/runtime surface around `copy_to`, `LibUnwind`, `Exception`, `File`, `Location`, and Nil arithmetic/indexing
 - **Fresh semantic prepass checkpoint: raw-text top-level macro literals now re-enter the semantic expander and the full stage3 prepass has crossed from semantic blockers back into pure type inference/runtime surface (2026-03-30, current session)**:
   - trustworthy setup:
     - `src/compiler/semantic/macro_expander.cr` now detects top-level `MacroLiteralNode` bodies that collapsed to a single raw text piece containing `{% ... %}`

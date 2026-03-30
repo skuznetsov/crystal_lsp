@@ -3,6 +3,23 @@
 Updated: 2026-03-30
 Context: compiler/bootstrap/stage2-stability
 
+[LM-353|verified]: `Pointer#appender` is now a first-class semantic builtin,
+which closes the exact helper surface used by `Crystal::System.print_error`
+and related pointer-buffer writers. The verified fix in
+`src/compiler/semantic/type_inference_engine.cr` models both the pointer-side
+constructor (`Pointer#appender`) and the nested nominal helper
+`Pointer::Appender(T)` with builtin methods for `size`, `<<`, `to_slice`, and
+`pointer`. Focused regression coverage in
+`spec/semantic/type_inference_pointer_appender_spec.cr` is green, the rebuild
+gate for `/tmp/crystal_v2_semantic_stage3probe` is green, and the full semantic
+stage3 probe moved from `semantic_diags=0 resolution_diags=0 type_diags=930`
+to `semantic_diags=0 resolution_diags=0 type_diags=926`. The old
+`Method 'appender' not found on Pointer(UInt8)` family is gone from
+`/tmp/stage3_semantic_probe.log`. Boundary: this did not touch the denser
+`copy_to`/Nil-arithmetic corridors, so the next frontier remains in those
+larger type/runtime families rather than pointer-appender plumbing.
+{F/G/R: 0.94/0.69/0.96} [verified]
+
 [LM-352|verified]: The last remaining semantic macro blocker on the live stage3
 prepass was not another `MacroIfNode` condition bug. The exact `src/stdlib/math/libm.cr`
 carrier at line 92 arrives in the semantic collector as a `MacroLiteralNode`
