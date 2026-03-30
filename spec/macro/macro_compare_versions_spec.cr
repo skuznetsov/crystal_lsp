@@ -267,4 +267,50 @@ describe "Macro compare_versions evaluation" do
     diagnostics.should be_empty
     result.should contain("fun modern")
   end
+
+  it "expands raw-text lib macro literals that compare Crystal::LLVM_VERSION" do
+    source = File.read("src/stdlib/math/libm.cr")
+    lexer = CrystalV2::Compiler::Frontend::Lexer.new(source)
+    parser = CrystalV2::Compiler::Frontend::Parser.new(lexer)
+    program = parser.parse_program
+
+    context = CrystalV2::Compiler::Semantic::Context.new(
+      CrystalV2::Compiler::Semantic::SymbolTable.new,
+      Set(String).new
+    )
+
+    analyzer = CrystalV2::Compiler::Semantic::Analyzer.new(program, context)
+    analyzer.collect_symbols
+
+    lib_symbol = context.symbol_table.lookup("LibM").as(CrystalV2::Compiler::Semantic::ModuleSymbol)
+    lib_node = program.roots
+      .map { |id| program.arena[id].as?(CrystalV2::Compiler::Frontend::LibNode) }
+      .compact
+      .find { |node| String.new(node.name) == "LibM" }
+    lib_node.should_not be_nil
+
+    body = lib_node.not_nil!.body || [] of CrystalV2::Compiler::Frontend::ExprId
+    target_id = body.find do |id|
+      node = program.arena[id]
+      node.span.start_line == 92
+    end
+    target_id.should_not be_nil
+
+    target = program.arena[target_id.not_nil!]
+    target.should be_a(CrystalV2::Compiler::Frontend::MacroLiteralNode)
+    target.as(CrystalV2::Compiler::Frontend::MacroLiteralNode).pieces.size.should eq(1)
+
+    expander = CrystalV2::Compiler::Semantic::MacroExpander.new(
+      program,
+      program.arena,
+      Set(String).new,
+      symbol_table: context.symbol_table
+    )
+
+    result = expander.expand_top_level_text(target_id.not_nil!, scope: lib_symbol.scope)
+    expander.diagnostics.should be_empty
+    result.should contain("llvm.powi.f32.i32")
+    result.should contain("llvm.powi.f64.i32")
+    result.should_not contain("{%")
+  end
 end

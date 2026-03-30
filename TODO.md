@@ -1,6 +1,31 @@
 # Crystal V2 Bootstrap — TODO (Updated 2026-03-30)
 
 ## Current Status
+- **Fresh semantic prepass checkpoint: raw-text top-level macro literals now re-enter the semantic expander and the full stage3 prepass has crossed from semantic blockers back into pure type inference/runtime surface (2026-03-30, current session)**:
+  - trustworthy setup:
+    - `src/compiler/semantic/macro_expander.cr` now detects top-level `MacroLiteralNode` bodies that collapsed to a single raw text piece containing `{% ... %}`
+    - those raw-text literals are reparsed through a synthetic macro wrapper and then re-expanded through the normal semantic macro path instead of being handed back unchanged to `reparse(...)`
+    - focused regression coverage in `spec/macro/macro_compare_versions_spec.cr` now locks the exact file-backed `src/stdlib/math/libm.cr` raw-text corridor at line 92
+  - decisive evidence:
+    - focused macro regressions are green:
+      - `../crystal/bin/crystal spec spec/macro/macro_compare_versions_spec.cr --error-trace`
+    - rebuild gate is green:
+      - `../crystal/bin/crystal build src/crystal_v2.cr -o /tmp/crystal_v2_semantic_stage3probe --error-trace`
+    - full semantic stage3 probe moved again:
+      - `bash /tmp/run_semantic_compile_stage3probe_log.sh`
+      - summary moved from:
+        - `semantic_diags=1`
+        - `resolution_diags=0`
+        - `type_diags=0`
+      - to:
+        - `semantic_diags=0`
+        - `resolution_diags=0`
+        - `type_diags=930`
+    - the old `src/stdlib/math/libm.cr` macro-expansion invalid-syntax diagnostic disappeared from `/tmp/stage3_semantic_probe.log`
+  - practical boundary:
+    - stage3 with the new inferer is still **not** green
+    - semantic macro-expansion is no longer the active frontier; the live blocker set is back in type inference / runtime surface
+    - the next honest frontier is now the new top `type_diags` families (`LibUnwind`, `Exception`, `File`, `Location`, Nil arithmetic / indexing), not another macro-expansion tweak
 - **Fresh semantic prepass checkpoint: command-literal macro values now survive cross-source lookup and the full stage3 prepass has moved from 3 semantic diagnostics down to 1 (2026-03-30, current session)**:
   - trustworthy setup:
     - `src/compiler/semantic/macro_expander.cr` now detects backtick command literals during macro evaluation, executes them through `sh -c`, and normalizes quoted `compare_versions(...)` operands through the existing `.id`-style unquote path

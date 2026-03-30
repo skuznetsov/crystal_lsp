@@ -3,6 +3,23 @@
 Updated: 2026-03-30
 Context: compiler/bootstrap/stage2-stability
 
+[LM-352|verified]: The last remaining semantic macro blocker on the live stage3
+prepass was not another `MacroIfNode` condition bug. The exact `src/stdlib/math/libm.cr`
+carrier at line 92 arrives in the semantic collector as a `MacroLiteralNode`
+whose body has collapsed to a single raw text piece containing the whole `{%
+if %} / {% elsif %} / {% else %}` bundle. The verified fix is to recognize that
+shape in `MacroExpander`, reparse it through a synthetic macro wrapper, and
+then feed it back through the normal semantic macro path instead of returning
+the raw text unchanged. Focused regression
+`spec/macro/macro_compare_versions_spec.cr` now locks the exact file-backed
+`libm.cr` corridor, the rebuild gate for `/tmp/crystal_v2_semantic_stage3probe`
+is green, and the full semantic stage3 probe moved from `semantic_diags=1
+resolution_diags=0 type_diags=0` to `semantic_diags=0 resolution_diags=0
+type_diags=930`. Boundary: stage3 is still not green, but the active frontier
+has moved back out of semantic macro-expansion and into the next type/runtime
+families (`LibUnwind`, `Exception`, `File`, `Location`, Nil arithmetic/indexing).
+{F/G/R: 0.95/0.72/0.96} [verified]
+
 [LM-351|verified]: `MacroExpander` now closes the `gc/boehm.cr` command-literal
 macro corridor under the new inferer. The durable fix was two-part:
 command-literal string nodes are recognized from original source text and

@@ -383,7 +383,7 @@ module CrystalV2
 
           case node
           when Frontend::MacroLiteralNode
-            evaluate_macro_body(node_id, context)
+            expand_raw_textual_top_level_macro(node, context) || evaluate_macro_body(node_id, context)
           when Frontend::MacroIfNode
             condition_result, body_context = evaluate_condition(node.condition, context)
             if condition_result
@@ -429,6 +429,63 @@ module CrystalV2
             emit_error("Unsupported top-level macro node: #{node.class}", node_id)
             ""
           end
+        end
+
+        private def expand_raw_textual_top_level_macro(
+          node : Frontend::MacroLiteralNode,
+          context : Context
+        ) : String?
+          return nil unless node.pieces.size == 1
+
+          piece = node.pieces[0]
+          return nil unless piece.kind.text?
+
+          text = piece.text
+          return nil unless text && text.includes?("{%")
+
+          wrapped = "macro __semantic_wrapped__\n#{text}\nend"
+          lexer = Frontend::Lexer.new(wrapped)
+          parser = Frontend::Parser.new(lexer, recovery_mode: @recovery_mode)
+          program = parser.parse_program
+          return nil if parser.diagnostics.any?
+
+          root_id = program.roots.first?
+          return nil unless root_id
+
+          macro_def = program.arena[root_id].as?(Frontend::MacroDefNode)
+          return nil unless macro_def
+
+          body_id = macro_def.body
+          return nil unless body_id
+
+          wrapped_body = program.arena[body_id]
+          if wrapped_body.is_a?(Frontend::MacroLiteralNode)
+            if wrapped_body.pieces.size == 1 && wrapped_body.pieces[0].kind.text?
+              wrapped_text = wrapped_body.pieces[0].text
+              return nil if wrapped_text && wrapped_text.includes?("{%")
+            end
+          end
+
+          expander = MacroExpander.new(
+            program,
+            program.arena,
+            @flags,
+            symbol_table: @symbol_table,
+            recovery_mode: @recovery_mode,
+            source_provider: @source_provider,
+            macro_source: wrapped,
+            source_sink: @source_sink
+          )
+          expander.macro_source_provider = @macro_source_provider
+
+          output = expander.expand_top_level_text(
+            body_id,
+            variables: context.variables,
+            owner_type: context.owner_type,
+            scope: context.scope
+          )
+          expander.diagnostics.each { |entry| @diagnostics << entry }
+          output
         end
 
         # Convert expression to string representation (for legacy/simple use)
