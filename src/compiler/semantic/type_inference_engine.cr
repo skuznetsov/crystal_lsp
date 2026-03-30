@@ -986,7 +986,12 @@ module CrystalV2
           debug("  Symbol lookup: #{symbol ? symbol.class.name : "nil"}")
           debug_type_trace(identifier_name, "symbol_lookup name=#{identifier_name} symbol=#{symbol ? symbol.class.name : "nil"}")
 
-          return @context.nil_type unless symbol
+          unless symbol
+            if result = infer_receiverless_current_context_reference(identifier_name)
+              return result
+            end
+            return @context.nil_type
+          end
 
           case symbol
           when VariableSymbol
@@ -1061,6 +1066,53 @@ module CrystalV2
           return nil unless receiver_type
 
           infer_method_call_result(method, receiver_type, arg_types, call_node)
+        end
+
+        private def infer_receiverless_current_context_call(
+          method_name : String,
+          arg_types : Array(Type),
+          has_block : Bool,
+          call_node : Frontend::CallNode? = nil
+        ) : Type?
+          receiver_type =
+            if @current_method_is_class_method_stack.last?
+              if current_class = @current_class
+                class_type_for(current_class)
+              elsif current_module = @current_module
+                module_type_for(current_module)
+              else
+                nil
+              end
+            else
+              @receiver_type_context || @current_class.try { |klass| instance_type_for(klass) } || @current_module.try { |mod| module_type_for(mod) }
+            end
+
+          return nil unless receiver_type
+          method = lookup_method(receiver_type, method_name, arg_types, has_block)
+          return nil unless method
+
+          infer_method_call_result(method, receiver_type, arg_types, call_node)
+        end
+
+        private def infer_receiverless_current_context_reference(method_name : String) : Type?
+          receiver_type =
+            if @current_method_is_class_method_stack.last?
+              if current_class = @current_class
+                class_type_for(current_class)
+              elsif current_module = @current_module
+                module_type_for(current_module)
+              else
+                nil
+              end
+            else
+              @receiver_type_context || @current_class.try { |klass| instance_type_for(klass) } || @current_module.try { |mod| module_type_for(mod) }
+            end
+
+          return nil unless receiver_type
+          method = lookup_method(receiver_type, method_name, [] of Type, false)
+          return nil unless method
+
+          infer_method_call_result(method, receiver_type, [] of Type, nil)
         end
 
         private def infer_receiverless_overload_call(
@@ -4506,6 +4558,9 @@ module CrystalV2
                 end
               end
             end
+            if result = infer_receiverless_current_context_call(method_name, arg_types, has_block, node)
+              return infer_block_if_present.call(result)
+            end
             # Fallback: search global table for a module/class method with this name
             if method = find_method_in_scope(@global_table, method_name)
               debug("  find_method_in_scope hit for #{method_name}: #{method.class.name}") if @debug_enabled
@@ -5399,6 +5454,8 @@ module CrystalV2
               end
             end
           when InstanceType
+            get_builtin_methods(receiver_type.class_symbol.name, method_name).each { |entry| methods << entry }
+
             # Phase 4B.2: Look for instance methods in class scope
             if symbol = receiver_type.class_symbol.scope.lookup(method_name)
               case symbol
@@ -7123,8 +7180,28 @@ module CrystalV2
         end
 
         private def resolve_method_annotation_type(type_name : String, receiver_type : Type?, scope : SymbolTable? = nil) : Type
-          if type_name == "self" && receiver_type
-            return receiver_type
+          if type_name == "self"
+            if receiver_type
+              return receiver_type
+            end
+
+            if @current_method_is_class_method_stack.last?
+              if current_class = @current_class
+                return class_type_for(current_class)
+              end
+
+              if current_module = @current_module
+                return module_type_for(current_module)
+              end
+            end
+
+            if current_class = @current_class
+              return instance_type_for(current_class)
+            end
+
+            if current_module = @current_module
+              return module_type_for(current_module)
+            end
           end
 
           if bound_type = @assignments[type_name]?
