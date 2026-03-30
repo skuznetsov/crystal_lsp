@@ -12,6 +12,7 @@ require "./types/tuple_type"
 require "./types/named_tuple_type"
 require "./types/proc_type"
 require "./types/pointer_type"
+require "./types/type_parameter"
 require "./types/module_type"
 require "./types/enum_type"
 require "./types/virtual_type"
@@ -5365,7 +5366,15 @@ module CrystalV2
           return if annotation_name.empty?
 
           if type_params.includes?(annotation_name)
-            binding[annotation_name] = arg_type
+            return if unresolved_method_type_parameter_type?(arg_type, type_params)
+
+            if existing = binding[annotation_name]?
+              if unresolved_method_type_parameter_type?(existing, type_params)
+                binding[annotation_name] = arg_type
+              end
+            else
+              binding[annotation_name] = arg_type
+            end
             return
           end
 
@@ -5439,6 +5448,39 @@ module CrystalV2
             if actual_type = actual_type_args[index]?
               infer_type_parameter_bindings_from_annotation(inner_name, actual_type, type_params, binding)
             end
+          end
+        end
+
+        private def unresolved_method_type_parameter_type?(type : Type, type_params : Array(String)) : Bool
+          case type
+          when TypeParameter
+            type_params.includes?(type.name)
+          when PrimitiveType
+            type_params.includes?(type.name) || type.name == "Unknown"
+          when PointerType
+            unresolved_method_type_parameter_type?(type.element_type, type_params)
+          when ArrayType
+            unresolved_method_type_parameter_type?(type.element_type, type_params)
+          when HashType
+            unresolved_method_type_parameter_type?(type.key_type, type_params) ||
+              unresolved_method_type_parameter_type?(type.value_type, type_params)
+          when TupleType
+            type.element_types.any? { |element_type| unresolved_method_type_parameter_type?(element_type, type_params) }
+          when NamedTupleType
+            type.entries.any? { |entry| unresolved_method_type_parameter_type?(entry[1], type_params) }
+          when ProcType
+            type.param_types.any? { |param_type| unresolved_method_type_parameter_type?(param_type, type_params) } ||
+              unresolved_method_type_parameter_type?(type.return_type, type_params)
+          when InstanceType
+            type.type_args.try(&.any? { |type_arg| unresolved_method_type_parameter_type?(type_arg, type_params) }) || false
+          when ClassType
+            type.type_args.try(&.any? { |type_arg| unresolved_method_type_parameter_type?(type_arg, type_params) }) || false
+          when ModuleType
+            type.type_args.try(&.any? { |type_arg| unresolved_method_type_parameter_type?(type_arg, type_params) }) || false
+          when UnionType
+            type.types.any? { |member| unresolved_method_type_parameter_type?(member, type_params) }
+          else
+            false
           end
         end
 
@@ -6105,6 +6147,7 @@ module CrystalV2
         private def parameters_match?(method : MethodSymbol, arg_types : Array(Type), receiver_type : Type? = nil) : Bool
           params = method.params.reject(&.is_block)
           required_count = count_required_params(params)
+          method_type_params = method.type_parameters || [] of String
 
           previous_method_bindings = {} of String => Type?
           if type_params = method.type_parameters
@@ -6146,6 +6189,8 @@ module CrystalV2
                 next if type_name == "_"
 
                 param_type = resolve_method_annotation_type(type_name, receiver_type, method.scope)
+                next if unresolved_method_type_parameter_type?(arg_type, method_type_params) ||
+                        unresolved_method_type_parameter_type?(param_type, method_type_params)
                 return false unless type_matches?(arg_type, param_type)
               end
 
@@ -6162,6 +6207,8 @@ module CrystalV2
               next if type_name == "_"
 
               param_type = resolve_method_annotation_type(type_name, receiver_type, method.scope)
+              next if unresolved_method_type_parameter_type?(arg_type, method_type_params) ||
+                      unresolved_method_type_parameter_type?(param_type, method_type_params)
               return false unless type_matches?(arg_type, param_type)
             end
 

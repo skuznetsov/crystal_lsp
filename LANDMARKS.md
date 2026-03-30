@@ -3,6 +3,22 @@
 Updated: 2026-03-30
 Context: compiler/bootstrap/stage2-stability
 
+[LM-349|verified]: The semantic stage3 frontier has crossed out of the old
+`FastFloat.fastfloat_strncasecmp` / `ryu_printf` type-inference failure class.
+`TypeInferenceEngine` now avoids hard-binding method `forall` parameters from
+placeholder actuals that still contain the callee's own type params, and
+`parameters_match?` now treats such still-unresolved actual/expected shapes as
+provisional instead of final mismatches. Focused regression
+`spec/semantic/type_inference_method_type_binding_spec.cr` is green, the exact
+`Float::FastFloat::Detail.parse(first : UC*)` reproducer now reports
+`{semantic: 0, resolve: 0, type: 0, root: "Bool"}`, and the full semantic
+stage3 probe moved from `semantic_diags=1 resolution_diags=0 type_diags=958`
+to `semantic_diags=1 resolution_diags=0 type_diags=0`. Boundary: stage3 is
+still not green, but the remaining blocker is now a single semantic
+macro-expansion diagnostic in `src/stdlib/math/libm.cr` (`compare_versions(...)`
+inside a `macro if` corridor), not the previous generic-method/type-inference
+families. {F/G/R: 0.96/0.71/0.96} [verified]
+
 [LM-348|verified]: The new inferer no longer silently collapses binary operator
 methods without return annotations to `Nil`. `TypeInferenceEngine` now routes
 that corridor through the normal method-body inference path instead of forcing

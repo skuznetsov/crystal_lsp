@@ -1,6 +1,36 @@
 # Crystal V2 Bootstrap — TODO (Updated 2026-03-30)
 
 ## Current Status
+- **Fresh semantic prepass checkpoint: generic `forall` method matching now survives placeholder actuals and the full stage3 probe has crossed from type-inference failure into a single macro-expansion semantic error (2026-03-30, current session)**:
+  - trustworthy setup:
+    - `src/compiler/semantic/type_inference_engine.cr` no longer hard-binds method type parameters from placeholder actuals that still contain the callee's own type params
+    - `parameters_match?` now treats still-unresolved actual/expected shapes tied to the callee's type params as provisional matches instead of final mismatches, so later concrete arguments can refine the binding
+    - focused regression coverage lives in `spec/semantic/type_inference_method_type_binding_spec.cr`
+  - decisive evidence:
+    - focused spec is green:
+      - `../crystal/bin/crystal spec spec/semantic/type_inference_method_type_binding_spec.cr --error-trace`
+    - existing guards stay green:
+      - `../crystal/bin/crystal spec spec/semantic/type_inference_spec.cr --example 'matches generic module methods with pointer-bound forall parameters' --error-trace`
+      - `../crystal/bin/crystal spec spec/semantic/type_inference_spec.cr --example 'supports relative outer-module method calls from path-style reopened generic modules' --error-trace`
+    - exact reproducer that previously emitted `Method 'fastfloat_strncasecmp' not found on FastFloat` is now green:
+      - a local `crystal eval` probe for `Float::FastFloat::Detail.parse(first : UC*)` calling `FastFloat.fastfloat_strncasecmp(first, "nan".to_unsafe, 3)` now reports `{semantic: 0, resolve: 0, type: 0, root: "Bool"}`
+    - compile safety gates are green:
+      - `../crystal/bin/crystal build src/crystal_v2.cr --no-codegen --error-trace`
+      - `../crystal/bin/crystal build src/crystal_v2.cr -o /tmp/crystal_v2_semantic_stage3probe --error-trace`
+    - full semantic stage3 probe has moved dramatically:
+      - `bash /tmp/run_semantic_compile_stage3probe_log.sh`
+      - current summary is:
+        - `semantic_diags=1`
+        - `resolution_diags=0`
+        - `type_diags=0`
+      - the old `FastFloat.fastfloat_strncasecmp`, `ryu_printf`, and Nil-arithmetic type-diagnostic families no longer dominate `/tmp/stage3_semantic_probe.log`
+  - practical boundary:
+    - stage3 with the new inferer is **not** green yet
+    - the current blocker is no longer type inference; it is a single semantic macro-expansion diagnostic in `src/stdlib/math/libm.cr`
+    - current live failure:
+      - `Macro expansion generated invalid syntax: Expected '{% end %}', '{% elsif %}', or '{% else %}'`
+      - emitted from the `powi_*` `macro if` corridor around `compare_versions(Crystal::LLVM_VERSION, "13.0.0") < 0`
+    - the next honest frontier is macro-condition / macro-expansion handling for that `math/libm.cr` branch, not another broad type-inference tweak
 - **Fresh semantic prepass checkpoint: binary operators with unannotated method bodies no longer silently collapse to `Nil`, but this alone does not move the full stage3 probe (2026-03-30, current session)**:
   - trustworthy setup:
     - `src/compiler/semantic/type_inference_engine.cr` now reuses normal method-body inference for arithmetic/bitwise operator methods found by `lookup_method(...)` when they have no return annotation, instead of forcing `nil_type`
