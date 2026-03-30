@@ -136,7 +136,7 @@
     - generated-body diagnostics now also point back to the originating macro call-site, so the old gap “shadow sees generated text but loses the origin call-site” is stale on the current tree
     - cross-file generated-body diagnostics now also point back to the macro definition site, so the old gap “shadow knows the call-site but not which macro body generated this code” is stale on the current tree
     - origin notes now live in first-class diagnostic metadata (`related_spans` / `secondary_spans`) instead of ad-hoc CLI string concatenation, so the provenance contract is less fragile
-    - generated provenance now also has a unified aggregate-side lookup (`CompileShadowAggregate#generated_info_for`), so CLI generated-diagnostic formatting/counting no longer has to treat analyzer-owned hash maps as the graph substrate
+    - generated provenance now also has a unified aggregate-side lookup (`CompileShadowAggregate#generated_info_for`), and that overlay now crosses collector/analyzer -> aggregate as an explicit `GeneratedOverlay` contract instead of five ad-hoc hash maps
     - CLI generated-diagnostic formatting now consumes that unified context through one shared helper, and same-file expansions intentionally skip the redundant `macro defined here` note
     - the next honest work item is no longer macro-call parity, top-level generated-body traversal, generated snippet visibility, or macro-call origin notes; it is broader expanded-node ownership/provenance and how far aggregate-backed shadow can carry diagnostics/contracts without pretending to be lowering
     - replacing reparse-based aggregation is still more honest follow-up than reopening Phase 1 identity questions

@@ -6309,13 +6309,7 @@ module CrystalV2
           node_file_path_provider: ->(expr_id : Frontend::ExprId) { aggregate.path_for(expr_id) },
           source_for_path_provider: ->(path : String) { shadow_sources_by_path[path]? },
         )
-        aggregate.attach_generated_overlay(
-          analyzer.generated_node_file_paths,
-          analyzer.generated_root_sources,
-          analyzer.generated_root_by_node,
-          analyzer.generated_root_origins,
-          analyzer.generated_root_macro_defs,
-        )
+        aggregate.attach_generated_overlay(analyzer.generated_overlay)
         resolve_result = analyzer.resolve_names
         analyzer.infer_types(resolve_result.identifier_symbols)
         semantic_inventory = Semantic::CompileShadowDeclarationInventory.from_symbol_table(

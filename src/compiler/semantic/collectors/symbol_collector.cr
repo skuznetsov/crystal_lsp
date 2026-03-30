@@ -3,6 +3,7 @@ require "../symbol"
 require "../context"
 require "../symbol_table"
 require "../diagnostic"
+require "../generated_overlay"
 require "../macro_expander"
 
 module CrystalV2
@@ -82,6 +83,17 @@ module CrystalV2
             end
           end
           self
+        end
+
+        def generated_overlay : GeneratedOverlay
+          GeneratedOverlay.new(
+            @generated_file_paths.dup,
+            @generated_top_level_roots.dup,
+            @generated_root_sources.dup,
+            @generated_root_by_node.dup,
+            @generated_root_origins.dup,
+            @generated_root_macro_defs.dup,
+          )
         end
 
         private def arena : Frontend::AstArena

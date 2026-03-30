@@ -34,13 +34,7 @@ private def attach_generated_shadow_overlay(
   aggregate : Semantic::CompileShadowAggregate,
   analyzer : Semantic::Analyzer
 ) : Nil
-  aggregate.attach_generated_overlay(
-    analyzer.generated_node_file_paths,
-    analyzer.generated_root_sources,
-    analyzer.generated_root_by_node,
-    analyzer.generated_root_origins,
-    analyzer.generated_root_macro_defs,
-  )
+  aggregate.attach_generated_overlay(analyzer.generated_overlay)
 end
 
 describe "compile semantic shadow aggregate" do

@@ -147,8 +147,10 @@ That shadow-only metadata now also has a unified aggregate-side lookup:
 `CompileShadowAggregate#generated_info_for(node_id)`, which bundles the
 generated root, generated source text, macro call origin, and macro
 definition site into one provenance record for downstream telemetry/formatting
-code. The analyzer still computes that overlay, but the compile-shadow graph
-substrate now owns the lookup used by CLI formatting and generated-diagnostic
+code. The analyzer still computes that overlay, but it now crosses the
+collector/analyzer -> aggregate boundary as an explicit `GeneratedOverlay`
+contract instead of five ad-hoc hash maps, and the compile-shadow graph
+substrate owns the lookup used by CLI formatting and generated-diagnostic
 counting.
 
 CLI formatting consumes that aggregate-side context through a shared helper, so

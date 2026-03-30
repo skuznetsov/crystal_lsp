@@ -18,7 +18,8 @@ The right short-term substrate is still reparse into that aggregate, not deep
 traversal over the current `VirtualArena`.
 The aggregate now also owns the unified generated-provenance lookup consumed by
 CLI formatting/counting, so analyzer-side hash maps are no longer the only
-place where shadow generated source/origin metadata lives.
+place where shadow generated source/origin metadata lives; that handoff now
+uses an explicit `GeneratedOverlay` contract instead of five loose maps.
 
 Verified sequence:
 - implementation:

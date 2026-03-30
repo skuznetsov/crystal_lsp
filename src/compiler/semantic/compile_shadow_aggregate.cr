@@ -2,17 +2,12 @@ require "../frontend/ast"
 require "../frontend/lexer"
 require "../frontend/parser"
 require "../frontend/dispatch"
+require "./generated_overlay"
 
 module CrystalV2
   module Compiler
     module Semantic
       class CompileShadowAggregate
-        record GeneratedNodeInfo,
-          root_id : Frontend::ExprId,
-          source : String?,
-          origin_node_id : Frontend::ExprId?,
-          macro_definition_node_id : Frontend::ExprId?
-
         record UnitSummary,
           unit_index : Int32,
           path : String,
@@ -110,54 +105,33 @@ module CrystalV2
         end
 
         def attach_generated_overlay(
-          generated_node_file_paths : Hash(Int32, String),
-          generated_root_sources : Hash(Int32, String),
-          generated_root_by_node : Hash(Int32, Int32),
-          generated_root_origins : Hash(Int32, Frontend::ExprId),
-          generated_root_macro_defs : Hash(Int32, Frontend::ExprId)
+          overlay : GeneratedOverlay
         ) : Nil
-          attach_generated_node_paths(generated_node_file_paths)
-          @generated_root_sources = generated_root_sources.dup
-          @generated_root_by_node = generated_root_by_node.dup
-          @generated_root_origins = generated_root_origins.dup
-          @generated_root_macro_defs = generated_root_macro_defs.dup
+          attach_generated_node_paths(overlay.node_file_paths)
+          @generated_root_sources = overlay.root_sources.dup
+          @generated_root_by_node = overlay.root_by_node.dup
+          @generated_root_origins = overlay.root_origins.dup
+          @generated_root_macro_defs = overlay.root_macro_defs.dup
         end
 
         def generated_info_for(expr_id : Frontend::ExprId) : GeneratedNodeInfo?
-          return nil if expr_id.invalid?
-          node_index = expr_id.index
-
-          root_index = if @generated_root_sources.has_key?(node_index) ||
-                          @generated_root_origins.has_key?(node_index) ||
-                          @generated_root_macro_defs.has_key?(node_index)
-                         node_index
-                       else
-                         @generated_root_by_node[node_index]?
-                       end
-          return nil unless root_index
-
-          GeneratedNodeInfo.new(
-            Frontend::ExprId.new(root_index),
-            @generated_root_sources[root_index]?,
-            @generated_root_origins[root_index]?,
-            @generated_root_macro_defs[root_index]?,
-          )
+          generated_overlay.generated_info_for(expr_id)
         end
 
         def generated_source_for(expr_id : Frontend::ExprId) : String?
-          generated_info_for(expr_id).try(&.source)
+          generated_overlay.generated_source_for(expr_id)
         end
 
         def generated_origin_for(expr_id : Frontend::ExprId) : Frontend::ExprId?
-          generated_info_for(expr_id).try(&.origin_node_id)
+          generated_overlay.generated_origin_for(expr_id)
         end
 
         def generated_node?(expr_id : Frontend::ExprId) : Bool
-          !generated_info_for(expr_id).nil?
+          generated_overlay.generated_node?(expr_id)
         end
 
         def generated_macro_definition_for(expr_id : Frontend::ExprId) : Frontend::ExprId?
-          generated_info_for(expr_id).try(&.macro_definition_node_id)
+          generated_overlay.generated_macro_definition_for(expr_id)
         end
 
         def generated_node_count_for_unit(unit_index : Int32) : Int32
@@ -205,6 +179,17 @@ module CrystalV2
           end
 
           assigned
+        end
+
+        private def generated_overlay : GeneratedOverlay
+          GeneratedOverlay.new(
+            {} of Int32 => String,
+            [] of Frontend::ExprId,
+            @generated_root_sources,
+            @generated_root_by_node,
+            @generated_root_origins,
+            @generated_root_macro_defs,
+          )
         end
       end
     end
