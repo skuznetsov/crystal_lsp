@@ -129,6 +129,12 @@ macro expands into another top-level `macro`, the generated `MacroSymbol`
 retains generated origin metadata and verbose shadow parity reports that extra
 macro under `macros provenance ... semantic_macro_expanded_total=1`.
 
+Declaration provenance is now also merged across reopened non-method symbols.
+If a top-level `class` is introduced via macro expansion and then reopened
+directly later in the source, semantic shadow parity reports both
+`semantic_direct_total=1` and `semantic_macro_expanded_total=1` for that class
+family instead of collapsing the final symbol to only its last-seen origin.
+
 Generated declaration provenance and `generated_*_diags` counters now use the
 explicit generated-origin mapping carried by the semantic stack. In particular,
 generated method/class/module/etc. symbols now retain generated origin metadata

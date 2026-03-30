@@ -156,6 +156,9 @@ Verified sequence:
     - the semantic shadow inventory reports
       `macros provenance ... semantic_direct_total=1 semantic_macro_expanded_total=1`
       when one direct macro expands into a second top-level macro
+  - reopened non-method declarations now retain merged origins too:
+    - a class introduced by macro expansion and later reopened directly keeps
+      both `direct` and `macro_expanded` provenance in the semantic inventory
   - generated provenance classification no longer depends on generated snippet
     availability:
     - semantic declaration provenance and `generated_*_diags` counters now use

@@ -120,7 +120,10 @@ module CrystalV2
             symbol.file_path = path
           end
           if origin_node_id = generated_origin_for(node_id)
+            symbol.mark_generated_declaration_origin
             symbol.generated_origin_node_id = origin_node_id
+          else
+            symbol.mark_direct_declaration_origin
           end
           if macro_def_node_id = generated_macro_definition_for(node_id)
             symbol.generated_macro_definition_node_id = macro_def_node_id
@@ -571,6 +574,7 @@ module CrystalV2
           assign_symbol_file(enum_symbol, node_id)
 
           if existing = table.lookup_local(name)
+            enum_symbol.merge_declaration_origins_from(existing) if existing.is_a?(EnumSymbol)
             table.redefine(name, enum_symbol)
           else
             table.define(name, enum_symbol)
@@ -595,6 +599,7 @@ module CrystalV2
 
           table = current_table
           if existing = table.lookup_local(name)
+            const_symbol.merge_declaration_origins_from(existing) if existing.is_a?(ConstantSymbol)
             table.redefine(name, const_symbol)
           else
             table.define(name, const_symbol)
@@ -1138,6 +1143,7 @@ module CrystalV2
         private def handle_macro_redefinition(name : String, new_symbol : MacroSymbol, existing : Symbol, table : SymbolTable)
           case existing
           when MacroSymbol
+            new_symbol.merge_declaration_origins_from(existing)
             table.redefine(name, new_symbol)
           else
             emit_incompatible_redefinition(name, new_symbol, existing)
@@ -1175,6 +1181,7 @@ module CrystalV2
               is_abstract: new_symbol.is_abstract? || existing.is_abstract?
             )
             assign_symbol_file(new_symbol, new_symbol.node_id)
+            new_symbol.merge_declaration_origins_from(existing)
             table.redefine(name, new_symbol)
           when ModuleSymbol
             # Handle the case where a class/struct definition replaces a module
@@ -1182,6 +1189,7 @@ module CrystalV2
             # (losing the path prefix), and later `struct X` is properly defined.
             # Reuse the module's scope as the class's instance scope.
             assign_symbol_file(new_symbol, new_symbol.node_id)
+            new_symbol.merge_declaration_origins_from(existing)
             table.redefine(name, new_symbol)
           when MethodSymbol, MacroSymbol, VariableSymbol
             emit_incompatible_redefinition(name, new_symbol, existing)

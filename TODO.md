@@ -125,6 +125,7 @@
     - cross-file mixed overload families are now attributed to the unit that contributed the generated overload, instead of inheriting the overload-set wrapper's original file
     - symbol-backed generated provenance now also covers non-method declaration kinds, so macro-expanded top-level classes/modules/enums/constants show up as `semantic_macro_expanded` instead of being misclassified as direct
     - macro-generated top-level macro definitions now ride the same symbol-backed provenance path, so `macros provenance` can distinguish direct vs macro-expanded macro defs too
+    - reopened non-method symbols now retain merged direct/generated declaration provenance, so a macro-expanded class later reopened directly no longer loses one origin in semantic shadow parity
     - shadow now also reports `generated_nodes`, so expanded semantic ownership is visible without corrupting the meaning of aggregate `nodes=`
     - collector/semantic declaration parity is now green across the currently measured macro-call shapes: bare identifier, positional args, named args, default arg, and block-yield
     - aggregate ownership now has a generated-node overlay, so per-unit shadow summaries can print both original parse `nodes=` and expanded `owned_nodes=`

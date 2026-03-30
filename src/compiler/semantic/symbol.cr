@@ -11,11 +11,15 @@ module CrystalV2
         getter file_path : String?
         getter generated_origin_node_id : ExprId?
         getter generated_macro_definition_node_id : ExprId?
+        getter? direct_declaration_origin : Bool
+        getter? generated_declaration_origin : Bool
 
         def initialize(@name : String, @node_id : ExprId, file_path : String? = nil)
           @file_path = file_path
           @generated_origin_node_id = nil
           @generated_macro_definition_node_id = nil
+          @direct_declaration_origin = false
+          @generated_declaration_origin = false
         end
 
         def file_path=(value : String?)
@@ -31,7 +35,20 @@ module CrystalV2
         end
 
         def generated? : Bool
-          !@generated_origin_node_id.nil?
+          @generated_declaration_origin
+        end
+
+        def mark_direct_declaration_origin : Nil
+          @direct_declaration_origin = true
+        end
+
+        def mark_generated_declaration_origin : Nil
+          @generated_declaration_origin = true
+        end
+
+        def merge_declaration_origins_from(other : Symbol) : Nil
+          @direct_declaration_origin ||= other.direct_declaration_origin?
+          @generated_declaration_origin ||= other.generated_declaration_origin?
         end
       end
 

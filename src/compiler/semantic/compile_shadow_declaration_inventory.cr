@@ -69,43 +69,31 @@ module CrystalV2
           table.each_local_symbol do |name, symbol|
             case symbol
             when MethodSymbol
-              inventory.record(
-                CompileShadowDeclarationKind::Methods,
-                name,
-                origin_for_symbol(symbol, origin_for_node)
-              )
+              origins_for_symbol(symbol, origin_for_node).each do |origin|
+                inventory.record(CompileShadowDeclarationKind::Methods, name, origin)
+              end
             when OverloadSetSymbol
               record_overload_set(inventory, name, symbol, origin_for_node)
             when ClassSymbol
-              inventory.record(
-                CompileShadowDeclarationKind::Classes,
-                name,
-                origin_for_symbol(symbol, origin_for_node)
-              )
+              origins_for_symbol(symbol, origin_for_node).each do |origin|
+                inventory.record(CompileShadowDeclarationKind::Classes, name, origin)
+              end
             when ModuleSymbol
-              inventory.record(
-                CompileShadowDeclarationKind::Modules,
-                name,
-                origin_for_symbol(symbol, origin_for_node)
-              )
+              origins_for_symbol(symbol, origin_for_node).each do |origin|
+                inventory.record(CompileShadowDeclarationKind::Modules, name, origin)
+              end
             when EnumSymbol
-              inventory.record(
-                CompileShadowDeclarationKind::Enums,
-                name,
-                origin_for_symbol(symbol, origin_for_node)
-              )
+              origins_for_symbol(symbol, origin_for_node).each do |origin|
+                inventory.record(CompileShadowDeclarationKind::Enums, name, origin)
+              end
             when MacroSymbol
-              inventory.record(
-                CompileShadowDeclarationKind::Macros,
-                name,
-                origin_for_symbol(symbol, origin_for_node)
-              )
+              origins_for_symbol(symbol, origin_for_node).each do |origin|
+                inventory.record(CompileShadowDeclarationKind::Macros, name, origin)
+              end
             when ConstantSymbol
-              inventory.record(
-                CompileShadowDeclarationKind::Constants,
-                name,
-                origin_for_symbol(symbol, origin_for_node)
-              )
+              origins_for_symbol(symbol, origin_for_node).each do |origin|
+                inventory.record(CompileShadowDeclarationKind::Constants, name, origin)
+              end
             end
           end
           inventory
@@ -244,7 +232,9 @@ module CrystalV2
         ) : Nil
           origins = Set(CompileShadowDeclarationOrigin).new
           symbol.overloads.each do |overload|
-            origins.add(origin_for_symbol(overload, origin_for_node))
+            origins_for_symbol(overload, origin_for_node).each do |origin|
+              origins.add(origin)
+            end
           end
 
           if origins.empty?
@@ -256,12 +246,17 @@ module CrystalV2
           end
         end
 
-        private def self.origin_for_symbol(
+        private def self.origins_for_symbol(
           symbol : Symbol,
           origin_for_node : Frontend::ExprId -> CompileShadowDeclarationOrigin
-        ) : CompileShadowDeclarationOrigin
-          return CompileShadowDeclarationOrigin::MacroExpanded if symbol.generated?
-          origin_for_node.call(symbol.node_id)
+        ) : Set(CompileShadowDeclarationOrigin)
+          origins = Set(CompileShadowDeclarationOrigin).new
+          origins.add(CompileShadowDeclarationOrigin::Direct) if symbol.direct_declaration_origin?
+          origins.add(CompileShadowDeclarationOrigin::MacroExpanded) if symbol.generated?
+          if origins.empty?
+            origins.add(origin_for_node.call(symbol.node_id))
+          end
+          origins
         end
       end
 

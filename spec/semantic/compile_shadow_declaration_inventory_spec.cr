@@ -467,4 +467,103 @@ describe "compile shadow declaration inventory" do
     macro_line.not_nil!.should contain("semantic_direct_total=1")
     macro_line.not_nil!.should contain("semantic_macro_expanded_total=1")
   end
+
+  it "retains both direct and generated provenance across class reopenings" do
+    aggregate = Semantic::CompileShadowAggregate.build([
+      {
+        path: "decl_lib.cr",
+        source: <<-CR,
+          macro define_alpha
+            class Alpha
+            end
+          end
+        CR
+      },
+      {
+        path: "decl_main.cr",
+        source: <<-CR,
+          require "./decl_lib"
+          define_alpha
+
+          class Alpha
+            def self.extra
+            end
+          end
+        CR
+      },
+    ])
+    program = aggregate.program
+    shadow_sources = {} of String => String
+    aggregate.unit_summaries.each { |u| shadow_sources[u.path] = u.source }
+
+    analyzer = Semantic::Analyzer.new(program)
+    analyzer.collect_symbols(
+      node_file_path_provider: ->(expr_id : Frontend::ExprId) { aggregate.path_for(expr_id) },
+      source_for_path_provider: ->(path : String) { shadow_sources[path]? },
+    )
+
+    alpha_symbol = analyzer.global_context.symbol_table.lookup_local("Alpha")
+    alpha_symbol.should be_a(Semantic::ClassSymbol)
+    alpha_symbol = alpha_symbol.as(Semantic::ClassSymbol)
+    alpha_symbol.direct_declaration_origin?.should be_true
+    alpha_symbol.generated_declaration_origin?.should be_true
+
+    semantic_inventory = Semantic::CompileShadowDeclarationInventory.from_symbol_table(
+      analyzer.global_context.symbol_table
+    )
+    class_line = semantic_inventory.provenance_lines("semantic").find { |line| line.starts_with?("classes provenance ") }
+
+    class_line.should_not be_nil
+    class_line.not_nil!.should contain("semantic_direct_total=1")
+    class_line.not_nil!.should contain("semantic_macro_expanded_total=1")
+  end
+
+  it "retains both direct and generated provenance across module reopenings" do
+    aggregate = Semantic::CompileShadowAggregate.build([
+      {
+        path: "decl_lib.cr",
+        source: <<-CR,
+          macro define_alpha
+            module Alpha
+            end
+          end
+        CR
+      },
+      {
+        path: "decl_main.cr",
+        source: <<-CR,
+          require "./decl_lib"
+          define_alpha
+
+          module Alpha
+            VALUE = 1
+          end
+        CR
+      },
+    ])
+    program = aggregate.program
+    shadow_sources = {} of String => String
+    aggregate.unit_summaries.each { |u| shadow_sources[u.path] = u.source }
+
+    analyzer = Semantic::Analyzer.new(program)
+    analyzer.collect_symbols(
+      node_file_path_provider: ->(expr_id : Frontend::ExprId) { aggregate.path_for(expr_id) },
+      source_for_path_provider: ->(path : String) { shadow_sources[path]? },
+    )
+
+    alpha_symbol = analyzer.global_context.symbol_table.lookup_local("Alpha")
+    alpha_symbol.should be_a(Semantic::ModuleSymbol)
+    alpha_symbol = alpha_symbol.as(Semantic::ModuleSymbol)
+    alpha_symbol.direct_declaration_origin?.should be_true
+    alpha_symbol.generated_declaration_origin?.should be_true
+
+    semantic_inventory = Semantic::CompileShadowDeclarationInventory.from_symbol_table(
+      analyzer.global_context.symbol_table
+    )
+    module_line = semantic_inventory.provenance_lines("semantic").find { |line| line.starts_with?("modules provenance ") }
+
+    module_line.should_not be_nil
+    module_line.not_nil!.should contain("semantic_direct_total=1")
+    module_line.not_nil!.should contain("semantic_macro_expanded_total=1")
+  end
 end
