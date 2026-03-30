@@ -5797,9 +5797,10 @@ module CrystalV2
       ) : String
         if primary_node_id = diagnostic.primary_node_id
           if context = aggregate.generated_diagnostic_context_for(primary_node_id)
-            secondary_spans = diagnostic.secondary_spans + context.secondary_spans
-            display_diagnostic = diagnostic.with_paths(context.display_path, secondary_spans)
-            return Semantic::DiagnosticFormatter.format(context.sources_with_generated(sources_by_path), display_diagnostic)
+            return Semantic::DiagnosticFormatter.format(
+              context.sources_with_generated(sources_by_path),
+              context.apply(diagnostic)
+            )
           end
         end
         Semantic::DiagnosticFormatter.format(sources_by_path, diagnostic)
@@ -5812,8 +5813,10 @@ module CrystalV2
       ) : String
         if node_id = diagnostic.node_id
           if context = aggregate.generated_diagnostic_context_for(node_id)
-            display_diagnostic = diagnostic.with_file_path(context.display_path, diagnostic.related_spans + context.related_spans)
-            return Frontend::DiagnosticFormatter.format(context.sources_with_generated(sources_by_path), display_diagnostic)
+            return Frontend::DiagnosticFormatter.format(
+              context.sources_with_generated(sources_by_path),
+              context.apply(diagnostic)
+            )
           end
         end
         Frontend::DiagnosticFormatter.format(sources_by_path, diagnostic)

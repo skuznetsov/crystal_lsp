@@ -15,6 +15,14 @@ module CrystalV2
           source : String,
           related_spans : Array(Frontend::RelatedSpan),
           secondary_spans : Array(Semantic::SecondarySpan) do
+          def apply(diagnostic : Frontend::Diagnostic) : Frontend::Diagnostic
+            diagnostic.with_file_path(display_path, diagnostic.related_spans + related_spans)
+          end
+
+          def apply(diagnostic : Semantic::Diagnostic) : Semantic::Diagnostic
+            diagnostic.with_paths(display_path, diagnostic.secondary_spans + secondary_spans)
+          end
+
           def sources_with_generated(base_sources : Hash(String, String)) : Hash(String, String)
             sources = base_sources.dup
             if display_path = self.display_path
