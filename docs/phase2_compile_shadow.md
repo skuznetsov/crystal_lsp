@@ -7,6 +7,11 @@ This spike adds a **shadow-only** compile-side semantic prepass behind:
 - `CRYSTAL_V2_SEMANTIC_SHADOW=1`
 - optional strict mode: `CRYSTAL_V2_SEMANTIC_SHADOW_STRICT=1`
 
+On the current tree, strict mode now also treats parser-diagnostic parity drift
+as a hard failure: if the compile-side parse diagnostics and the shared-aggregate
+reparse diagnostics diverge, shadow strict mode raises instead of only printing
+telemetry.
+
 It does **not** change compile output or lowering behavior.
 It only verifies that the existing semantic stack can analyze a compile-like
 aggregate program before any demand-driven rewrite work begins.

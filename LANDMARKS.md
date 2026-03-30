@@ -25,6 +25,8 @@ shared-aggregate reparse diagnostics, so parser-side drift between those two
 paths is visible even though the shadow parser telemetry is still
 non-authoritative. That signal now also has an explicit parity layer:
 `parse_diag_gaps` plus verbose `Semantic shadow parse diagnostics: ...` lines.
+Under `CRYSTAL_V2_SEMANTIC_SHADOW_STRICT=1`, parser-parity drift is now also a
+hard failure instead of warning-only telemetry.
 
 Verified sequence:
 - implementation:
@@ -63,6 +65,10 @@ Verified sequence:
     - the same malformed carrier now also reports `parse_diag_gaps=0` and a
       verbose parser-parity line
       `Semantic shadow parse diagnostics: compile_total=1 compile_unique=1 shadow_total=1 shadow_unique=1 gaps=0`
+    - parser-parity drift now has a strict-mode contract too:
+      the dedicated parity object builds a strict failure message when gaps are
+      present, and the compile shadow path raises on that message in
+      `CRYSTAL_V2_SEMANTIC_SHADOW_STRICT=1`
   - live type-error smoke now prints file-aware shadow diagnostics:
     - `CRYSTAL_V2_SEMANTIC_SHADOW=1 /tmp/crystal_v2_semantic_shadow /tmp/shadow_type_error.cr --no-prelude --stats --verbose`
     - output includes `error[E3001]` with `--> /tmp/shadow_type_error.cr:1:1`

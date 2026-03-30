@@ -8,6 +8,7 @@
     - aggregate ownership/provenance is now tracked per unit via `src/compiler/semantic/compile_shadow_aggregate.cr`
     - compile-side `ParsedUnit` now retains file-aware parse diagnostics, and shadow summaries now split `compile_parse_diags` from `shadow_parse_diags`
     - parser-side shadow telemetry now also reports `parse_diag_gaps` plus verbose parity lines comparing compile parse diagnostics to aggregate reparse diagnostics
+    - `CRYSTAL_V2_SEMANTIC_SHADOW_STRICT=1` now treats parser-diagnostic parity drift as a hard failure instead of only surfacing it as telemetry
     - documented in `docs/phase2_compile_shadow.md`
   - decisive evidence:
     - targeted multi-file semantic aggregate spec is green:

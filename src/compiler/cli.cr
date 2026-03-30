@@ -6209,6 +6209,11 @@ module CrystalV2
         declaration_summary_lines.concat(collector_inventory.provenance_lines("collector"))
         declaration_summary_lines.concat(semantic_inventory.provenance_lines("semantic"))
         parse_diagnostic_summary_lines = parse_diagnostic_parity.summary_lines(5, "compile", "shadow")
+        if semantic_shadow_strict?
+          if strict_message = parse_diagnostic_parity.strict_message("compile", "shadow")
+            raise strict_message
+          end
+        end
         expected_unit_count = aggregate.unit_summaries.size
         ensure_shadow_unit_metric_size!(symbols_by_unit, expected_unit_count, "symbols_by_unit")
         ensure_shadow_unit_metric_size!(generated_symbols_by_unit, expected_unit_count, "generated_symbols_by_unit")

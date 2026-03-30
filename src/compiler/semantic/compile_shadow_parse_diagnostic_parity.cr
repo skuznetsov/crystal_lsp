@@ -104,6 +104,18 @@ module CrystalV2
           lines
         end
 
+        def strict_message(left_label : String = "compile", right_label : String = "shadow") : String?
+          return nil if gap_count == 0
+
+          summary = summary_lines(3, left_label, right_label)
+          String.build do |io|
+            io << "semantic shadow strict parse diagnostic mismatch"
+            summary.each do |line|
+              io << '\n' << line
+            end
+          end
+        end
+
         private def self.count_signatures(diagnostics : Array(Frontend::Diagnostic)) : Hash(Signature, Int32)
           counts = {} of Signature => Int32
           diagnostics.each do |diagnostic|
