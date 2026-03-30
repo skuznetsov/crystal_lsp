@@ -627,6 +627,979 @@ describe Semantic::TypeInferenceEngine do
       type.should be_a(PrimitiveType)
       type.as(PrimitiveType).name.should eq("Int32")
     end
+
+    it "resolves receiverless overload calls on implicit self" do
+      source = <<-CRYSTAL
+        class Hasher
+          def result : Int32
+            1
+          end
+        end
+
+        class Foo
+          def hash(hasher : Hasher) : Hasher
+            hasher
+          end
+
+          def other(hasher : Hasher)
+            hash(hasher).result
+          end
+        end
+
+        foo = Foo.new
+        hasher = Hasher.new
+        foo.other(hasher)
+      CRYSTAL
+
+      program, analyzer, engine = infer_types(source)
+
+      engine.diagnostics.select(&.level.error?).should be_empty
+
+      call_id = program.roots[4]
+      type = engine.context.get_type(call_id)
+      type.should be_a(PrimitiveType)
+      type.as(PrimitiveType).name.should eq("Int32")
+    end
+
+    it "resolves receiverless calls on implicit self inside modules" do
+      source = <<-CRYSTAL
+        module Comparableish
+          def clamp(min : Int32, max : Int32) : Int32
+            min
+          end
+
+          def clamp(max : Int32)
+            clamp max, max
+          end
+        end
+      CRYSTAL
+
+      program, analyzer, engine = infer_types(source)
+
+      engine.diagnostics.select(&.level.error?).should be_empty
+    end
+
+    it "does not eagerly reject abstract bodyless helper chains in prepass" do
+      source = <<-CRYSTAL
+        class Hasher
+          def result : Int32
+            1
+          end
+        end
+
+        abstract class Foo
+          abstract def hash(hasher : Hasher)
+
+          def digest
+            hash(Hasher.new).result
+          end
+        end
+      CRYSTAL
+
+      program, analyzer, engine = infer_types(source)
+
+      engine.diagnostics.select(&.level.error?).should be_empty
+    end
+
+    it "treats &proc block-pass arguments as blocks for module method lookup" do
+      source = <<-CRYSTAL
+        module Onceish
+          def self.exec(flag : Bool, &) : Int32
+            1
+          end
+
+          def self.call(flag : Bool, &block)
+            Onceish.exec(flag, &block)
+          end
+        end
+
+        Onceish.call(true) { }
+      CRYSTAL
+
+      program, analyzer, engine = infer_types(source)
+
+      engine.diagnostics.select(&.level.error?).should be_empty
+
+      call_id = program.roots.last
+      type = engine.context.get_type(call_id)
+      type.should be_a(PrimitiveType)
+      type.as(PrimitiveType).name.should eq("Int32")
+    end
+
+    it "treats builtin type names as class receivers in expression position" do
+      source = <<-CRYSTAL
+        class String
+          def self.build : String
+            "x"
+          end
+        end
+
+        String.build
+      CRYSTAL
+
+      program, analyzer, engine = infer_types(source)
+
+      engine.diagnostics.select(&.level.error?).should be_empty
+
+      call_id = program.roots.last
+      type = engine.context.get_type(call_id)
+      type.should be_a(PrimitiveType)
+      type.as(PrimitiveType).name.should eq("String")
+    end
+
+    it "matches splat class methods on generic class receivers" do
+      source = <<-CRYSTAL
+        class Buffer(T)
+          def self.null
+            uninitialized Buffer(T)
+          end
+        end
+
+        class Slice(T)
+          def self.literal(*elts : T)
+            uninitialized Slice(T)
+          end
+
+          def to_buffer
+            Buffer(T).null
+          end
+        end
+
+        TABLE = Slice(UInt64).literal(1_u64, 2_u64)
+        TABLE.to_buffer
+      CRYSTAL
+
+      program, analyzer, engine = infer_types(source)
+
+      analyzer.semantic_diagnostics.should be_empty
+      analyzer.name_resolver_diagnostics.should be_empty
+      engine.diagnostics.should be_empty
+
+      type = engine.context.get_type(program.roots.last)
+      type.should be_a(InstanceType)
+      instance_type = type.as(InstanceType)
+      instance_type.class_symbol.name.should eq("Buffer")
+      type_arg = instance_type.type_args.try(&.first?)
+      type_arg.should be_a(PrimitiveType)
+      type_arg.as(PrimitiveType).name.should eq("UInt64")
+    end
+
+    it "matches Int-typed class method parameters from nested generic module callers" do
+      source = <<-CRYSTAL
+        module Float::FastFloat
+          def self.compute_product_approximation(q : Int64, w : UInt64, bit_precision : Int)
+            w
+          end
+        end
+
+        module Float::FastFloat
+          module BinaryFormat(T, EquivUint)
+            def compute_error(q : Int64, w : UInt64)
+              FastFloat.compute_product_approximation(q, w, mantissa_explicit_bits &+ 3)
+            end
+          end
+
+          struct BinaryFormat_Float64
+            include BinaryFormat(Float64, UInt64)
+
+            def mantissa_explicit_bits : Int32
+              52
+            end
+          end
+        end
+
+        Float::FastFloat::BinaryFormat_Float64.new.compute_error(1_i64, 2_u64)
+      CRYSTAL
+
+      program, analyzer, engine = infer_types(source)
+
+      analyzer.semantic_diagnostics.should be_empty
+      analyzer.name_resolver_diagnostics.should be_empty
+      engine.diagnostics.should be_empty
+
+      type = engine.context.get_type(program.roots.last)
+      type.should be_a(PrimitiveType)
+      type.as(PrimitiveType).name.should eq("UInt64")
+    end
+
+    it "tracks class variable assignments for later reads" do
+      source = <<-CRYSTAL
+        class SpinLock
+          def lock : Int32
+            1
+          end
+        end
+
+        class Holder
+          @@spin = SpinLock.new
+
+          def self.touch
+            @@spin.lock
+          end
+        end
+
+        Holder.touch
+      CRYSTAL
+
+      program, analyzer, engine = infer_types(source)
+
+      engine.diagnostics.select(&.level.error?).should be_empty
+
+      call_id = program.roots.last
+      type = engine.context.get_type(call_id)
+      type.should be_a(PrimitiveType)
+      type.as(PrimitiveType).name.should eq("Int32")
+    end
+
+    it "tracks uninitialized assignments as their declared runtime type" do
+      source = <<-CRYSTAL
+        class SpinLock
+          def lock : Int32
+            1
+          end
+        end
+
+        class Holder
+          @@spin = uninitialized SpinLock
+
+          def self.touch
+            @@spin.lock
+          end
+        end
+
+        Holder.touch
+      CRYSTAL
+
+      program, analyzer, engine = infer_types(source)
+
+      engine.diagnostics.select(&.level.error?).should be_empty
+
+      call_id = program.roots.last
+      type = engine.context.get_type(call_id)
+      type.should be_a(PrimitiveType)
+      type.as(PrimitiveType).name.should eq("Int32")
+    end
+
+    it "tracks module class vars through module-owned method body inference" do
+      source = <<-CRYSTAL
+        module Crystalish
+          class SpinLock
+            def lock : Int32
+              1
+            end
+          end
+
+          module Onceish
+            @@spin = uninitialized SpinLock
+
+            def self.touch
+              @@spin.lock
+            end
+          end
+        end
+
+        Crystalish::Onceish.touch
+      CRYSTAL
+
+      program, analyzer, engine = infer_types(source)
+
+      engine.diagnostics.select(&.level.error?).should be_empty
+
+      call_id = program.roots.last
+      type = engine.context.get_type(call_id)
+      type.should be_a(PrimitiveType)
+      type.as(PrimitiveType).name.should eq("Int32")
+    end
+
+    it "matches generic receiver methods with substituted user-defined parameters" do
+      source = <<-CRYSTAL
+        class Item
+          def initialize
+          end
+        end
+
+        class Box(T)
+          def push(value : T) : Int32
+            1
+          end
+        end
+
+        item = Item.new
+        box = uninitialized Box(Item)
+        box.push(item)
+      CRYSTAL
+
+      program, analyzer, engine = infer_types(source)
+
+      engine.diagnostics.select(&.level.error?).should be_empty
+
+      call_id = program.roots.last
+      type = engine.context.get_type(call_id)
+      type.should be_a(PrimitiveType)
+      type.as(PrimitiveType).name.should eq("Int32")
+    end
+
+    it "infers PointerLinkedList each blocks with pointer element params" do
+      source = <<-CRYSTAL
+        class Item
+          def value : Int32
+            1
+          end
+        end
+
+        class PointerLinkedList(T)
+          def each(&) : Nil
+          end
+        end
+
+        list = uninitialized PointerLinkedList(Item)
+
+        list.each do |node|
+          node.value.value
+        end
+      CRYSTAL
+
+      program, analyzer, engine = infer_types(source)
+
+      engine.diagnostics.select(&.level.error?).should be_empty
+    end
+
+    it "parses pointer suffix parameter types for pointer value access" do
+      source = <<-CRYSTAL
+        def read_flag(flag : Bool*)
+          flag.value
+        end
+      CRYSTAL
+
+      program, analyzer, engine = infer_types(source)
+
+      engine.diagnostics.select(&.level.error?).should be_empty
+    end
+
+    it "supports pointer null? checks in prepass" do
+      source = <<-CRYSTAL
+        def missing?(ptr : UInt8*)
+          ptr.null?
+        end
+      CRYSTAL
+
+      program, analyzer, engine = infer_types(source)
+
+      engine.diagnostics.select(&.level.error?).should be_empty
+    end
+
+    it "supports pointer union arithmetic and dereference" do
+      source = <<-CRYSTAL
+        number = 1
+        byte = 2_u8
+
+        ptr = if true
+          pointerof(number)
+        else
+          pointerof(byte)
+        end
+
+        advanced = ptr + 1
+        delta = advanced - ptr
+        value = ptr.value
+      CRYSTAL
+
+      program, analyzer, engine = infer_types(source)
+
+      analyzer.semantic_diagnostics.should be_empty
+      analyzer.name_resolver_diagnostics.should be_empty
+      engine.diagnostics.select(&.level.error?).should be_empty
+    end
+
+    it "supports universal unsafe_as casts in semantic prepass" do
+      source = <<-CRYSTAL
+        1.5_f64.unsafe_as(UInt64)
+      CRYSTAL
+
+      program, analyzer, engine = infer_types(source)
+
+      analyzer.semantic_diagnostics.should be_empty
+      analyzer.name_resolver_diagnostics.should be_empty
+      engine.diagnostics.select(&.level.error?).should be_empty
+
+      call_id = program.roots.last
+      type = engine.context.get_type(call_id)
+      type.should be_a(PrimitiveType)
+      type.as(PrimitiveType).name.should eq("UInt64")
+    end
+
+    it "supports array unsafe_fetch and unsafe_put in semantic prepass" do
+      source = <<-CRYSTAL
+        values = [] of UInt64
+        values << 1_u64
+        values.unsafe_put(0, 2_u64)
+        values.unsafe_fetch(0)
+      CRYSTAL
+
+      program, analyzer, engine = infer_types(source)
+
+      analyzer.semantic_diagnostics.should be_empty
+      analyzer.name_resolver_diagnostics.should be_empty
+      engine.diagnostics.select(&.level.error?).should be_empty
+
+      call_id = program.roots.last
+      type = engine.context.get_type(call_id)
+      type.should be_a(PrimitiveType)
+      type.as(PrimitiveType).name.should eq("UInt64")
+    end
+
+    it "resolves lib-local aliases in fun signatures" do
+      source = <<-CRYSTAL
+        lib LibC
+          alias Char = UInt8
+          alias SizeT = Int32
+
+          fun strlen(str : Char*) : SizeT
+        end
+
+        def call_strlen(str : Pointer(UInt8))
+          LibC.strlen(str)
+        end
+      CRYSTAL
+
+      program, analyzer, engine = infer_types(source)
+
+      engine.diagnostics.select(&.level.error?).should be_empty
+    end
+
+    it "approximates uninitialized static array shorthand as slice-like storage" do
+      source = <<-CRYSTAL
+        buffer = uninitialized UInt8[20]
+        buffer.to_slice
+      CRYSTAL
+
+      program, analyzer, engine = infer_types(source)
+
+      engine.diagnostics.select(&.level.error?).should be_empty
+
+      call_id = program.roots.last
+      type = engine.context.get_type(call_id)
+      type.should be_a(ArrayType)
+      type.as(ArrayType).element_type.to_s.should eq("UInt8")
+    end
+
+    it "treats underscore parameter annotations as wildcard matches" do
+      source = <<-CRYSTAL
+        def wrap(value : _) : Int32
+          1
+        end
+
+        wrap("x")
+      CRYSTAL
+
+      program, analyzer, engine = infer_types(source)
+
+      engine.diagnostics.select(&.level.error?).should be_empty
+
+      call_id = program.roots.last
+      type = engine.context.get_type(call_id)
+      type.should be_a(PrimitiveType)
+      type.as(PrimitiveType).name.should eq("Int32")
+    end
+
+    it "supports universal itself on generic values" do
+      source = <<-CRYSTAL
+        class Box(T)
+          def current(value : T)
+            value.itself
+          end
+        end
+
+        Box(String).new.current("x")
+      CRYSTAL
+
+      program, analyzer, engine = infer_types(source)
+
+      analyzer.semantic_diagnostics.should be_empty
+      analyzer.name_resolver_diagnostics.should be_empty
+      engine.diagnostics.select(&.level.error?).should be_empty
+    end
+
+    it "supports Slice(T) annotations in method bodies" do
+      source = <<-CRYSTAL
+        def count(bytes : Slice(UInt16))
+          bytes.size
+        end
+      CRYSTAL
+
+      program, analyzer, engine = infer_types(source)
+
+      engine.diagnostics.select(&.level.error?).should be_empty
+    end
+
+    it "supports slice to_unsafe and pointer arithmetic" do
+      source = <<-CRYSTAL
+        def walk(bytes : Slice(UInt8))
+          ptr = bytes.to_unsafe
+          finish = ptr + bytes.size
+          ptr < finish
+        end
+      CRYSTAL
+
+      program, analyzer, engine = infer_types(source)
+
+      engine.diagnostics.select(&.level.error?).should be_empty
+    end
+
+    it "supports pointer copy_to in method bodies" do
+      source = <<-CRYSTAL
+        def copy_digits(src : Pointer(UInt8), dst : Pointer(UInt8))
+          src.copy_to(dst, 2)
+        end
+      CRYSTAL
+
+      program, analyzer, engine = infer_types(source)
+
+      engine.diagnostics.select(&.level.error?).should be_empty
+    end
+
+    it "supports slice fill in method bodies" do
+      source = <<-CRYSTAL
+        def zero(bytes : Slice(UInt8))
+          bytes.fill(0_u8)
+        end
+      CRYSTAL
+
+      program, analyzer, engine = infer_types(source)
+
+      engine.diagnostics.select(&.level.error?).should be_empty
+    end
+
+    it "supports slice copy_to in method bodies" do
+      source = <<-CRYSTAL
+        def copy(bytes : Slice(UInt8), dst : Pointer(UInt8))
+          bytes.copy_to(dst, bytes.size)
+        end
+      CRYSTAL
+
+      program, analyzer, engine = infer_types(source)
+
+      engine.diagnostics.select(&.level.error?).should be_empty
+    end
+
+    it "supports pointer copy_to after pointer casts" do
+      source = <<-CRYSTAL
+        def pack(chars)
+          value = 0_u64
+          chars.as(UInt8*).copy_to(pointerof(value).as(UInt8*), 8)
+        end
+      CRYSTAL
+
+      program, analyzer, engine = infer_types(source)
+
+      engine.diagnostics.select(&.level.error?).should be_empty
+    end
+
+    it "supports Slice.new(...).fill in method bodies" do
+      source = <<-CRYSTAL
+        def zero(result : UInt8*)
+          Slice.new(result, 9).fill('0'.ord.to_u8!)
+        end
+      CRYSTAL
+
+      program, analyzer, engine = infer_types(source)
+
+      engine.diagnostics.select(&.level.error?).should be_empty
+    end
+
+    it "supports integer unsafe shifts in method bodies" do
+      source = <<-CRYSTAL
+        def shift(w : UInt64, bit_precision : Int32, lz : Int32)
+          mask = 0xFFFFFFFFFFFFFFFF_u64.unsafe_shr(bit_precision)
+          value = w.unsafe_shl(lz)
+          {mask, value}
+        end
+      CRYSTAL
+
+      program, analyzer, engine = infer_types(source)
+
+      engine.diagnostics.select(&.level.error?).should be_empty
+    end
+
+    it "supports integer bits_set? in method bodies" do
+      source = <<-CRYSTAL
+        def flagged?(value : UInt64, mask : UInt64)
+          value.bits_set?(mask)
+        end
+      CRYSTAL
+
+      program, analyzer, engine = infer_types(source)
+
+      engine.diagnostics.select(&.level.error?).should be_empty
+    end
+
+    it "supports integer leading_zeros_count and bang casts in method bodies" do
+      source = <<-CRYSTAL
+        def normalize(w : UInt64)
+          w.leading_zeros_count.to_i32!
+        end
+      CRYSTAL
+
+      program, analyzer, engine = infer_types(source)
+
+      engine.diagnostics.select(&.level.error?).should be_empty
+    end
+
+    it "supports integer byte_swap and bang casts in method bodies" do
+      source = <<-CRYSTAL
+        def swap_and_pack(val : UInt64)
+          {val.byte_swap, val.to_u128!, val.to_u32!}
+        end
+      CRYSTAL
+
+      program, analyzer, engine = infer_types(source)
+
+      engine.diagnostics.select(&.level.error?).should be_empty
+    end
+
+    it "supports integer builtins in called nested module methods" do
+      source = <<-CRYSTAL
+        struct Float
+        end
+
+        module Float::FastFloat
+          def self.probe_u64(w : UInt64, bit_precision : Int) : UInt64
+            wide = w.to_u128!
+            mask = 0xFFFFFFFFFFFFFFFF_u64.unsafe_shr(bit_precision)
+            shifted = w.unsafe_shl(1_i32)
+            count = w.leading_zeros_count.to_i32!
+            flagged = w.bits_set?(1_u64)
+            shifted
+          end
+
+          def self.probe_u128(value : UInt128, shift : Int32) : UInt64
+            value.unsafe_shr(shift).to_u64!
+          end
+
+          def self.probe_i128(value : Int128, shift : Int32) : Int128
+            value.unsafe_shl(shift)
+          end
+        end
+
+        Float::FastFloat.probe_u64(1_u64, 3)
+        Float::FastFloat.probe_u128(1_u128, 1_i32)
+        Float::FastFloat.probe_i128(1_i128, 1_i32)
+      CRYSTAL
+
+      program, analyzer, engine = infer_types(source)
+
+      analyzer.semantic_diagnostics.should be_empty
+      analyzer.name_resolver_diagnostics.should be_empty
+      engine.diagnostics.should be_empty
+
+      type = engine.context.get_type(program.roots.last)
+      type.should be_a(PrimitiveType)
+      type.as(PrimitiveType).name.should eq("Int128")
+    end
+
+    it "keeps generic Array class references through builder and pointer corridors" do
+      source = <<-CRYSTAL
+        arr = Array(UInt64).new(4)
+        arr << 1_u64
+        arr << 2_u64
+        ptr = arr.to_unsafe
+        ptr[0]
+      CRYSTAL
+
+      program, analyzer, engine = infer_types(source)
+
+      analyzer.semantic_diagnostics.should be_empty
+      analyzer.name_resolver_diagnostics.should be_empty
+      engine.diagnostics.should be_empty
+
+      arr_type = engine.context.get_type(program.roots[0])
+      arr_type.should be_a(ArrayType)
+      arr_type.as(ArrayType).element_type.should be_a(PrimitiveType)
+      arr_type.as(ArrayType).element_type.as(PrimitiveType).name.should eq("UInt64")
+
+      type = engine.context.get_type(program.roots.last)
+      type.should be_a(PrimitiveType)
+      type.as(PrimitiveType).name.should eq("UInt64")
+    end
+
+    it "supports Slice literal constants through to_unsafe and indexing" do
+      source = <<-CRYSTAL
+        module Powers
+          TABLE = Slice(UInt64).literal(1_u64, 2_u64, 3_u64)
+        end
+
+        ptr = Powers::TABLE.to_unsafe
+        ptr[0]
+      CRYSTAL
+
+      program, analyzer, engine = infer_types(source)
+
+      analyzer.semantic_diagnostics.should be_empty
+      analyzer.name_resolver_diagnostics.should be_empty
+      engine.diagnostics.should be_empty
+
+      ptr_type = engine.context.get_type(program.roots[1])
+      ptr_type.should be_a(PointerType)
+      ptr_type.as(PointerType).element_type.should be_a(PrimitiveType)
+      ptr_type.as(PointerType).element_type.as(PrimitiveType).name.should eq("UInt64")
+
+      type = engine.context.get_type(program.roots.last)
+      type.should be_a(PrimitiveType)
+      type.as(PrimitiveType).name.should eq("UInt64")
+    end
+
+    it "supports scoped constant values as method receivers" do
+      source = <<-CRYSTAL
+        class Table
+          def size
+            3_u64
+          end
+        end
+
+        module Fast
+          module Powers
+            TABLE = Table.new
+          end
+
+          def self.read_first
+            Powers::TABLE.size
+          end
+        end
+      CRYSTAL
+
+      program, analyzer, engine = infer_types(source)
+
+      engine.diagnostics.select(&.level.error?).should be_empty
+    end
+
+    it "supports nested module method calls through scoped module receivers" do
+      source = <<-CRYSTAL
+        module Fast
+          def self.compute(value : UInt64)
+            value
+          end
+
+          module Inner
+            def self.read(value : UInt64)
+              Fast.compute(value)
+            end
+          end
+        end
+      CRYSTAL
+
+      program, analyzer, engine = infer_types(source)
+
+      engine.diagnostics.select(&.level.error?).should be_empty
+    end
+
+    it "supports relative outer-module method calls from nested namespaces" do
+      source = <<-CRYSTAL
+        module Outer
+          module Fast
+            def self.compute(value : UInt64)
+              value
+            end
+
+            module Inner
+              def self.read(value : UInt64)
+                Fast.compute(value)
+              end
+            end
+          end
+        end
+      CRYSTAL
+
+      program, analyzer, engine = infer_types(source)
+
+      engine.diagnostics.select(&.level.error?).should be_empty
+    end
+
+    it "supports relative outer-module method calls across reopened namespaces" do
+      source = <<-CRYSTAL
+        module Outer::Fast
+          def self.compute(value : UInt64)
+            value
+          end
+        end
+
+        module Outer::Fast::Inner
+          def self.read(value : UInt64)
+            Fast.compute(value)
+          end
+        end
+      CRYSTAL
+
+      program, analyzer, engine = infer_types(source)
+
+      engine.diagnostics.select(&.level.error?).should be_empty
+    end
+
+    it "supports relative outer-module method calls from generic nested modules" do
+      source = <<-CRYSTAL
+        module Outer::Fast
+          def self.compute(value : UInt64)
+            value
+          end
+
+          module BinaryFormat(T)
+            def self.read(value : UInt64)
+              Fast.compute(value)
+            end
+          end
+        end
+      CRYSTAL
+
+      program, analyzer, engine = infer_types(source)
+
+      engine.diagnostics.select(&.level.error?).should be_empty
+    end
+
+    it "resolves enclosing module self paths from included generic module instance methods" do
+      source = <<-CRYSTAL
+        struct Float
+        end
+
+        module Float::FastFloat
+          struct Value128
+            property high : UInt64
+
+            def initialize(@high : UInt64 = 0_u64)
+            end
+          end
+
+          def self.compute_product_approximation(q : Int64, w : UInt64, bit_precision : Int) : Value128
+            Value128.new(high: w)
+          end
+
+          module BinaryFormat(T, EquivUint)
+            def mantissa_explicit_bits : Int32
+              52
+            end
+
+            def compute_error(q : Int64, w : UInt64)
+              product = FastFloat.compute_product_approximation(q, w, mantissa_explicit_bits &+ 3)
+              product.high
+            end
+          end
+
+          struct BinaryFormat_Float64
+            include BinaryFormat(Float64, UInt64)
+          end
+        end
+
+        Float::FastFloat::BinaryFormat_Float64.new.compute_error(1_i64, 2_u64)
+      CRYSTAL
+
+      program, analyzer, engine = infer_types(source)
+
+      analyzer.semantic_diagnostics.should be_empty
+      analyzer.name_resolver_diagnostics.should be_empty
+      engine.diagnostics.should be_empty
+
+      type = engine.context.get_type(program.roots.last)
+      type.should be_a(PrimitiveType)
+      type.as(PrimitiveType).name.should eq("UInt64")
+    end
+
+    it "supports relative outer-module method calls from path-style reopened generic modules" do
+      source = <<-CRYSTAL
+        module Outer::Fast
+          def self.compute(value : UInt64)
+            value
+          end
+        end
+
+        module Outer::Fast::BinaryFormat(T, U)
+          def self.read(value : UInt64)
+            Fast.compute(value)
+          end
+        end
+      CRYSTAL
+
+      program, analyzer, engine = infer_types(source)
+
+      engine.diagnostics.select(&.level.error?).should be_empty
+    end
+
+    it "does not eagerly reject bodies with untyped parameters in prepass" do
+      source = <<-CRYSTAL
+        def helper(format, *args, &)
+          ptr = format.to_unsafe
+          finish = ptr + 1
+          ptr < finish
+        end
+      CRYSTAL
+
+      program, analyzer, engine = infer_types(source)
+
+      engine.diagnostics.select(&.level.error?).should be_empty
+    end
+
+    it "infers untyped helper bodies from concrete call-site bindings" do
+      source = <<-CRYSTAL
+        def helper(buffer)
+          ptr = buffer.to_unsafe
+          ptr[0]
+        end
+
+        buffer = [1_u8, 2_u8, 3_u8]
+        helper(buffer)
+      CRYSTAL
+
+      program, analyzer, engine = infer_types(source)
+
+      analyzer.semantic_diagnostics.should be_empty
+      analyzer.name_resolver_diagnostics.should be_empty
+      engine.diagnostics.select(&.level.error?).should be_empty
+
+      type = engine.context.get_type(program.roots.last)
+      type.should be_a(PrimitiveType)
+      type.as(PrimitiveType).name.should eq("UInt8")
+    end
+
+    it "binds deferred default arguments from receiver context" do
+      source = <<-CRYSTAL
+        module Container(T)
+          def size : Int32
+            3
+          end
+
+          def each_value(size : Int32 = self.size)
+            size + 1
+          end
+        end
+
+        struct Box
+          include Container(Int32)
+        end
+
+        Box.new.each_value
+      CRYSTAL
+
+      program, analyzer, engine = infer_types(source)
+
+      analyzer.semantic_diagnostics.should be_empty
+      analyzer.name_resolver_diagnostics.should be_empty
+      engine.diagnostics.select(&.level.error?).should be_empty
+
+      type = engine.context.get_type(program.roots.last)
+      type.should be_a(PrimitiveType)
+      type.as(PrimitiveType).name.should eq("Int32")
+    end
+
+    it "does not eagerly reject Object-typed receivers in prepass" do
+      source = <<-CRYSTAL
+        class Foo
+          def contains?(collection : Object)
+            collection.includes?(self)
+          end
+        end
+      CRYSTAL
+
+      program, analyzer, engine = infer_types(source)
+
+      engine.diagnostics.select(&.level.error?).should be_empty
+    end
   end
 
   describe "Integration: Complex Expressions (Current Parser)" do
@@ -1072,6 +2045,26 @@ describe Semantic::TypeInferenceEngine do
 
       type_names = union.types.map(&.to_s).sort
       type_names.should eq(["Int32", "String"])
+    end
+
+    it "finds enum instance methods through nilable try short blocks" do
+      source = <<-CRYSTAL
+        enum Errish
+          Foo
+
+          def message : String
+            "boom"
+          end
+        end
+
+        def probe(err : Errish | Nil)
+          err.try &.message
+        end
+      CRYSTAL
+
+      program, analyzer, engine = infer_types(source)
+
+      engine.diagnostics.select(&.level.error?).should be_empty
     end
 
     it "handles union return type when all return same type" do
@@ -1555,6 +2548,37 @@ describe Semantic::TypeInferenceEngine do
       return2_type.should be_a(PrimitiveType)
       return2_type.as(PrimitiveType).name.should eq("String")
     end
+
+    it "uses explicit returns when inferring unannotated method bodies" do
+      source = <<-CRYSTAL
+        class Finder
+          def maybe(flag : Bool)
+            while true
+              return 1 if flag
+            end
+          end
+
+          def call
+            if value = maybe(true)
+              value + 1
+            else
+              0
+            end
+          end
+        end
+
+        Finder.new.call
+      CRYSTAL
+
+      program, analyzer, engine = infer_types(source)
+
+      engine.diagnostics.select(&.level.error?).should be_empty
+
+      call_id = program.roots.last
+      type = engine.context.get_type(call_id)
+      type.should be_a(PrimitiveType)
+      type.as(PrimitiveType).name.should eq("Int32")
+    end
   end
 
   describe "Phase 7: Self Keyword" do
@@ -2005,6 +3029,444 @@ describe Semantic::TypeInferenceEngine do
       # << returns the array itself
       push_type.should be_a(ArrayType)
       push_type.as(ArrayType).element_type.as(PrimitiveType).name.should eq("Int32")
+    end
+
+    it "resolves operator methods returning self in chained calls" do
+      source = <<-CRYSTAL
+        class Builder
+          def <<(value : String) : self
+            self
+          end
+        end
+
+        builder = Builder.new
+        result = builder << "a" << "b"
+      CRYSTAL
+
+      program, analyzer, engine = infer_types(source)
+
+      analyzer.semantic_diagnostics.should be_empty
+      analyzer.name_resolver_diagnostics.should be_empty
+      engine.diagnostics.should be_empty
+
+      result_assign = program.arena[program.roots[2]].as(CrystalV2::Compiler::Frontend::AssignNode)
+      chain_id = result_assign.value.not_nil!
+      chain_type = engine.context.get_type(chain_id)
+
+      chain_type.should be_a(InstanceType)
+      chain_type.as(InstanceType).class_symbol.name.should eq("Builder")
+    end
+
+    it "parses proc arrow annotations for call receivers" do
+      source = <<-CRYSTAL
+        def probe(block : Int32 -> String)
+          block.call(1)
+        end
+      CRYSTAL
+
+      program, analyzer, engine = infer_types(source)
+
+      analyzer.semantic_diagnostics.should be_empty
+      analyzer.name_resolver_diagnostics.should be_empty
+      engine.diagnostics.should be_empty
+
+      def_node = program.arena[program.roots[0]].as(CrystalV2::Compiler::Frontend::DefNode)
+      call_id = def_node.body.not_nil!.first
+      call_type = engine.context.get_type(call_id)
+
+      call_type.should be_a(PrimitiveType)
+      call_type.as(PrimitiveType).name.should eq("String")
+    end
+
+    it "infers receiverless each block params from generic module type parameters" do
+      source = <<-CRYSTAL
+        module EnumerableLike(T)
+          def each
+          end
+
+          def probe(block : T -> U) forall U
+            each do |value|
+              block.call(value)
+            end
+          end
+        end
+      CRYSTAL
+
+      program, analyzer, engine = infer_types(source)
+
+      analyzer.semantic_diagnostics.should be_empty
+      analyzer.name_resolver_diagnostics.should be_empty
+      engine.diagnostics.should be_empty
+    end
+
+    it "preserves implicit each block typing across generic module reopenings" do
+      source = <<-CRYSTAL
+        module EnumerableLike(T)
+          abstract def each(& : T ->)
+
+          def probe(block : T -> U, &) forall U
+            each do |value|
+              block.call(value)
+            end
+          end
+        end
+
+        module EnumerableLike
+          def marker
+          end
+        end
+      CRYSTAL
+
+      program, analyzer, engine = infer_types(source)
+
+      analyzer.semantic_diagnostics.should be_empty
+      analyzer.name_resolver_diagnostics.should be_empty
+      engine.diagnostics.should be_empty
+    end
+
+    it "substitutes generic ivar element types in array mutations" do
+      source = <<-CRYSTAL
+        class Box(T)
+          @data : Array(T)
+
+          def initialize
+            @data = [] of T
+          end
+
+          def add(value : T)
+            @data << value
+          end
+
+          def clear_it
+            @data.clear
+          end
+        end
+
+        box = Box(Int32).new
+        box.add(1)
+        box.clear_it
+      CRYSTAL
+
+      program, analyzer, engine = infer_types(source)
+
+      analyzer.semantic_diagnostics.should be_empty
+      analyzer.name_resolver_diagnostics.should be_empty
+      engine.diagnostics.should be_empty
+    end
+
+    it "treats tap as a universal method returning the receiver" do
+      source = <<-CRYSTAL
+        values = [1, 2]
+        result = values.tap { nil }
+      CRYSTAL
+
+      program, analyzer, engine = infer_types(source)
+
+      analyzer.semantic_diagnostics.should be_empty
+      analyzer.name_resolver_diagnostics.should be_empty
+      engine.diagnostics.should be_empty
+
+      result_assign = program.arena[program.roots[1]].as(CrystalV2::Compiler::Frontend::AssignNode)
+      result_type = engine.context.get_type(result_assign.value.not_nil!)
+      result_type.should be_a(ArrayType)
+    end
+
+    it "parses tuple type names in method annotations" do
+      source = <<-CRYSTAL
+        def pair : Tuple(Int32, String)
+          {1, "x"}
+        end
+
+        result = pair
+      CRYSTAL
+
+      program, analyzer, engine = infer_types(source)
+
+      analyzer.semantic_diagnostics.should be_empty
+      analyzer.name_resolver_diagnostics.should be_empty
+      engine.diagnostics.should be_empty
+
+      result_assign = program.arena[program.roots[1]].as(CrystalV2::Compiler::Frontend::AssignNode)
+      result_type = engine.context.get_type(result_assign.value.not_nil!)
+      result_type.should be_a(TupleType)
+      result_type.as(TupleType).element_types.size.should eq(2)
+    end
+
+    it "parses brace tuple type annotations in method signatures" do
+      source = <<-CRYSTAL
+        def second(tuple : {Int32, String, Bool})
+          tuple[1]
+        end
+
+        result = second({1, "x", true})
+      CRYSTAL
+
+      program, analyzer, engine = infer_types(source)
+
+      analyzer.semantic_diagnostics.should be_empty
+      analyzer.name_resolver_diagnostics.should be_empty
+      engine.diagnostics.should be_empty
+
+      result_assign = program.arena[program.roots[1]].as(CrystalV2::Compiler::Frontend::AssignNode)
+      result_type = engine.context.get_type(result_assign.value.not_nil!)
+      result_type.should be_a(PrimitiveType)
+      result_type.as(PrimitiveType).name.should eq("String")
+    end
+
+    it "parses brace named tuple annotations in method signatures" do
+      source = <<-CRYSTAL
+        def extract(pair : {left: Int32, right: String})
+          pair[:right]
+        end
+
+        value = extract({left: 1, right: "ok"})
+      CRYSTAL
+
+      program, analyzer, engine = infer_types(source)
+
+      analyzer.semantic_diagnostics.should be_empty
+      analyzer.name_resolver_diagnostics.should be_empty
+      engine.diagnostics.should be_empty
+
+      value_assign = program.arena[program.roots[1]].as(CrystalV2::Compiler::Frontend::AssignNode)
+      value_type = engine.context.get_type(value_assign.value.not_nil!)
+      value_type.should be_a(PrimitiveType)
+      value_type.as(PrimitiveType).name.should eq("String")
+    end
+
+    it "binds untyped method params from call-site arguments during body inference" do
+      source = <<-CRYSTAL
+        class Accumulator(T)
+          @data : Array(T)
+
+          def initialize
+            @data = [] of T
+          end
+
+          def add(value)
+            @data << value
+          end
+        end
+
+        acc = Accumulator(Int32).new
+        acc.add(1)
+      CRYSTAL
+
+      program, analyzer, engine = infer_types(source)
+
+      analyzer.semantic_diagnostics.should be_empty
+      analyzer.name_resolver_diagnostics.should be_empty
+      engine.diagnostics.should be_empty
+    end
+
+    it "supports array container builtins used by stdlib helpers" do
+      source = <<-CRYSTAL
+        values = [1, 2]
+        values.push(3)
+        values.concat([4, 5])
+        first = values.first
+        copy = values.dup
+        values.swap(0, 1)
+        values.clear
+      CRYSTAL
+
+      program, analyzer, engine = infer_types(source)
+
+      analyzer.semantic_diagnostics.should be_empty
+      analyzer.name_resolver_diagnostics.should be_empty
+      engine.diagnostics.should be_empty
+    end
+
+    it "resolves hash put_if_absent to the value type" do
+      source = <<-CRYSTAL
+        h = {1 => [] of String}
+        arr = h.put_if_absent(2) { Array(String).new }
+        arr << "x"
+      CRYSTAL
+
+      program, analyzer, engine = infer_types(source)
+
+      analyzer.semantic_diagnostics.should be_empty
+      analyzer.name_resolver_diagnostics.should be_empty
+      engine.diagnostics.should be_empty
+    end
+
+    it "instantiates builtin generic containers through .new calls" do
+      source = <<-CRYSTAL
+        class Array(T)
+        end
+
+        class Hash(K, V)
+        end
+
+        ary = Array(String).new(2)
+        ary << "a"
+
+        h = Hash(Int32, Array(String)).new
+        values = h.put_if_absent(1) { Array(String).new }
+        values.concat(ary)
+      CRYSTAL
+
+      program, analyzer, engine = infer_types(source)
+
+      analyzer.semantic_diagnostics.should be_empty
+      analyzer.name_resolver_diagnostics.should be_empty
+      engine.diagnostics.should be_empty
+    end
+
+    it "instantiates generic hash builders through .new inside generic methods" do
+      source = <<-CRYSTAL
+        class Array(T)
+        end
+
+        class Hash(K, V)
+        end
+
+        class Bucket(T)
+          def group_byish(value : T, & : T -> U) forall U
+            h = Hash(U, Array(T)).new
+            key = yield value
+            h.put_if_absent(key) { Array(T).new } << value
+          end
+        end
+
+        Bucket(String).new.group_byish("x") { |v| 1 }
+      CRYSTAL
+
+      program, analyzer, engine = infer_types(source)
+
+      analyzer.semantic_diagnostics.should be_empty
+      analyzer.name_resolver_diagnostics.should be_empty
+      engine.diagnostics.should be_empty
+    end
+
+    it "infers nested iterator yields for generic hash builders" do
+      source = <<-CRYSTAL
+        class Array(T)
+        end
+
+        class Hash(K, V)
+        end
+
+        class Bucket(T)
+          def initialize(@value : T)
+          end
+
+          def each
+            yield @value
+          end
+
+          def group_byish(& : T -> U) forall U
+            h = Hash(U, Array(T)).new
+            each do |e|
+              v = yield e
+              h.put_if_absent(v) { Array(T).new } << e
+            end
+          end
+        end
+
+        Bucket(String).new("x").group_byish { |e| 1 }
+      CRYSTAL
+
+      program, analyzer, engine = infer_types(source)
+
+      analyzer.semantic_diagnostics.should be_empty
+      analyzer.name_resolver_diagnostics.should be_empty
+      engine.diagnostics.should be_empty
+    end
+
+    it "infers typeof on yielded generic block results for compact_map-style builders" do
+      source = <<-CRYSTAL
+        class Bucket(T)
+          def initialize(@value : T)
+          end
+
+          def each
+            yield @value
+          end
+
+          def compact_mapish(& : T -> U?) forall U
+            ary = [] of typeof((yield @value).not_nil!)
+            each do |e|
+              v = yield e
+              unless v.nil?
+                ary << v
+              end
+            end
+            ary
+          end
+        end
+
+        Bucket(String).new("x").compact_mapish do |value|
+          if true
+            value
+          else
+            nil
+          end
+        end
+      CRYSTAL
+
+      program, analyzer, engine = infer_types(source)
+
+      analyzer.semantic_diagnostics.should be_empty
+      analyzer.name_resolver_diagnostics.should be_empty
+      engine.diagnostics.should be_empty
+    end
+
+    it "applies arg-inferred generic bindings to block parameter signatures" do
+      source = <<-CRYSTAL
+        class Hash(K, V)
+        end
+
+        def with_objectish(value : T, obj : U, & : T, U ->) : U forall T, U
+          yield value, obj
+          obj
+        end
+
+        with_objectish("x", Hash(String, Int32).new) do |item, memo|
+          memo.fetch(item) { 0 }
+        end
+      CRYSTAL
+
+      program, analyzer, engine = infer_types(source)
+
+      analyzer.semantic_diagnostics.should be_empty
+      analyzer.name_resolver_diagnostics.should be_empty
+      engine.diagnostics.should be_empty
+    end
+
+    it "preserves structural collection types through is_a? and case narrowing" do
+      source = <<-CRYSTAL
+        class Array(T)
+        end
+
+        value = if true
+          [1]
+        else
+          "x"
+        end
+
+        if value.is_a?(Array)
+          value.first
+        end
+
+        def headish(elem : Array(Int32) | String)
+          case elem
+          when Array
+            elem.first
+          else
+            elem
+          end
+        end
+
+        headish([1])
+      CRYSTAL
+
+      program, analyzer, engine = infer_types(source)
+
+      analyzer.semantic_diagnostics.should be_empty
+      analyzer.name_resolver_diagnostics.should be_empty
+      engine.diagnostics.should be_empty
     end
   end
 
@@ -2662,6 +4124,47 @@ describe Semantic::TypeInferenceEngine do
       engine.diagnostics.size.should be > 0
       engine.diagnostics.first.message.should contain("Cannot index")
     end
+  end
+
+  describe "Phase 14C: Enum Index Syntax" do
+    it "infers enum type for bracketed flag combinations" do
+      source = <<-CRYSTAL
+        @[Flags]
+        enum Options
+          None = 0
+          IGNORE_CASE = 0x0000_0001
+          MULTILINE = 0x0000_0006
+          EXTENDED = 0x0000_0008
+        end
+
+        alias CompileOptions = Options
+
+        class Regex
+          def options : CompileOptions
+            CompileOptions::IGNORE_CASE
+          end
+
+          def sample
+            options & ~CompileOptions[IGNORE_CASE, MULTILINE, EXTENDED]
+          end
+        end
+      CRYSTAL
+
+      program, analyzer, engine = infer_types(source)
+
+      analyzer.resolve_names.diagnostics.should be_empty
+      engine.diagnostics.should be_empty
+
+      regex_class = program.arena[program.roots.last].as(CrystalV2::Compiler::Frontend::ClassNode)
+      sample_def_id = regex_class.body.not_nil!.last
+      sample_def = program.arena[sample_def_id].as(CrystalV2::Compiler::Frontend::DefNode)
+      expr_id = sample_def.body.not_nil!.last
+      expr_type = engine.context.get_type(expr_id)
+
+      expr_type.should be_a(EnumType)
+      expr_type.as(EnumType).symbol.name.should eq("Options")
+    end
+
   end
 
   describe "Phase 15: Tuples" do
@@ -3521,6 +5024,20 @@ describe Semantic::TypeInferenceEngine do
 
       shift_type = engine.context.get_type(shift_expr_id)
       shift_type.as(PrimitiveType).name.should eq("Int32")
+    end
+
+    it "keeps bitwise-or compound assignments numeric after shifts" do
+      source = <<-CRYSTAL
+        def probe
+          result = 0_i32
+          shift = 0
+          result |= -(1 << shift)
+        end
+      CRYSTAL
+
+      program, analyzer, engine = infer_types(source)
+
+      engine.diagnostics.select(&.level.error?).should be_empty
     end
 
     it "respects operator precedence for right shift" do
