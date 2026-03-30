@@ -14,7 +14,15 @@ module CrystalV2
           display_path : String?,
           source : String,
           related_spans : Array(Frontend::RelatedSpan),
-          secondary_spans : Array(Semantic::SecondarySpan)
+          secondary_spans : Array(Semantic::SecondarySpan) do
+          def sources_with_generated(base_sources : Hash(String, String)) : Hash(String, String)
+            sources = base_sources.dup
+            if display_path = self.display_path
+              sources[display_path] = source
+            end
+            sources
+          end
+        end
 
         record UnitSummary,
           unit_index : Int32,

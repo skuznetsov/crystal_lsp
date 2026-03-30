@@ -156,10 +156,10 @@ aggregate/analyzer/collector no longer have to hand-roll those snapshot
 copies at each boundary.
 
 CLI formatting now consumes aggregate-owned generated diagnostic contexts
-instead of rebuilding display paths, generated source text, and provenance
-notes in the CLI layer. Same-file expansions still omit the
-`macro defined here` note to avoid redundant output when the call site and
-definition live in the same file.
+instead of rebuilding display paths, generated source text, provenance notes,
+or temporary generated source-map overlays in the CLI layer. Same-file
+expansions still omit the `macro defined here` note to avoid redundant output
+when the call site and definition live in the same file.
 
 On the current tree, that top-level macro gap is now closed for the semantic
 symbol table: a no-prelude carrier with a top-level `{% for %}` that generates

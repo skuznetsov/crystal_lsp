@@ -176,8 +176,9 @@ Verified sequence:
       origin, and macro-definition origin into one shadow-side record
   - aggregate-side generated provenance now also assembles the generated
     diagnostic context consumed by CLI formatting, including display path,
-    generated source, and note spans; same-file expansions still intentionally
-    omit the redundant `macro defined here` note
+    generated source, note spans, and temporary generated source-map overlay
+    assembly; same-file expansions still intentionally omit the redundant
+    `macro defined here` note
   - `GeneratedOverlay` itself now exposes explicit `empty`, `dup`, and
     `snapshot` helpers, so analyzer, collector, and aggregate use one
     snapshot contract instead of manually reconstructing six collections at

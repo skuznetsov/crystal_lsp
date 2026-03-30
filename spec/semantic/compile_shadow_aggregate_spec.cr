@@ -781,6 +781,40 @@ describe "compile semantic shadow aggregate" do
     formatted.should contain("define_bad(:alpha)")
   end
 
+  it "builds a generated source map overlay from generated diagnostic context" do
+    aggregate = build_shared_shadow_aggregate([
+      <<-CR,
+        macro define_bad(name)
+          def {{name.id}}
+            missing + 1
+          end
+        end
+      CR
+      <<-CR,
+        define_bad(:alpha)
+        alpha()
+      CR
+    ])
+    program = aggregate.program
+    shadow_sources = build_shadow_sources(aggregate)
+
+    analyzer = Semantic::Analyzer.new(program)
+    analyzer.collect_symbols(
+      node_file_path_provider: ->(expr_id : Frontend::ExprId) { aggregate.path_for(expr_id) },
+      source_for_path_provider: ->(path : String) { shadow_sources[path]? },
+    )
+    attach_generated_shadow_overlay(aggregate, analyzer)
+    result = analyzer.resolve_names
+
+    diagnostic = result.diagnostics.first
+    node_id = diagnostic.node_id.not_nil!
+    context = aggregate.generated_diagnostic_context_for(node_id).not_nil!
+    source_map = context.sources_with_generated({"unit_1.cr" => shadow_sources["unit_1.cr"]})
+
+    source_map["unit_1.cr"].should eq(shadow_sources["unit_1.cr"])
+    source_map[context.display_path.not_nil!].should contain("missing + 1")
+  end
+
   it "adds origin note for generated type diagnostics" do
     aggregate = build_shared_shadow_aggregate([
       <<-CR,
