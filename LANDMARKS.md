@@ -115,6 +115,9 @@ Verified sequence:
       argful bundle materialization/ownership inside the shared aggregate
     - `spec/semantic/compile_shadow_declaration_inventory_spec.cr` verifies
       semantic-side materialization/provenance for the same corridor
+    - that same lower-level pair now also locks the cross-file block-yield
+      bundle corridor below the CLI layer, including generated ownership in the
+      aggregate and generated semantic provenance in the inventory
     - this keeps collector-vs-semantic parity as the CLI-level contract while
       pinning lower-level semantic materialization separately
   - live bare macro-call smoke is now green on both collector and semantic sides:

@@ -268,6 +268,15 @@ corridor below the CLI layer:
 - `compile_shadow_declaration_inventory_spec` verifies the matching
   semantic-side materialization/provenance contract for that corridor
 
+The same lower-level layer now also locks the cross-file block-yield bundle
+corridor:
+
+- `compile_shadow_aggregate_spec` verifies that a cross-file `define_bundle do`
+  carrier materializes generated non-method declarations, resolves cleanly,
+  and attributes generated ownership back to the caller unit
+- `compile_shadow_declaration_inventory_spec` verifies the matching generated
+  semantic provenance for those block-yield declarations
+
 This keeps the layering honest: collector-vs-semantic declaration parity is
 still the CLI-level contract, while the lower-level aggregate/inventory specs
 pin semantic materialization and provenance directly.

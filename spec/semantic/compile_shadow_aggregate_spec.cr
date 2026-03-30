@@ -445,6 +445,63 @@ describe "compile semantic shadow aggregate" do
     aggregate.owned_node_count_for_unit(1).should be > aggregate.unit_summaries[1].node_count
   end
 
+  it "expands cross-file block-yield non-method bundle declarations in aggregate" do
+    aggregate = build_shared_shadow_aggregate([
+      <<-CR,
+        macro define_bundle
+          {{yield}}
+        end
+      CR
+      <<-CR,
+        define_bundle do
+          class Alpha
+          end
+
+          module Beta
+          end
+
+          enum Mode
+            One
+          end
+
+          FLAG = 1
+        end
+      CR
+    ])
+    program = aggregate.program
+    shadow_sources = build_shadow_sources(aggregate)
+
+    analyzer = Semantic::Analyzer.new(program)
+    analyzer.collect_symbols(
+      node_file_path_provider: ->(expr_id : Frontend::ExprId) { aggregate.path_for(expr_id) },
+      source_for_path_provider: ->(path : String) { shadow_sources[path]? },
+    )
+    attach_generated_shadow_overlay(aggregate, analyzer)
+    result = analyzer.resolve_names
+    analyzer.infer_types(result.identifier_symbols)
+
+    alpha = analyzer.global_context.symbol_table.lookup("Alpha")
+    beta = analyzer.global_context.symbol_table.lookup("Beta")
+    mode = analyzer.global_context.symbol_table.lookup("Mode")
+    flag = analyzer.global_context.symbol_table.lookup("FLAG")
+
+    alpha.should be_a(Semantic::ClassSymbol)
+    beta.should be_a(Semantic::ModuleSymbol)
+    mode.should be_a(Semantic::EnumSymbol)
+    flag.should be_a(Semantic::ConstantSymbol)
+
+    alpha.not_nil!.file_path.should eq("unit_1.cr")
+    beta.not_nil!.file_path.should eq("unit_1.cr")
+    mode.not_nil!.file_path.should eq("unit_1.cr")
+    flag.not_nil!.file_path.should eq("unit_1.cr")
+
+    result.diagnostics.should be_empty
+    analyzer.type_inference_diagnostics.should be_empty
+    aggregate.generated_top_level_roots.should_not be_empty
+    aggregate.generated_node_count_for_unit(1).should be > 0
+    aggregate.owned_node_count_for_unit(1).should be > aggregate.unit_summaries[1].node_count
+  end
+
   it "resolves cross-file zero-arg macro call in aggregate" do
     aggregate = build_shared_shadow_aggregate([
       <<-CR,

@@ -56,6 +56,7 @@
     - lower-level regression coverage now locks that same argful non-method corridor too:
       - `spec/semantic/compile_shadow_aggregate_spec.cr` verifies cross-file argful bundle materialization/ownership inside the shared aggregate
       - `spec/semantic/compile_shadow_declaration_inventory_spec.cr` verifies semantic-side materialization/provenance for the same corridor
+      - the same lower-level pair now also locks cross-file block-yield bundle materialization/ownership/provenance below the CLI layer
       - this keeps collector-vs-semantic parity as the CLI-level contract while pinning lower-level semantic materialization separately
     - live bare macro-call smoke is now green on both collector and semantic sides:
       - `CRYSTAL_V2_SEMANTIC_SHADOW=1 /tmp/crystal_v2_semantic_shadow /tmp/shadow_macro_call_decl.cr --no-prelude --stats --verbose`
