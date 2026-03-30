@@ -211,6 +211,40 @@ module CrystalV2
           )
         end
 
+        def enrich_shadow_diagnostic(diagnostic : Frontend::Diagnostic) : Frontend::Diagnostic
+          related_spans = diagnostic.related_spans.map do |related|
+            next related if related.file_path
+            next related unless related_node_id = related.node_id
+            related.with_file_path(path_for(related_node_id))
+          end
+
+          primary_file_path = diagnostic.file_path
+          if primary_file_path.nil?
+            if node_id = diagnostic.node_id
+              primary_file_path = path_for(node_id)
+            end
+          end
+
+          diagnostic.with_file_path(primary_file_path, related_spans)
+        end
+
+        def enrich_shadow_diagnostic(diagnostic : Semantic::Diagnostic) : Semantic::Diagnostic
+          primary_file_path = diagnostic.primary_file_path
+          if primary_file_path.nil?
+            if primary_node_id = diagnostic.primary_node_id
+              primary_file_path = path_for(primary_node_id)
+            end
+          end
+
+          secondary_spans = diagnostic.secondary_spans.map do |secondary|
+            next secondary if secondary.file_path
+            next secondary unless secondary_node_id = secondary.node_id
+            secondary.with_file_path(path_for(secondary_node_id))
+          end
+
+          diagnostic.with_paths(primary_file_path, secondary_spans)
+        end
+
         def format_shadow_diagnostic(
           diagnostic : Frontend::Diagnostic,
           base_sources : Hash(String, String)

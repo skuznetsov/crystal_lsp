@@ -5750,46 +5750,6 @@ module CrystalV2
         counts[unit_index]? || raise "semantic shadow internal error: missing #{label} for unit_index=#{unit_index} size=#{counts.size}"
       end
 
-      private def enrich_shadow_semantic_diagnostic(
-        diagnostic : Semantic::Diagnostic,
-        aggregate : Semantic::CompileShadowAggregate
-      ) : Semantic::Diagnostic
-        primary_file_path = diagnostic.primary_file_path
-        if primary_file_path.nil?
-          if primary_node_id = diagnostic.primary_node_id
-            primary_file_path = aggregate.path_for(primary_node_id)
-          end
-        end
-
-        secondary_spans = diagnostic.secondary_spans.map do |secondary|
-          next secondary if secondary.file_path
-          next secondary unless secondary_node_id = secondary.node_id
-          secondary.with_file_path(aggregate.path_for(secondary_node_id))
-        end
-
-        diagnostic.with_paths(primary_file_path, secondary_spans)
-      end
-
-      private def enrich_shadow_resolution_diagnostic(
-        diagnostic : Frontend::Diagnostic,
-        aggregate : Semantic::CompileShadowAggregate
-      ) : Frontend::Diagnostic
-        related_spans = diagnostic.related_spans.map do |related|
-          next related if related.file_path
-          next related unless related_node_id = related.node_id
-          related.with_file_path(aggregate.path_for(related_node_id))
-        end
-
-        primary_file_path = diagnostic.file_path
-        if primary_file_path.nil?
-          if node_id = diagnostic.node_id
-            primary_file_path = aggregate.path_for(node_id)
-          end
-        end
-
-        diagnostic.with_file_path(primary_file_path, related_spans)
-      end
-
       private def count_shadow_diagnostics_by_unit(
         diagnostics : Array(Semantic::Diagnostic),
         aggregate : Semantic::CompileShadowAggregate
@@ -6199,9 +6159,9 @@ module CrystalV2
           analyzer.global_context.symbol_table
         )
         declaration_parity = Semantic::CompileShadowDeclarationParity.compare(collector_inventory, semantic_inventory)
-        semantic_diagnostics = analyzer.semantic_diagnostics.map { |diagnostic| enrich_shadow_semantic_diagnostic(diagnostic, aggregate) }
-        resolution_diagnostics = resolve_result.diagnostics.map { |diagnostic| enrich_shadow_resolution_diagnostic(diagnostic, aggregate) }
-        type_diagnostics = analyzer.type_inference_diagnostics.map { |diagnostic| enrich_shadow_semantic_diagnostic(diagnostic, aggregate) }
+        semantic_diagnostics = analyzer.semantic_diagnostics.map { |diagnostic| aggregate.enrich_shadow_diagnostic(diagnostic) }
+        resolution_diagnostics = resolve_result.diagnostics.map { |diagnostic| aggregate.enrich_shadow_diagnostic(diagnostic) }
+        type_diagnostics = analyzer.type_inference_diagnostics.map { |diagnostic| aggregate.enrich_shadow_diagnostic(diagnostic) }
         symbols_by_unit = count_shadow_symbols_by_unit(analyzer.global_context.symbol_table, aggregate)
         generated_symbols_by_unit = count_shadow_generated_symbols_by_unit(analyzer.global_context.symbol_table, aggregate)
         identifiers_by_unit = count_shadow_identifiers_by_unit(resolve_result.identifier_symbols, aggregate)

@@ -82,6 +82,54 @@ describe "compile semantic shadow aggregate" do
     aggregate.path_for(callee_id).should eq("unit_1.cr")
   end
 
+  it "enriches frontend diagnostics with aggregate file paths" do
+    aggregate = build_shared_shadow_aggregate([
+      "def alpha\nend\n",
+      "alpha()\n",
+    ])
+    program = aggregate.program
+    call_root = program.roots.last
+    call_node = program.arena[call_root].as(Frontend::CallNode)
+    callee_id = call_node.callee.not_nil!
+    related_span = Frontend::RelatedSpan.new(program.arena[program.roots.first].span, "defined here", program.roots.first, nil)
+    diagnostic = Frontend::Diagnostic.new(
+      "test",
+      program.arena[callee_id].span,
+      node_id: callee_id,
+      related_spans: [related_span],
+    )
+
+    enriched = aggregate.enrich_shadow_diagnostic(diagnostic)
+
+    enriched.file_path.should eq("unit_1.cr")
+    enriched.related_spans.first.file_path.should eq("unit_0.cr")
+  end
+
+  it "enriches semantic diagnostics with aggregate file paths" do
+    aggregate = build_shared_shadow_aggregate([
+      "def alpha\nend\n",
+      "alpha()\n",
+    ])
+    program = aggregate.program
+    call_root = program.roots.last
+    call_node = program.arena[call_root].as(Frontend::CallNode)
+    callee_id = call_node.callee.not_nil!
+    secondary = Semantic::SecondarySpan.new(program.arena[program.roots.first].span, "defined here", program.roots.first, nil)
+    diagnostic = Semantic::Diagnostic.new(
+      Semantic::DiagnosticLevel::Error,
+      "E9999",
+      "test",
+      program.arena[callee_id].span,
+      [secondary],
+      primary_node_id: callee_id,
+    )
+
+    enriched = aggregate.enrich_shadow_diagnostic(diagnostic)
+
+    enriched.primary_file_path.should eq("unit_1.cr")
+    enriched.secondary_spans.first.file_path.should eq("unit_0.cr")
+  end
+
   it "infers types across aggregated files in shared AstArena order" do
     aggregate = build_shared_shadow_aggregate([
       <<-CR,
