@@ -3,6 +3,20 @@
 Updated: 2026-03-30
 Context: compiler/bootstrap/stage2-stability
 
+[LM-348|verified]: The new inferer no longer silently collapses binary operator
+methods without return annotations to `Nil`. `TypeInferenceEngine` now routes
+that corridor through the normal method-body inference path instead of forcing
+`nil_type` once `lookup_method(...)` succeeds. Focused regression
+`spec/semantic/type_inference_operator_method_body_spec.cr` is green, and the
+exact analyzer helper for a no-annotation `UInt32#//` carrier moved from
+`root_type=Nil` to `root_type=UInt32` with `diags=0`. Boundary/refutation:
+this fix did **not** move the full semantic stage3 probe, which stayed at
+`type_diags=958`; `src/stdlib/float/printer/ryu_printf.cr` still reports
+`Operator '//' not defined for UInt32 and Int32` plus the downstream
+`copy_to`/`Nil` cascade. So the real remaining `ryu_printf` blocker is not
+just the generic “operator method without annotation” bug class.
+{F/G/R: 0.94/0.52/0.95} [verified]
+
 [LM-347|verified]: The current semantic stage3 frontier is no longer blocked by
 the raw `flag?` macro-condition family. `TypeInferenceEngine` now receives the
 active runtime flag set, treats receiverless `flag?(...)` as a known macro

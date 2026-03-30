@@ -1,6 +1,27 @@
 # Crystal V2 Bootstrap — TODO (Updated 2026-03-30)
 
 ## Current Status
+- **Fresh semantic prepass checkpoint: binary operators with unannotated method bodies no longer silently collapse to `Nil`, but this alone does not move the full stage3 probe (2026-03-30, current session)**:
+  - trustworthy setup:
+    - `src/compiler/semantic/type_inference_engine.cr` now reuses normal method-body inference for arithmetic/bitwise operator methods found by `lookup_method(...)` when they have no return annotation, instead of forcing `nil_type`
+    - focused regression coverage lives in `spec/semantic/type_inference_operator_method_body_spec.cr`
+  - decisive evidence:
+    - focused spec is green:
+      - `../crystal/bin/crystal spec spec/semantic/type_inference_operator_method_body_spec.cr --error-trace`
+    - exact analyzer helper that used to report `root_type=Nil` on a no-annotation `UInt32#//` carrier now reports:
+      - `diags=0`
+      - `root_type=UInt32`
+    - rebuilt probe compiler stays green:
+      - `../crystal/bin/crystal build src/crystal_v2.cr -o /tmp/crystal_v2_semantic_stage3probe --error-trace`
+    - full semantic stage3 probe did **not** improve:
+      - `bash /tmp/run_semantic_compile_stage3probe_log.sh`
+      - stays at `type_diags=958`
+  - practical boundary:
+    - this closes one real silent-inference bug, but it is **not** the main remaining `ryu_printf` blocker
+    - `src/stdlib/float/printer/ryu_printf.cr` still shows:
+      - `Operator '//' not defined for UInt32 and Int32`
+      - downstream `copy_to` / `Nil` cascades
+    - so the next honest frontier is still the real `ryu_printf` / fast-float corridor, not a generic “all unannotated operators” story
 - **Fresh semantic prepass checkpoint: macro `flag?` conditions are now understood by the new inferer and dead platform branches stop polluting the stage3 prepass (2026-03-30, current session)**:
   - trustworthy setup:
     - `src/compiler/semantic/type_inference_engine.cr` now carries the active runtime flag set into semantic inference

@@ -2260,8 +2260,8 @@ module CrystalV2
                               debug("  parse_type_name(#{ann}) => #{result}")
                               result
                             else
-                              debug("  NO return_annotation, returning nil_type")
-                              @context.nil_type
+                              debug("  NO return_annotation, inferring operator method body")
+                              infer_method_call_result(method, left_type, [right_type], nil)
                             end
                             # Fallback: numeric promotion for untyped numeric operators
                             # Exclude << (array push operator) as it has specific semantics
