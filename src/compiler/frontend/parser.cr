@@ -5443,59 +5443,79 @@ module CrystalV2
         end
 
         # Phase 85: Parse uninitialized (uninitialized variable)
-        # Grammar: uninitialized(Type)
+        # Grammar: uninitialized(Type) | uninitialized Type
         private def parse_uninitialized : ExprId
           uninitialized_token = current_token
           advance
           skip_trivia
 
-          # Expect opening parenthesis
-          unless current_token.kind == Token::Kind::LParen
-            emit_unexpected(current_token)
-            return PREFIX_ERROR
-          end
-          advance # consume (
-          skip_trivia
+          if current_token.kind == Token::Kind::LParen
+            advance # consume (
+            skip_trivia
 
-          # Parse type expression (single argument)
+            # Parse type expression (single argument)
+            type_expr = with_pointer_suffix { parse_expression(0) }
+            return PREFIX_ERROR if type_expr.invalid?
+
+            skip_trivia
+
+            # Expect closing parenthesis (tolerate stray tokens by fast-forwarding)
+            unless current_token.kind == Token::Kind::RParen
+              scan_idx = @index
+              paren_balance = 0
+              while scan_idx < @tokens.size
+                tok = @tokens[scan_idx]
+                if tok.kind == Token::Kind::LParen
+                  paren_balance += 1
+                elsif tok.kind == Token::Kind::RParen
+                  if paren_balance == 0
+                    @index = scan_idx
+                    @previous_token = scan_idx > 0 ? @tokens[scan_idx - 1] : nil
+                    break
+                  else
+                    paren_balance -= 1
+                  end
+                end
+                scan_idx += 1
+              end
+              unless current_token.kind == Token::Kind::RParen
+                emit_unexpected(current_token)
+                return PREFIX_ERROR
+              end
+            end
+            rparen_token = current_token
+            advance
+
+            return @arena.add_typed(
+              UninitializedNode.new(
+                uninitialized_token.span.cover(rparen_token.span),
+                type_expr
+              )
+            )
+          end
+
           type_expr = with_pointer_suffix { parse_expression(0) }
           return PREFIX_ERROR if type_expr.invalid?
 
-          skip_trivia
-
-          # Expect closing parenthesis (tolerate stray tokens by fast-forwarding)
-          unless current_token.kind == Token::Kind::RParen
-            scan_idx = @index
-            paren_balance = 0
-            while scan_idx < @tokens.size
-              tok = @tokens[scan_idx]
-              if tok.kind == Token::Kind::LParen
-                paren_balance += 1
-              elsif tok.kind == Token::Kind::RParen
-                if paren_balance == 0
-                  @index = scan_idx
-                  @previous_token = scan_idx > 0 ? @tokens[scan_idx - 1] : nil
-                  break
-                else
-                  paren_balance -= 1
-                end
-              end
-              scan_idx += 1
-            end
-            unless current_token.kind == Token::Kind::RParen
-              emit_unexpected(current_token)
-              return PREFIX_ERROR
-            end
-          end
-          rparen_token = current_token
-          advance
-
           @arena.add_typed(
             UninitializedNode.new(
-              uninitialized_token.span.cover(rparen_token.span),
+              uninitialized_token.span.cover(@arena[type_expr].span),
               type_expr
             )
           )
+        end
+
+        private def starts_uninitialized_type_expression?(token : Token) : Bool
+          case token.kind
+          when Token::Kind::LParen,
+               Token::Kind::ColonColon,
+               Token::Kind::Identifier,
+               Token::Kind::Self,
+               Token::Kind::Typeof
+            true
+          else
+            false
+          end
         end
 
         # Phase 86: Parse offsetof (field offset in type)
@@ -7190,7 +7210,51 @@ module CrystalV2
                          end
                 STDERR.puts "[LIB_PARSE_APPEND] lib=#{lib_trace_name} idx=#{body_id_indexes.size + 1} expr=#{expr.index} #{detail} token=#{token.kind}"
               end
-              body_id_indexes << expr.index unless expr.invalid?
+              if expr.invalid?
+                # Recovery: skip tokens until we find a recognizable lib body
+                # statement (fun, struct, enum, etc.) or end/EOF.
+                # This handles unparseable macro blocks like {% if compare_versions(...) %}.
+                recovery_depth = 0
+                loop do
+                  t = current_token
+                  break if t.kind == Token::Kind::EOF
+                  if t.kind == Token::Kind::End && recovery_depth == 0
+                    break
+                  end
+                  # Track {% %} nesting to avoid breaking on inner {% end %}
+                  if t.kind == Token::Kind::LBracePercent
+                    # Check if this is {% end %}
+                    peeked = peek_token
+                    if peeked.kind == Token::Kind::End || (peeked.kind == Token::Kind::Identifier && slice_eq?(peeked.slice, "end"))
+                      if recovery_depth > 0
+                        recovery_depth -= 1
+                        advance # consume {%
+                        advance # consume end
+                        skip_trivia
+                        if current_token.kind == Token::Kind::PercentRBrace
+                          advance # consume %}
+                        end
+                        next
+                      else
+                        # Top-level {% end %} — consume it and continue lib parsing
+                        advance # consume {%
+                        advance # consume end
+                        skip_trivia
+                        if current_token.kind == Token::Kind::PercentRBrace
+                          advance # consume %}
+                        end
+                        break
+                      end
+                    else
+                      # A new {% if/for/etc %} — increase depth
+                      recovery_depth += 1
+                    end
+                  end
+                  advance
+                end
+              else
+                body_id_indexes << expr.index
+              end
               consume_newlines
               # Also consume semicolons as statement terminators in lib context
               while current_token.kind == Token::Kind::Semicolon
@@ -9881,13 +9945,15 @@ module CrystalV2
             parse_pointerof
           when Token::Kind::Uninitialized
             # Phase 85: uninitialized variable
-            # Treat bare `uninitialized` as identifier unless followed by '('
-            if peek_token.kind != Token::Kind::LParen
+            # Support both `uninitialized(Type)` and `uninitialized Type`.
+            # Keep bare `uninitialized` as an identifier when no type-like
+            # expression follows.
+            if starts_uninitialized_type_expression?(peek_next_non_trivia)
+              parse_uninitialized
+            else
               id = @arena.add_typed(IdentifierNode.new(token.span, stable_identifier_token_slice(token)))
               advance
               id
-            else
-              parse_uninitialized
             end
           when Token::Kind::Offsetof
             # Phase 86: offset of field in type
@@ -11746,54 +11812,115 @@ module CrystalV2
           content = String.new(token.slice)
           pieces_b = SmallVec(StringPiece, 8).new
           i = 0
+          saw_expression = false
 
           while i < content.size
             Watchdog.check!
-            # Find next #{
+            # Find next interpolation opener (#{...} or, in macro context, {{...}})
             text_start = i
+            interpolation_start = nil.as(Int32?)
+            interpolation_kind = nil.as(Symbol?)
             while i < content.size
               Watchdog.check!
-              break if i + 1 < content.size && content[i] == '#' && content[i + 1] == '{'
+              if i + 1 < content.size && content[i] == '#' && content[i + 1] == '{'
+                interpolation_start = i
+                interpolation_kind = :crystal
+                break
+              end
+              if macro_context? && i + 1 < content.size && content[i] == '{' && content[i + 1] == '{'
+                interpolation_start = i
+                interpolation_kind = :macro
+                break
+              end
               i += 1
             end
 
             # Add text piece if any
-            if i > text_start
+            if interpolation_start && interpolation_start > text_start
+              pieces_b << StringPiece.text(content[text_start...i])
+            elsif interpolation_start.nil? && i > text_start
               pieces_b << StringPiece.text(content[text_start...i])
             end
 
-            break if i >= content.size
+            break unless interpolation_start
 
-            # Skip #{
-            i += 2
-
-            # Find matching } (handle nested braces)
-            expr_start = i
-            brace_depth = 1
-            while i < content.size && brace_depth > 0
-              Watchdog.check!
-              if content[i] == '{'
-                brace_depth += 1
-              elsif content[i] == '}'
-                brace_depth -= 1
+            if interpolation_kind == :crystal
+              i += 2
+              expr_start = i
+              brace_depth = 1
+              while i < content.size && brace_depth > 0
+                Watchdog.check!
+                if content[i] == '{'
+                  brace_depth += 1
+                elsif content[i] == '}'
+                  brace_depth -= 1
+                end
+                i += 1 if brace_depth > 0
               end
-              i += 1 if brace_depth > 0
+
+              expr_text = content[expr_start...i]
+              expr_id = parse_interpolation_expression(expr_text)
+              pieces_b << StringPiece.expression(expr_id)
+              saw_expression = true
+
+              # Move past the closing }
+              i += 1
+            else
+              i += 2
+              expr_start = i
+              macro_depth = 1
+              while i < content.size && macro_depth > 0
+                Watchdog.check!
+                if content[i] == '"' || content[i] == '\''
+                  quote = content[i]
+                  i += 1
+                  while i < content.size
+                    ch = content[i]
+                    if ch == '\\' && i + 1 < content.size
+                      i += 2
+                      next
+                    end
+                    i += 1
+                    break if ch == quote
+                  end
+                  next
+                end
+
+                if i + 1 < content.size && content[i] == '{' && content[i + 1] == '{'
+                  macro_depth += 1
+                  i += 2
+                  next
+                end
+
+                if i + 1 < content.size && content[i] == '}' && content[i + 1] == '}'
+                  macro_depth -= 1
+                  break if macro_depth == 0
+                  i += 2
+                  next
+                end
+
+                i += 1
+              end
+
+              expr_text = content[expr_start...i]
+              expr_id = parse_interpolation_expression(expr_text)
+              pieces_b << StringPiece.expression(expr_id)
+              saw_expression = true
+
+              # Move past the closing }}
+              i += 2
             end
-
-            # Parse expression
-            expr_text = content[expr_start...i]
-            expr_id = parse_interpolation_expression(expr_text)
-            pieces_b << StringPiece.expression(expr_id)
-
-            # Move past the closing }
-            i += 1
           end
 
           advance
-          @arena.add_typed(StringInterpolationNode.new(
-            token.span,
-            pieces_b.to_a
-          ))
+          if saw_expression
+            @arena.add_typed(StringInterpolationNode.new(
+              token.span,
+              pieces_b.to_a
+            ))
+          else
+            @arena.add_typed(StringNode.new(token.span, token.slice))
+          end
         end
 
         # Determine if an expression can accept a trailing block
@@ -14780,7 +14907,13 @@ current_token.kind == Token::Kind::Identifier &&
 
           case keyword_kind
           when :if, :unless
-            return parse_macro_if_control(start_span, keyword)
+            result = parse_macro_if_control(start_span, keyword)
+            unless result == PREFIX_ERROR
+              return result
+            end
+            # Failed to parse — restore position for recovery
+            @index = saved_index
+            @previous_token = saved_previous
           when :for
             return parse_macro_for_control(start_span)
           when :begin
