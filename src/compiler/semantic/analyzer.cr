@@ -67,50 +67,6 @@ module CrystalV2
         private def analysis_root_count : Int32
           @program.roots.size + @generated_overlay.top_level_roots.size
         end
-
-        def generated_node_file_paths : Hash(Int32, String)
-          @generated_overlay.node_file_paths
-        end
-
-        def generated_top_level_roots : Array(ExprId)
-          @generated_overlay.top_level_roots
-        end
-
-        def generated_root_sources : Hash(Int32, String)
-          @generated_overlay.root_sources
-        end
-
-        def generated_root_by_node : Hash(Int32, Int32)
-          @generated_overlay.root_by_node
-        end
-
-        def generated_root_origins : Hash(Int32, ExprId)
-          @generated_overlay.root_origins
-        end
-
-        def generated_root_macro_defs : Hash(Int32, ExprId)
-          @generated_overlay.root_macro_defs
-        end
-
-        def generated_info_for(node_id : ExprId) : GeneratedNodeInfo?
-          @generated_overlay.generated_info_for(node_id)
-        end
-
-        def generated_source_for(node_id : ExprId) : String?
-          @generated_overlay.generated_source_for(node_id)
-        end
-
-        def generated_origin_for(node_id : ExprId) : ExprId?
-          @generated_overlay.generated_origin_for(node_id)
-        end
-
-        def generated_node?(node_id : ExprId) : Bool
-          @generated_overlay.generated_node?(node_id)
-        end
-
-        def generated_macro_definition_for(node_id : ExprId) : ExprId?
-          @generated_overlay.generated_macro_definition_for(node_id)
-        end
       end
     end
   end

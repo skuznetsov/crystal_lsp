@@ -148,8 +148,8 @@ describe "compile semantic shadow aggregate" do
     alpha_symbol = analyzer.global_context.symbol_table.lookup("alpha")
     alpha_symbol.should be_a(Semantic::MethodSymbol)
     alpha_symbol.not_nil!.file_path.should eq("unit_0.cr")
-    analyzer.generated_node_file_paths.values.uniq.should eq(["unit_0.cr"])
-    analyzer.generated_node_file_paths.size.should be > 0
+    analyzer.generated_overlay.node_file_paths.values.uniq.should eq(["unit_0.cr"])
+    analyzer.generated_overlay.node_file_paths.size.should be > 0
   end
 
   it "resolves calls after top-level macro call expansion across aggregate files" do
@@ -364,7 +364,7 @@ describe "compile semantic shadow aggregate" do
       source_for_path_provider: ->(path : String) { shadow_sources[path]? },
     )
 
-    generated_indices = analyzer.generated_node_file_paths.keys.sort
+    generated_indices = analyzer.generated_overlay.node_file_paths.keys.sort
     generated_indices.should_not be_empty
     first_generated_id = Frontend::ExprId.new(generated_indices.first)
 
@@ -404,7 +404,7 @@ describe "compile semantic shadow aggregate" do
       source_for_path_provider: ->(path : String) { shadow_sources[path]? },
     )
 
-    generated_indices = analyzer.generated_node_file_paths.keys.sort
+    generated_indices = analyzer.generated_overlay.node_file_paths.keys.sort
     generated_indices.should_not be_empty
     first_generated_id = Frontend::ExprId.new(generated_indices.first)
 

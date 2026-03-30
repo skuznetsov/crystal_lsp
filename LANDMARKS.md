@@ -181,6 +181,9 @@ Verified sequence:
   - `GeneratedOverlay` itself now exposes explicit `empty` and `dup` helpers,
     so analyzer, collector, and aggregate use one snapshot contract instead of
     manually reconstructing six collections at each boundary
+  - analyzer-side generated shadow internals are no longer re-exported through
+    ad-hoc `generated_*` passthroughs; callers now depend on the explicit
+    `generated_overlay` snapshot instead
   - CLI regression coverage now locks generated diagnostic note behavior for
     both resolution and type diagnostics across same-file vs cross-file macro
     expansions, including `...[generated]` display paths and redundant
