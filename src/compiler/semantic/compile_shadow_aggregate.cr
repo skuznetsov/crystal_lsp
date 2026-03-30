@@ -112,6 +112,7 @@ module CrystalV2
         def attach_generated_overlay(
           overlay : GeneratedOverlay
         ) : Nil
+          detach_generated_overlay
           attach_generated_node_paths(overlay.node_file_paths)
           @generated_overlay = GeneratedOverlay.new(
             overlay.node_file_paths.dup,
@@ -149,6 +150,18 @@ module CrystalV2
 
         def generated_node_file_paths : Hash(Int32, String)
           @generated_overlay.node_file_paths
+        end
+
+        private def detach_generated_overlay : Nil
+          @generated_overlay.node_file_paths.each_key do |node_index|
+            next if node_index < 0 || node_index >= @unit_index_by_node.size
+
+            current = @unit_index_by_node.unsafe_fetch(node_index)
+            if current >= 0 && current < @generated_node_count_by_unit.size && @generated_node_count_by_unit[current] > 0
+              @generated_node_count_by_unit[current] -= 1
+            end
+            @unit_index_by_node[node_index] = -1
+          end
         end
 
         def generated_node_count_for_unit(unit_index : Int32) : Int32

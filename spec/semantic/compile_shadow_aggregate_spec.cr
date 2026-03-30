@@ -380,6 +380,54 @@ describe "compile semantic shadow aggregate" do
     )
   end
 
+  it "replaces previous generated overlay ownership on reattach" do
+    aggregate = build_shared_shadow_aggregate([
+      <<-CR,
+        macro define_alpha(dummy)
+          def alpha
+            42
+          end
+        end
+      CR
+      <<-CR,
+        define_alpha(1)
+        alpha()
+      CR
+    ])
+    program = aggregate.program
+    shadow_sources = build_shadow_sources(aggregate)
+
+    analyzer = Semantic::Analyzer.new(program)
+    analyzer.collect_symbols(
+      node_file_path_provider: ->(expr_id : Frontend::ExprId) { aggregate.path_for(expr_id) },
+      source_for_path_provider: ->(path : String) { shadow_sources[path]? },
+    )
+
+    generated_indices = analyzer.generated_node_file_paths.keys.sort
+    generated_indices.should_not be_empty
+    first_generated_id = Frontend::ExprId.new(generated_indices.first)
+
+    attach_generated_shadow_overlay(aggregate, analyzer)
+    aggregate.path_for(first_generated_id).should eq("unit_1.cr")
+    aggregate.generated_node_count_for_unit(1).should eq(aggregate.generated_node_file_paths.size)
+
+    empty_overlay = Semantic::GeneratedOverlay.new(
+      {} of Int32 => String,
+      [] of Frontend::ExprId,
+      {} of Int32 => String,
+      {} of Int32 => Int32,
+      {} of Int32 => Frontend::ExprId,
+      {} of Int32 => Frontend::ExprId,
+    )
+    aggregate.attach_generated_overlay(empty_overlay)
+
+    aggregate.path_for(first_generated_id).should be_nil
+    aggregate.unit_index_for(first_generated_id).should be_nil
+    aggregate.generated_node_count_for_unit(1).should eq(0)
+    aggregate.generated_top_level_roots.should be_empty
+    aggregate.generated_node_file_paths.should be_empty
+  end
+
   it "reports resolution diagnostics inside generated top-level def bodies" do
     aggregate = build_shared_shadow_aggregate([
       <<-CR,
