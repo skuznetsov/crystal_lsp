@@ -244,6 +244,9 @@ and block-yield.
 CLI regression coverage now also locks non-method macro-call declaration parity
 for both same-file and cross-file bundle carriers that generate top-level
 `class`, `module`, `enum`, and constant declarations under the shadow path.
+That coverage now also includes argful bundle carriers that materialize those
+same non-method declarations through `{{name.id}}`-style macro arguments in
+both same-file and cross-file forms.
 
 Generated top-level roots now participate in shadow `resolve_names` and
 `infer_types`, not just in collector parity. For example, a carrier like:

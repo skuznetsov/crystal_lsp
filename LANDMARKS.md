@@ -99,6 +99,9 @@ Verified sequence:
       declarations
     - both carriers assert `declaration_gaps=0` plus green
       collector-vs-semantic parity/provenance lines for those comparable kinds
+    - the same CLI coverage now also locks argful bundle carriers that
+      materialize those non-method declarations through `{{name.id}}`-style
+      macro arguments in both same-file and cross-file forms
   - live bare macro-call smoke is now green on both collector and semantic sides:
     - `CRYSTAL_V2_SEMANTIC_SHADOW=1 /tmp/crystal_v2_semantic_shadow /tmp/shadow_macro_call_decl.cr --no-prelude --stats --verbose`
     - output includes `semantic_diags=0 resolution_diags=0 type_diags=0`,

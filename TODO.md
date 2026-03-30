@@ -48,6 +48,7 @@
     - CLI regression coverage now locks non-method macro-call declaration parity too:
       - `spec/semantic_cli_spec.cr` now covers both same-file and cross-file bundle carriers that generate top-level `class`, `module`, `enum`, and constant declarations
       - both carriers assert `declaration_gaps=0` plus green collector-vs-semantic parity/provenance lines for those comparable kinds
+      - the same CLI coverage now also locks argful bundle carriers using `{{name.id}}` macro arguments in both same-file and cross-file forms
     - live bare macro-call smoke is now green on both collector and semantic sides:
       - `CRYSTAL_V2_SEMANTIC_SHADOW=1 /tmp/crystal_v2_semantic_shadow /tmp/shadow_macro_call_decl.cr --no-prelude --stats --verbose`
       - output includes:
