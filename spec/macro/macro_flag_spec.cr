@@ -23,7 +23,35 @@ private def expand_flag_macro(flag_name : String) : String
   analyzer = CrystalV2::Compiler::Semantic::Analyzer.new(program, context)
   analyzer.collect_symbols
   table = context.symbol_table
-  symbol = table.lookup("__flag_test").as?(CrystalV2::Compiler::Semantic::MacroSymbol)
+  symbol = table.lookup_macro("__flag_test")
+  symbol.should_not be_nil
+
+  expander = CrystalV2::Compiler::Semantic::MacroExpander.new(program, program.arena, context.flags)
+  expr_id = expander.expand(symbol.not_nil!, [] of CrystalV2::Compiler::Frontend::ExprId)
+  node = program.arena[expr_id]
+  CrystalV2::Compiler::Frontend.node_literal_string(node) || ""
+end
+
+private def expand_unless_flag_macro(flag_name : String) : String
+  source = <<-CR
+  macro __unless_flag_test
+    {% unless flag?(:#{flag_name}) %}
+      "false"
+    {% else %}
+      "true"
+    {% end %}
+  end
+  CR
+
+  lexer = CrystalV2::Compiler::Frontend::Lexer.new(source)
+  parser = CrystalV2::Compiler::Frontend::Parser.new(lexer)
+  program = parser.parse_program
+  context = CrystalV2::Compiler::Semantic::Context.new(CrystalV2::Compiler::Semantic::SymbolTable.new)
+
+  analyzer = CrystalV2::Compiler::Semantic::Analyzer.new(program, context)
+  analyzer.collect_symbols
+  table = context.symbol_table
+  symbol = table.lookup_macro("__unless_flag_test")
   symbol.should_not be_nil
 
   expander = CrystalV2::Compiler::Semantic::MacroExpander.new(program, program.arena, context.flags)
@@ -41,6 +69,13 @@ describe "Macro flag? evaluation" do
 
   it "returns false for missing flags" do
     expand_flag_macro("nonexistent_flag").should eq("false")
+  end
+
+  it "supports unless control flow in macro bodies" do
+    flag = CrystalV2::Runtime.target_flags.first?
+    flag.should_not be_nil
+    expand_unless_flag_macro(flag.not_nil!).should eq("true")
+    expand_unless_flag_macro("nonexistent_flag").should eq("false")
   end
 
   it "respects custom flags passed to context" do
@@ -66,7 +101,7 @@ describe "Macro flag? evaluation" do
     analyzer = CrystalV2::Compiler::Semantic::Analyzer.new(program, context)
     analyzer.collect_symbols
     table = context.symbol_table
-    symbol = table.lookup("__custom_flag_test").as?(CrystalV2::Compiler::Semantic::MacroSymbol)
+    symbol = table.lookup_macro("__custom_flag_test")
     symbol.should_not be_nil
 
     expander = CrystalV2::Compiler::Semantic::MacroExpander.new(program, program.arena, context.flags)

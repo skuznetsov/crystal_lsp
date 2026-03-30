@@ -3,6 +3,23 @@
 Updated: 2026-03-30
 Context: compiler/bootstrap/stage2-stability
 
+[LM-350|verified]: `MacroExpander` now treats `compare_versions(...)` as a real
+semantic macro builtin, and the full semantic stage3 prepass has moved from
+`semantic_diags=43 resolution_diags=0 type_diags=0` to
+`semantic_diags=3 resolution_diags=0 type_diags=0`. The durable parts of the
+fix are: top-level `compare_versions(v1, v2)` now runs through
+`SemanticVersion.parse(v1) <=> SemanticVersion.parse(v2)`, scoped macro
+constant lookup now walks qualified paths (`A::B::C`) through symbol scopes,
+and fallback macro values exist for `Crystal::VERSION` /
+`Crystal::LLVM_VERSION` when no semantic symbol is available yet. Focused
+regressions `spec/macro/macro_compare_versions_spec.cr` and the nearby harness
+`spec/macro/macro_flag_spec.cr` are green. Boundary: stage3 is still not
+green; the remaining macro blockers are now narrow and distinct:
+`gc/boehm.cr` still needs command-literal/env evaluation for `VERSION`, and
+`math/libm.cr` still has a raw macro-literal `elsif compare_versions(...)`
+expansion path that does not collapse to a concrete branch. {F/G/R:
+0.95/0.78/0.95} [verified]
+
 [LM-349|verified]: The semantic stage3 frontier has crossed out of the old
 `FastFloat.fastfloat_strncasecmp` / `ryu_printf` type-inference failure class.
 `TypeInferenceEngine` now avoids hard-binding method `forall` parameters from

@@ -1,6 +1,35 @@
 # Crystal V2 Bootstrap — TODO (Updated 2026-03-30)
 
 ## Current Status
+- **Fresh semantic prepass checkpoint: macro `compare_versions(...)` is now a real semantic builtin and full stage3 prepass noise has collapsed from 43 semantic diagnostics to 3 (2026-03-30, current session)**:
+  - trustworthy setup:
+    - `src/compiler/semantic/macro_expander.cr` now evaluates top-level `compare_versions(v1, v2)` through `SemanticVersion.parse(... ) <=> ...`
+    - scoped macro constant lookup now understands qualified paths like `A::B::C` through symbol scopes instead of only flat names
+    - host fallbacks for `Crystal::VERSION` and `Crystal::LLVM_VERSION` are available when the semantic macro path has no symbol-table definition yet
+    - focused regression coverage lives in `spec/macro/macro_compare_versions_spec.cr`
+    - nearby harness coverage in `spec/macro/macro_flag_spec.cr` is now honest again because it uses `lookup_macro(...)` instead of `lookup(...)`
+  - decisive evidence:
+    - focused macro regressions are green:
+      - `../crystal/bin/crystal spec spec/macro/macro_compare_versions_spec.cr spec/macro/macro_flag_spec.cr --error-trace`
+    - rebuild gate is green:
+      - `../crystal/bin/crystal build src/crystal_v2.cr -o /tmp/crystal_v2_semantic_stage3probe --error-trace`
+    - full semantic stage3 probe moved again:
+      - `bash /tmp/run_semantic_compile_stage3probe_log.sh`
+      - summary moved from:
+        - `semantic_diags=43`
+        - `resolution_diags=0`
+        - `type_diags=0`
+      - to:
+        - `semantic_diags=3`
+        - `resolution_diags=0`
+        - `type_diags=0`
+    - the old mass of `compare_versions expects valid semantic versions: Not a semantic version: "Crystal::VERSION"` and `"Crystal::LLVM_VERSION"` diagnostics disappeared from the full prepass log
+  - practical boundary:
+    - stage3 with the new inferer is still **not** green
+    - the remaining semantic blockers are now clearly narrower:
+      - `src/stdlib/gc/boehm.cr`: command-literal/env corridor still leaves `VERSION` as raw `` `pkg-config ...` `` text, so `compare_versions(VERSION, "8.2.0")` still fails
+      - `src/stdlib/math/libm.cr`: raw macro-literal expansion path still emits the whole `{% if %} / {% elsif %} / {% else %}` structure instead of collapsing the `compare_versions(Crystal::LLVM_VERSION, "13.0.0") < 0` branch
+    - the next honest frontier is now macro command/env execution plus the raw macro-literal `elsif` compare corridor, not general type inference
 - **Fresh semantic prepass checkpoint: generic `forall` method matching now survives placeholder actuals and the full stage3 probe has crossed from type-inference failure into a single macro-expansion semantic error (2026-03-30, current session)**:
   - trustworthy setup:
     - `src/compiler/semantic/type_inference_engine.cr` no longer hard-binds method type parameters from placeholder actuals that still contain the callee's own type params
