@@ -740,7 +740,7 @@ describe "compile semantic shadow aggregate" do
     aggregate.generated_source_for(diagnostic.node_id.not_nil!).not_nil!.should contain("missing + 1")
   end
 
-  it "exposes generated node info as a unified provenance lookup" do
+  it "exposes generated provenance as a unified aggregate lookup" do
     aggregate = build_shared_shadow_aggregate([
       <<-CR,
         macro define_bad(name)
@@ -767,12 +767,40 @@ describe "compile semantic shadow aggregate" do
 
     diagnostic = result.diagnostics.first
     node_id = diagnostic.node_id.not_nil!
-    info = aggregate.generated_info_for(node_id)
+    info = aggregate.provenance_for(node_id)
 
     info.should_not be_nil
-    info.not_nil!.source.not_nil!.should contain("missing + 1")
-    aggregate.path_for(info.not_nil!.origin_node_id.not_nil!).should eq("unit_1.cr")
-    aggregate.path_for(info.not_nil!.macro_definition_node_id.not_nil!).should eq("unit_0.cr")
+    info = info.not_nil!
+    info.generated?.should be_true
+    info.owning_path.should eq("unit_1.cr")
+    info.generated_source.not_nil!.should contain("missing + 1")
+    info.origin_call_path.should eq("unit_1.cr")
+    info.origin_macro_def_path.should eq("unit_0.cr")
+  end
+
+  it "exposes parsed provenance without generated metadata" do
+    aggregate = build_shared_shadow_aggregate([
+      <<-CR,
+        def greet
+          41
+        end
+      CR
+      <<-CR,
+        greet()
+      CR
+    ])
+    program = aggregate.program
+    call_root = program.roots.last
+    call_node = program.arena[call_root].as(Frontend::CallNode)
+    callee_id = call_node.callee.not_nil!
+
+    info = aggregate.provenance_for(callee_id).not_nil!
+
+    info.generated?.should be_false
+    info.owning_path.should eq("unit_1.cr")
+    info.generated_source.should be_nil
+    info.origin_call_path.should be_nil
+    info.origin_macro_def_path.should be_nil
   end
 
   it "reports type diagnostics inside generated top-level def bodies" do
@@ -962,7 +990,7 @@ describe "compile semantic shadow aggregate" do
 
     diagnostic = result.diagnostics.first
     node_id = diagnostic.node_id.not_nil!
-    context = aggregate.generated_diagnostic_context_for(node_id).not_nil!
+    context = aggregate.diagnostic_provenance_context_for(node_id).not_nil!
     formatted = aggregate.format_shadow_diagnostic(diagnostic, {"unit_1.cr" => shadow_sources["unit_1.cr"]})
 
     formatted.should contain("note: expanded from macro call here")
@@ -996,7 +1024,7 @@ describe "compile semantic shadow aggregate" do
 
     diagnostic = result.diagnostics.first
     node_id = diagnostic.node_id.not_nil!
-    context = aggregate.generated_diagnostic_context_for(node_id).not_nil!
+    context = aggregate.diagnostic_provenance_context_for(node_id).not_nil!
     source_map = context.sources_with_generated({"unit_1.cr" => shadow_sources["unit_1.cr"]})
 
     source_map["unit_1.cr"].should eq(shadow_sources["unit_1.cr"])
@@ -1031,7 +1059,7 @@ describe "compile semantic shadow aggregate" do
 
     diagnostic = analyzer.type_inference_diagnostics.first
     node_id = diagnostic.primary_node_id.not_nil!
-    context = aggregate.generated_diagnostic_context_for(node_id).not_nil!
+    context = aggregate.diagnostic_provenance_context_for(node_id).not_nil!
     formatted = aggregate.format_shadow_diagnostic(diagnostic, {"unit_1.cr" => shadow_sources["unit_1.cr"]})
 
     formatted.should contain("note: expanded from macro call here")
@@ -1065,7 +1093,7 @@ describe "compile semantic shadow aggregate" do
 
     diagnostic = result.diagnostics.first
     node_id = diagnostic.node_id.not_nil!
-    context = aggregate.generated_diagnostic_context_for(node_id).not_nil!
+    context = aggregate.diagnostic_provenance_context_for(node_id).not_nil!
     formatted = aggregate.format_shadow_diagnostic(
       diagnostic,
       {"unit_0.cr" => shadow_sources["unit_0.cr"], "unit_1.cr" => shadow_sources["unit_1.cr"]}
@@ -1103,7 +1131,7 @@ describe "compile semantic shadow aggregate" do
 
     diagnostic = analyzer.type_inference_diagnostics.first
     node_id = diagnostic.primary_node_id.not_nil!
-    context = aggregate.generated_diagnostic_context_for(node_id).not_nil!
+    context = aggregate.diagnostic_provenance_context_for(node_id).not_nil!
     formatted = aggregate.format_shadow_diagnostic(
       diagnostic,
       {"unit_0.cr" => shadow_sources["unit_0.cr"], "unit_1.cr" => shadow_sources["unit_1.cr"]}

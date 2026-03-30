@@ -224,14 +224,16 @@ Verified sequence:
     - generated declaration provenance is now retained directly on semantic
       symbols too, so declaration parity no longer depends on an
       analyzer-side callback to classify generated declarations
-  - generated provenance metadata now also has a unified analyzer lookup:
-    - `generated_info_for(node_id)` bundles generated root, source, call-site
-      origin, and macro-definition origin into one shadow-side record
-  - aggregate-side generated provenance now also assembles the generated
-    diagnostic context consumed by CLI formatting, including display path,
-    generated source, note spans, temporary generated source-map overlay
-    assembly, and diagnostic-decoration glue; same-file expansions still
-    intentionally omit the redundant `macro defined here` note
+  - generated provenance metadata now also has an explicit aggregate-side
+    boundary:
+    - `provenance_for(node_id)` exposes parsed vs generated origin plus
+      owning path, generated source, call-site provenance, and macro-definition
+      provenance
+    - `diagnostic_provenance_context_for(node_id)` assembles the formatter
+      context consumed by CLI output, including display path, generated
+      source, note spans, temporary generated source-map overlay assembly,
+      and diagnostic-decoration glue; same-file expansions still intentionally
+      omit the redundant `macro defined here` note
   - `GeneratedOverlay` itself now exposes explicit `empty`, `dup`, and
     `snapshot` helpers, so analyzer, collector, and aggregate use one
     snapshot contract instead of manually reconstructing six collections at
@@ -291,10 +293,10 @@ Verified sequence:
     now counted separately too, but that is still telemetry rather than a
     unified compile-authoritative parser diagnostic contract
   - the next bounded move is no longer another macro parity tweak; it is to
-    collapse shadow-only generated provenance, diagnostic-context assembly,
-    and parser-parity identity into one explicit provenance contract before
-    attempting a compile-graph rewrite. That contract is now scoped in
-    `docs/phase2_provenance_contract.md`
+    finish collapsing shadow-only generated provenance, diagnostic-context
+    assembly, and parser-parity identity into one explicit provenance
+    contract before attempting a compile-graph rewrite. That contract is now
+    scoped in `docs/phase2_provenance_contract.md`
   - parser-side drift is now summarized through a dedicated parity object, but
     it still compares shadow telemetry rather than establishing compile-path
     parser authority

@@ -24,8 +24,8 @@ This document scopes that next step.
 The current tree already has a useful shadow-only substrate:
 
 - `Semantic::GeneratedOverlay`
-- `CompileShadowAggregate#generated_info_for(node_id)`
-- aggregate-owned generated diagnostic context assembly
+- `CompileShadowAggregate#provenance_for(node_id)`
+- `CompileShadowAggregate#diagnostic_provenance_context_for(node_id)`
 - parser parity telemetry via `compile_parse_diags`, `shadow_parse_diags`,
   and `parse_diag_gaps`
 - strict shadow failure on parser or declaration parity drift
@@ -106,8 +106,8 @@ They should consume one context object that already knows:
 - related/secondary origin notes
 - whether the primary span is generated or parsed
 
-Current shadow `GeneratedDiagnosticContext` is the right local shape, but it is
-not yet the compile-authoritative source of truth.
+Current shadow diagnostic provenance context is the right local shape, but it
+is not yet the compile-authoritative source of truth.
 
 ### 3. One Declaration-Origin Contract
 

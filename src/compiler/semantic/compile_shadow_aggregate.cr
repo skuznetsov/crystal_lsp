@@ -12,7 +12,28 @@ module CrystalV2
   module Compiler
     module Semantic
       class CompileShadowAggregate
-        record GeneratedDiagnosticContext,
+        enum ProvenanceOriginKind
+          Parsed
+          Generated
+        end
+
+        record ProvenanceInfo,
+          origin_kind : ProvenanceOriginKind,
+          owning_path : String?,
+          generated_display_path : String?,
+          generated_source : String?,
+          origin_call_path : String?,
+          origin_call_span : Frontend::Span?,
+          origin_call_node_id : Frontend::ExprId?,
+          origin_macro_def_path : String?,
+          origin_macro_def_span : Frontend::Span?,
+          origin_macro_def_node_id : Frontend::ExprId? do
+          def generated? : Bool
+            origin_kind == ProvenanceOriginKind::Generated
+          end
+        end
+
+        record DiagnosticProvenanceContext,
           display_path : String?,
           source : String,
           related_spans : Array(Frontend::RelatedSpan),
@@ -178,6 +199,46 @@ module CrystalV2
           @generated_overlay.generated_info_for(expr_id)
         end
 
+        def provenance_for(expr_id : Frontend::ExprId) : ProvenanceInfo?
+          return nil if expr_id.invalid?
+
+          owning_path = path_for(expr_id)
+          if info = generated_info_for(expr_id)
+            origin_call_node_id = info.origin_node_id
+            origin_macro_def_node_id = info.macro_definition_node_id
+            origin_call_path = origin_call_node_id ? path_for(origin_call_node_id) : nil
+            origin_macro_def_path = origin_macro_def_node_id ? path_for(origin_macro_def_node_id) : nil
+            origin_call_span = origin_call_node_id ? @program.arena[origin_call_node_id].span : nil
+            origin_macro_def_span = origin_macro_def_node_id ? @program.arena[origin_macro_def_node_id].span : nil
+
+            ProvenanceInfo.new(
+              ProvenanceOriginKind::Generated,
+              owning_path,
+              generated_display_path_for(expr_id),
+              info.source,
+              origin_call_path,
+              origin_call_span,
+              origin_call_node_id,
+              origin_macro_def_path,
+              origin_macro_def_span,
+              origin_macro_def_node_id,
+            )
+          else
+            ProvenanceInfo.new(
+              ProvenanceOriginKind::Parsed,
+              owning_path,
+              nil,
+              nil,
+              nil,
+              nil,
+              nil,
+              nil,
+              nil,
+              nil,
+            )
+          end
+        end
+
         def generated_source_for(expr_id : Frontend::ExprId) : String?
           @generated_overlay.generated_source_for(expr_id)
         end
@@ -211,17 +272,22 @@ module CrystalV2
           end
         end
 
-        def generated_diagnostic_context_for(expr_id : Frontend::ExprId) : GeneratedDiagnosticContext?
-          return nil unless info = generated_info_for(expr_id)
-          return nil unless generated_source = info.source
+        def diagnostic_provenance_context_for(expr_id : Frontend::ExprId) : DiagnosticProvenanceContext?
+          return nil unless info = provenance_for(expr_id)
+          return nil unless info.generated?
+          return nil unless generated_source = info.generated_source
 
-          related_spans = generated_related_spans_for(expr_id)
-          GeneratedDiagnosticContext.new(
-            generated_display_path_for(expr_id),
+          related_spans = provenance_related_spans_for(info)
+          DiagnosticProvenanceContext.new(
+            info.generated_display_path,
             generated_source,
             related_spans,
             generated_related_spans_to_secondary_spans(related_spans),
           )
+        end
+
+        def generated_diagnostic_context_for(expr_id : Frontend::ExprId) : DiagnosticProvenanceContext?
+          diagnostic_provenance_context_for(expr_id)
         end
 
         def enrich_shadow_diagnostic(diagnostic : Frontend::Diagnostic) : Frontend::Diagnostic
@@ -263,7 +329,7 @@ module CrystalV2
           base_sources : Hash(String, String)
         ) : String
           if node_id = diagnostic.node_id
-            if context = generated_diagnostic_context_for(node_id)
+            if context = diagnostic_provenance_context_for(node_id)
               return Frontend::DiagnosticFormatter.format(
                 context.sources_with_generated(base_sources),
                 context.apply(diagnostic)
@@ -278,7 +344,7 @@ module CrystalV2
           base_sources : Hash(String, String)
         ) : String
           if primary_node_id = diagnostic.primary_node_id
-            if context = generated_diagnostic_context_for(primary_node_id)
+            if context = diagnostic_provenance_context_for(primary_node_id)
               return Semantic::DiagnosticFormatter.format(
                 context.sources_with_generated(base_sources),
                 context.apply(diagnostic)
@@ -325,28 +391,37 @@ module CrystalV2
           unit_summary.node_count + generated_node_count_for_unit(unit_index)
         end
 
-        private def generated_origin_related_span(
-          expr_id : Frontend::ExprId
+        private def provenance_related_spans_for(
+          info : ProvenanceInfo
+        ) : Array(Frontend::RelatedSpan)
+          related_spans = [] of Frontend::RelatedSpan
+          if related = provenance_origin_related_span(info)
+            related_spans << related
+          end
+          if related = provenance_macro_definition_related_span(info)
+            related_spans << related
+          end
+          related_spans
+        end
+
+        private def provenance_origin_related_span(
+          info : ProvenanceInfo
         ) : Frontend::RelatedSpan?
-          return nil unless info = generated_info_for(expr_id)
-          return nil unless origin_node_id = info.origin_node_id
-          return nil unless origin_path = path_for(origin_node_id)
-          origin_span = @program.arena[origin_node_id].span
+          return nil unless origin_node_id = info.origin_call_node_id
+          return nil unless origin_path = info.origin_call_path
+          return nil unless origin_span = info.origin_call_span
           Frontend::RelatedSpan.new(origin_span, "expanded from macro call here", origin_node_id, origin_path)
         end
 
-        private def generated_macro_definition_related_span(
-          expr_id : Frontend::ExprId
+        private def provenance_macro_definition_related_span(
+          info : ProvenanceInfo
         ) : Frontend::RelatedSpan?
-          return nil unless info = generated_info_for(expr_id)
-          return nil unless macro_def_node_id = info.macro_definition_node_id
-          return nil unless macro_def_path = path_for(macro_def_node_id)
-          if origin_node_id = info.origin_node_id
-            if origin_path = path_for(origin_node_id)
-              return nil if origin_path == macro_def_path
-            end
+          return nil unless macro_def_node_id = info.origin_macro_def_node_id
+          return nil unless macro_def_path = info.origin_macro_def_path
+          if origin_path = info.origin_call_path
+            return nil if origin_path == macro_def_path
           end
-          macro_def_span = @program.arena[macro_def_node_id].span
+          return nil unless macro_def_span = info.origin_macro_def_span
           Frontend::RelatedSpan.new(macro_def_span, "macro defined here", macro_def_node_id, macro_def_path)
         end
 

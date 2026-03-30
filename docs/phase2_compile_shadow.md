@@ -162,19 +162,21 @@ an analyzer-side callback to classify those symbols as `macro_expanded`. The
 generated source text map is still used only for formatting `... [generated]`
 snippets, not for provenance classification.
 
-That shadow-only metadata now also has a unified aggregate-side lookup:
-`CompileShadowAggregate#generated_info_for(node_id)`, which bundles the
-generated root, generated source text, macro call origin, and macro
-definition site into one provenance record for downstream telemetry/formatting
-code. The analyzer still computes that overlay, but it now crosses the
-collector/analyzer -> aggregate boundary as an explicit `GeneratedOverlay`
-contract instead of five ad-hoc hash maps, and the compile-shadow graph
-substrate owns the lookup used by CLI formatting and generated-diagnostic
-counting. `GeneratedOverlay` now also exposes an explicit empty/dup API, so
+That shadow-only metadata now also has an explicit aggregate-side provenance
+boundary:
+
+- `CompileShadowAggregate#provenance_for(node_id)`
+- `CompileShadowAggregate#diagnostic_provenance_context_for(node_id)`
+
+Those APIs now carry the aggregate-owned provenance used by CLI formatting and
+generated-diagnostic counting. The analyzer still computes the underlying
+generated overlay, but it now crosses the collector/analyzer -> aggregate
+boundary as an explicit `GeneratedOverlay` snapshot instead of five ad-hoc
+hash maps. `GeneratedOverlay` now also exposes an explicit empty/dup API, so
 aggregate/analyzer/collector no longer have to hand-roll those snapshot
 copies at each boundary.
 
-CLI formatting now consumes aggregate-owned generated diagnostic contexts
+CLI formatting now consumes aggregate-owned diagnostic provenance contexts
 instead of rebuilding display paths, generated source text, provenance notes,
 temporary generated source-map overlays, or diagnostic-decoration glue in the
 CLI layer. Same-file expansions still omit the `macro defined here` note to
@@ -451,6 +453,6 @@ preserves:
 
 The bounded preparation step for that frontier is now documented separately in
 `docs/phase2_provenance_contract.md`: before any compile-graph rewrite, the
-project should first collapse the current shadow-only generated provenance,
-diagnostic-context assembly, and parser-parity identity into one explicit
-provenance contract.
+project should first finish collapsing the current shadow-only generated
+provenance, diagnostic-context assembly, and parser-parity identity into one
+explicit provenance contract.
