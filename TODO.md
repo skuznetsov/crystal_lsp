@@ -52,7 +52,7 @@
       - `spec/semantic_cli_spec.cr` now covers both same-file and cross-file bundle carriers that generate top-level `class`, `module`, `enum`, and constant declarations
       - both carriers assert `declaration_gaps=0` plus green collector-vs-semantic parity/provenance lines for those comparable kinds
       - the same CLI coverage now also locks argful bundle carriers using `{{name.id}}` macro arguments in both same-file and cross-file forms
-      - the same non-method CLI matrix now also locks same-file named-arg bundles and cross-file default-arg bundles
+      - the same non-method CLI matrix now also locks same-file named-arg bundles, cross-file default-arg bundles, and same-file/cross-file block-yield bundles
     - lower-level regression coverage now locks that same argful non-method corridor too:
       - `spec/semantic/compile_shadow_aggregate_spec.cr` verifies cross-file argful bundle materialization/ownership inside the shared aggregate
       - `spec/semantic/compile_shadow_declaration_inventory_spec.cr` verifies semantic-side materialization/provenance for the same corridor

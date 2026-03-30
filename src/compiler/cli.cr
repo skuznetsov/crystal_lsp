@@ -6113,6 +6113,9 @@ module CrystalV2
           expansion_arena,
           flags,
           recovery_mode: true,
+          source_provider: ->(block_expr_id : Frontend::ExprId) {
+            shadow_collector_macro_block_source(expansion_arena, block_expr_id, aggregate, source)
+          },
           macro_source: macro_source
         )
         macro_symbol = Semantic::MacroSymbol.new(
@@ -6162,6 +6165,35 @@ module CrystalV2
             )
           end
         end
+      end
+
+      private def shadow_collector_macro_block_source(
+        arena : Frontend::ArenaLike,
+        block_id : Frontend::ExprId,
+        aggregate : Semantic::CompileShadowAggregate?,
+        fallback_source : String
+      ) : String?
+        block_node = arena[block_id]
+        return nil unless block_node.is_a?(Frontend::BlockNode)
+        body = block_node.body
+        return nil if body.empty?
+
+        spans = body.map { |expr_id| arena[expr_id].span }
+        span = Frontend::Span.cover_all(spans)
+
+        source = if agg = aggregate
+                   agg.unit_for(block_id).try(&.source)
+                 else
+                   fallback_source
+                 end
+        source ||= fallback_source
+
+        start = span.start_offset
+        finish = span.end_offset
+        return nil if start < 0 || finish <= start || start >= source.bytesize
+        length = finish - start
+        length = source.bytesize - start if start + length > source.bytesize
+        source.byte_slice(start, length)
       end
 
       private def run_semantic_compile_shadow(

@@ -256,6 +256,8 @@ The same non-method CLI matrix now also locks:
 
 - same-file named-arg bundles
 - cross-file default-arg bundles
+- same-file block-yield bundles
+- cross-file block-yield bundles
 
 Lower-level regression coverage now also locks the same argful non-method
 corridor below the CLI layer:

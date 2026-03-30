@@ -106,8 +106,9 @@ Verified sequence:
     - the same CLI coverage now also locks argful bundle carriers that
       materialize those non-method declarations through `{{name.id}}`-style
       macro arguments in both same-file and cross-file forms
-    - the same non-method CLI matrix now also locks same-file named-arg bundles
-      and cross-file default-arg bundles
+    - the same non-method CLI matrix now also locks same-file named-arg bundles,
+      cross-file default-arg bundles, and same-file/cross-file block-yield
+      bundles
   - lower-level regression coverage now locks that same argful non-method
     corridor below the CLI layer too:
     - `spec/semantic/compile_shadow_aggregate_spec.cr` verifies cross-file
