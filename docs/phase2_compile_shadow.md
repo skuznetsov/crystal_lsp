@@ -252,6 +252,11 @@ for both same-file and cross-file bundle carriers that generate top-level
 That coverage now also includes argful bundle carriers that materialize those
 same non-method declarations through `{{name.id}}`-style macro arguments in
 both same-file and cross-file forms.
+The same non-method CLI matrix now also locks:
+
+- same-file named-arg bundles
+- cross-file default-arg bundles
+
 Lower-level regression coverage now also locks the same argful non-method
 corridor below the CLI layer:
 
