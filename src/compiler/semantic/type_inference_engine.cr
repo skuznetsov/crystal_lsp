@@ -1056,6 +1056,15 @@ module CrystalV2
             symbol = @global_table.try(&.lookup(identifier_name))
           end
 
+          if symbol.is_a?(ModuleSymbol)
+            if current_class = @current_class
+              current_class_name = current_class.name
+              if current_class_name == identifier_name || current_class_name.ends_with?("::#{identifier_name}")
+                symbol = current_class
+              end
+            end
+          end
+
           if symbol.nil? && is_type_name?(identifier_name)
             if resolved_symbol = lookup_type_symbol(identifier_name)
               if type = type_from_symbol(resolved_symbol)

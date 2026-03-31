@@ -1,6 +1,39 @@
 # Crystal V2 Bootstrap — TODO (Updated 2026-03-31)
 
 ## Current Status
+- **Fresh semantic current-class self-reference checkpoint: bare `Thread` inside `class Thread` instance methods now stays bound to the current class even when an included `Crystal::System::Thread` module shadows the same leaf name, and the live stage3 gate moved again (2026-03-31, current session)**:
+  - trustworthy setup:
+    - `src/compiler/semantic/type_inference_engine.cr` now overrides a resolved `ModuleSymbol` with `@current_class` when the identifier text matches the current class name (or its leaf name for nested classes)
+    - the fix is intentionally narrow: it only affects bare identifiers in the current class body after ordinary lexical/global lookup has already selected a module shadow with the same class leaf name
+    - focused regression coverage now lives in `spec/semantic/type_inference_current_class_shadow_spec.cr`
+  - decisive evidence:
+    - focused regression is green:
+      - `../crystal/bin/crystal spec spec/semantic/type_inference_current_class_shadow_spec.cr --error-trace`
+    - rebuild gates are green:
+      - `../crystal/bin/crystal build src/crystal_v2.cr --no-codegen --error-trace`
+      - `../crystal/bin/crystal build src/crystal_v2.cr -o /tmp/crystal_v2_semantic_stage3probe --error-trace`
+    - the exact no-prelude reducer is green under the safe wrapper:
+      - `env CRYSTAL_V2_SEMANTIC_COMPILE=1 scripts/run_safe.sh /tmp/crystal_v2_semantic_stage3probe 120 2048 /tmp/semantic_thread_include_shadow_probe.cr --no-prelude --stats --verbose --no-link -o /tmp/semantic_thread_include_shadow_probe.out > /tmp/semantic_thread_include_shadow_probe_after.log 2>&1`
+      - summary: `semantic_diags=0 resolution_diags=0 type_diags=0`
+    - the full semantic stage3 probe under the safe wrapper moves again:
+      - `env CRYSTAL_V2_SEMANTIC_COMPILE=1 scripts/run_safe.sh /tmp/crystal_v2_semantic_stage3probe 240 4096 src/crystal_v2.cr --stats --no-link -o /tmp/stage3_semantic_probe.out > /tmp/stage3_semantic_probe_after_thread_shadow.log 2>&1`
+      - summary moved from:
+        - `semantic_diags=0`
+        - `resolution_diags=0`
+        - `type_diags=262`
+      - to:
+        - `semantic_diags=0`
+        - `resolution_diags=0`
+        - `type_diags=259`
+    - the old `Method 'threads' not found on Thread` family is absent from `/tmp/stage3_semantic_probe_after_thread_shadow.log`
+  - practical boundary:
+    - stage3 with the new inferer is still **not** green
+    - `threads.@mutex` is still red, so this step fixed the current-class shadow corridor but not the remaining ivar typing behind `Thread::LinkedList`
+    - the next honest frontier is now:
+      - `pthread_mutex_*` / `Errno.new(ret)`
+      - remaining `sigaction` on `LibC`
+      - `threads.@mutex`
+      - later `Nil` arithmetic / `Int128` compiler_rt families
 - **Fresh semantic explicit-receiver-ivar checkpoint: `action.@sa_mask` and similar explicit ivar reads now flow through ivar metadata instead of being treated as missing methods, and the live stage3 gate moved again (2026-03-31, current session)**:
   - trustworthy setup:
     - `src/compiler/semantic/type_inference_engine.cr` now normalizes `@field` to `field` inside the existing field-access fallback

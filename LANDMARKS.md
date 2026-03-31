@@ -3,6 +3,33 @@
 Updated: 2026-03-31
 Context: compiler/bootstrap/stage2-stability
 
+[LM-375|verified]: The next live stage3 blocker after [LM-374] was not more
+absolute-path or explicit-ivar metadata work. A richer host-side AST dump over
+the real thread subset showed that the failing `Thread.threads` calls in
+`src/stdlib/crystal/system/thread.cr` were not entering method lookup with the
+class receiver at all: the bare `Thread` identifiers on the failing instance
+method lines were already bound to a shadowing `ModuleSymbol`
+(`Crystal::System::Thread`), while nearby class-method sites still resolved
+`Thread` correctly as a `ClassSymbol`. The verified fix in
+`src/compiler/semantic/type_inference_engine.cr` is intentionally narrow: after
+normal lookup selects a `ModuleSymbol`, bare identifiers whose text matches the
+current class name (or its leaf name) are rebound to `@current_class`, so
+`Thread.threads` in `class Thread` instance methods keeps the class receiver
+instead of the included module shadow. Focused regression
+`spec/semantic/type_inference_current_class_shadow_spec.cr` is green, both
+rebuild gates for `src/crystal_v2.cr` and `/tmp/crystal_v2_semantic_stage3probe`
+are green, the exact no-prelude reducer
+`/tmp/semantic_thread_include_shadow_probe.cr` is fully green under
+`scripts/run_safe.sh`, and the full safe stage3 probe moves from
+`semantic_diags=0 resolution_diags=0 type_diags=262` to
+`semantic_diags=0 resolution_diags=0 type_diags=259`. The old
+`Method 'threads' not found on Thread` family disappears from the live log.
+Useful negative result: `threads.@mutex` remains red, and separate host-side
+introspection still shows `Thread::Mutex#to_unsafe` inferring as
+`Pointer(Nil)`, so the remaining pthread corridor is now earlier ivar typing /
+`to_unsafe` surface rather than this class-shadow bug. {F/G/R: 0.95/0.74/0.97}
+[verified]
+
 [LM-374|verified]: The next live stage3 blocker after [LM-373] was not more
 absolute-path shadowing. Once `::Signal` stayed rooted correctly, the remaining
 runtime noise clustered around explicit receiver ivars such as
