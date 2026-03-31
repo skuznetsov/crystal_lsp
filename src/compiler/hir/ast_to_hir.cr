@@ -2253,14 +2253,14 @@ module Crystal::HIR
       chain = [] of String
       seen = Set(String).new
       seen << owner
-      if ci = @class_info[owner]?
-        p = ci.parent_name
-        while p
-          break if seen.includes?(p) # cycle detection
-          seen << p
-          chain << p
-          p = @class_info[p]?.try(&.parent_name)
-        end
+      # Walk via @class_info first, then fall back to @module.class_parents
+      # for types like enums that don't have ClassInfo entries.
+      p = @class_info[owner]?.try(&.parent_name) || @module.class_parents[owner]?
+      while p
+        break if seen.includes?(p) # cycle detection
+        seen << p
+        chain << p
+        p = @class_info[p]?.try(&.parent_name) || @module.class_parents[p]?
       end
       @parent_chains[owner] = chain
       chain
@@ -5057,6 +5057,9 @@ module Crystal::HIR
         STDERR.puts "[ENUM_PRE] enum=#{enum_name} current=#{arena_map_key(@arena)} current_path=#{source_path_for(@arena) || "?"} body=#{body_count}"
       end
       register_enum_in_best_arena(node, enum_name, debug_enum)
+      # Register Enum as parent class so deferred method lookup can find
+      # inherited methods like includes?, none?, etc.
+      @module.register_class_parent(enum_name, "Enum") unless enum_name.empty?
     end
 
     # Resolve an enum member value expression to an Int64.
@@ -5315,6 +5318,7 @@ module Crystal::HIR
       @enum_info ||= {} of String => Hash(String, Int64)
       debug_enum = debug_enum_arena_enabled_for?(full_enum_name)
       register_enum_in_best_arena(node, full_enum_name, debug_enum)
+      @module.register_class_parent(full_enum_name, "Enum") unless full_enum_name.empty?
     end
 
     private def register_enum_in_best_arena(
