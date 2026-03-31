@@ -1,7 +1,35 @@
 # LANDMARKS
 
-Updated: 2026-03-30
+Updated: 2026-03-31
 Context: compiler/bootstrap/stage2-stability
+
+[LM-366|verified]: The next live stage3 blocker after [LM-365] was not more
+module-self plumbing and not a hidden lib-struct parse bug. Exact reducers
+showed two tightly coupled semantic defects instead: the iterative fast path in
+`compute_node_type_no_recurse(...)` still hard-coded non-terminating `&&` / `||`
+to `Bool`, which broke Crystal value semantics on shapes like
+`mode || system_tcgetattr`, and even after that collapse was removed, C-style
+struct field declarations such as `c_lflag : TcflagT` were not exposed as
+readable member fields during semantic member access. The verified fix is
+bounded and two-part: `src/compiler/semantic/type_inference_engine.cr` now uses
+`infer_logical_and_type(...)` / `infer_logical_or_type(...)` in the iterative
+logical fast path instead of forcing `Bool`, and the same engine now has a
+struct-field fallback for member access that consumes collector-registered bare
+field declarations. `src/compiler/semantic/collectors/symbol_collector.cr`
+records bare `TypeDeclarationNode`s inside struct bodies as struct field
+metadata and defines matching field symbols in the struct scope. Focused
+regression `spec/semantic/type_inference_logical_value_semantics_spec.cr` is
+green, neighboring `spec/semantic/type_inference_logical_rhs_narrowing_spec.cr`
+stays green, the uninitialized and deferred-default semantic examples remain
+green, both rebuild gates for `src/crystal_v2.cr` and
+`/tmp/crystal_v2_semantic_stage3probe` are green, and the full safe stage3
+probe moved from `semantic_diags=0 resolution_diags=0 type_diags=399` to
+`semantic_diags=0 resolution_diags=0 type_diags=395`. The exact
+`mode || system_tcgetattr` -> `Bool` collapse no longer reproduces in the
+focused reducer. Boundary: stage3 is still not green; the next live frontier is
+`EventLoop.has_constant?`, the remaining real-stdlib `Termios.c_lflag` /
+bitflag corridor, `Cannot index type UInt8`, and later `Nil#to_slice` /
+string-runtime families. {F/G/R: 0.95/0.72/0.97} [verified]
 
 [LM-365|verified]: The next live stage3 blocker after [LM-364] was not another
 C-call ABI mismatch. The exact reducer around

@@ -1390,6 +1390,12 @@ module CrystalV2
               end
               pending_annotations.clear
 
+            when Frontend::TypeDeclarationNode
+              if owner && owner.is_struct?
+                collect_struct_field_declaration(owner, expr_id, node)
+              end
+              pending_annotations.clear
+
             when Frontend::GetterNode, Frontend::SetterNode, Frontend::PropertyNode
               if owner
                 attach_accessor_annotations(owner, node, pending_annotations)
@@ -1457,6 +1463,16 @@ module CrystalV2
               pending_annotations.clear
             end
           end
+        end
+
+        private def collect_struct_field_declaration(owner : ClassSymbol, node_id : Frontend::ExprId, node : Frontend::TypeDeclarationNode) : Nil
+          field_name = intern_name(node.name)
+          return if field_name.starts_with?('@')
+
+          type_annotation = intern_name(node.declared_type)
+          default_value = node.value
+          owner.add_instance_var(field_name, type_annotation, default_value, !default_value.nil?)
+          define_struct_field_symbol(owner, field_name, type_annotation, node_id)
         end
 
         private def handle_class_body_macro_expansion(node_id : Frontend::ExprId, owner_type : ClassSymbol?) : Nil
@@ -2242,6 +2258,22 @@ module CrystalV2
               rescue SymbolRedefinitionError
                 scope.redefine(sym_name, sym)
               end
+            end
+          end
+        end
+
+        private def define_struct_field_symbol(class_symbol : ClassSymbol, name : String, type_annotation : String?, node_id : Frontend::ExprId)
+          sym = VariableSymbol.new(name, node_id, declared_type: type_annotation)
+          assign_symbol_file(sym, node_id)
+
+          scope = class_symbol.scope
+          if existing = scope.lookup_local(name)
+            scope.redefine(name, sym)
+          else
+            begin
+              scope.define(name, sym)
+            rescue SymbolRedefinitionError
+              scope.redefine(name, sym)
             end
           end
         end

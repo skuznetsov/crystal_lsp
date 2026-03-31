@@ -54,5 +54,148 @@ describe Semantic::TypeInferenceEngine do
       type = engine.context.get_type(program.roots.last)
       type.to_s.should contain("Int32")
     end
+
+    it "preserves non-bool values through nil-coalescing || assignments" do
+      source = <<-CRYSTAL
+        lib LibC
+          alias TcflagT = UInt64
+
+          struct Termios
+            c_lflag : TcflagT
+          end
+        end
+
+        class Terminal
+          def system_tcgetattr
+            termios = uninitialized LibC::Termios
+            termios
+          end
+
+          def probe(mode = nil)
+            new_mode = mode || system_tcgetattr
+            new_mode.c_lflag
+          end
+        end
+
+        Terminal.new.probe()
+      CRYSTAL
+
+      program, analyzer, engine = infer_logical_value_types(source)
+
+      analyzer.semantic_diagnostics.should be_empty
+      analyzer.name_resolver_diagnostics.should be_empty
+      engine.diagnostics.select(&.level.error?).should be_empty
+
+      engine.context.get_type(program.roots.last).to_s.should eq("UInt64")
+    end
+
+    it "returns the truthy value type for nilable || expressions" do
+      source = <<-CRYSTAL
+        lib LibC
+          struct Termios
+            c_lflag : UInt64
+          end
+        end
+
+        class Terminal
+          def system_tcgetattr
+            termios = uninitialized LibC::Termios
+            termios
+          end
+
+          def probe(mode = nil)
+            mode || system_tcgetattr
+          end
+        end
+
+        Terminal.new.probe()
+      CRYSTAL
+
+      program, analyzer, engine = infer_logical_value_types(source)
+
+      analyzer.semantic_diagnostics.should be_empty
+      analyzer.name_resolver_diagnostics.should be_empty
+      engine.diagnostics.select(&.level.error?).should be_empty
+
+      engine.context.get_type(program.roots.last).to_s.should eq("Termios")
+    end
+
+    it "infers uninitialized lib structs through helper returns" do
+      source = <<-CRYSTAL
+        lib LibC
+          struct Termios
+            c_lflag : UInt64
+          end
+        end
+
+        class Terminal
+          def system_tcgetattr
+            termios = uninitialized LibC::Termios
+            termios
+          end
+        end
+
+        Terminal.new.system_tcgetattr()
+      CRYSTAL
+
+      program, analyzer, engine = infer_logical_value_types(source)
+
+      analyzer.semantic_diagnostics.should be_empty
+      analyzer.name_resolver_diagnostics.should be_empty
+      engine.diagnostics.select(&.level.error?).should be_empty
+
+      engine.context.get_type(program.roots.last).to_s.should eq("Termios")
+    end
+
+    it "preserves receiverless helper return types inside instance methods" do
+      source = <<-CRYSTAL
+        lib LibC
+          struct Termios
+            c_lflag : UInt64
+          end
+        end
+
+        class Terminal
+          def system_tcgetattr
+            termios = uninitialized LibC::Termios
+            termios
+          end
+
+          def probe
+            system_tcgetattr
+          end
+        end
+
+        Terminal.new.probe()
+      CRYSTAL
+
+      program, analyzer, engine = infer_logical_value_types(source)
+
+      analyzer.semantic_diagnostics.should be_empty
+      analyzer.name_resolver_diagnostics.should be_empty
+      engine.diagnostics.select(&.level.error?).should be_empty
+
+      engine.context.get_type(program.roots.last).to_s.should eq("Termios")
+    end
+
+    it "binds nil defaults for untyped instance-method params" do
+      source = <<-CRYSTAL
+        class Terminal
+          def probe(mode = nil)
+            mode
+          end
+        end
+
+        Terminal.new.probe()
+      CRYSTAL
+
+      program, analyzer, engine = infer_logical_value_types(source)
+
+      analyzer.semantic_diagnostics.should be_empty
+      analyzer.name_resolver_diagnostics.should be_empty
+      engine.diagnostics.select(&.level.error?).should be_empty
+
+      engine.context.get_type(program.roots.last).to_s.should eq("Nil")
+    end
   end
 end

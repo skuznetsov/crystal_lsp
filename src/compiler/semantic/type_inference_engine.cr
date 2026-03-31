@@ -783,7 +783,7 @@ module CrystalV2
                     infer_expression(node.right)
                   end
                 else
-                  @context.bool_type
+                  infer_logical_and_type(infer_expression(node.left), infer_expression(node.right))
                 end
               else
                 # Narrowing-sensitive && expressions must go through recursive
@@ -799,7 +799,7 @@ module CrystalV2
                   infer_expression(node.right)
                 end
               else
-                @context.bool_type
+                infer_logical_or_type(infer_expression(node.left), infer_expression(node.right))
               end
             when "..", "..."
               # Range(begin,end): type ignores exclusivity for now
@@ -4877,6 +4877,9 @@ module CrystalV2
                             body_type
                           end
                         else
+                          if field_type = infer_struct_field_access_type(receiver_type, method_name)
+                            field_type
+                          else
                           emit_error("Method '#{method_name}' not found on #{receiver_type}", expr_id)
                           # Heuristic: for arrays, some methods are no-ops on type
                           if receiver_type.is_a?(ArrayType) && {"to_a", "each", "each_with_index", "map", "collect", "select", "reject", "filter"}.includes?(method_name)
@@ -4884,11 +4887,28 @@ module CrystalV2
                           else
                             @context.nil_type
                           end
+                          end
                         end
 
           @context.set_type(expr_id, result_type)
           debug("  infer_member_access returning: #{result_type.class.name}: #{result_type}")
           result_type
+        end
+
+        private def infer_struct_field_access_type(receiver_type : Type, field_name : String) : Type?
+          instance_type = receiver_type.as?(InstanceType)
+          return nil unless instance_type
+
+          class_symbol = instance_type.class_symbol
+          return nil unless class_symbol.is_struct?
+
+          symbol = class_symbol.scope.lookup_local(field_name)
+          return nil unless symbol.is_a?(VariableSymbol)
+
+          declared_type = symbol.declared_type
+          return nil unless declared_type
+
+          resolve_method_annotation_type(declared_type, receiver_type, class_symbol.scope)
         end
 
         private def infer_call(node : Frontend::CallNode, expr_id : ExprId) : Type

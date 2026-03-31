@@ -1,6 +1,40 @@
-# Crystal V2 Bootstrap — TODO (Updated 2026-03-30)
+# Crystal V2 Bootstrap — TODO (Updated 2026-03-31)
 
 ## Current Status
+- **Fresh semantic logical-value/struct-field checkpoint: non-boolean `&&/||` expressions no longer collapse to `Bool` in the iterative fast path, and struct field declarations from bare `TypeDeclarationNode`s now surface as readable member fields (2026-03-31, current session)**:
+  - trustworthy setup:
+    - `src/compiler/semantic/type_inference_engine.cr` no longer hard-codes `Bool` for non-terminating `&&` / `||` in `compute_node_type_no_recurse(...)`; it now uses `infer_logical_and_type(...)` / `infer_logical_or_type(...)`, preserving Crystal value semantics even when the iterative pass wins
+    - the same engine now has a bounded struct-field fallback in `infer_member_access(...)`: when ordinary method lookup misses on a struct receiver, it can resolve collector-registered bare field declarations as typed member reads
+    - `src/compiler/semantic/collectors/symbol_collector.cr` now records bare `TypeDeclarationNode`s inside struct bodies as struct field metadata and defines corresponding field symbols in the struct scope
+    - focused regression coverage lives in `spec/semantic/type_inference_logical_value_semantics_spec.cr`
+  - decisive evidence:
+    - focused regressions are green:
+      - `../crystal/bin/crystal spec spec/semantic/type_inference_logical_value_semantics_spec.cr --error-trace`
+      - `../crystal/bin/crystal spec spec/semantic/type_inference_logical_rhs_narrowing_spec.cr --error-trace`
+      - `../crystal/bin/crystal spec spec/semantic/type_inference_spec.cr --example 'tracks uninitialized assignments as their declared runtime type' --error-trace`
+      - `../crystal/bin/crystal spec spec/semantic/type_inference_spec.cr --example 'binds deferred default arguments from receiver context' --error-trace`
+    - rebuild gates are green:
+      - `../crystal/bin/crystal build src/crystal_v2.cr --no-codegen --error-trace`
+      - `../crystal/bin/crystal build src/crystal_v2.cr -o /tmp/crystal_v2_semantic_stage3probe --error-trace`
+    - the full semantic stage3 probe under the safe wrapper moves again:
+      - `env CRYSTAL_V2_SEMANTIC_COMPILE=1 scripts/run_safe.sh /tmp/crystal_v2_semantic_stage3probe 240 4096 src/crystal_v2.cr --stats --no-link -o /tmp/stage3_semantic_probe.out > /tmp/stage3_semantic_probe.log 2>&1`
+      - summary moved from:
+        - `semantic_diags=0`
+        - `resolution_diags=0`
+        - `type_diags=399`
+      - to:
+        - `semantic_diags=0`
+        - `resolution_diags=0`
+        - `type_diags=395`
+    - the old `mode || system_tcgetattr` -> `Bool` collapse is locked by the new reducer and no longer reproduces in the focused spec pack
+  - practical boundary:
+    - stage3 with the new inferer is still **not** green
+    - the next honest frontier has moved to:
+      - `EventLoop.has_constant?`
+      - remaining `Termios.c_lflag` / bitflag arithmetic in the real stdlib corridor
+      - `Cannot index type UInt8`
+      - `Nil#to_slice` and later string/runtime families
+    - that means the next move is not more `&&/||` value-semantics work, but the next concrete EventLoop/termios/indexing corridor from the new top of the log
 - **Fresh semantic module-self checkpoint: `self` inside non-class module methods now stays a module receiver instead of collapsing to `Nil`, which removes the early `event_loop.reopened/close` family from stage3 (2026-03-30, current session)**:
   - trustworthy setup:
     - `src/compiler/semantic/type_inference_engine.cr` now returns `module_type_for(current_module)` from `infer_self(...)` when semantic body inference is inside a non-class module method
