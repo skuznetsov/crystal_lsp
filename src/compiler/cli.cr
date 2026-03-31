@@ -4326,36 +4326,52 @@ module CrystalV2
             idx += 1
           end
           break if idx >= size
+
           if bytes[idx] == '#'.ord
             while idx < size && bytes[idx] != '\n'.ord
               idx += 1
             end
             next
           end
+
+          if idx + 1 < size && bytes[idx] == '{'.ord && bytes[idx + 1] == '%'.ord
+            tag_end = source.index("%}", idx)
+            return false unless tag_end
+
+            tag_start = idx + 2
+            tag = source.byte_slice(tag_start, tag_end - tag_start)
+            tag = tag.strip
+            tag = tag.lstrip('-').lstrip('~').rstrip('-').rstrip('~').strip
+
+            if tag.starts_with?("skip_file")
+              cond_text = tag.sub(/^skip_file/, "").strip
+              return true if cond_text.empty?
+
+              if cond_text.starts_with?("if ")
+                return evaluate_macro_condition_text(cond_text.lchop("if").strip, flags) == true
+              elsif cond_text.starts_with?("unless ")
+                cond = evaluate_macro_condition_text(cond_text.lchop("unless").strip, flags)
+                return cond.nil? ? false : !cond
+              else
+                return false
+              end
+            end
+
+            idx = tag_end + 2
+            next
+          end
+
+          line_end = source.index('\n', idx) || size
+          line = source.byte_slice(idx, line_end - idx).strip
+          if line.starts_with?("require ")
+            idx = line_end + 1
+            next
+          end
+
           break
         end
-        return false unless idx + 1 < size && bytes[idx] == '{'.ord && bytes[idx + 1] == '%'.ord
 
-        tag_end = source.index("%}", idx)
-        return false unless tag_end
-
-        tag_start = idx + 2
-        tag = source.byte_slice(tag_start, tag_end - tag_start)
-        tag = tag.strip
-        tag = tag.lstrip('-').lstrip('~').rstrip('-').rstrip('~').strip
-        return false unless tag.starts_with?("skip_file")
-
-        cond_text = tag.sub(/^skip_file/, "").strip
-        return true if cond_text.empty?
-
-        if cond_text.starts_with?("if ")
-          evaluate_macro_condition_text(cond_text.lchop("if").strip, flags) == true
-        elsif cond_text.starts_with?("unless ")
-          cond = evaluate_macro_condition_text(cond_text.lchop("unless").strip, flags)
-          cond.nil? ? false : !cond
-        else
-          false
-        end
+        false
       end
 
       private def collect_macro_literal_exprs(
@@ -5039,12 +5055,170 @@ module CrystalV2
         texts
       end
 
+      private struct MacroReflectionEvaluator
+        def initialize(@flags : Set(String))
+        end
+
+        def evaluate(member_name : String, receiver_name : String, arg_name : String) : Bool?
+          clean_receiver = receiver_name.strip
+          clean_arg = normalize_name(arg_name)
+
+          case member_name
+          when "has_constant?"
+            evaluate_has_constant(clean_receiver, clean_arg)
+          when "has_method?"
+            evaluate_has_method(clean_receiver, clean_arg)
+          else
+            nil
+          end
+        end
+
+        def flag_enabled?(flag_name : String) : Bool
+          @flags.includes?(normalize_name(flag_name))
+        end
+
+        private def evaluate_has_constant(receiver_name : String, constant_name : String) : Bool?
+          case receiver_name
+          when "Crystal::EventLoop"
+            backend = event_loop_backend
+            case constant_name
+            when "LibEvent" then backend == "libevent"
+            when "Polling"  then backend == "epoll" || backend == "kqueue"
+            when "Epoll"    then backend == "epoll"
+            when "Kqueue"   then backend == "kqueue"
+            when "IOCP"     then backend == "iocp"
+            when "Wasi"     then backend == "wasi"
+            else                 false
+            end
+          when "IO"
+            case constant_name
+            when "Evented"
+              flag_enabled?("wasi") || evaluate_has_constant("Crystal::EventLoop", "LibEvent") == true
+            else
+              false
+            end
+          when "LibC"
+            evaluate_libc_has_constant(constant_name)
+          else
+            nil
+          end
+        end
+
+        private def evaluate_has_method(receiver_name : String, method_name : String) : Bool?
+          case receiver_name
+          when "LibC"
+            evaluate_libc_has_method(method_name)
+          when "Crystal::Interpreter.class", "Interpreter.class"
+            return false unless flag_enabled?("interpreted")
+
+            case method_name
+            when "signal", "signal_descriptor"
+              true
+            else
+              false
+            end
+          else
+            nil
+          end
+        end
+
+        private def evaluate_libc_has_constant(constant_name : String) : Bool
+          is_darwin = flag_enabled?("darwin")
+          is_linux = flag_enabled?("linux")
+          is_bsd = flag_enabled?("freebsd") || flag_enabled?("openbsd") || flag_enabled?("netbsd") || flag_enabled?("dragonfly")
+
+          case constant_name
+          when "EVFILT_USER", "NOTE_TRIGGER", "EV_UDATA_SPECIFIC",
+               "EVFILT_READ", "EVFILT_WRITE", "EVFILT_TIMER", "EV_ADD", "EV_DELETE", "EV_CLEAR", "EV_EOF", "EV_ERROR",
+               "NOTE_NSECONDS"
+            is_darwin || is_bsd
+          when "EPOLL_CTL_ADD", "EPOLL_CTL_DEL", "EPOLL_CTL_MOD", "EPOLLIN", "EPOLLOUT", "EPOLLERR", "EPOLLHUP"
+            is_linux
+          when "CLOCK_MONOTONIC", "TIOCGWINSZ", "TIOCSCTTY", "O_CLOEXEC", "O_DIRECTORY", "O_NONBLOCK", "SOCK_CLOEXEC"
+            is_darwin || is_linux || is_bsd
+          when "SIGRTMIN"
+            is_linux || is_bsd
+          else
+            false
+          end
+        end
+
+        private def evaluate_libc_has_method(method_name : String) : Bool
+          is_unix = flag_enabled?("unix")
+          is_linux = flag_enabled?("linux")
+          is_darwin = flag_enabled?("darwin")
+          is_bsd = flag_enabled?("freebsd") || flag_enabled?("openbsd") || flag_enabled?("netbsd") || flag_enabled?("dragonfly")
+          is_android = flag_enabled?("android")
+
+          case method_name
+          when "dup2", "fcntl", "lseek", "isatty", "ttyname_r", "open", "close", "pread", "pipe", "flock", "fsync"
+            is_unix
+          when "fdatasync", "tcgetattr", "tcsetattr", "cfmakeraw", "strerror_r", "clock_gettime"
+            is_unix
+          when "accept4", "dup3", "pipe2", "__errno_location", "gai_strerror"
+            is_linux
+          when "__system_property_read_callback", "__system_property_get"
+            is_android
+          when "__errno"
+            is_darwin
+          when "__error", "if_nametoindex"
+            is_darwin || is_bsd
+          when "___errno"
+            is_bsd
+          when "pthread_sigmask"
+            is_unix
+          when "pthread_setname_np"
+            is_linux || is_darwin
+          when "pthread_set_name_np"
+            is_bsd
+          when "kqueue1"
+            is_linux || is_bsd
+          else
+            false
+          end
+        end
+
+        private def event_loop_backend : String?
+          if flag_enabled?("wasi")
+            "wasi"
+          elsif flag_enabled?("unix")
+            if flag_enabled?("evloop=libevent")
+              "libevent"
+            elsif flag_enabled?("evloop=epoll") || flag_enabled?("android") || flag_enabled?("linux")
+              "epoll"
+            elsif flag_enabled?("evloop=kqueue") || flag_enabled?("darwin") || flag_enabled?("freebsd")
+              "kqueue"
+            else
+              "libevent"
+            end
+          elsif flag_enabled?("win32")
+            "iocp"
+          else
+            nil
+          end
+        end
+
+        private def normalize_name(name : String) : String
+          trimmed = name.strip
+          trimmed = trimmed[1..] if trimmed.starts_with?(':')
+          if trimmed.size >= 2
+            first = trimmed[0]
+            last = trimmed[trimmed.size - 1]
+            if (first == '"' && last == '"') || (first == '\'' && last == '\'')
+              trimmed = trimmed[1...-1]
+            end
+          end
+          trimmed
+        end
+
+      end
+
       private def evaluate_macro_condition_text(text : String, flags : Set(String)) : Bool?
-        MacroConditionScanner.new(text, flags).parse
+        MacroConditionScanner.new(text, MacroReflectionEvaluator.new(flags)).parse
       end
 
       private class MacroConditionScanner
-        def initialize(@input : String, @flags : Set(String))
+        def initialize(@input : String, @reflection : MacroReflectionEvaluator)
           @index = 0
         end
 
@@ -5099,7 +5273,7 @@ module CrystalV2
             return value
           end
 
-          ident = read_identifier
+          ident = read_path_identifier
           return nil unless ident
 
           case ident
@@ -5110,8 +5284,38 @@ module CrystalV2
           when "flag?"
             parse_flag_call
           else
-            nil
+            parse_reflection_call(ident)
           end
+        end
+
+        private def parse_reflection_call(receiver_name : String) : Bool?
+          skip_ws
+          return nil unless peek_char == '.'
+          advance(1)
+          member_name = read_identifier
+          return nil unless member_name
+
+          if member_name == "class"
+            skip_ws
+            return nil unless peek_char == '.'
+            advance(1)
+            member_name = read_identifier
+            return nil unless member_name
+            receiver_name = "#{receiver_name}.class"
+          end
+
+          return nil unless member_name == "has_constant?" || member_name == "has_method?"
+
+          skip_ws
+          return nil unless peek_char == '('
+          advance(1)
+          skip_ws
+          arg_name = parse_flag_name
+          skip_ws
+          advance(1) if peek_char == ')'
+          return nil unless arg_name
+
+          @reflection.evaluate(member_name, receiver_name, arg_name)
         end
 
         private def parse_flag_call : Bool?
@@ -5123,7 +5327,7 @@ module CrystalV2
           skip_ws
           advance(1) if peek_char == ')'
           return nil unless flag_name
-          @flags.includes?(flag_name)
+          @reflection.flag_enabled?(flag_name)
         end
 
         private def parse_flag_name : String?
@@ -5152,6 +5356,18 @@ module CrystalV2
           while @index < @input.size
             ch = @input[@index]
             break unless ch.alphanumeric? || ch == '_' || ch == '?'
+            @index += 1
+          end
+          return nil if @index == start
+          @input[start, @index - start]
+        end
+
+        private def read_path_identifier : String?
+          skip_ws
+          start = @index
+          while @index < @input.size
+            ch = @input[@index]
+            break unless ch.alphanumeric? || ch == '_' || ch == '?' || ch == ':'
             @index += 1
           end
           return nil if @index == start
@@ -5196,6 +5412,7 @@ module CrystalV2
         expr_id : Frontend::ExprId,
         flags : Set(String)
       ) : Bool?
+        reflection = MacroReflectionEvaluator.new(flags)
         node = arena[expr_id]
         case node
         when Frontend::BoolNode
@@ -5228,38 +5445,81 @@ module CrystalV2
             nil
           end
         when Frontend::CallNode
-          macro_flag_call?(arena, node, flags)
+          macro_condition_call?(arena, node, flags, reflection)
         else
           nil
         end
       end
 
-      private def macro_flag_call?(
+      private def macro_condition_call?(
         arena : Frontend::ArenaLike,
         node : Frontend::CallNode,
-        flags : Set(String)
+        flags : Set(String),
+        reflection : MacroReflectionEvaluator
       ) : Bool?
         callee = arena[node.callee]
-        callee_name = case callee
-                      when Frontend::IdentifierNode
-                        String.new(callee.name)
+        case callee
+        when Frontend::IdentifierNode
+          callee_name = String.new(callee.name)
+          return nil unless callee_name == "flag?"
+          return nil unless node.args.size == 1
+          arg = arena[node.args[0]]
+          flag_name = case arg
+                      when Frontend::SymbolNode
+                        String.new(arg.name)
+                      when Frontend::StringNode
+                        String.new(arg.value)
                       else
                         nil
                       end
-        return nil unless callee_name == "flag?"
-        return nil unless node.args.size == 1
-        arg = arena[node.args[0]]
-        flag_name = case arg
-                    when Frontend::SymbolNode
-                      String.new(arg.name)
-                    when Frontend::StringNode
-                      String.new(arg.value)
-                    else
-                      nil
-                    end
-        return nil unless flag_name
-        flag_name = flag_name.strip.gsub(/^[:"']|["']$/, "")
-        flags.includes?(flag_name)
+          return nil unless flag_name
+          flag_name = flag_name.strip.gsub(/^[:"']|["']$/, "")
+          flags.includes?(flag_name)
+        when Frontend::MemberAccessNode
+          member_name = String.new(callee.member)
+          return nil unless member_name == "has_constant?" || member_name == "has_method?"
+
+          receiver_name = macro_condition_receiver_name(arena, callee.object)
+          return nil unless receiver_name
+          return nil unless node.args.size == 1
+
+          arg = arena[node.args[0]]
+          arg_name = case arg
+                     when Frontend::SymbolNode
+                       String.new(arg.name)
+                     when Frontend::StringNode
+                       String.new(arg.value)
+                     else
+                       nil
+                     end
+          return nil unless arg_name
+
+          reflection.evaluate(member_name, receiver_name, arg_name)
+        else
+          nil
+        end
+      end
+
+      private def macro_condition_receiver_name(arena : Frontend::ArenaLike, expr_id : Frontend::ExprId) : String?
+        node = arena[expr_id]
+        case node
+        when Frontend::IdentifierNode
+          String.new(node.name)
+        when Frontend::ConstantNode
+          String.new(node.name)
+        when Frontend::PathNode
+          Frontend.node_literal_string(node)
+        when Frontend::CallNode
+          callee = arena[node.callee]
+          if callee.is_a?(Frontend::MemberAccessNode) && String.new(callee.member) == "class"
+            if base = macro_condition_receiver_name(arena, callee.object)
+              return "#{base}.class"
+            end
+          end
+          nil
+        else
+          nil
+        end
       end
 
       private def resolve_require_path(req_path : String, base_dir : String, input_base_dir : String) : String | Array(String) | Nil
@@ -5703,6 +5963,16 @@ module CrystalV2
         diagnostics.each { |d| err_io.puts Semantic::DiagnosticFormatter.format(source, d) }
       end
 
+      private def active_semantic_units(units : Array(ParsedUnit)) : Array(ParsedUnit)
+        flags = Runtime.target_flags
+        active_units = [] of ParsedUnit
+        units.each do |unit|
+          next if skip_file_directive?(unit.source, flags)
+          active_units << unit
+        end
+        active_units
+      end
+
       private def build_semantic_shadow_aggregate(units : Array(ParsedUnit)) : Semantic::CompileShadowAggregate
         shadow_units = [] of NamedTuple(path: String, source: String)
         units.each do |unit|
@@ -5775,10 +6045,11 @@ module CrystalV2
         out_io : IO,
         err_io : IO,
       ) : Int32?
-        aggregate = build_semantic_shadow_aggregate(units)
+        active_units = active_semantic_units(units)
+        aggregate = build_semantic_shadow_aggregate(active_units)
         analyzer = Semantic::Analyzer.new(aggregate.program)
         sources_by_path = aggregate.sources_by_path
-        compile_parse_diagnostics = units.flat_map(&.parse_diagnostics)
+        compile_parse_diagnostics = active_units.flat_map(&.parse_diagnostics)
         shadow_parse_diagnostics = aggregate.parse_diagnostics.map { |diagnostic| aggregate.enrich_shadow_diagnostic(diagnostic) }
         parse_diagnostic_parity = Semantic::CompileShadowParseDiagnosticParity.compare(
           compile_parse_diagnostics,
@@ -5793,7 +6064,7 @@ module CrystalV2
           end
           emit_semantic_compile_prepass_summary(
             semantic_compile_prepass_summary(
-              units,
+              active_units,
               aggregate,
               analyzer,
               0,
@@ -5824,7 +6095,7 @@ module CrystalV2
         if analyzer.semantic_errors?
           emit_semantic_compile_prepass_summary(
             semantic_compile_prepass_summary(
-              units,
+              active_units,
               aggregate,
               analyzer,
               0,
@@ -5850,7 +6121,7 @@ module CrystalV2
         if resolution_diagnostics.any?
           emit_semantic_compile_prepass_summary(
             semantic_compile_prepass_summary(
-              units,
+              active_units,
               aggregate,
               analyzer,
               resolve_result.identifier_symbols.size,
@@ -5876,7 +6147,7 @@ module CrystalV2
 
         emit_semantic_compile_prepass_summary(
           semantic_compile_prepass_summary(
-            units,
+            active_units,
             aggregate,
             analyzer,
             resolve_result.identifier_symbols.size,
@@ -6451,7 +6722,8 @@ module CrystalV2
         out_io : IO,
         err_io : IO,
       ) : SemanticShadowSummary?
-        aggregate = build_semantic_shadow_aggregate(units)
+        active_units = active_semantic_units(units)
+        aggregate = build_semantic_shadow_aggregate(active_units)
         program = aggregate.program
         collector_inventory = build_shadow_collector_declaration_inventory(aggregate)
         analyzer = Semantic::Analyzer.new(program)
@@ -6466,13 +6738,13 @@ module CrystalV2
           analyzer.global_context.symbol_table
         )
         declaration_parity = Semantic::CompileShadowDeclarationParity.compare(collector_inventory, semantic_inventory)
-        compile_parse_diagnostics = units.flat_map(&.parse_diagnostics)
+        compile_parse_diagnostics = active_units.flat_map(&.parse_diagnostics)
         shadow_parse_diagnostics = aggregate.parse_diagnostics.map { |diagnostic| aggregate.enrich_shadow_diagnostic(diagnostic) }
         parse_diagnostic_parity = Semantic::CompileShadowParseDiagnosticParity.compare(
           compile_parse_diagnostics,
           shadow_parse_diagnostics
         )
-        compile_parse_diagnostics_by_unit = units.map(&.parse_diagnostics.size)
+        compile_parse_diagnostics_by_unit = active_units.map(&.parse_diagnostics.size)
         shadow_parse_diagnostics_by_unit = aggregate.unit_summaries.map(&.parse_diagnostic_count)
         semantic_diagnostics = analyzer.semantic_diagnostics.map { |diagnostic| aggregate.enrich_shadow_diagnostic(diagnostic) }
         resolution_diagnostics = resolve_result.diagnostics.map { |diagnostic| aggregate.enrich_shadow_diagnostic(diagnostic) }
@@ -6554,7 +6826,7 @@ module CrystalV2
           declaration_summary_lines: declaration_summary_lines,
           parse_diagnostic_gap_count: parse_diagnostic_parity.gap_count,
           parse_diagnostic_summary_lines: parse_diagnostic_summary_lines,
-          files_count: units.size,
+          files_count: active_units.size,
           roots_count: program.roots.size,
           analysis_root_count: program.roots.size + aggregate.generated_top_level_roots.size,
           generated_root_count: aggregate.generated_top_level_roots.size,

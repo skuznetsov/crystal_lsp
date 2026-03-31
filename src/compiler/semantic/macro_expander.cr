@@ -913,7 +913,14 @@ module CrystalV2
 
           if callee.is_a?(Frontend::MemberAccessNode)
             obj = callee.object
+            obj_node = @arena[obj]
             member = intern_name(callee.member)
+
+            if member == "has_constant?"
+              if symbol = resolve_named_type_symbol(obj_node, context)
+                return evaluate_has_constant_call(symbol, node, context)
+              end
+            end
 
             # Handle annotation/annotations returning MacroAnnotationValue
             if member == "annotation" || member == "annotations"
@@ -967,6 +974,36 @@ module CrystalV2
           rescue ex
             emit_error("compare_versions expects valid semantic versions: #{ex.message}", node.callee)
             MACRO_NIL
+          end
+        end
+
+        private def evaluate_has_constant_call(symbol : Symbol, node : Frontend::CallNode, context : Context) : MacroValue
+          return MacroBoolValue.new(false) unless arg = node.args[0]?
+
+          constant_name = evaluate_to_macro_value(arg, context).to_id
+          MacroBoolValue.new(symbol_has_constant?(symbol, constant_name))
+        end
+
+        private def symbol_has_constant?(symbol : Symbol, name : String) : Bool
+          case symbol
+          when ClassSymbol
+            scope_has_constant?(symbol.scope, name)
+          when ModuleSymbol
+            scope_has_constant?(symbol.scope, name)
+          when EnumSymbol
+            symbol.members.has_key?(name) || scope_has_constant?(symbol.scope, name)
+          else
+            false
+          end
+        end
+
+        private def scope_has_constant?(scope : SymbolTable, name : String) : Bool
+          symbol = scope.lookup_local(name)
+          case symbol
+          when ConstantSymbol, ClassSymbol, ModuleSymbol, EnumSymbol, AliasSymbol
+            true
+          else
+            false
           end
         end
 
@@ -2336,6 +2373,11 @@ module CrystalV2
             end
           end
 
+          if node.is_a?(Frontend::CallNode)
+            value = evaluate_to_macro_value(expr_id, context)
+            return {value.truthy?, context}
+          end
+
           # Treat identifier conditions based on the bound macro variable value,
           # so constructs like `if ann` or `if flag` behave reasonably.
           if node.is_a?(Frontend::IdentifierNode)
@@ -2876,6 +2918,19 @@ module CrystalV2
                    nil
                  end
           return nil if name.nil? || name.empty?
+
+          if name.includes?("::")
+            segments = name.split("::").reject(&.empty?)
+            if owner = context.owner_type
+              if symbol = resolve_path_symbol_in_table(owner.scope, segments)
+                return symbol
+              end
+            end
+
+            if symbol = resolve_path_symbol_in_table(table, segments)
+              return symbol
+            end
+          end
 
           if owner = context.owner_type
             if symbol = owner.scope.lookup(name)

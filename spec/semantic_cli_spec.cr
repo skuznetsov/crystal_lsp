@@ -271,6 +271,93 @@ describe CrystalV2::Compiler::CLI do
     end
   end
 
+  it "keeps compile-path macro reflection green for skip_file and has_constant? branches" do
+    with_temp_shadow_project({
+      "event_loop.cr" => <<-'CRYSTAL',
+        abstract class Crystal::EventLoop
+        end
+
+        {% if flag?(:wasi) %}
+          class Crystal::EventLoop::Wasi < Crystal::EventLoop
+          end
+        {% elsif flag?(:unix) %}
+          {% if flag?("evloop=libevent") %}
+            class Crystal::EventLoop::LibEvent < Crystal::EventLoop
+            end
+          {% elsif flag?("evloop=epoll") || flag?(:android) || flag?(:linux) %}
+            abstract class Crystal::EventLoop::Polling < Crystal::EventLoop
+            end
+          {% elsif flag?("evloop=kqueue") || flag?(:darwin) || flag?(:freebsd) %}
+            abstract class Crystal::EventLoop::Polling < Crystal::EventLoop
+            end
+          {% else %}
+            class Crystal::EventLoop::LibEvent < Crystal::EventLoop
+            end
+          {% end %}
+        {% elsif flag?(:win32) %}
+          class Crystal::EventLoop::IOCP < Crystal::EventLoop
+          end
+        {% end %}
+      CRYSTAL
+      "evented.cr" => <<-'CRYSTAL',
+        require "./event_loop"
+
+        {% skip_file unless flag?(:wasi) || Crystal::EventLoop.has_constant?(:LibEvent) %}
+
+        module IO::Evented
+          VALUE = 1
+        end
+      CRYSTAL
+      "fd.cr" => <<-'CRYSTAL',
+        class IO
+        end
+
+        require "./evented"
+
+        module Crystal::System::FileDescriptor
+          {% if IO.has_constant?(:Evented) %}
+            VALUE = IO::Evented::VALUE
+          {% else %}
+            VALUE = 0
+          {% end %}
+        end
+      CRYSTAL
+      "socket.cr" => <<-'CRYSTAL',
+        require "./fd"
+
+        module Crystal::System::Socket
+          {% if Crystal::EventLoop.has_constant?(:Polling) %}
+            VALUE = Crystal::EventLoop::Polling
+          {% else %}
+            VALUE = 0
+          {% end %}
+        end
+      CRYSTAL
+      "main.cr" => <<-'CRYSTAL',
+        require "./socket"
+
+        Crystal::System::FileDescriptor::VALUE
+      CRYSTAL
+    }) do |dir|
+      main_path = File.join(dir, "main.cr")
+      output_path = File.join(dir, "main")
+      out_io = IO::Memory.new
+      err_io = IO::Memory.new
+      status = 1
+
+      with_semantic_compile_env do
+        cli = CrystalV2::Compiler::CLI.new([main_path, "--no-prelude", "--stats", "--verbose", "--no-link", "-o", output_path])
+        status = cli.run(out_io: out_io, err_io: err_io)
+      end
+
+      status.should eq(0)
+      out_io.to_s.should contain("semantic_diags=0")
+      out_io.to_s.should contain("resolution_diags=0")
+      out_io.to_s.should contain("type_diags=0")
+      err_io.to_s.should be_empty
+    end
+  end
+
   it "keeps semantic compile prepass green for hash-backed macro iteration and mutation" do
     with_temp_shadow_project({
       "main.cr" => <<-'CRYSTAL',

@@ -1,6 +1,47 @@
 # Crystal V2 Bootstrap — TODO (Updated 2026-03-31)
 
 ## Current Status
+- **Fresh macro-reflection/skip-file checkpoint: compile-path macro conditions now evaluate `has_constant?`/`has_method?` across the real CLI prepass, and semantic shadow/prepass no longer analyze files that the compile path already skipped (2026-03-31, current session)**:
+  - trustworthy setup:
+    - `src/compiler/cli.cr` now has a bounded compile-path macro reflection evaluator shared by the raw `skip_file` scanner and the AST-based macro condition path
+    - the evaluator now covers the real live stage3 corridor:
+      - `Crystal::EventLoop.has_constant?(:LibEvent|:Polling)`
+      - `IO.has_constant?(:Evented)`
+      - bounded `LibC.has_constant?` / `LibC.has_method?`
+      - `Crystal::Interpreter.class.has_method?` false-paths
+    - `skip_file_directive?` no longer assumes `skip_file` must be the very first meaningful token in a file; it can now see `skip_file` after leading `require` lines, which matches the real `src/stdlib/io/evented.cr` shape
+    - `run_semantic_compile_prepass(...)` and `run_semantic_compile_shadow(...)` now build their shadow aggregate from the same active unit set that the compile path uses after `skip_file` filtering
+    - `src/compiler/semantic/macro_expander.cr` also now resolves qualified type paths for `has_constant?` in semantic macro expansion, so the semantic-only path and CLI path no longer diverge on named class-path reflection
+    - focused regression coverage lives in:
+      - `spec/semantic_cli_spec.cr`
+      - `spec/macro/macro_compare_versions_spec.cr`
+  - decisive evidence:
+    - focused regressions are green:
+      - `../crystal/bin/crystal spec spec/semantic_cli_spec.cr --example 'keeps compile-path macro reflection green for skip_file and has_constant? branches' --error-trace`
+      - `../crystal/bin/crystal spec spec/macro/macro_compare_versions_spec.cr spec/macro/macro_flag_spec.cr --error-trace`
+    - rebuild gates are green:
+      - `../crystal/bin/crystal build src/crystal_v2.cr --no-codegen --error-trace`
+      - `../crystal/bin/crystal build src/crystal_v2.cr -o /tmp/crystal_v2_semantic_stage3probe --error-trace`
+    - the full semantic stage3 probe under the safe wrapper moves again:
+      - `env CRYSTAL_V2_SEMANTIC_COMPILE=1 scripts/run_safe.sh /tmp/crystal_v2_semantic_stage3probe 240 4096 src/crystal_v2.cr --stats --no-link -o /tmp/stage3_semantic_probe.out > /tmp/stage3_semantic_probe.log 2>&1`
+      - summary moved from:
+        - `semantic_diags=0`
+        - `resolution_diags=0`
+        - `type_diags=395`
+      - to:
+        - `semantic_diags=0`
+        - `resolution_diags=0`
+        - `type_diags=394`
+    - the old `Method 'has_constant?' not found on EventLoop` error at `src/stdlib/io/evented.cr:3` no longer appears in `/tmp/stage3_semantic_probe.log`
+    - file/roots counts also shrink in the live probe (`files=339 -> 330`, `roots=1052 -> 1031`), which confirms the skipped-unit fix is actually taking effect in the semantic aggregate
+  - practical boundary:
+    - stage3 with the new inferer is still **not** green
+    - the next honest frontier is now the denser real-stdlib type surface after `evented` is gone:
+      - `Termios.c_lflag` / bitflag arithmetic
+      - `Cannot index type UInt8`
+      - `FastFloat.to_f64?`
+      - `CaseOptions.none?`, `QuickCheckResult.yes?`, and later string/runtime families
+    - that means the next move is not more `skip_file` plumbing, but the next concrete termios/string/runtime corridor from the new top of the log
 - **Fresh semantic logical-value/struct-field checkpoint: non-boolean `&&/||` expressions no longer collapse to `Bool` in the iterative fast path, and struct field declarations from bare `TypeDeclarationNode`s now surface as readable member fields (2026-03-31, current session)**:
   - trustworthy setup:
     - `src/compiler/semantic/type_inference_engine.cr` no longer hard-codes `Bool` for non-terminating `&&` / `||` in `compute_node_type_no_recurse(...)`; it now uses `infer_logical_and_type(...)` / `infer_logical_or_type(...)`, preserving Crystal value semantics even when the iterative pass wins

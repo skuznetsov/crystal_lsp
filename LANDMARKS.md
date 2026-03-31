@@ -3,6 +3,41 @@
 Updated: 2026-03-31
 Context: compiler/bootstrap/stage2-stability
 
+[LM-367|verified]: The next live stage3 blocker after [LM-366] was not another
+`&&/||` value-semantics miss. The exact `io/evented.cr` probe showed a
+pipeline split: semantic macro expansion had started to understand qualified
+`has_constant?` on class paths, but the real compile path still evaluated
+`skip_file` through a separate CLI macro-condition scanner that only knew
+`flag?`, and the semantic shadow/prepass still built its aggregate from all
+parsed units even when the compile path had already skipped some of them. The
+verified fix is correspondingly two-part and compile-path-facing:
+`src/compiler/cli.cr` now has a bounded macro reflection evaluator shared by
+the raw `skip_file` scanner and the AST-based macro condition path, covering
+`Crystal::EventLoop.has_constant?(:LibEvent|:Polling)`,
+`IO.has_constant?(:Evented)`, and bounded `LibC.has_constant?` /
+`LibC.has_method?` conditions; `skip_file_directive?` also now scans past
+leading `require` lines before deciding whether a file is skipped; and both
+`run_semantic_compile_prepass(...)` and `run_semantic_compile_shadow(...)` now
+filter to the same active unit set that the compile path uses after
+`skip_file`. In parallel, `src/compiler/semantic/macro_expander.cr` now
+resolves qualified named type paths for semantic `has_constant?`, keeping the
+semantic-only macro path aligned with the real compile path. Focused regressions
+`spec/semantic_cli_spec.cr --example 'keeps compile-path macro reflection green
+for skip_file and has_constant? branches'` and
+`spec/macro/macro_compare_versions_spec.cr spec/macro/macro_flag_spec.cr` are
+green, both rebuild gates for `src/crystal_v2.cr` and
+`/tmp/crystal_v2_semantic_stage3probe` are green, and the full safe stage3
+probe moved from `semantic_diags=0 resolution_diags=0 type_diags=395` to
+`semantic_diags=0 resolution_diags=0 type_diags=394`. The old
+`Method 'has_constant?' not found on EventLoop` at `src/stdlib/io/evented.cr:3`
+no longer appears, and the live probe also shrank from `files=339 roots=1052`
+to `files=330 roots=1031`, confirming that skipped units are no longer leaking
+into the semantic aggregate. Boundary: stage3 is still not green; the next live
+frontier is the denser real-stdlib type surface led by `Termios.c_lflag` /
+bitflag arithmetic, `Cannot index type UInt8`, `FastFloat.to_f64?`,
+`CaseOptions.none?`, and later string/runtime families. {F/G/R: 0.95/0.72/0.97}
+[verified]
+
 [LM-366|verified]: The next live stage3 blocker after [LM-365] was not more
 module-self plumbing and not a hidden lib-struct parse bug. Exact reducers
 showed two tightly coupled semantic defects instead: the iterative fast path in

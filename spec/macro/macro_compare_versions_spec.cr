@@ -313,4 +313,42 @@ describe "Macro compare_versions evaluation" do
     result.should contain("llvm.powi.f64.i32")
     result.should_not contain("{%")
   end
+
+  it "evaluates has_constant? on named class paths in macro conditions" do
+    source = <<-CR
+    abstract class Crystal::EventLoop
+      class LibEvent
+      end
+    end
+
+    {% if Crystal::EventLoop.has_constant?(:LibEvent) %}
+      ENABLED = 1
+    {% else %}
+      ENABLED = 0
+    {% end %}
+    CR
+
+    result, diagnostics = expand_first_top_level_macro_text(source)
+
+    diagnostics.should be_empty
+    result.should contain("ENABLED = 1")
+  end
+
+  it "evaluates has_constant? on named class paths as false when constant is absent" do
+    source = <<-CR
+    abstract class Crystal::EventLoop
+    end
+
+    {% if Crystal::EventLoop.has_constant?(:LibEvent) %}
+      ENABLED = 1
+    {% else %}
+      ENABLED = 0
+    {% end %}
+    CR
+
+    result, diagnostics = expand_first_top_level_macro_text(source)
+
+    diagnostics.should be_empty
+    result.should contain("ENABLED = 0")
+  end
 end
