@@ -6910,6 +6910,10 @@ module CrystalV2
             io_param = Frontend::Parameter.new(name: "io".to_slice, type_annotation: "IO".to_slice)
             methods << MethodSymbol.new(method_name, dummy_node_id, params: [] of Frontend::Parameter, return_annotation: "String", scope: dummy_scope)
             methods << MethodSymbol.new(method_name, dummy_node_id, params: [io_param], return_annotation: "Nil", scope: dummy_scope)
+          when "inspect"
+            io_param = Frontend::Parameter.new(name: "io".to_slice, type_annotation: "IO".to_slice)
+            methods << MethodSymbol.new(method_name, dummy_node_id, params: [] of Frontend::Parameter, return_annotation: "String", scope: dummy_scope)
+            methods << MethodSymbol.new(method_name, dummy_node_id, params: [io_param], return_annotation: "Nil", scope: dummy_scope)
           when "to_io"
             if receiver_type.is_a?(PrimitiveType) && receiver_type.name == "_"
               io_param = Frontend::Parameter.new(name: "io".to_slice, type_annotation: "IO".to_slice)

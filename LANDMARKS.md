@@ -3,6 +3,27 @@
 Updated: 2026-03-31
 Context: compiler/bootstrap/stage2-stability
 
+[LM-383|verified]: The next early blocker after [LM-382] was not another
+pointer-specific surface gap. Once the `pthread_create` ambiguity was gone, the
+new head log exposed `Method 'inspect' not found on Pointer(Void)` from
+`src/stdlib/crystal/system/thread.cr`, but the underlying stdlib contract is
+universal: `Object` always provides both `inspect : String` and
+`inspect(io : IO) : Nil`, and `Pointer(T)` only customizes `to_s(io)`. The
+verified fix is therefore to widen the universal builtin table, not to add a
+pointer-only hack. `src/compiler/semantic/type_inference_engine.cr` now models
+`inspect` alongside universal `to_s`, with both overloads. Focused regression
+`spec/semantic/type_inference_io_protocol_spec.cr` is green; both rebuild gates
+for `src/crystal_v2.cr` and `/tmp/crystal_v2_semantic_stage3probe` are green;
+the cheap real-prelude carrier moves from
+`semantic_diags=0 resolution_diags=0 type_diags=272` to
+`semantic_diags=0 resolution_diags=0 type_diags=271`; and the full safe stage3
+probe moves from `semantic_diags=0 resolution_diags=0 type_diags=291` to
+`semantic_diags=0 resolution_diags=0 type_diags=290`. The live log no longer
+contains `Method 'inspect' not found on Pointer(Void)`. Boundary: stage3 is
+still not green; the next head frontier is now `Event#delete`,
+`Number#seconds` / top-level `sleep`, and then `Int#new` / compiler_rt /
+`File.open(...)`-style later surfaces. {F/G/R: 0.96/0.84/0.98} [verified]
+
 [LM-382|verified]: The next apparent `LibGC.pthread_create(...)` /
 `Errno.new(ret)` frontier after [LM-381] was not a remaining lib-fun surface
 hole. Two traces separated the root cause cleanly. First, a cheap real-prelude

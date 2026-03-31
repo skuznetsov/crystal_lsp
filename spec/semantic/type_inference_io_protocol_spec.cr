@@ -61,5 +61,27 @@ describe Semantic::TypeInferenceEngine do
       engine.diagnostics.should be_empty
       engine.context.get_type(program.roots.last).to_s.should eq("Tuple(IO, IO)")
     end
+
+    it "supports universal inspect overloads for pointer-like receivers" do
+      source = <<-CRYSTAL
+        class IO
+        end
+
+        def probe(io : IO)
+          ptr = Pointer(Void).null
+          ptr.inspect(io)
+          ptr.inspect
+        end
+
+        probe(IO.new)
+      CRYSTAL
+
+      program, analyzer, engine = infer_io_protocol_types(source)
+
+      analyzer.semantic_diagnostics.should be_empty
+      analyzer.name_resolver_diagnostics.should be_empty
+      engine.diagnostics.should be_empty
+      engine.context.get_type(program.roots.last).to_s.should eq("String")
+    end
   end
 end
