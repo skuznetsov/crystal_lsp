@@ -1,6 +1,37 @@
 # Crystal V2 Bootstrap — TODO (Updated 2026-03-30)
 
 ## Current Status
+- **Fresh semantic module-self checkpoint: `self` inside non-class module methods now stays a module receiver instead of collapsing to `Nil`, which removes the early `event_loop.reopened/close` family from stage3 (2026-03-30, current session)**:
+  - trustworthy setup:
+    - `src/compiler/semantic/type_inference_engine.cr` now returns `module_type_for(current_module)` from `infer_self(...)` when semantic body inference is inside a non-class module method
+    - qualified module type parsing also now returns a real `ModuleType` for scoped module names instead of a primitive placeholder, so reducers like `event_loop : Crystal::EventLoop::FileDescriptor` stay on the module method surface
+    - focused regression coverage lives in `spec/semantic/type_inference_module_annotation_spec.cr`
+  - decisive evidence:
+    - focused regressions are green:
+      - `../crystal/bin/crystal spec spec/semantic/type_inference_module_annotation_spec.cr --error-trace`
+      - `../crystal/bin/crystal spec spec/semantic/type_inference_lib_fun_call_spec.cr --error-trace`
+    - rebuild gates are green:
+      - `../crystal/bin/crystal build src/crystal_v2.cr --no-codegen --error-trace`
+      - `../crystal/bin/crystal build src/crystal_v2.cr -o /tmp/crystal_v2_semantic_stage3probe --error-trace`
+    - the full semantic stage3 probe under the safe wrapper moves again:
+      - `env CRYSTAL_V2_SEMANTIC_COMPILE=1 scripts/run_safe.sh /tmp/crystal_v2_semantic_stage3probe 240 4096 src/crystal_v2.cr --stats --no-link -o /tmp/stage3_semantic_probe.out > /tmp/stage3_semantic_probe.log 2>&1`
+      - summary moved from:
+        - `semantic_diags=0`
+        - `resolution_diags=0`
+        - `type_diags=402`
+      - to:
+        - `semantic_diags=0`
+        - `resolution_diags=0`
+        - `type_diags=399`
+    - the old `Method 'reopened' not found on Crystal::EventLoop::FileDescriptor` / `Method 'close' not found on Crystal::EventLoop::FileDescriptor` family no longer appears in `/tmp/stage3_semantic_probe.log`
+  - practical boundary:
+    - stage3 with the new inferer is still **not** green
+    - the next honest frontier has moved on to:
+      - `termios`/`Bool` degradation around `new_mode.c_lflag`
+      - `Cannot index type UInt8`
+      - `Grapheme.codepoints` collapsing to `Bool`
+      - later `close` on `Nil` corridors
+    - that means the next move is not more module-annotation/self plumbing, but the next concrete struct/indexing/runtime corridor from the new top of the log
 - **Fresh semantic lib-fun checkpoint: C-call signatures now survive unnamed `fun` params, primitive type references, and C-compatible argument matching tightly enough to remove the live `LibC.fcntl` / `LibC.lseek` / `LibC.pthread_sigmask` family from stage3 (2026-03-30, current session)**:
   - trustworthy setup:
     - `src/compiler/frontend/ast.cr` no longer auto-marks every `Parameter` with `name=nil` as a block parameter when it still carries a real type annotation; unnamed `fun pthread_sigmask(Int, SigsetT*, SigsetT*)` params now remain ordinary positional params

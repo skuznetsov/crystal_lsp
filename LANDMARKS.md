@@ -3,6 +3,31 @@
 Updated: 2026-03-30
 Context: compiler/bootstrap/stage2-stability
 
+[LM-365|verified]: The next live stage3 blocker after [LM-364] was not another
+C-call ABI mismatch. The exact reducer around
+`event_loop.reopened(self)` / `event_loop.close(self)` showed two coupled but
+small semantic defects: qualified module names such as
+`Crystal::EventLoop::FileDescriptor` were still parsed as primitive placeholders
+in some type-expression paths, and `infer_self(...)` still fell through to
+`Nil` for non-class module methods, so included-module instance-style bodies
+passed `self : Nil` into otherwise valid module-restricted calls. The verified
+fix in `src/compiler/semantic/type_inference_engine.cr` is bounded: scoped
+module names now resolve to real `ModuleType`s, and `infer_self(...)` now
+returns `module_type_for(current_module)` when body inference is inside a
+non-class module method. Focused regression
+`spec/semantic/type_inference_module_annotation_spec.cr` is green, the nearby
+lib-fun regression pack remains green, both rebuild gates for
+`src/crystal_v2.cr` and `/tmp/crystal_v2_semantic_stage3probe` are green, and
+the full safe stage3 probe moved from `semantic_diags=0 resolution_diags=0
+type_diags=402` to `semantic_diags=0 resolution_diags=0 type_diags=399`. The
+old `Method 'reopened' not found on Crystal::EventLoop::FileDescriptor` and
+`Method 'close' not found on Crystal::EventLoop::FileDescriptor` family no
+longer appears in `/tmp/stage3_semantic_probe.log`. Boundary: stage3 is still
+not green; the next live frontier is the denser `termios`/`Bool` degradation in
+`src/stdlib/crystal/system/unix/file_descriptor.cr`, the `Cannot index type
+UInt8` corridor, and later `Grapheme.codepoints` / `Nil`-driven string
+families. {F/G/R: 0.96/0.71/0.97} [verified]
+
 [LM-364|verified]: The live `LibC.fcntl` / `LibC.lseek` / `LibC.pthread_sigmask`
 stage3 blocker was not one single matcher miss. The exact reducers showed three
 coupled defects across the semantic stack: variadic `fun` declarations were not

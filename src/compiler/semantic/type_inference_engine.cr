@@ -2062,7 +2062,7 @@ module CrystalV2
               when ClassSymbol
                 return @parse_type_cache[name] = instance_type_for(symbol)
               when ModuleSymbol
-                return @parse_type_cache[name] = PrimitiveType.new(name)
+                return @parse_type_cache[name] = module_type_for(symbol)
               when EnumSymbol
                 return @parse_type_cache[name] = EnumType.new(symbol)
               when AliasSymbol
@@ -3633,6 +3633,8 @@ module CrystalV2
           if current_class = @current_class
             instance_type = instance_type_for(current_class)
             instance_type
+          elsif current_module = @current_module
+            module_type_for(current_module)
           else
             # self outside class context (shouldn't happen in valid code)
             @context.nil_type
