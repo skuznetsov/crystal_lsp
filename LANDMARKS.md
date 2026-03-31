@@ -3,6 +3,35 @@
 Updated: 2026-03-31
 Context: compiler/bootstrap/stage2-stability
 
+[LM-368|verified]: The next live stage3 blocker after [LM-367] was not another
+macro-reflection miss and not a generic `Termios` field-collector failure. The
+exact nested-module reducer for `Crystal::System::FileDescriptor#system_echo`
+showed three coupled semantic issues instead: eager body inference of
+module-owned instance methods still ran before a concrete receiver existed;
+assignment targets were still being pre-inferred as standalone expressions by
+the iterative child walker; and the parser reused zero-arg
+`CallNode(MemberAccess)` wrappers both for write targets and RHS field reads,
+but only bare `MemberAccessNode`s had the struct-field fallback. The verified
+fix in `src/compiler/semantic/type_inference_engine.cr` is correspondingly
+three-part: defer eager body inference for module-owned instance methods until
+an including receiver exists, walk only receiver/index subexpressions for
+assignment targets instead of the full target node, and teach `infer_call(...)`
+to apply the same struct-field fallback to zero-arg
+`CallNode(MemberAccess)` wrappers that `infer_member_access(...)` already used.
+Focused regression
+`spec/semantic/type_inference_module_instance_receiver_spec.cr` is green, both
+rebuild gates for `src/crystal_v2.cr` and `/tmp/crystal_v2_semantic_stage3probe`
+are green, and the full safe stage3 probe moved from `semantic_diags=0
+resolution_diags=0 type_diags=394` to `semantic_diags=0 resolution_diags=0
+type_diags=290`. The exact real `Termios` reducer under `scripts/run_safe.sh`
+no longer reports `Method 'c_lflag' not found on Termios`; it now fails later
+and more honestly on `Operator '&' not defined for ULong and Int32` /
+`Operator '|' not defined for ULong and Int32`. Boundary: stage3 is still not
+green; the next live frontier is C integer alias arithmetic (`ULong`/`Int32`
+bitflag ops), `Cannot index type UInt8`, and later `Time::Location` /
+string-runtime families rather than more module-instance or setter-target
+plumbing. {F/G/R: 0.96/0.77/0.97} [verified]
+
 [LM-367|verified]: The next live stage3 blocker after [LM-366] was not another
 `&&/||` value-semantics miss. The exact `io/evented.cr` probe showed a
 pipeline split: semantic macro expansion had started to understand qualified

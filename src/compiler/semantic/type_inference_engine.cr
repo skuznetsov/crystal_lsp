@@ -612,7 +612,8 @@ module CrystalV2
               children << node.right
             end
           when Frontend::AssignNode
-            children << node.target; children << node.value
+            append_assignment_target_children(children, node.target)
+            children << node.value
           when Frontend::IndexNode
             children << node.object; node.indexes.each { |e| children << e }
           when Frontend::MemberAccessNode
@@ -731,6 +732,32 @@ module CrystalV2
           end
           @children_cache[idx] = children if idx >= 0 && idx < @children_cache.size
           children
+        end
+
+        private def append_assignment_target_children(children : Array(ExprId), target_id : ExprId) : Nil
+          target_node = @arena[target_id]
+
+          case target_node
+          when Frontend::MemberAccessNode
+            children << target_node.object
+          when Frontend::CallNode
+            callee_node = @arena[target_node.callee]
+            if callee_node.is_a?(Frontend::MemberAccessNode)
+              children << callee_node.object
+              target_node.args.each { |arg| children << arg }
+              if blk = target_node.block
+                children << blk
+              end
+              if named_args = target_node.named_args
+                named_args.each { |named_arg| children << named_arg.value }
+              end
+            else
+              children << target_id
+            end
+          when Frontend::IndexNode
+            children << target_node.object
+            target_node.indexes.each { |index| children << index }
+          end
         end
 
         private def clear_cached_type_tree(expr_id : ExprId, seen : Set(Int32)? = nil) : Nil
@@ -1594,6 +1621,14 @@ module CrystalV2
 
           defer_body_inference = generic_owner || method_is_generic || has_untyped_params
 
+          # Instance methods declared in modules don't have a concrete receiver
+          # during eager body walks. Inferring them against the module object
+          # seeds false diagnostics that disappear once the module is included
+          # into a real receiver type.
+          if method_symbol && module_owned_instance_method_requires_concrete_receiver?(method_symbol)
+            defer_body_inference = true
+          end
+
           # Phase 71: Process default parameter values
           if !defer_body_inference && (params = node.params)
             params.each do |param|
@@ -1628,6 +1663,11 @@ module CrystalV2
           @assignments = previous_assignments.not_nil!
           @current_method_is_class_method_stack.pop unless @current_method_is_class_method_stack.empty?
           @current_method_scope = previous_method_scope
+        end
+
+        private def module_owned_instance_method_requires_concrete_receiver?(method : MethodSymbol) : Bool
+          return false if method.is_class_method?
+          !!method.scope.owner_module
         end
 
         # Phase 5C: Process class bodies and track current class context
@@ -3507,13 +3547,14 @@ module CrystalV2
 
           target_id = node.target
           value_id = node.value
+          target_node = @arena[target_id]
+
+          pretype_assignment_target(target_id, target_node)
 
           # Infer value type
           value_type = infer_expression(value_id)
 
           # Get target identifier name
-          target_node = @arena[target_id]
-
           # Phase 5A: Check if target is instance variable
           case target_node
           when Frontend::InstanceVarNode
@@ -3541,6 +3582,27 @@ module CrystalV2
           # Assignments return the value type in Crystal
           # Type will be set by infer_expression
           value_type
+        end
+
+        private def pretype_assignment_target(target_id : ExprId, target_node : Frontend::Node) : Nil
+          case target_node
+          when Frontend::MemberAccessNode
+            pretype_struct_field_target(target_id, target_node.object, member_name_for(target_id, target_node))
+          when Frontend::CallNode
+            return unless target_node.args.size == 1
+
+            callee_node = @arena[target_node.callee]
+            return unless callee_node.is_a?(Frontend::MemberAccessNode)
+
+            pretype_struct_field_target(target_id, callee_node.object, member_name_for(target_node.callee, callee_node))
+          end
+        end
+
+        private def pretype_struct_field_target(target_id : ExprId, receiver_id : ExprId, field_name : String) : Nil
+          receiver_type = infer_expression(receiver_id)
+          if field_type = infer_struct_field_access_type(receiver_type, field_name)
+            @context.set_type(target_id, field_type)
+          end
         end
 
         # Phase 73: Multiple assignment (a, b = 1, 2)
@@ -4900,7 +4962,6 @@ module CrystalV2
           return nil unless instance_type
 
           class_symbol = instance_type.class_symbol
-          return nil unless class_symbol.is_struct?
 
           symbol = class_symbol.scope.lookup_local(field_name)
           return nil unless symbol.is_a?(VariableSymbol)
@@ -5347,6 +5408,11 @@ module CrystalV2
               infer_method_body_type(method, receiver_type, arg_types, node)
             end
           else
+            if arg_types.empty? && !has_block && !node.named_args
+              if field_type = infer_struct_field_access_type(receiver_type, method_name)
+                return field_type
+              end
+            end
             # Fallback heuristic for unknown collection receivers
             if {"map", "collect", "select", "reject", "filter", "to_a", "each", "each_with_index"}.includes?(method_name)
               return ArrayType.new(@context.nil_type)

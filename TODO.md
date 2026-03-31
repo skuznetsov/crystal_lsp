@@ -1,6 +1,40 @@
 # Crystal V2 Bootstrap — TODO (Updated 2026-03-31)
 
 ## Current Status
+- **Fresh semantic module-field-write checkpoint: module-owned instance methods now wait for a concrete receiver, assignment targets no longer pre-infer setter wrappers as standalone calls, and zero-arg `CallNode(MemberAccess)` wrappers now reuse the same struct-field fallback as bare member access (2026-03-31, current session)**:
+  - trustworthy setup:
+    - `src/compiler/semantic/type_inference_engine.cr` now defers eager body inference for module-owned instance methods until an including receiver is available, instead of inferring them against the module object itself
+    - the iterative child walker no longer pre-infers assignment targets as standalone expressions; for field writes it now walks only the receiver/index subexpressions and leaves the actual write target to `infer_assign(...)`
+    - `infer_assign(...)` now pretypes struct/lib-struct field write targets directly, and `infer_call(...)` now applies the same zero-arg struct-field fallback to `CallNode(MemberAccess)` wrappers that the parser reuses inside RHS expressions
+    - focused regression coverage lives in:
+      - `spec/semantic/type_inference_module_instance_receiver_spec.cr`
+  - decisive evidence:
+    - focused regression is green:
+      - `../crystal/bin/crystal spec spec/semantic/type_inference_module_instance_receiver_spec.cr --error-trace`
+    - rebuild gates are green:
+      - `../crystal/bin/crystal build src/crystal_v2.cr --no-codegen --error-trace`
+      - `../crystal/bin/crystal build src/crystal_v2.cr -o /tmp/crystal_v2_semantic_stage3probe --error-trace`
+    - the full semantic stage3 probe under the safe wrapper moves again:
+      - `env CRYSTAL_V2_SEMANTIC_COMPILE=1 scripts/run_safe.sh /tmp/crystal_v2_semantic_stage3probe 240 4096 src/crystal_v2.cr --stats --no-link -o /tmp/stage3_semantic_probe.out > /tmp/stage3_semantic_probe.log 2>&1`
+      - summary moved from:
+        - `semantic_diags=0`
+        - `resolution_diags=0`
+        - `type_diags=394`
+      - to:
+        - `semantic_diags=0`
+        - `resolution_diags=0`
+        - `type_diags=290`
+    - the exact no-prelude reducer for the real `Termios` corridor still reproduces, but it has moved:
+      - `env CRYSTAL_V2_SEMANTIC_COMPILE=1 scripts/run_safe.sh /tmp/crystal_v2_semantic_stage3probe 60 2048 /tmp/semantic_file_descriptor_nested_module_termios_probe.cr --no-prelude --stats --verbose --no-link -o /tmp/semantic_file_descriptor_nested_module_termios_probe.out`
+      - `Method 'c_lflag' not found on Termios` no longer appears
+      - the reducer now fails later on `Operator '&' not defined for ULong and Int32` / `Operator '|' not defined for ULong and Int32`
+  - practical boundary:
+    - stage3 with the new inferer is still **not** green
+    - the next honest frontier is no longer field lookup itself, but C integer alias arithmetic:
+      - `ULong` / `Int32` bitflag ops in the real `termios` corridor
+      - `Cannot index type UInt8`
+      - later `Time::Location` / string/runtime families
+    - that means the next move is not more module-instance or setter-target plumbing, but numeric alias normalization for real libc integer surfaces
 - **Fresh macro-reflection/skip-file checkpoint: compile-path macro conditions now evaluate `has_constant?`/`has_method?` across the real CLI prepass, and semantic shadow/prepass no longer analyze files that the compile path already skipped (2026-03-31, current session)**:
   - trustworthy setup:
     - `src/compiler/cli.cr` now has a bounded compile-path macro reflection evaluator shared by the raw `skip_file` scanner and the AST-based macro condition path
