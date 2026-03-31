@@ -85,6 +85,66 @@ describe Semantic::TypeInferenceEngine do
       engine.context.get_type(program.roots.last).to_s.should eq("Nil")
     end
 
+    it "matches enum symbol literals for methods with double splat metadata tails" do
+      units = [
+        {
+          path: "/stdlib/trace.cr",
+          source: <<-CRYSTAL,
+            module Crystal
+              module Tracing
+                enum Section
+                  Sched
+                end
+              end
+
+              def self.trace(section : Tracing::Section, operation : String, time : UInt64? = nil, **metadata) : Nil
+                nil
+              end
+            end
+
+            Crystal.trace :sched, "yield", fiber: nil
+          CRYSTAL
+        },
+      ]
+
+      program, analyzer, engine = infer_named_arg_types(units)
+
+      analyzer.semantic_diagnostics.should be_empty
+      analyzer.name_resolver_diagnostics.should be_empty
+      engine.diagnostics.should be_empty
+      engine.context.get_type(program.roots.last).to_s.should eq("Nil")
+    end
+
+    it "does not widen Symbol variables into enum parameters" do
+      units = [
+        {
+          path: "/stdlib/trace.cr",
+          source: <<-CRYSTAL,
+            module Crystal
+              module Tracing
+                enum Section
+                  Sched
+                end
+              end
+
+              def self.trace(section : Tracing::Section, operation : String, time : UInt64? = nil, **metadata) : Nil
+                nil
+              end
+            end
+
+            section = :sched
+            Crystal.trace section, "yield"
+          CRYSTAL
+        },
+      ]
+
+      _, analyzer, engine = infer_named_arg_types(units)
+
+      analyzer.semantic_diagnostics.should be_empty
+      analyzer.name_resolver_diagnostics.should be_empty
+      engine.diagnostics.select(&.level.error?).map(&.message).should contain("Method 'trace' not found on Crystal")
+    end
+
     it "matches module methods called with named arguments" do
       units = [
         {

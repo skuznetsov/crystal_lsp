@@ -1192,7 +1192,8 @@ module CrystalV2
             end
 
           return nil unless receiver_type
-          method = lookup_method(receiver_type, method_name, arg_types, has_block)
+          arg_expr_ids = call_node ? positional_call_arg_ids(call_node).map { |arg_id| arg_id.as(ExprId?) } : nil
+          method = lookup_method(receiver_type, method_name, arg_types, has_block, arg_expr_ids)
           return nil unless method
 
           infer_method_call_result(method, receiver_type, arg_types, call_node)
@@ -1241,7 +1242,8 @@ module CrystalV2
             method_has_block = method.params.any?(&.is_block)
             next false unless method_has_block == has_block
 
-            parameters_match?(method, arg_types, receiver_type)
+            arg_expr_ids = call_node ? positional_call_arg_ids(call_node).map { |arg_id| arg_id.as(ExprId?) } : nil
+            parameters_match?(method, arg_types, receiver_type, arg_expr_ids)
           end
 
           return nil if matches.empty?
@@ -5559,11 +5561,12 @@ module CrystalV2
           end
 
           named_arg_types = infer_named_argument_types(node)
+          named_arg_expr_ids = infer_named_argument_expr_ids(node)
 
           infer_pointer_linked_list_block(node, receiver_type, method_name)
 
           if named_arg_types && !named_arg_types.empty?
-            if result = infer_named_argument_method_call(receiver_type, method_name, arg_types, named_arg_types, has_block, node)
+            if result = infer_named_argument_method_call(receiver_type, method_name, arg_ids, arg_types, named_arg_types, named_arg_expr_ids || {} of String => ExprId, has_block, node)
               return result
             end
           end
@@ -5751,7 +5754,7 @@ module CrystalV2
             end
           end
 
-          if method = lookup_method(receiver_type, method_name, arg_types, has_block)
+          if method = lookup_method(receiver_type, method_name, arg_types, has_block, arg_ids.map { |arg_id| arg_id.as(ExprId?) })
             if ann = method.return_annotation
               resolve_method_annotation_type(ann, receiver_type, method.scope, class_method_context: method.is_class_method?)
             else
@@ -5847,25 +5850,41 @@ module CrystalV2
           types
         end
 
+        private def infer_named_argument_expr_ids(node : Frontend::CallNode) : Hash(String, ExprId)?
+          named_args = node.named_args
+          return nil unless named_args
+
+          expr_ids = {} of String => ExprId
+          named_args.each do |named_arg|
+            expr_ids[intern_name(named_arg.name)] = named_arg.value
+          end
+          expr_ids
+        end
+
         private def infer_named_argument_method_call(
           receiver_type : Type,
           method_name : String,
+          positional_arg_ids : Array(ExprId),
           positional_arg_types : Array(Type),
           named_arg_types : Hash(String, Type),
+          named_arg_expr_ids : Hash(String, ExprId),
           has_block : Bool,
           call_node : Frontend::CallNode
         ) : Type?
-          matches = [] of {MethodSymbol, Array(Type)}
+          matches = [] of {MethodSymbol, Array(Type), Array(ExprId?)}
 
           method_candidates_for(receiver_type, method_name).each do |method|
             method_has_block = method.params.any?(&.is_block)
             next unless method_has_block == has_block
 
-            ordered_arg_types = ordered_call_argument_types(method, positional_arg_types, named_arg_types)
-            next unless ordered_arg_types
-            next unless parameters_match?(method, ordered_arg_types, receiver_type)
+            ordered_arguments = ordered_call_arguments(method, positional_arg_ids, positional_arg_types, named_arg_types, named_arg_expr_ids)
+            next unless ordered_arguments
 
-            matches << {method, ordered_arg_types}
+            ordered_arg_types = ordered_arguments[0]
+            ordered_arg_expr_ids = ordered_arguments[1]
+            next unless parameters_match?(method, ordered_arg_types, receiver_type, ordered_arg_expr_ids)
+
+            matches << {method, ordered_arg_types, ordered_arg_expr_ids}
           end
 
           return nil if matches.empty?
@@ -5879,15 +5898,19 @@ module CrystalV2
           infer_method_call_result(selected[0], receiver_type, selected[1], call_node)
         end
 
-        private def ordered_call_argument_types(
+        private def ordered_call_arguments(
           method : MethodSymbol,
+          positional_arg_ids : Array(ExprId),
           positional_arg_types : Array(Type),
-          named_arg_types : Hash(String, Type)
-        ) : Array(Type)?
+          named_arg_types : Hash(String, Type),
+          named_arg_expr_ids : Hash(String, ExprId)
+        ) : Tuple(Array(Type), Array(ExprId?))?
           params = method.params.reject(&.is_block)
-          return nil if params.any?(&.is_double_splat)
+          has_double_splat = params.any?(&.is_double_splat)
+          params = params.reject(&.is_double_splat)
 
           ordered = [] of Type
+          ordered_expr_ids = [] of ExprId?
           used_named = Set(String).new
           positional_index = 0
 
@@ -5901,6 +5924,7 @@ module CrystalV2
               splat_count = remaining_positionals - suffix_positionals
               splat_count.times do
                 ordered << positional_arg_types[positional_index]
+                ordered_expr_ids << positional_arg_ids[positional_index]
                 positional_index += 1
               end
               next
@@ -5908,6 +5932,7 @@ module CrystalV2
 
             if positional_index < positional_arg_types.size
               ordered << positional_arg_types[positional_index]
+              ordered_expr_ids << positional_arg_ids[positional_index]
               positional_index += 1
               next
             end
@@ -5917,18 +5942,22 @@ module CrystalV2
 
             if arg_type = named_arg_types[param_name]?
               ordered << arg_type
+              ordered_expr_ids << named_arg_expr_ids[param_name]?
               used_named << param_name
             elsif default_value = param.default_value
               ordered << infer_expression(default_value)
+              ordered_expr_ids << nil
             else
               return nil
             end
           end
 
           return nil unless positional_index == positional_arg_types.size
-          return nil unless named_arg_types.each_key.all? { |name| used_named.includes?(name) }
+          unless has_double_splat
+            return nil unless named_arg_types.each_key.all? { |name| used_named.includes?(name) }
+          end
 
-          ordered
+          {ordered, ordered_expr_ids}
         end
 
         private def named_argument_lookup_name(param : Frontend::Parameter) : String?
@@ -6564,18 +6593,19 @@ module CrystalV2
         # 2. Filter by parameter count
         # 3. Filter by parameter types (if annotated)
         # 4. Return best match
-        private def lookup_method(receiver_type : Type, method_name : String, arg_types : Array(Type), has_block : Bool) : MethodSymbol?
+        private def lookup_method(receiver_type : Type, method_name : String, arg_types : Array(Type), has_block : Bool, arg_expr_ids : Array(ExprId?)? = nil) : MethodSymbol?
           debug_type_trace(method_name, "lookup_method start method=#{method_name} receiver=#{receiver_type} receiver_class=#{receiver_type.class.name} args=#{arg_types.map(&.to_s).join(",")}")
           debug_hook("infer.lookup.start", "method=#{method_name} receiver=#{receiver_type} args=#{arg_types.size}")
           lookup_key = MethodLookupKey.new(receiver_type, method_name, arg_types, has_block)
-          if @method_lookup_cache.has_key?(lookup_key)
+          cacheable = !literal_sensitive_call_arguments?(arg_expr_ids)
+          if cacheable && @method_lookup_cache.has_key?(lookup_key)
             return @method_lookup_cache[lookup_key]
           end
           candidates = method_candidates_for(receiver_type, method_name)
           debug_type_trace(method_name, "lookup_method candidates method=#{method_name} count=#{candidates.size} receiver=#{receiver_type}")
           if candidates.empty?
             debug_hook("infer.lookup.miss", "method=#{method_name} receiver=#{receiver_type} stage=candidates")
-            @method_lookup_cache[lookup_key] = nil
+            @method_lookup_cache[lookup_key] = nil if cacheable
             return nil
           end
 
@@ -6584,12 +6614,12 @@ module CrystalV2
           matching_count = candidates.select do |m|
             required = count_required_params(m.params)
             has_splat = m.params.any? { |p| p.is_splat || p.is_double_splat }
-            max = has_splat ? Int32::MAX : m.params.count { |p| !p.is_block }
+            max = has_splat ? Int32::MAX : m.params.count { |p| !p.is_block && !p.is_double_splat }
             actual_count >= required && actual_count <= max
           end
           if matching_count.empty?
             debug_hook("infer.lookup.miss", "method=#{method_name} receiver=#{receiver_type} stage=arity")
-            @method_lookup_cache[lookup_key] = nil
+            @method_lookup_cache[lookup_key] = nil if cacheable
             return nil
           end
 
@@ -6602,17 +6632,17 @@ module CrystalV2
 
           # Filter by parameter types (for typed parameters)
           matches = matching_count.select do |method|
-            parameters_match?(method, arg_types, receiver_type)
+            parameters_match?(method, arg_types, receiver_type, arg_expr_ids)
           end
 
           if matches.empty?
             debug_hook("infer.lookup.miss", "method=#{method_name} receiver=#{receiver_type} stage=types")
-            @method_lookup_cache[lookup_key] = nil
+            @method_lookup_cache[lookup_key] = nil if cacheable
             return nil
           end
           if matches.size == 1
             debug_hook("infer.lookup.hit", "method=#{method_name} receiver=#{receiver_type} selected=#{matches.first.name}")
-            @method_lookup_cache[lookup_key] = matches.first
+            @method_lookup_cache[lookup_key] = matches.first if cacheable
             return matches.first
           end
 
@@ -6622,8 +6652,17 @@ module CrystalV2
           # Ties are resolved by order of definition (first defined wins)
           selected = matches.max_by { |m| specificity_score(m, arg_types) }
           debug_hook("infer.lookup.hit", "method=#{method_name} receiver=#{receiver_type} selected=#{selected.name} overloads=#{matches.size}")
-          @method_lookup_cache[lookup_key] = selected
+          @method_lookup_cache[lookup_key] = selected if cacheable
           selected
+        end
+
+        private def literal_sensitive_call_arguments?(arg_expr_ids : Array(ExprId?)?) : Bool
+          return false unless arg_expr_ids
+
+          arg_expr_ids.any? do |arg_expr_id|
+            next false unless arg_expr_id
+            @arena[arg_expr_id].is_a?(Frontend::SymbolNode)
+          end
         end
 
         # Find all methods with given name on receiver type
@@ -7162,7 +7201,7 @@ module CrystalV2
 
         # Check if method parameters match argument types
         # Accounts for default parameter values
-        private def parameters_match?(method : MethodSymbol, arg_types : Array(Type), receiver_type : Type? = nil) : Bool
+        private def parameters_match?(method : MethodSymbol, arg_types : Array(Type), receiver_type : Type? = nil, arg_expr_ids : Array(ExprId?)? = nil) : Bool
           params = method.params.reject(&.is_block)
           required_count = count_required_params(params)
           method_type_params = method.type_parameters || [] of String
@@ -7210,7 +7249,8 @@ module CrystalV2
                 param_type = resolve_method_annotation_type(type_name, receiver_type, method.scope)
                 next if unresolved_method_type_parameter_type?(arg_type, method_type_params) ||
                         unresolved_method_type_parameter_type?(param_type, method_type_params)
-                return false unless parameter_type_matches?(arg_type, param_type, c_fun_compat)
+                arg_expr_id = arg_expr_ids.try(&.[i]?)
+                return false unless parameter_type_matches?(arg_type, param_type, c_fun_compat, arg_expr_id)
               end
 
               return true
@@ -7228,7 +7268,8 @@ module CrystalV2
               param_type = resolve_method_annotation_type(type_name, receiver_type, method.scope)
               next if unresolved_method_type_parameter_type?(arg_type, method_type_params) ||
                       unresolved_method_type_parameter_type?(param_type, method_type_params)
-              return false unless parameter_type_matches?(arg_type, param_type, c_fun_compat)
+              arg_expr_id = arg_expr_ids.try(&.[i]?)
+              return false unless parameter_type_matches?(arg_type, param_type, c_fun_compat, arg_expr_id)
             end
 
             true
@@ -7250,9 +7291,33 @@ module CrystalV2
           false
         end
 
-        private def parameter_type_matches?(actual : Type, expected : Type, c_fun_compat : Bool) : Bool
+        private def parameter_type_matches?(actual : Type, expected : Type, c_fun_compat : Bool, arg_expr_id : ExprId? = nil) : Bool
+          return true if literal_symbol_matches_expected_type?(arg_expr_id, expected)
           return type_matches?(actual, expected) unless c_fun_compat
           c_fun_type_matches?(actual, expected)
+        end
+
+        private def literal_symbol_matches_expected_type?(arg_expr_id : ExprId?, expected : Type) : Bool
+          return false unless arg_expr_id
+
+          symbol_node = @arena[arg_expr_id].as?(Frontend::SymbolNode)
+          return false unless symbol_node
+
+          case expected
+          when EnumType
+            enum_symbol_literal_matches?(symbol_node, expected)
+          when UnionType
+            expected.types.any? { |member| literal_symbol_matches_expected_type?(arg_expr_id, member) }
+          else
+            false
+          end
+        end
+
+        private def enum_symbol_literal_matches?(symbol_node : Frontend::SymbolNode, enum_type : EnumType) : Bool
+          literal_name = intern_name(symbol_node.name).lstrip(':')
+          enum_type.symbol.members.keys.any? do |member_name|
+            member_name.underscore == literal_name
+          end
         end
 
         private def c_fun_type_matches?(actual : Type, expected : Type) : Bool
@@ -8782,6 +8847,19 @@ module CrystalV2
             return proc_type
           end
 
+          if scoped_symbol = resolve_annotation_scoped_symbol(type_name, scope)
+            case scoped_symbol
+            when AliasSymbol
+              return resolve_annotation_type_in_scope(scoped_symbol.target, scope)
+            when ClassSymbol
+              return instance_type_for(scoped_symbol)
+            when EnumSymbol
+              return EnumType.new(scoped_symbol)
+            when ModuleSymbol
+              return module_type_for(scoped_symbol)
+            end
+          end
+
           if scoped_symbol = scope.lookup(type_name)
             if scoped_symbol.is_a?(VariableSymbol)
               if bound_type = @assignments[type_name]?
@@ -8865,6 +8943,21 @@ module CrystalV2
           end
 
           parse_type_name(type_name)
+        end
+
+        private def resolve_annotation_scoped_symbol(type_name : String, scope : SymbolTable) : Symbol?
+          return nil unless type_name.includes?("::")
+
+          segments = type_name.split("::")
+          table : SymbolTable? = scope
+          while table
+            if symbol = resolve_path_symbol_in_table(table, segments)
+              return symbol
+            end
+            table = table.parent
+          end
+
+          nil
         end
 
         private def resolve_annotation_union_type_in_scope(type_name : String, scope : SymbolTable?) : Type?

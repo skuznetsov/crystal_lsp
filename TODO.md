@@ -1,6 +1,39 @@
 # Crystal V2 Bootstrap — TODO (Updated 2026-03-31)
 
 ## Current Status
+- **Fresh semantic trace-enum checkpoint: relative scoped annotations now resolve in local module scope, enum symbol literals are matched call-site-sensitively, and named-arg reordering no longer rejects `**metadata` tails (2026-03-31, current session)**:
+  - trustworthy setup:
+    - `src/compiler/semantic/type_inference_engine.cr` now resolves scoped annotation names like `Tracing::Section` by walking parent symbol tables from the current method scope before falling back to global `parse_type_name(...)`
+    - the same file now carries `ExprId` provenance through semantic call matching where needed, so enum-typed parameters can accept symbol **literals** such as `:sched` without widening ordinary `Symbol` variables into enum arguments
+    - the same named-argument ordering path now preserves leftover keyword arguments for a trailing `**metadata` parameter instead of rejecting the call up front
+    - focused regression coverage now lives in `spec/semantic/type_inference_named_args_spec.cr`
+  - decisive evidence:
+    - focused regressions are green:
+      - `../crystal/bin/crystal spec spec/semantic/type_inference_named_args_spec.cr --error-trace`
+      - `../crystal/bin/crystal spec spec/semantic/type_inference_pthread_mutex_spec.cr --error-trace`
+    - rebuild gates are green:
+      - `../crystal/bin/crystal build src/crystal_v2.cr --no-codegen --error-trace`
+      - `../crystal/bin/crystal build src/crystal_v2.cr -o /tmp/crystal_v2_semantic_stage3probe --error-trace`
+    - the full semantic stage3 probe under the safe wrapper moves again:
+      - `env CRYSTAL_V2_SEMANTIC_COMPILE=1 scripts/run_safe.sh /tmp/crystal_v2_semantic_stage3probe 240 4096 src/crystal_v2.cr --stats --no-link -o /tmp/stage3_semantic_probe.out > /tmp/stage3_semantic_probe_after_trace_enum_scope.log 2>&1`
+      - branch-local summary moved from:
+        - `semantic_diags=0`
+        - `resolution_diags=0`
+        - `type_diags=323`
+      - to:
+        - `semantic_diags=0`
+        - `resolution_diags=0`
+        - `type_diags=306`
+    - removed/moved families from the live log:
+      - the old `Crystal.trace(...)` family is absent from the full probe
+      - the live quartet is narrower and later:
+        - `Crystal.print_buffered(...)`
+        - `LibGC.pthread_create(...)`
+        - `Errno.new(ret)`
+        - later `Fiber.new(...)` / file-close / Nil cascades
+  - practical boundary:
+    - stage3 with the new inferer is still **not** green
+    - the next honest frontier is no longer scoped enum / `trace` matching; it is richer runtime call context around `print_buffered`, `pthread_create`, and `Errno.new`
 - **Fresh semantic named-arg matcher checkpoint: external keyword names and splat-before-keyword tails now match in semantic call inference, but the full stage3 head blocker is elsewhere (2026-03-31, current session)**:
   - trustworthy setup:
     - `src/compiler/semantic/type_inference_engine.cr` now matches named arguments against `Parameter#external_name` when present (for signatures like `to io : IO`) instead of only the internal parameter name
