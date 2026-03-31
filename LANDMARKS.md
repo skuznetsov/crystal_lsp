@@ -3,6 +3,32 @@
 Updated: 2026-03-31
 Context: compiler/bootstrap/stage2-stability
 
+[LM-388|verified]: After [LM-387], the fresh live head blocker moved into
+`src/stdlib/crystal/compiler_rt/mul.cr` and `divmod128.cr`, starting with
+`Operator '>>' not defined for Int128 and Int32` and then cascading into
+`^ Int128, Nil`, `&- Nil, Nil`, and `to_u128!` on `Nil`. A pair of cheap local
+reducers (`module Probe` and even a top-level `fun __divti3(...)`) both stayed
+green, which falsified the simple theory that raw `Int128 >> Int32` support was
+globally missing. The decisive evidence came from a full safe probe with
+`DEBUG_TYPE_TRACE_NAMES='>>,^,&-,//,to_u128!'`: the trace showed
+`lookup_method candidates method=>> count=1 receiver=Int128` immediately
+followed by `^ receiver=Int128 args=Nil`, which ruled out missing symbols and
+isolated the failure to parameter matching for the builtin right-shift contract
+under the full stage3 graph. The verified fix in
+`src/compiler/semantic/type_inference_engine.cr` is intentionally narrow:
+integer builtin `>>` now accepts `Int | UInt` shift-count operands, matching
+the already-verified `<<` rule, while same-width arithmetic/bitwise operators
+remain unchanged. Focused regression
+`spec/semantic/type_inference_operator_method_body_spec.cr` is green; both
+rebuild gates for `src/crystal_v2.cr` and `/tmp/crystal_v2_semantic_stage3probe`
+are green; and the full safe stage3 probe moves from
+`semantic_diags=0 resolution_diags=0 type_diags=278` to
+`semantic_diags=0 resolution_diags=0 type_diags=247`. The live log no longer
+starts in `compiler_rt` `Int128`/`UInt128` shifts; the next head frontier is
+later runtime/stdlib surface (`FileDescriptor#print`, `LibC.getcwd`,
+`LibC.environ`, then `ryu_printf`) rather than another 128-bit shift cascade.
+{F/G/R: 0.97/0.84/0.98} [verified]
+
 [LM-387|verified]: After [LM-386], the live head blocker was the paired
 `Function 'new' not found` / `Operator '<<' not defined for Nil and Int32`
 corridor at `src/stdlib/int.cr:1642` and `:2590`. A broad first pivot that

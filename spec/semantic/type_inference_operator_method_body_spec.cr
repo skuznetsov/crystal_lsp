@@ -73,5 +73,30 @@ describe Semantic::TypeInferenceEngine do
       root_type = engine.context.get_type(program.roots.last)
       root_type.to_s.should eq("Tuple(UInt32, UInt64)")
     end
+
+    it "supports integer right shifts with Int32 counts during on-demand body inference" do
+      source = <<-CRYSTAL
+        module Probe
+          def self.shift128(value : Int128, amount : Int32)
+            value >> amount
+          end
+
+          def self.shiftu128(value : UInt128, amount : Int32)
+            value >> amount
+          end
+        end
+
+        {Probe.shift128(1_i128, 127), Probe.shiftu128(1_u128, 64)}
+      CRYSTAL
+
+      program, analyzer, engine = infer_operator_method_body_types(source)
+
+      analyzer.semantic_diagnostics.should be_empty
+      analyzer.name_resolver_diagnostics.should be_empty
+      engine.diagnostics.select(&.level.error?).should be_empty
+
+      root_type = engine.context.get_type(program.roots.last)
+      root_type.to_s.should eq("Tuple(Int128, UInt128)")
+    end
   end
 end

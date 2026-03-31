@@ -1,6 +1,43 @@
 # Crystal V2 Bootstrap — TODO (Updated 2026-03-31)
 
 ## Current Status
+- **Fresh semantic Int128 shift checkpoint: integer builtin `>>` now accepts integer-width shift counts under on-demand body inference, which clears the `compiler_rt` `Int128`/`UInt128` head blocker from the live stage3 graph (2026-03-31, current session)**:
+  - trustworthy setup:
+    - `src/compiler/semantic/type_inference_engine.cr` now treats integer builtin `>>` like the already-fixed `<<` path: the shift-count parameter is `Int | UInt` instead of forcing the receiver's exact width
+    - this is intentionally narrow: arithmetic/bitwise operators that semantically require same-width operands still keep their old contract
+    - focused regression coverage now lives in `spec/semantic/type_inference_operator_method_body_spec.cr`
+  - decisive evidence:
+    - focused regressions are green:
+      - `../crystal/bin/crystal spec spec/semantic/type_inference_operator_method_body_spec.cr --error-trace`
+    - rebuild gates are green:
+      - `../crystal/bin/crystal build src/crystal_v2.cr --no-codegen --error-trace`
+      - `../crystal/bin/crystal build src/crystal_v2.cr -o /tmp/crystal_v2_semantic_stage3probe --error-trace`
+    - the full semantic stage3 probe under the safe wrapper moves materially again:
+      - `env CRYSTAL_V2_SEMANTIC_COMPILE=1 scripts/run_safe.sh /tmp/crystal_v2_semantic_stage3probe 240 4096 src/crystal_v2.cr --stats --no-link -o /tmp/stage3_semantic_probe.out > /tmp/stage3_semantic_probe_after_i128_shr_fix.log 2>&1`
+      - branch-local summary moved from:
+        - `semantic_diags=0`
+        - `resolution_diags=0`
+        - `type_diags=278`
+      - to:
+        - `semantic_diags=0`
+        - `resolution_diags=0`
+        - `type_diags=247`
+      - removed/moved families from the live log:
+        - `Operator '>>' not defined for Int128 and Int32`
+        - the downstream `compiler_rt/mul.cr` and `compiler_rt/divmod128.cr` `Int128`/`UInt128` nil-cascade rooted in `a >> 127`
+    - the diagnostic trace that justified the fix is preserved in:
+      - `/tmp/stage3_semantic_probe_trace_i128_ops.log`
+      - key observation:
+        - `lookup_method candidates method=>> count=1 receiver=Int128`
+        - followed immediately by `^ receiver=Int128 args=Nil`
+        - which falsified "missing symbol" and isolated the failure to the shift-count contract under the full graph
+  - practical boundary:
+    - stage3 with the new inferer is still **not** green
+    - the next honest blockers are now later runtime/stdlib surfaces:
+      - `main.cr` / `FileDescriptor#print`
+      - `crystal/system/unix/dir.cr` / `LibC.getcwd`
+      - `crystal/system/unix/env.cr` / `LibC.environ`
+      - `float/printer/ryu_printf.cr`
 - **Fresh semantic struct-constant checkpoint: owner-scoped constant evaluation now keeps `Int128::MIN` / `UInt128::MIN`-style bodies in the defining struct context, without the broad false-positive flood from eager `.struct?` body inference (2026-03-31, current session)**:
   - trustworthy setup:
     - `src/compiler/semantic/type_inference_engine.cr` now treats receiverless calls in type-body constant evaluation as implicit class/module receivers whenever `@current_method_scope.nil?`

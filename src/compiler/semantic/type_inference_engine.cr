@@ -8050,8 +8050,21 @@ module CrystalV2
           if integer_primitive_name?(type_name)
             # Integer arithmetic and bitwise operators
             case method_name
-            when "+", "-", "*", "/", "//", "%", "&", "|", "^", ">>"
+            when "+", "-", "*", "/", "//", "%", "&", "|", "^"
               param = Frontend::Parameter.new(name: "other".to_slice, type_annotation: type_name.to_slice)
+              methods << MethodSymbol.new(
+                method_name,
+                dummy_node_id,
+                params: [param],
+                return_annotation: type_name,
+                scope: dummy_scope
+              )
+            when ">>"
+              # Shift counts commonly arrive as narrower integer widths
+              # (for example Int32 literals/locals) during body inference, so
+              # accepting any integer width here avoids spurious Nil cascades
+              # when primitive receivers are carried as instance-like types.
+              param = Frontend::Parameter.new(name: "other".to_slice, type_annotation: "Int | UInt".to_slice)
               methods << MethodSymbol.new(
                 method_name,
                 dummy_node_id,
