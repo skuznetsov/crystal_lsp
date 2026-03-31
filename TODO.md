@@ -1,6 +1,35 @@
 # Crystal V2 Bootstrap — TODO (Updated 2026-03-30)
 
 ## Current Status
+- **Fresh semantic ternary checkpoint: truthy ternary branches now inherit the same positive narrowings as `if`, which removes the live `IO#read_char` tuple-index blocker from stage3 (2026-03-30, current session)**:
+  - trustworthy setup:
+    - `src/compiler/semantic/type_inference_engine.cr` now routes narrowing-sensitive ternary nodes through recursive inference instead of the iterative union fast-path
+    - recursive `infer_ternary` now applies the same branch-local flow contracts already used by `if`:
+      - positive `is_a?` / truthy-nil / `responds_to?` narrowings on the true branch
+      - `compute_else_narrowing(...)` on the false branch
+    - focused regression coverage lives in `spec/semantic/type_inference_ternary_narrowing_spec.cr`
+  - decisive evidence:
+    - focused regressions are green:
+      - `../crystal/bin/crystal spec spec/semantic/type_inference_ternary_narrowing_spec.cr --error-trace`
+      - `../crystal/bin/crystal spec spec/semantic/type_inference_logical_rhs_narrowing_spec.cr --error-trace`
+    - rebuild gates are green:
+      - `../crystal/bin/crystal build src/crystal_v2.cr --no-codegen --error-trace`
+      - `../crystal/bin/crystal build src/crystal_v2.cr -o /tmp/crystal_v2_semantic_stage3probe --error-trace`
+    - the full semantic stage3 probe under the safe wrapper moves again:
+      - `env CRYSTAL_V2_SEMANTIC_COMPILE=1 scripts/run_safe.sh /tmp/crystal_v2_semantic_stage3probe 240 4096 src/crystal_v2.cr --stats --no-link -o /tmp/stage3_semantic_probe.out > /tmp/stage3_semantic_probe.log 2>&1`
+      - summary moved from:
+        - `semantic_diags=0`
+        - `resolution_diags=0`
+        - `type_diags=465`
+      - to:
+        - `semantic_diags=0`
+        - `resolution_diags=0`
+        - `type_diags=457`
+    - `Cannot index type Nil | Tuple(Char, Int32)` no longer appears in `/tmp/stage3_semantic_probe.log`
+  - practical boundary:
+    - stage3 with the new inferer is still **not** green
+    - the early `io.cr` frontier has moved again, now to `UInt32#to_s` / `UInt8#to_s` formatting calls and a later `Cannot index type UInt8` corridor
+    - the next honest move is builtin numeric/string formatting surface, not more tuple/ternary flow work
 - **Fresh semantic guard-clause checkpoint: terminating `unless` statements now preserve the continuing truthy path for the rest of the block, which removes the live `IO#read_char_with_bytesize` `to_u32` family from stage3 (2026-03-30, current session)**:
   - trustworthy setup:
     - `src/compiler/semantic/type_inference_engine.cr` now snapshots `@flow_narrowings` per block and lets later statements inherit guard-clause narrowings introduced by terminating `unless` nodes

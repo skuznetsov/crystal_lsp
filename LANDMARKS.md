@@ -3,6 +3,25 @@
 Updated: 2026-03-30
 Context: compiler/bootstrap/stage2-stability
 
+[LM-361|verified]: Truthy ternary branches now inherit the same positive flow
+narrowings as `if`, which removes the live `IO#read_char` tuple-index blocker
+and moves the full safe stage3 prepass from `type_diags=465` to
+`type_diags=457`. The verified fix in
+`src/compiler/semantic/type_inference_engine.cr` has two parts: narrowing-
+sensitive `TernaryNode`s now bypass the iterative union fast-path, and
+recursive `infer_ternary(...)` applies true-branch `is_a?` / truthy-nil /
+`responds_to?` narrowings plus false-branch `compute_else_narrowing(...)`
+before combining results. Focused regressions in
+`spec/semantic/type_inference_ternary_narrowing_spec.cr` and the neighboring
+logical guard pack are green, and both rebuild gates for `src/crystal_v2.cr`
+and `/tmp/crystal_v2_semantic_stage3probe` are green. The old
+`Cannot index type Nil | Tuple(Char, Int32)` family no longer appears in
+`/tmp/stage3_semantic_probe.log`. Boundary: stage3 is still not green; the
+early `io.cr` frontier now sits on numeric/string formatting (`UInt32#to_s`,
+`UInt8#to_s`) plus a later `Cannot index type UInt8` corridor, so the next
+blocker is builtin formatting/index surface rather than tuple/ternary flow.
+{F/G/R: 0.96/0.66/0.96} [verified]
+
 [LM-360|verified]: Terminating `unless` guard clauses now preserve the
 continuing truthy path for the rest of the current block, which removes the
 live `IO#read_char_with_bytesize` `to_u32` family and moves the full safe

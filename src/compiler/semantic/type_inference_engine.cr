@@ -852,10 +852,14 @@ module CrystalV2
             # Parenthesized expressions have the type of their inner expression
             infer_expression(node.expression)
           when Frontend::TernaryNode
-            # condition ? then : else - union of then and else branches
-            then_type = infer_expression(node.true_branch)
-            else_type = infer_expression(node.false_branch)
-            @context.union_of([then_type, else_type])
+            if truthy_condition_narrowings(node.condition).empty?
+              # condition ? then : else - union of then and else branches
+              then_type = infer_expression(node.true_branch)
+              else_type = infer_expression(node.false_branch)
+              @context.union_of([then_type, else_type])
+            else
+              nil
+            end
           when Frontend::RangeNode
             # begin..end or begin...end
             begin_type = infer_expression(node.begin_expr)
@@ -9034,10 +9038,52 @@ module CrystalV2
           true_id = node.true_branch
           false_id = node.false_branch
 
-          # Infer all three expressions
           condition_type = infer_expression(condition_id)
+
+          if known_condition = known_macro_condition_value(condition_id)
+            selected = known_condition ? true_id : false_id
+            return infer_expression(selected)
+          end
+
+          narrowing = extract_is_a_narrowing(condition_id)
+          responds_to_narrowing = extract_responds_to_narrowing(condition_id)
+          truthy_narrowings = narrowing.nil? ? extract_truthy_narrowings(condition_id) : [] of {String, Type}
+          simple_nil_narrowing = narrowing.nil? ? extract_nil_narrowing(condition_id, condition_type) : nil
+
+          if narrowing
+            @flow_narrowings[narrowing[0]] = narrowing[1]
+          else
+            truthy_narrowings.each do |var_name, narrowed_type|
+              @flow_narrowings[var_name] = narrowed_type
+            end
+          end
+          if responds_to_narrowing
+            @flow_narrowings[responds_to_narrowing[0]] = responds_to_narrowing[1]
+          end
+
           true_type = infer_expression(true_id)
+
+          if narrowing
+            @flow_narrowings.delete(narrowing[0])
+          else
+            truthy_narrowings.each do |var_name, _|
+              @flow_narrowings.delete(var_name)
+            end
+          end
+          if responds_to_narrowing
+            @flow_narrowings.delete(responds_to_narrowing[0])
+          end
+
+          else_narrowing = compute_else_narrowing(narrowing, simple_nil_narrowing, condition_type)
+          if else_narrowing
+            @flow_narrowings[else_narrowing[0]] = else_narrowing[1]
+          end
+
           false_type = infer_expression(false_id)
+
+          if else_narrowing
+            @flow_narrowings.delete(else_narrowing[0])
+          end
 
           # In Crystal, condition can be any type (truthy/falsy semantics)
           # We don't need to check condition_type
