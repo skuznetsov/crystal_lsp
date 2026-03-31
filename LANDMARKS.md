@@ -3,6 +3,33 @@
 Updated: 2026-03-31
 Context: compiler/bootstrap/stage2-stability
 
+[LM-386|verified]: After [LM-385], the new head blocker was `Unknown generic type ''`
+with no source file. An env-guarded trace on the empty-generic path showed the
+exact offending string: `"(Int, SiginfoT*, Void*)"` under `current_module=Thread`,
+which immediately falsified the "broken generic application" theory and pinned
+the problem to proc-type parsing. The real root cause was two-stage. First,
+`parse_proc_type_name(...)`, `resolve_proc_type_name_in_scope(...)`, and
+`method_block_signature(...)` were finding the top-level `->` but then handing
+the entire wrapped params blob `"(A, B, C)"` to generic-arg splitting instead
+of stripping the outer proc parameter list. Second, once that was fixed, alias
+targets normalized into canonical `Proc(T1, T2, ..., R)` strings, but
+`resolve_generic_type_application(...)` still treated `Proc` as an unknown
+generic base. The verified fix in
+`src/compiler/semantic/type_inference_engine.cr` is therefore narrow and
+complete: unwrap one outer proc-parameter `(...)` list before splitting params,
+and teach generic application resolution to round-trip canonical `Proc(...)`
+into `ProcType`. Focused regression
+`spec/semantic/type_inference_proc_type_annotation_spec.cr` is green together
+with neighboring `spec/semantic/type_inference_instance_var_refinement_spec.cr`;
+both rebuild gates for `src/crystal_v2.cr` and `/tmp/crystal_v2_semantic_stage3probe`
+are green; and the full safe stage3 probe moves from
+`semantic_diags=0 resolution_diags=0 type_diags=287` to
+`semantic_diags=0 resolution_diags=0 type_diags=286`. The live log no longer
+contains `Unknown generic type ''`. Boundary: stage3 is still not green; the
+next head frontier is now `Int128.new(1)` / `UInt128.new 0` in `src/stdlib/int.cr`
+and the downstream compiler_rt integer operator cascades rather than more proc
+annotation parsing failures. {F/G/R: 0.96/0.83/0.98} [verified]
+
 [LM-385|verified]: After [LM-384], the next head blocker was no longer about
 time spans or top-level overload dispatch. A no-prelude carrier distilled it to
 an annotated ivar case: `@timeout_event : Event?`, a zero-arg method assigning

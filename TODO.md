@@ -1,6 +1,39 @@
 # Crystal V2 Bootstrap — TODO (Updated 2026-03-31)
 
 ## Current Status
+- **Fresh semantic proc-type checkpoint: wrapped-parameter proc annotations now strip their outer `(...)` list before param splitting, and canonical `Proc(...)` alias targets round-trip through type parsing instead of falling back to the generic parser (2026-03-31, current session)**:
+  - trustworthy setup:
+    - `src/compiler/semantic/type_inference_engine.cr` now unwraps one outer parenthesized parameter list in all three proc-annotation corridors:
+      - `method_block_signature(...)`
+      - `parse_proc_type_name(...)`
+      - `resolve_proc_type_name_in_scope(...)`
+    - the same file now recognizes canonical `Proc(T1, T2, ..., R)` inside `resolve_generic_type_application(...)`, which is the normalized form reached by alias targets after proc parsing
+    - focused regression coverage now lives in `spec/semantic/type_inference_proc_type_annotation_spec.cr`
+  - decisive evidence:
+    - focused regressions are green:
+      - `../crystal/bin/crystal spec spec/semantic/type_inference_proc_type_annotation_spec.cr --error-trace`
+      - `../crystal/bin/crystal spec spec/semantic/type_inference_instance_var_refinement_spec.cr --error-trace`
+    - rebuild gates are green:
+      - `../crystal/bin/crystal build src/crystal_v2.cr --no-codegen --error-trace`
+      - `../crystal/bin/crystal build src/crystal_v2.cr -o /tmp/crystal_v2_semantic_stage3probe --error-trace`
+    - the full semantic stage3 probe under the safe wrapper moves again:
+      - `env CRYSTAL_V2_SEMANTIC_COMPILE=1 scripts/run_safe.sh /tmp/crystal_v2_semantic_stage3probe 240 4096 src/crystal_v2.cr --stats --no-link -o /tmp/stage3_semantic_probe.out > /tmp/stage3_semantic_probe_after_proc_type_fix.log 2>&1`
+      - branch-local summary moved from:
+        - `semantic_diags=0`
+        - `resolution_diags=0`
+        - `type_diags=287`
+      - to:
+        - `semantic_diags=0`
+        - `resolution_diags=0`
+        - `type_diags=286`
+      - removed/moved families from the live log:
+        - `Unknown generic type ''`
+  - practical boundary:
+    - stage3 with the new inferer is still **not** green
+    - the next honest blockers are now:
+      - `Int128.new(1)` / `UInt128.new 0` in `src/stdlib/int.cr`
+      - downstream compiler_rt integer operator cascades
+      - later `File.open(...)` / `Location.read_zoneinfo(...)` families
 - **Fresh semantic ivar-or-assign checkpoint: module-typed ivars now retain concrete zero-arg assignment carriers across methods, and parser-rewritten `||=` assignments no longer leak the pre-assignment upper bound into the stored ivar type (2026-03-31, current session)**:
   - trustworthy setup:
     - `src/compiler/semantic/type_inference_engine.cr` now seeds typed ivars from zero-arg methods of the current class that syntactically assign that ivar, instead of relying only on whichever method body happened to be inferred first

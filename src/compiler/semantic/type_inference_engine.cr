@@ -6754,7 +6754,7 @@ module CrystalV2
           arrow_index = find_top_level_arrow(type_string)
           return nil unless arrow_index
 
-          params_part = trim_slice(type_string, 0, arrow_index)
+          params_part = unwrap_proc_params_list(trim_slice(type_string, 0, arrow_index))
           return_part = trim_slice(type_string, arrow_index + 2, type_string.bytesize)
 
           param_types = [] of Type
@@ -9328,7 +9328,7 @@ module CrystalV2
           arrow_index = find_top_level_arrow(type_name)
           return nil unless arrow_index
 
-          params_part = trim_slice(type_name, 0, arrow_index)
+          params_part = unwrap_proc_params_list(trim_slice(type_name, 0, arrow_index))
           return_part = trim_slice(type_name, arrow_index + 2, type_name.bytesize)
 
           param_types = [] of Type
@@ -9346,7 +9346,7 @@ module CrystalV2
           arrow_index = find_top_level_arrow(type_name)
           return nil unless arrow_index
 
-          params_part = trim_slice(type_name, 0, arrow_index)
+          params_part = unwrap_proc_params_list(trim_slice(type_name, 0, arrow_index))
           return_part = trim_slice(type_name, arrow_index + 2, type_name.bytesize)
 
           param_types = [] of Type
@@ -9378,6 +9378,28 @@ module CrystalV2
             i += 1
           end
           nil
+        end
+
+        private def unwrap_proc_params_list(params_part : String) : String
+          return params_part unless params_part.starts_with?('(') && params_part.ends_with?(')')
+
+          depth = 0
+          last_index = params_part.bytesize - 1
+          i = 0
+          while i < params_part.bytesize
+            case params_part.byte_at(i)
+            when 40_u8
+              depth += 1
+            when 41_u8
+              depth -= 1 if depth > 0
+              return params_part unless depth >= 0
+              return params_part if depth == 0 && i < last_index
+            end
+            i += 1
+          end
+
+          return params_part unless depth == 0
+          trim_slice(params_part, 1, last_index)
         end
 
         private def receiver_type_parameter_context(receiver_type : Type?) : {Array(Type), Array(String)}?
@@ -9547,6 +9569,12 @@ module CrystalV2
             ArrayType.new(resolved_args.first? || @context.nil_type)
           when "Tuple"
             TupleType.new(resolved_args)
+          when "Proc"
+            if resolved_args.empty?
+              ProcType.new([] of Type, unknown_type)
+            else
+              ProcType.new(resolved_args[0...-1], resolved_args.last)
+            end
           when "Hash"
             HashType.new(resolved_args[0]? || @context.nil_type, resolved_args[1]? || @context.nil_type)
           else
