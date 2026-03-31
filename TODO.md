@@ -1,6 +1,35 @@
 # Crystal V2 Bootstrap — TODO (Updated 2026-03-31)
 
 ## Current Status
+- **Fresh semantic libc-integer-alias checkpoint: numeric fallback now treats concrete C integer aliases as numeric operands, and the exact `termios` carrier is green end-to-end (2026-03-31, current session)**:
+  - trustworthy setup:
+    - `src/compiler/semantic/type_inference_engine.cr` now canonicalizes concrete libc-style numeric aliases (`Long`, `ULong`, `LongLong`, `ULongLong`, `Short`, `UShort`, etc.) when deciding whether a primitive is numeric and when computing numeric-promotion widths
+    - the same binary-operator fallback now accepts unions whose members are all numeric-like primitives, instead of requiring both operands to be single primitive numerics
+    - focused regression coverage in `spec/semantic/type_inference_module_instance_receiver_spec.cr` now includes:
+      - the original module-owned instance receiver/write-target corridor
+      - libc alias-backed bitflag arithmetic on struct fields
+      - libc alias arithmetic against a numeric union (`LibC::ULong + (UInt32 | UInt64)`)
+  - decisive evidence:
+    - focused regressions are green:
+      - `../crystal/bin/crystal spec spec/semantic/type_inference_module_instance_receiver_spec.cr --error-trace`
+    - rebuild gates are green:
+      - `../crystal/bin/crystal build src/crystal_v2.cr --no-codegen --error-trace`
+      - `../crystal/bin/crystal build src/crystal_v2.cr -o /tmp/crystal_v2_semantic_stage3probe --error-trace`
+    - the exact real `termios` carrier is now green under the safe wrapper:
+      - `env CRYSTAL_V2_SEMANTIC_COMPILE=1 scripts/run_safe.sh /tmp/crystal_v2_semantic_stage3probe 60 2048 /tmp/semantic_file_descriptor_nested_module_termios_probe.cr --no-prelude --stats --verbose --no-link -o /tmp/semantic_file_descriptor_nested_module_termios_probe.out`
+      - summary: `semantic_diags=0 resolution_diags=0 type_diags=0`
+  - practical boundary:
+    - full stage3 with the new inferer is still **not** green and did **not** move on this step:
+      - `env CRYSTAL_V2_SEMANTIC_COMPILE=1 scripts/run_safe.sh /tmp/crystal_v2_semantic_stage3probe 240 4096 src/crystal_v2.cr --stats --no-link -o /tmp/stage3_semantic_probe.out > /tmp/stage3_semantic_probe.log 2>&1`
+      - stayed at:
+        - `semantic_diags=0`
+        - `resolution_diags=0`
+        - `type_diags=288`
+    - that means the exact `termios` falsifier is no longer representative of the top full-graph blocker
+    - the next honest frontier is now:
+      - `Cannot index type UInt8`
+      - remaining `ULong` + numeric-union arithmetic elsewhere in the full stdlib graph
+      - `Time::Location.load_localtime` / later runtime/string families
 - **Fresh semantic module-field-write checkpoint: module-owned instance methods now wait for a concrete receiver, assignment targets no longer pre-infer setter wrappers as standalone calls, and zero-arg `CallNode(MemberAccess)` wrappers now reuse the same struct-field fallback as bare member access (2026-03-31, current session)**:
   - trustworthy setup:
     - `src/compiler/semantic/type_inference_engine.cr` now defers eager body inference for module-owned instance methods until an including receiver is available, instead of inferring them against the module object itself

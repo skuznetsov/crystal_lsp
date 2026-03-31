@@ -3,6 +3,30 @@
 Updated: 2026-03-31
 Context: compiler/bootstrap/stage2-stability
 
+[LM-369|verified]: The next exact `termios` blocker after [LM-368] was no
+longer field lookup or module-instance receiver timing. The real no-prelude
+carrier showed that once `c_lflag` field access survived, the remaining exact
+failures were concrete libc alias arithmetic (`ULong & Int32`, `ULong | Int32`)
+rather than another struct/write-target miss. The verified fix in
+`src/compiler/semantic/type_inference_engine.cr` is bounded: concrete libc-like
+aliases (`Long`, `ULong`, `LongLong`, `ULongLong`, `Short`, `UShort`, etc.) now
+canonicalize through the numeric fallback when determining numeric-ness and
+promotion widths, and binary fallback promotion now also accepts unions whose
+members are all numeric-like primitives. Focused regression
+`spec/semantic/type_inference_module_instance_receiver_spec.cr` is green with
+three examples, including a direct `LibC::ULong + (UInt32 | UInt64)` carrier;
+both rebuild gates for `src/crystal_v2.cr` and
+`/tmp/crystal_v2_semantic_stage3probe` are green; and the exact real
+`/tmp/semantic_file_descriptor_nested_module_termios_probe.cr` oracle is now
+fully green under `scripts/run_safe.sh` with `semantic_diags=0
+resolution_diags=0 type_diags=0`. Boundary/refutation: the full safe stage3
+probe does **not** move and remains at `semantic_diags=0 resolution_diags=0
+type_diags=288`, so this exact `termios` carrier is no longer representative of
+the main full-graph blocker. The next live frontier is `Cannot index type
+UInt8`, the remaining broader `ULong` + numeric-union arithmetic elsewhere in
+the stdlib graph, and later `Time::Location` / runtime-string families rather
+than the exact `termios` reducer itself. {F/G/R: 0.95/0.63/0.97} [verified]
+
 [LM-368|verified]: The next live stage3 blocker after [LM-367] was not another
 macro-reflection miss and not a generic `Termios` field-collector failure. The
 exact nested-module reducer for `Crystal::System::FileDescriptor#system_echo`

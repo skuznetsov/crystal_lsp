@@ -2360,9 +2360,9 @@ module CrystalV2
                             end
                             # Fallback: numeric promotion for untyped numeric operators
                             # Exclude << (array push operator) as it has specific semantics
-                          elsif op != "<<" && numeric_type?(left_type) && numeric_type?(right_type)
+                          elsif op != "<<" && (promoted = promote_numeric_operands(left_type, right_type))
                             debug("  fallback: numeric promotion")
-                            promote_numeric_types(left_type, right_type)
+                            promoted
                           else
                             # No method found and not numeric types
                             debug("  NO method found, emitting error")
@@ -2510,8 +2510,10 @@ module CrystalV2
         end
 
         private def numeric_type?(type : Type) : Bool
-          type.is_a?(PrimitiveType) &&
-            (integer_primitive_name?(type.name) || type.name == "Float32" || type.name == "Float64")
+          return false unless type.is_a?(PrimitiveType)
+
+          canonical_name = canonical_numeric_primitive_name(type.name)
+          integer_primitive_name?(canonical_name) || canonical_name == "Float32" || canonical_name == "Float64"
         end
 
         private def integer_primitive_name?(name : String) : Bool
@@ -2521,6 +2523,24 @@ module CrystalV2
             true
           else
             false
+          end
+        end
+
+        private def canonical_numeric_primitive_name(name : String) : String
+          case name
+          when "Int"        then "Int32"
+          when "UInt"       then "UInt32"
+          when "Short"      then "Int16"
+          when "UShort"     then "UInt16"
+          when "SChar"      then "Int8"
+          when "Long"       then sizeof(Void*) == 4 ? "Int32" : "Int64"
+          when "ULong"      then sizeof(Void*) == 4 ? "UInt32" : "UInt64"
+          when "LongLong"   then "Int64"
+          when "ULongLong"  then "UInt64"
+          when "Float"      then "Float32"
+          when "Double"     then "Float64"
+          else
+            name
           end
         end
 
@@ -2672,14 +2692,46 @@ module CrystalV2
           end
         end
 
+        private def promote_numeric_operands(left : Type, right : Type) : Type?
+          left_members = numeric_operand_members(left)
+          right_members = numeric_operand_members(right)
+          return nil unless left_members && right_members
+
+          promoted = Array(Type).new(left_members.size * right_members.size)
+          left_members.each do |left_member|
+            right_members.each do |right_member|
+              promoted << promote_numeric_types(left_member, right_member)
+            end
+          end
+
+          union_of(promoted)
+        end
+
+        private def numeric_operand_members(type : Type) : Array(Type)?
+          case type
+          when UnionType
+            return nil unless type.types.all? { |member| numeric_type?(member) }
+            type.types
+          else
+            return [type] of Type if numeric_type?(type)
+          end
+
+          nil
+        end
+
         # Get numeric type width for promotion
         # I32 = 32, I64 = 64, F64 = 128 (floats wider than ints)
         private def numeric_type_width(type_name : String) : Int32
-          case type_name
-          when "Int32"   then 32
-          when "Int64"   then 64
-          when "Float64" then 128 # Floats wider than any integer
-          else                0
+          case canonical_numeric_primitive_name(type_name)
+          when "Int8", "UInt8"      then 8
+          when "Int16", "UInt16"    then 16
+          when "Int32", "UInt32"    then 32
+          when "Int64", "UInt64"    then 64
+          when "Int128", "UInt128"  then 128
+          when "Float32"             then 160
+          when "Float64"             then 192
+          else
+            0
           end
         end
 
