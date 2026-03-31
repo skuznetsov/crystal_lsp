@@ -603,7 +603,14 @@ module CrystalV2
             op = Frontend.node_operator_string(node) || ""
             children << node.operand unless op == "->"
           when Frontend::BinaryNode
-            children << node.left; children << node.right
+            op = Frontend.node_operator_string(node) || ""
+            children << node.left
+            # Preserve short-circuit semantics for recursive inference.
+            # Pre-inferencing the RHS here caches it before infer_binary can
+            # apply flow narrowings from the LHS.
+            unless {"&&", "||"}.includes?(op)
+              children << node.right
+            end
           when Frontend::AssignNode
             children << node.target; children << node.value
           when Frontend::IndexNode
@@ -767,15 +774,21 @@ module CrystalV2
             when "==", "!=", "<", ">", "<=", ">="
               @context.bool_type
             when "&&"
-              if control_flow_terminator?(node.right)
-                left_type = infer_expression(node.left)
-                if falsy = extract_falsy_component(left_type)
-                  falsy
+              if truthy_condition_narrowings(node.left).empty?
+                if control_flow_terminator?(node.right)
+                  left_type = infer_expression(node.left)
+                  if falsy = extract_falsy_component(left_type)
+                    falsy
+                  else
+                    infer_expression(node.right)
+                  end
                 else
-                  infer_expression(node.right)
+                  @context.bool_type
                 end
               else
-                @context.bool_type
+                # Narrowing-sensitive && expressions must go through recursive
+                # inference so RHS sees the temporary flow facts from LHS.
+                nil
               end
             when "||"
               if control_flow_terminator?(node.right)
@@ -6661,6 +6674,23 @@ module CrystalV2
           end
         end
 
+        private def integer_cast_target(method_name : String) : String?
+          case method_name
+          when "to_i8"    then "Int8"
+          when "to_i16"   then "Int16"
+          when "to_i32"   then "Int32"
+          when "to_i64"   then "Int64"
+          when "to_i128"  then "Int128"
+          when "to_u8"    then "UInt8"
+          when "to_u16"   then "UInt16"
+          when "to_u32"   then "UInt32"
+          when "to_u64"   then "UInt64"
+          when "to_u128"  then "UInt128"
+          else
+            nil
+          end
+        end
+
         # Calculate specificity score for a method match
         #
         # Higher score = more specific match
@@ -6837,7 +6867,7 @@ module CrystalV2
                 scope: dummy_scope
               )
             else
-              if cast_target = integer_bang_cast_target(method_name)
+              if cast_target = integer_bang_cast_target(method_name) || integer_cast_target(method_name)
                 methods << MethodSymbol.new(
                   method_name,
                   dummy_node_id,
@@ -7158,6 +7188,15 @@ module CrystalV2
               dummy_node_id,
               params: [index_param, value_param],
               return_annotation: element_type_name,
+              scope: dummy_scope
+            )
+          when "[]?"
+            param = Frontend::Parameter.new(name: "index".to_slice, type_annotation: "Int32".to_slice)
+            methods << MethodSymbol.new(
+              method_name,
+              dummy_node_id,
+              params: [param],
+              return_annotation: "#{element_type_name} | Nil",
               scope: dummy_scope
             )
           when "first", "last"

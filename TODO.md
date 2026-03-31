@@ -1,6 +1,37 @@
 # Crystal V2 Bootstrap — TODO (Updated 2026-03-30)
 
 ## Current Status
+- **Fresh semantic indexable-flow checkpoint: slice-like `[]?` plus narrowing-sensitive `&&` inference now close the live `IO#peek_or_read_utf8` query lookup family, and full stage3 moves again under the safe wrapper (2026-03-30, current session)**:
+  - trustworthy setup:
+    - `src/compiler/semantic/type_inference_engine.cr` now exposes `[]?` on array/slice-like builtin receivers and recognizes non-bang integer casts such as `to_u32`
+    - iterative child prewalk no longer pre-infers the RHS of `&&` / `||`, so recursive logical inference keeps short-circuit semantics instead of caching an unnarrowed RHS too early
+    - `compute_node_type_no_recurse` now defers only narrowing-sensitive `&&` nodes to recursive inference; plain boolean `&&` and existing `||` fast paths stay intact
+    - focused regression coverage in `spec/semantic/type_inference_logical_rhs_narrowing_spec.cr` now locks:
+      - `peek[index]?` under `peek && ...`
+      - `[]?` on slice-like aliases
+      - the exact untyped `Reader#peek_or_read_utf8` call chain shape
+  - decisive evidence:
+    - focused regressions are green:
+      - `../crystal/bin/crystal spec spec/semantic/type_inference_logical_rhs_narrowing_spec.cr --error-trace`
+      - `../crystal/bin/crystal spec spec/semantic/type_inference_responds_to_narrowing_spec.cr --error-trace`
+    - rebuild gates are green:
+      - `../crystal/bin/crystal build src/crystal_v2.cr --no-codegen --error-trace`
+      - `../crystal/bin/crystal build src/crystal_v2.cr -o /tmp/crystal_v2_semantic_stage3probe --error-trace`
+    - the full semantic stage3 probe under the safe wrapper moves again:
+      - `env CRYSTAL_V2_SEMANTIC_COMPILE=1 scripts/run_safe.sh /tmp/crystal_v2_semantic_stage3probe 240 4096 src/crystal_v2.cr --stats --no-link -o /tmp/stage3_semantic_probe.out > /tmp/stage3_semantic_probe.log 2>&1`
+      - summary moved from:
+        - `semantic_diags=0`
+        - `resolution_diags=0`
+        - `type_diags=481`
+      - to:
+        - `semantic_diags=0`
+        - `resolution_diags=0`
+        - `type_diags=477`
+    - `Method '[]?' not found on Nil | Array(UInt8)` no longer appears in `/tmp/stage3_semantic_probe.log`
+  - practical boundary:
+    - stage3 with the new inferer is still **not** green
+    - the same live `io.cr` corridor now stops one step later at `Method 'to_u32' not found on Nil | UInt8`
+    - the next honest move is not more blanket short-circuit deferral, but the remaining nilable-byte/value corridor after the query lookup succeeds
 - **Fresh semantic flow-typing checkpoint: RHS of `&&` now inherits the same positive branch narrowings as the enclosing truthy condition, but the live stage3 `io.cr` corridor is still blocked by missing `[]?` surface rather than short-circuit scope alone (2026-03-30, current session)**:
   - trustworthy setup:
     - `src/compiler/semantic/type_inference_engine.cr` now evaluates the RHS of `&&` under temporary truthy-condition narrowings derived from the left side

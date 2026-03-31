@@ -3,6 +3,27 @@
 Updated: 2026-03-30
 Context: compiler/bootstrap/stage2-stability
 
+[LM-359|verified]: The live `IO#peek_or_read_utf8` query-lookup blocker is now
+closed by a bounded semantic fix, and the full safe stage3 prepass moves from
+`type_diags=481` to `type_diags=477`. The verified change in
+`src/compiler/semantic/type_inference_engine.cr` has three coupled parts:
+array/slice-like builtin receivers now expose `[]?`, primitive integers now
+recognize non-bang casts such as `to_u32`, and the iterative walker no longer
+pre-infers the RHS of `&&` / `||` before recursive logical inference can apply
+flow facts. To avoid the regression from blanket logical deferral, the
+fast-path now falls back only for narrowing-sensitive `&&` nodes while keeping
+plain boolean `&&` and existing `||` shortcuts. Focused regressions in
+`spec/semantic/type_inference_logical_rhs_narrowing_spec.cr` are green,
+including the exact untyped `Reader#peek_or_read_utf8` call chain plus
+slice-like `[]?`, the nearby `responds_to?` regression remains green, and both
+rebuild gates for `src/crystal_v2.cr` and `/tmp/crystal_v2_semantic_stage3probe`
+are green. The old `Method '[]?' not found on Nil | Array(UInt8)` family no
+longer appears in `/tmp/stage3_semantic_probe.log`. Boundary: stage3 is still
+not green; the same `io.cr` family now fails one step later at
+`Method 'to_u32' not found on Nil | UInt8`, so the next blocker is the
+remaining nilable-byte/value corridor after query lookup, not `[]?` surface or
+blanket short-circuit recursion. {F/G/R: 0.96/0.63/0.96} [verified]
+
 [LM-358|verified]: RHS evaluation for `&&` now inherits the same positive flow
 narrowings as the enclosing truthy branch. The verified fix in
 `src/compiler/semantic/type_inference_engine.cr` snapshots/restores temporary
