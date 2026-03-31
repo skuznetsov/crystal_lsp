@@ -2226,12 +2226,17 @@ module CrystalV2
           # Binary node has left, right, operator fields
           left_id = node.left
           right_id = node.right
+          op = String.new(node.operator)
 
           left_type = infer_expression(left_id)
-          right_type = infer_expression(right_id)
-
-          # Get operator text
-          op = String.new(node.operator)
+          right_type =
+            if op == "&&"
+              infer_expression_with_truthy_condition_narrowings(left_id) do
+                infer_expression(right_id)
+              end
+            else
+              infer_expression(right_id)
+            end
 
           debug("infer_binary: op=#{op}, left_type=#{left_type}, right_type=#{right_type}")
 
@@ -2943,6 +2948,55 @@ module CrystalV2
           seen = Set(String).new
           collect_truthy_narrowings(condition_id, result, seen)
           result
+        end
+
+        private def truthy_condition_narrowings(condition_id : ExprId) : Array({String, Type})
+          result = [] of {String, Type}
+
+          if narrowing = extract_is_a_narrowing(condition_id)
+            result << narrowing
+          else
+            result.concat(extract_truthy_narrowings(condition_id))
+          end
+
+          if responds_to_narrowing = extract_responds_to_narrowing(condition_id)
+            result << responds_to_narrowing
+          end
+
+          result
+        end
+
+        private def infer_expression_with_truthy_condition_narrowings(condition_id : ExprId, & : -> Type) : Type
+          narrowings = truthy_condition_narrowings(condition_id)
+          return yield if narrowings.empty?
+
+          with_temporary_flow_narrowings(narrowings) do
+            yield
+          end
+        end
+
+        private def with_temporary_flow_narrowings(narrowings : Array({String, Type}), & : -> Type) : Type
+          previous = {} of String => {Bool, Type?}
+
+          begin
+            narrowings.each do |var_name, narrowed_type|
+              unless previous.has_key?(var_name)
+                previous[var_name] = {@flow_narrowings.has_key?(var_name), @flow_narrowings[var_name]?}
+              end
+
+              @flow_narrowings[var_name] = narrowed_type
+            end
+
+            yield
+        ensure
+          previous.each do |var_name, (had_previous, previous_type)|
+            if had_previous
+              @flow_narrowings[var_name] = previous_type.not_nil!
+            else
+              @flow_narrowings.delete(var_name)
+            end
+          end
+          end
         end
 
         private def collect_truthy_narrowings(

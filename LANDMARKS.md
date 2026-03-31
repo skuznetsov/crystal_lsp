@@ -3,6 +3,22 @@
 Updated: 2026-03-30
 Context: compiler/bootstrap/stage2-stability
 
+[LM-358|verified]: RHS evaluation for `&&` now inherits the same positive flow
+narrowings as the enclosing truthy branch. The verified fix in
+`src/compiler/semantic/type_inference_engine.cr` snapshots/restores temporary
+`@flow_narrowings` and applies the existing `is_a?`, truthy nil, and
+`responds_to?` narrowings while inferring the RHS of `&&`. Focused regression
+`spec/semantic/type_inference_logical_rhs_narrowing_spec.cr` is green, the
+nearby `responds_to?` regression stays green, and both rebuild gates for
+`src/crystal_v2.cr` and `/tmp/crystal_v2_semantic_stage3probe` are green.
+Boundary/refutation: the full semantic stage3 probe under `scripts/run_safe.sh`
+does **not** move and remains at `semantic_diags=0 resolution_diags=0
+type_diags=481`. The live `src/stdlib/io.cr` corridor still reports
+`Method '[]?' not found on Nil | Array(UInt8)` plus downstream
+`Method 'to_u32' not found on Nil | UInt8`, so the next real blocker is the
+missing `[]?`/indexable builtin surface in that shape, not short-circuit flow
+scope alone. {F/G/R: 0.95/0.42/0.96} [verified]
+
 [LM-357|verified]: Top-level union parsing inside generic annotations is now
 depth-aware, which closes the live `Enumerable(Path | String)#each` family in
 `src/stdlib/file_utils.cr`. The root cause was not module-method lookup itself:

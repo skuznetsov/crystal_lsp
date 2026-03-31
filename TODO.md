@@ -1,6 +1,32 @@
 # Crystal V2 Bootstrap — TODO (Updated 2026-03-30)
 
 ## Current Status
+- **Fresh semantic flow-typing checkpoint: RHS of `&&` now inherits the same positive branch narrowings as the enclosing truthy condition, but the live stage3 `io.cr` corridor is still blocked by missing `[]?` surface rather than short-circuit scope alone (2026-03-30, current session)**:
+  - trustworthy setup:
+    - `src/compiler/semantic/type_inference_engine.cr` now evaluates the RHS of `&&` under temporary truthy-condition narrowings derived from the left side
+    - the helper reuses the same existing narrowing sources already used by `if` then-branches:
+      - `is_a?`
+      - truthy nil narrowing on identifiers/assignments
+      - `responds_to?`
+    - the temporary narrowings are snapshot/restored around the RHS walk, so nested/outer `@flow_narrowings` are preserved instead of overwritten
+    - focused regression coverage lives in `spec/semantic/type_inference_logical_rhs_narrowing_spec.cr`
+  - decisive evidence:
+    - focused regressions are green:
+      - `../crystal/bin/crystal spec spec/semantic/type_inference_logical_rhs_narrowing_spec.cr --error-trace`
+    - nearby `responds_to?` flow regression remains green:
+      - `../crystal/bin/crystal spec spec/semantic/type_inference_responds_to_narrowing_spec.cr --error-trace`
+    - rebuild gates are green:
+      - `../crystal/bin/crystal build src/crystal_v2.cr --no-codegen --error-trace`
+      - `../crystal/bin/crystal build src/crystal_v2.cr -o /tmp/crystal_v2_semantic_stage3probe --error-trace`
+  - practical boundary:
+    - the full semantic stage3 probe under the safe wrapper is unchanged:
+      - `env CRYSTAL_V2_SEMANTIC_COMPILE=1 scripts/run_safe.sh /tmp/crystal_v2_semantic_stage3probe 180 4096 src/crystal_v2.cr --stats --no-link -o /tmp/stage3_semantic_probe.out > /tmp/stage3_semantic_probe.log 2>&1`
+      - summary stays at:
+        - `semantic_diags=0`
+        - `resolution_diags=0`
+        - `type_diags=481`
+    - the exact `&&` flow-scoping contract is now covered, but the live `IO#peek_or_read_utf8` blocker is still held by `Method '[]?' not found on Nil | Array(UInt8)` / `Method 'to_u32' not found on Nil | UInt8`
+    - that means the next honest stage3 move is not broader short-circuit flow typing again, but missing `[]?` / indexable builtin surface for the real `io.cr` shape
 - **Fresh semantic prepass checkpoint: top-level union splitting inside generic annotations is now depth-aware, which removes the `Enumerable(Path | String)#each` family from live stage3 (2026-03-30, current session)**:
   - trustworthy setup:
     - `src/compiler/semantic/type_inference_engine.cr` now routes top-level union splitting through one depth-aware helper that ignores `|` separators nested inside `()`, `{}`, and `[]`
