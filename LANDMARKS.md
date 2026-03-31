@@ -3,6 +3,38 @@
 Updated: 2026-03-30
 Context: compiler/bootstrap/stage2-stability
 
+[LM-364|verified]: The live `LibC.fcntl` / `LibC.lseek` / `LibC.pthread_sigmask`
+stage3 blocker was not one single matcher miss. The exact reducers showed three
+coupled defects across the semantic stack: variadic `fun` declarations were not
+preserving their trailing `...` in `MethodSymbol` form; `uninitialized
+LibC::SigsetT` degraded to `UInt32.class`, which made `pointerof(newmask)`
+produce `Pointer(UInt32.class)`; and unnamed `fun pthread_sigmask(Int,
+SigsetT*, SigsetT*)` parameters were being auto-marked as block params because
+`Frontend::Parameter` treated any `name=nil` as `is_block=true`, so the
+semantic matcher dropped the whole signature before it even got to nil-pointer
+compatibility. The verified fix is correspondingly bounded but cross-layer:
+`src/compiler/frontend/ast.cr` now only auto-flags anonymous block params when
+they also lack a real type annotation, `src/compiler/semantic/collectors/symbol_collector.cr`
+preserves `fun ...` varargs via a synthetic splat parameter, and
+`src/compiler/semantic/type_inference_engine.cr` now (a) normalizes primitive
+metaclass runtime references like `UInt32.class` back to `UInt32` for
+`uninitialized`/`pointerof` paths and (b) applies C-call-specific argument
+compatibility for `FunNode`s (integer ABI-family widening, enum-to-integer, and
+`nil` as a null-pointer argument). Focused regression
+`spec/semantic/type_inference_lib_fun_call_spec.cr` is green, neighboring
+`spec/parser/parser_fun_spec.cr`, the lib-alias semantic example, and the
+out-arg resolver example all stay green, both rebuild gates for
+`src/crystal_v2.cr` and `/tmp/crystal_v2_semantic_stage3probe` are green, and
+the full safe stage3 probe moved from `semantic_diags=0 resolution_diags=0
+type_diags=442` to `semantic_diags=0 resolution_diags=0 type_diags=402`. The
+old `Method 'fcntl' not found on LibC`, `Method 'lseek' not found on LibC`, and
+`Method 'pthread_sigmask' not found on LibC` families no longer appear in
+`/tmp/stage3_semantic_probe.log`. Boundary: stage3 is still not green; the next
+live frontier is later runtime/struct surface (`Crystal::EventLoop::FileDescriptor`
+callbacks, `termios` field access degrading to `Bool`, `Cannot index type
+UInt8`, `Grapheme.codepoints` collapsing to `Bool`) rather than more C-call ABI
+matching. {F/G/R: 0.97/0.78/0.97} [verified]
+
 [LM-363|verified]: The next live `io.cr` blocker after [LM-362] was not more
 numeric formatting and not another `IO#peek_or_read_utf8` flow-typing miss. The
 real early noise came from protocol-style formatting/writer calls:

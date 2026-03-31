@@ -1,6 +1,44 @@
 # Crystal V2 Bootstrap — TODO (Updated 2026-03-30)
 
 ## Current Status
+- **Fresh semantic lib-fun checkpoint: C-call signatures now survive unnamed `fun` params, primitive type references, and C-compatible argument matching tightly enough to remove the live `LibC.fcntl` / `LibC.lseek` / `LibC.pthread_sigmask` family from stage3 (2026-03-30, current session)**:
+  - trustworthy setup:
+    - `src/compiler/frontend/ast.cr` no longer auto-marks every `Parameter` with `name=nil` as a block parameter when it still carries a real type annotation; unnamed `fun pthread_sigmask(Int, SigsetT*, SigsetT*)` params now remain ordinary positional params
+    - `src/compiler/semantic/collectors/symbol_collector.cr` preserves variadic `fun ...` signatures by appending a synthetic splat parameter for `...`
+    - `src/compiler/semantic/type_inference_engine.cr` now adds bounded `FunNode`-specific argument compatibility for C calls:
+      - signed/unsigned integer widening by ABI family instead of exact-width equality
+      - enum-to-underlying-integer matching
+      - `nil` as a null-pointer argument for pointer-typed C params
+    - the same runtime normalization path now strips primitive metaclass references such as `UInt32.class` back to `UInt32` for `uninitialized LibC::SigsetT` and `pointerof(newmask)`-style shapes
+    - focused regression coverage lives in `spec/semantic/type_inference_lib_fun_call_spec.cr`
+  - decisive evidence:
+    - focused regressions are green:
+      - `../crystal/bin/crystal spec spec/semantic/type_inference_lib_fun_call_spec.cr --error-trace`
+      - `../crystal/bin/crystal spec spec/parser/parser_fun_spec.cr --error-trace`
+      - `../crystal/bin/crystal spec spec/semantic/type_inference_spec.cr --example 'resolves lib-local aliases in fun signatures' --error-trace`
+      - `../crystal/bin/crystal spec spec/semantic/name_resolver_spec.cr --example 'resolves locals introduced by out arguments' --error-trace`
+    - rebuild gates are green:
+      - `../crystal/bin/crystal build src/crystal_v2.cr --no-codegen --error-trace`
+      - `../crystal/bin/crystal build src/crystal_v2.cr -o /tmp/crystal_v2_semantic_stage3probe --error-trace`
+    - the full semantic stage3 probe under the safe wrapper moves again:
+      - `env CRYSTAL_V2_SEMANTIC_COMPILE=1 scripts/run_safe.sh /tmp/crystal_v2_semantic_stage3probe 240 4096 src/crystal_v2.cr --stats --no-link -o /tmp/stage3_semantic_probe.out > /tmp/stage3_semantic_probe.log 2>&1`
+      - summary moved from:
+        - `semantic_diags=0`
+        - `resolution_diags=0`
+        - `type_diags=442`
+      - to:
+        - `semantic_diags=0`
+        - `resolution_diags=0`
+        - `type_diags=402`
+    - `Method 'fcntl' not found on LibC`, `Method 'lseek' not found on LibC`, and `Method 'pthread_sigmask' not found on LibC` no longer appear in `/tmp/stage3_semantic_probe.log`
+  - practical boundary:
+    - stage3 with the new inferer is still **not** green
+    - the next honest frontier has moved later to:
+      - `Crystal::EventLoop::FileDescriptor#reopened` / `#close`
+      - `termios`/`Bool` degradation around `new_mode.c_lflag`
+      - `Cannot index type UInt8`
+      - `Grapheme.codepoints` collapsing to `Bool`
+    - that means the next move is not more lib-fun ABI matching, but the next concrete runtime/struct/indexing corridor from the new top of the log
 - **Fresh semantic IO-protocol checkpoint: object formatting and numeric IO writers are now modeled tightly enough to remove the early `obj.to_s(io)` / `to_io` noise from stage3 (2026-03-30, current session)**:
   - trustworthy setup:
     - `src/compiler/semantic/type_inference_engine.cr` now exposes:

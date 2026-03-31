@@ -213,7 +213,7 @@ module CrystalV2
           @is_block : Bool = false,
           @is_instance_var : Bool = false,
         )
-          if !@is_block && @name.nil? && !@is_splat && !@is_double_splat
+          if !@is_block && @name.nil? && @type_annotation.nil? && !@is_splat && !@is_double_splat
             @is_block = true
           end
         end

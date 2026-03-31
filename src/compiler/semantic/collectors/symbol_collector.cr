@@ -479,7 +479,14 @@ module CrystalV2
 
         private def handle_fun(node_id : Frontend::ExprId, node : Frontend::FunNode)
           name = intern_name(node.name)
-          params = node.params || [] of Frontend::Parameter
+          params = (node.params || [] of Frontend::Parameter).dup
+          if node.varargs
+            params << Frontend::Parameter.new(
+              name: "varargs".to_slice,
+              type_annotation: "_".to_slice,
+              is_splat: true
+            )
+          end
           return_annotation = node.return_type.try { |slice| intern_name(slice) }
 
           method_scope = SymbolTable.new(current_table)

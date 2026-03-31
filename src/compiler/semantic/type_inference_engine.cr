@@ -4007,6 +4007,12 @@ module CrystalV2
           case type
           when ClassType
             instance_type_for(type.symbol, type.type_args)
+          when PrimitiveType
+            if primitive_metaclass?(type)
+              primitive_metaclass_value_type(type) || type
+            else
+              type
+            end
           else
             type
           end
@@ -6552,6 +6558,7 @@ module CrystalV2
           params = method.params.reject(&.is_block)
           required_count = count_required_params(params)
           method_type_params = method.type_parameters || [] of String
+          c_fun_compat = c_fun_method?(method)
 
           previous_method_bindings = {} of String => Type?
           if type_params = method.type_parameters
@@ -6595,7 +6602,7 @@ module CrystalV2
                 param_type = resolve_method_annotation_type(type_name, receiver_type, method.scope)
                 next if unresolved_method_type_parameter_type?(arg_type, method_type_params) ||
                         unresolved_method_type_parameter_type?(param_type, method_type_params)
-                return false unless type_matches?(arg_type, param_type)
+                return false unless parameter_type_matches?(arg_type, param_type, c_fun_compat)
               end
 
               return true
@@ -6613,7 +6620,7 @@ module CrystalV2
               param_type = resolve_method_annotation_type(type_name, receiver_type, method.scope)
               next if unresolved_method_type_parameter_type?(arg_type, method_type_params) ||
                       unresolved_method_type_parameter_type?(param_type, method_type_params)
-              return false unless type_matches?(arg_type, param_type)
+              return false unless parameter_type_matches?(arg_type, param_type, c_fun_compat)
             end
 
             true
@@ -6626,6 +6633,53 @@ module CrystalV2
               end
             end
           end
+        end
+
+        private def c_fun_method?(method : MethodSymbol) : Bool
+          return false if method.node_id.invalid?
+          @arena[method.node_id].is_a?(Frontend::FunNode)
+        rescue
+          false
+        end
+
+        private def parameter_type_matches?(actual : Type, expected : Type, c_fun_compat : Bool) : Bool
+          return type_matches?(actual, expected) unless c_fun_compat
+          c_fun_type_matches?(actual, expected)
+        end
+
+        private def c_fun_type_matches?(actual : Type, expected : Type) : Bool
+          return true if type_matches?(actual, expected)
+
+          if expected.is_a?(UnionType)
+            return expected.types.any? { |member| c_fun_type_matches?(actual, member) }
+          end
+
+          if actual.is_a?(UnionType)
+            return actual.types.all? { |member| c_fun_type_matches?(member, expected) }
+          end
+
+          if actual == @context.nil_type
+            return true if expected.is_a?(PointerType)
+          end
+
+          if actual.is_a?(PrimitiveType)
+            if symbol = lookup_type_symbol(actual.name)
+              if symbol.is_a?(EnumSymbol)
+                return c_fun_type_matches?(parse_type_name(symbol.base_type), expected)
+              end
+            end
+
+            if expected.is_a?(PrimitiveType)
+              return true if signed_integer_type_name?(actual.name) && signed_integer_type_name?(expected.name)
+              return true if unsigned_integer_type_name?(actual.name) && unsigned_integer_type_name?(expected.name)
+            end
+          end
+
+          if actual.is_a?(EnumType)
+            return c_fun_type_matches?(parse_type_name(actual.symbol.base_type), expected)
+          end
+
+          false
         end
 
         # Check if actual_type is compatible with expected_type
@@ -6642,11 +6696,21 @@ module CrystalV2
           return true if actual.to_s == expected.to_s
 
           if actual.is_a?(PrimitiveType) && expected.is_a?(PrimitiveType)
+            if symbol = lookup_type_symbol(actual.name)
+              if symbol.is_a?(EnumSymbol)
+                return type_matches?(parse_type_name(symbol.base_type), expected)
+              end
+            end
+
             if expected.name == "Int"
               return signed_integer_type_name?(actual.name)
             elsif expected.name == "UInt"
               return unsigned_integer_type_name?(actual.name)
             end
+          end
+
+          if actual.is_a?(EnumType) && expected.is_a?(PrimitiveType)
+            return type_matches?(parse_type_name(actual.symbol.base_type), expected)
           end
 
           # If expected is a union, actual must match at least one member
