@@ -1,6 +1,37 @@
 # Crystal V2 Bootstrap — TODO (Updated 2026-03-30)
 
 ## Current Status
+- **Fresh semantic prepass checkpoint: top-level union splitting inside generic annotations is now depth-aware, which removes the `Enumerable(Path | String)#each` family from live stage3 (2026-03-30, current session)**:
+  - trustworthy setup:
+    - `src/compiler/semantic/type_inference_engine.cr` now routes top-level union splitting through one depth-aware helper that ignores `|` separators nested inside `()`, `{}`, and `[]`
+    - the same helper is used consistently by:
+      - `parse_type_name`
+      - `resolve_annotation_type_in_scope`
+      - `substitute_type_parameters`
+    - this closes the exact corridor where `Enumerable(Int32 | String)` or `Enumerable(Path | String)` used to degrade to a truncated primitive-like receiver such as `Enumerable(Int32`
+    - focused regression coverage lives in `spec/semantic/type_inference_generic_union_annotation_spec.cr`
+  - decisive evidence:
+    - focused regression is green:
+      - `../crystal/bin/crystal spec spec/semantic/type_inference_generic_union_annotation_spec.cr --error-trace`
+    - nearby `responds_to?` regression remains green:
+      - `../crystal/bin/crystal spec spec/semantic/type_inference_responds_to_narrowing_spec.cr --error-trace`
+    - rebuild gates are green:
+      - `../crystal/bin/crystal build src/crystal_v2.cr --no-codegen --error-trace`
+      - `../crystal/bin/crystal build src/crystal_v2.cr -o /tmp/crystal_v2_semantic_stage3probe --error-trace`
+    - full semantic stage3 probe moved again under the safe wrapper:
+      - `env CRYSTAL_V2_SEMANTIC_COMPILE=1 scripts/run_safe.sh /tmp/crystal_v2_semantic_stage3probe 180 4096 src/crystal_v2.cr --stats --no-link -o /tmp/stage3_semantic_probe.out > /tmp/stage3_semantic_probe.log 2>&1`
+      - summary moved from:
+        - `semantic_diags=0`
+        - `resolution_diags=0`
+        - `type_diags=490`
+      - to:
+        - `semantic_diags=0`
+        - `resolution_diags=0`
+        - `type_diags=481`
+    - `Method 'each' not found on Enumerable(Path | String)` no longer appears in `/tmp/stage3_semantic_probe.log`
+  - practical boundary:
+    - stage3 with the new inferer is still **not** green
+    - the remaining frontier has moved on to denser runtime/API and Nil-cascade families after `file_utils`
 - **Fresh semantic prepass checkpoint: `responds_to?` guards now narrow `self` and simple receivers to concrete implementors, which removes the live `IO#unbuffered_pos` blocker from full stage3 (2026-03-30, current session)**:
   - trustworthy setup:
     - `src/compiler/semantic/type_inference_engine.cr` now extracts branch-local narrowing from `responds_to?` conditions

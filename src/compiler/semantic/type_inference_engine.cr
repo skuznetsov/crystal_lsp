@@ -2100,25 +2100,10 @@ module CrystalV2
 
         @[AlwaysInline]
         private def parse_union_type_name(name : String) : Type?
-          size = name.bytesize
-          return nil if size < 5 # "A | B" minimum
-          types = [] of Type
-          start = 0
-          i = 0
-          found = false
-          while i + 2 < size
-            if name.byte_at(i) == 32_u8 && name.byte_at(i + 1) == 124_u8 && name.byte_at(i + 2) == 32_u8
-              found = true
-              types << parse_type_name(trim_slice(name, start, i))
-              i += 3
-              start = i
-              next
-            end
-            i += 1
-          end
-          return nil unless found
-          types << parse_type_name(trim_slice(name, start, size))
-          union_of(types)
+          parts = split_top_level_union_parts(name)
+          return nil unless parts
+
+          union_of(parts.map { |part| parse_type_name(part) })
         end
 
         @[AlwaysInline]
@@ -7950,28 +7935,10 @@ module CrystalV2
         end
 
         private def resolve_annotation_union_type_in_scope(type_name : String, scope : SymbolTable?) : Type?
-          size = type_name.bytesize
-          return nil if size < 5
+          parts = split_top_level_union_parts(type_name)
+          return nil unless parts
 
-          types = [] of Type
-          start = 0
-          i = 0
-          found = false
-          while i + 2 < size
-            if type_name.byte_at(i) == 32_u8 && type_name.byte_at(i + 1) == 124_u8 && type_name.byte_at(i + 2) == 32_u8
-              found = true
-              types << resolve_annotation_type_in_scope(trim_slice(type_name, start, i), scope)
-              i += 3
-              start = i
-              next
-            end
-            i += 1
-          end
-
-          return nil unless found
-
-          types << resolve_annotation_type_in_scope(trim_slice(type_name, start, size), scope)
-          union_of(types)
+          union_of(parts.map { |part| resolve_annotation_type_in_scope(part, scope) })
         end
 
         private def parse_proc_type_name(type_name : String) : Type?
@@ -8214,28 +8181,57 @@ module CrystalV2
         end
 
         private def substitute_union_type_parameters(type_name : String, type_args : Array(Type), type_params : Array(String)) : Type?
-          size = type_name.bytesize
-          return nil if size < 5
+          parts = split_top_level_union_parts(type_name)
+          return nil unless parts
 
-          types = [] of Type
+          union_of(parts.map { |part| substitute_type_parameters(part, type_args, type_params) })
+        end
+
+        private def split_top_level_union_parts(type_name : String) : Array(String)?
+          size = type_name.bytesize
+          return nil if size < 5 # "A | B" minimum
+
+          parts = [] of String
           start = 0
+          paren_depth = 0
+          brace_depth = 0
+          bracket_depth = 0
           i = 0
           found = false
-          while i + 2 < size
-            if type_name.byte_at(i) == 32_u8 && type_name.byte_at(i + 1) == 124_u8 && type_name.byte_at(i + 2) == 32_u8
-              found = true
-              types << substitute_type_parameters(trim_slice(type_name, start, i), type_args, type_params)
-              i += 3
-              start = i
-              next
+
+          while i < size
+            case type_name.byte_at(i)
+            when 40_u8
+              paren_depth += 1
+            when 41_u8
+              paren_depth -= 1 if paren_depth > 0
+            when 123_u8
+              brace_depth += 1
+            when 125_u8
+              brace_depth -= 1 if brace_depth > 0
+            when 91_u8
+              bracket_depth += 1
+            when 93_u8
+              bracket_depth -= 1 if bracket_depth > 0
+            when 32_u8
+              if paren_depth == 0 && brace_depth == 0 && bracket_depth == 0 &&
+                 i + 2 < size &&
+                 type_name.byte_at(i + 1) == 124_u8 &&
+                 type_name.byte_at(i + 2) == 32_u8
+                found = true
+                parts << trim_slice(type_name, start, i)
+                i += 3
+                start = i
+                next
+              end
             end
             i += 1
           end
 
           return nil unless found
 
-          types << substitute_type_parameters(trim_slice(type_name, start, size), type_args, type_params)
-          union_of(types)
+          parts << trim_slice(type_name, start, size)
+          parts
         end
 
         private def split_top_level_generic_args(arg_list : String) : Array(String)

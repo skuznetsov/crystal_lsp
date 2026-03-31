@@ -3,6 +3,28 @@
 Updated: 2026-03-30
 Context: compiler/bootstrap/stage2-stability
 
+[LM-357|verified]: Top-level union parsing inside generic annotations is now
+depth-aware, which closes the live `Enumerable(Path | String)#each` family in
+`src/stdlib/file_utils.cr`. The root cause was not module-method lookup itself:
+`Enumerable(Int32)` receivers already worked, but `Enumerable(Int32 | String)`
+degraded into a truncated primitive-like receiver (`Enumerable(Int32`) because
+three separate union splitters (`parse_type_name`,
+`resolve_annotation_type_in_scope`, and `substitute_type_parameters`) were all
+naively splitting on every `" | "` without tracking nesting. The verified fix
+in `src/compiler/semantic/type_inference_engine.cr` routes all three paths
+through one depth-aware `split_top_level_union_parts(...)` helper that ignores
+separators inside `()`, `{}`, and `[]`. Focused regression
+`spec/semantic/type_inference_generic_union_annotation_spec.cr` is green, the
+nearby `responds_to?` regression stays green, both rebuild gates for
+`src/crystal_v2.cr` and `/tmp/crystal_v2_semantic_stage3probe` are green, and
+the full semantic stage3 probe under `scripts/run_safe.sh` moved from
+`semantic_diags=0 resolution_diags=0 type_diags=490` to
+`semantic_diags=0 resolution_diags=0 type_diags=481`. The old
+`Method 'each' not found on Enumerable(Path | String)` family no longer appears
+in `/tmp/stage3_semantic_probe.log`. Boundary: stage3 is still not green; the
+remaining work is now in denser runtime/API and Nil-cascade families beyond
+this generic-union annotation corridor. {F/G/R: 0.96/0.72/0.96} [verified]
+
 [LM-356|verified]: Branch-local `responds_to?` guards now narrow both `self`
 and simple receivers to concrete implementors, which closes the live
 `IO#unbuffered_pos` blocker in `src/stdlib/io/buffered.cr`. The verified fix
