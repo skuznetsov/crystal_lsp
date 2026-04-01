@@ -4033,24 +4033,27 @@ module CrystalV2
           end
         end
 
+        private def identifier_binding_name(expr_id : ExprId) : String?
+          node = @arena[expr_id]
+
+          case node
+          when Frontend::IdentifierNode
+            intern_name(node.name)
+          when Frontend::AssignNode
+            target_node = @arena[node.target]
+            target_node.is_a?(Frontend::IdentifierNode) ? intern_name(target_node.name) : nil
+          else
+            nil
+          end
+        end
+
         # Phase 96: Extract nil narrowing from truthy check
         # If condition is a simple identifier (or assignment to identifier) with nilable type,
         # narrow to non-nil in then branch.
         # Returns {variable_name, narrowed_type} or nil if not applicable
         private def extract_nil_narrowing(condition_id : ExprId, condition_type : Type) : {String, Type}?
-          condition_node = @arena[condition_id]
-
-          # Only narrow if condition is a simple variable (identifier)
-          var_name = case condition_node
-                     when Frontend::IdentifierNode
-                       intern_name(condition_node.name)
-                     when Frontend::AssignNode
-                       target_node = @arena[condition_node.target]
-                       return nil unless target_node.is_a?(Frontend::IdentifierNode)
-                       intern_name(target_node.name)
-                     else
-                       return nil
-                     end
+          var_name = identifier_binding_name(condition_id)
+          return nil unless var_name
 
           effective_condition_type = condition_type_for_truthy_narrowing(condition_id, condition_type)
           return nil unless effective_condition_type
@@ -12023,11 +12026,7 @@ module CrystalV2
 
           if case_value_id
             case_value_type = infer_expression(case_value_id)
-            # Check if case value is a simple identifier (for narrowing)
-            case_value_node = @arena[case_value_id]
-            if case_value_node.is_a?(Frontend::IdentifierNode)
-              case_var_name = intern_name(case_value_node.name)
-            end
+            case_var_name = identifier_binding_name(case_value_id)
           end
 
           branch_types = [] of Type
@@ -12093,6 +12092,11 @@ module CrystalV2
             when Frontend::PathNode
               # when Foo::Bar (namespaced type)
               if type = resolve_path_as_type(cond_node)
+                return type
+              end
+            when Frontend::GenericNode
+              # when Tuple(Int32, Bool), Hash(String, Int32), etc.
+              if type = type_from_type_expr(cond_id)
                 return type
               end
             when Frontend::IsANode

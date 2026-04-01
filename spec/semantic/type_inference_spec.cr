@@ -4039,6 +4039,35 @@ describe Semantic::TypeInferenceEngine do
       analyzer.name_resolver_diagnostics.should be_empty
       engine.diagnostics.should be_empty
     end
+
+    it "narrows assignment subjects in case else branches" do
+      source = <<-CRYSTAL
+        def source(flag : Bool)
+          if flag
+            {1, true}
+          else
+            1
+          end
+        end
+
+        def consume(value : Int32)
+          value
+        end
+
+        case result = source(false)
+        when Tuple(Int32, Bool)
+          0
+        else
+          consume(result)
+        end
+      CRYSTAL
+
+      program, analyzer, engine = infer_types(source)
+
+      analyzer.semantic_diagnostics.should be_empty
+      analyzer.name_resolver_diagnostics.should be_empty
+      engine.diagnostics.should be_empty
+    end
   end
 
   describe "Phase 10: Blocks and Yield" do

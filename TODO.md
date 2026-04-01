@@ -1,6 +1,40 @@
 # Crystal V2 Bootstrap — TODO (Updated 2026-04-01)
 
 ## Current Status
+- **Fresh semantic case-assignment narrowing checkpoint: `infer_case` now binds assignment subjects like `case result = ...`, and `extract_when_narrowing(...)` now understands generic type conditions like `when Tuple(Int32, Bool)`, which closes the exact `File::Error.from_os_error(..., result, file: ...)` union-carrier falsifier and moves the honest whole-program stage3 gate from `type_diags=30` to `type_diags=29` (2026-04-01, current session)**:
+  - trustworthy setup:
+    - `src/compiler/semantic/type_inference_engine.cr` now extracts a flow-binding name from both plain identifiers and `AssignNode` targets, so `case result = ...` reuses the same narrowing key as `if result = ...`
+    - the same file now treats generic type conditions in `when` branches as real type expressions via `type_from_type_expr(...)`, which keeps `when Tuple(Int32, Bool)` on the narrowing path instead of silently skipping it
+    - focused regression coverage lives in `spec/semantic/type_inference_spec.cr`
+  - decisive evidence:
+    - focused regressions are green:
+      - `../crystal/bin/crystal spec spec/semantic/type_inference_spec.cr --example 'narrows assignment subjects in case else branches' --error-trace`
+      - `../crystal/bin/crystal spec spec/semantic/type_inference_spec.cr --example 'preserves structural collection types through is_a? and case narrowing' --error-trace`
+    - rebuild gates are green:
+      - `../crystal/bin/crystal build src/crystal_v2.cr --no-codegen --error-trace`
+      - `../crystal/bin/crystal build src/crystal_v2.cr -o /tmp/crystal_v2_semantic_stage3probe --error-trace`
+    - the corrected exact no-prelude carrier is green under the safe wrapper:
+      - `env DEBUG_TYPE_TRACE_NAMES=from_os_error CRYSTAL_V2_SEMANTIC_COMPILE=1 scripts/run_safe.sh /tmp/crystal_v2_semantic_stage3probe 60 2048 /tmp/semantic_case_assign_narrowing_probe.cr --no-prelude --stats --verbose`
+      - `semantic_diags=0`, `resolution_diags=0`, `type_diags=0`
+      - trace now shows the old `from_os_error` miss is gone once `EventLoop.open` returns a real `Tuple(Int32, Bool) | Errno | WinError` union instead of the earlier tuple-only false falsifier
+    - the full semantic stage3 probe under the safe wrapper improves again:
+      - `env CRYSTAL_V2_SEMANTIC_COMPILE=1 scripts/run_safe.sh /tmp/crystal_v2_semantic_stage3probe 300 4096 src/crystal_v2.cr --stats --no-link -o /tmp/stage3_semantic_probe_after_case_assign_narrowing.out > /tmp/stage3_semantic_probe_after_case_assign_narrowing.log 2>&1`
+      - summary moved from:
+        - `semantic_diags=0`
+        - `resolution_diags=0`
+        - `type_diags=30`
+      - to:
+        - `semantic_diags=0`
+        - `resolution_diags=0`
+        - `type_diags=29`
+  - practical boundary:
+    - this is a real `case` flow-typing checkpoint, not another kwargs/body-carrier tweak
+    - it also records an adversary result: the earlier tuple-only `/tmp/semantic_case_assign_narrowing_probe.cr` was a bad falsifier because its `else` branch was unreachable, so future work should keep this carrier on the union-return shape
+    - stage3 is still not green; the new honest head has shifted to later runtime/file corridors:
+      - `src/stdlib/file.cr` (`close` on `Nil`)
+      - `src/stdlib/time/location.cr` / `src/stdlib/file.cr` (`Location.read_zoneinfo`, `Nil.close`)
+      - `src/stdlib/crystal/system/unix/process.cr` / `signal.cr` (`EventLoop.remove`, `file_descriptor_close`)
+      - `src/stdlib/regex.cr` (`LibPCRE2#jit_stack_assign`)
 - **Fresh semantic enum-helper + yielded-block lexical-context checkpoint: enum helper constructors now stay concrete through narrowed union reassignment, and untyped yielded blocks now preserve the caller's lexical owner context instead of wiping `@current_class` on early block-signature exits; together these close the exact `EventLoop.current.open(... perm ...)` and `@lock.sync { @queue.shift? }` falsifiers and move the honest whole-program stage3 gate from `type_diags=49` to `type_diags=48` (2026-04-01, current session)**:
   - trustworthy setup:
     - `src/compiler/semantic/type_inference_engine.cr` now treats `EnumType.new(...)` / `new!(...)` as concrete enum constructors in receiverless semantic lookup, which keeps narrowed reassignment flows like `perm = ::File::Permissions.new(perm) if perm.is_a? Int32` concrete instead of collapsing to `Nil`

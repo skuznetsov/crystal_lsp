@@ -3,6 +3,32 @@
 Updated: 2026-04-01
 Context: compiler/bootstrap/stage2-stability
 
+[LM-409|verified]: After [LM-408] and the later non-positional/kwargs-carrier
+checkpoints, the remaining `File::Error.from_os_error` head was not another
+keyword-rest bug. The decisive branch needed an adversary correction first: the
+old `/tmp/semantic_case_assign_narrowing_probe.cr` returned only
+`Tuple(Int32, Bool)`, so its `else` branch was statically unreachable and could
+not falsify the live stage3 bug honestly. Once the carrier was corrected to
+return a real `Tuple(Int32, Bool) | Errno | WinError` union, the exact failure
+split cleanly: `case result = EventLoop.open(path)` still typed the else-branch
+`result` too broadly because semantic case narrowing only recognized bare
+identifiers and non-generic type literals. The verified fix remains bounded to
+`src/compiler/semantic/type_inference_engine.cr`: `infer_case(...)` now reuses
+assignment-subject bindings through a small `identifier_binding_name(...)`
+helper, and `extract_when_narrowing(...)` now resolves generic type conditions
+such as `when Tuple(Int32, Bool)` through `type_from_type_expr(...)`. Focused
+regressions in `spec/semantic/type_inference_spec.cr` are green; rebuild gates
+for `src/crystal_v2.cr --no-codegen` and
+`/tmp/crystal_v2_semantic_stage3probe` are green; the corrected exact safe
+carrier is green under `scripts/run_safe.sh`; and the full safe stage3 probe
+moves from `semantic_diags=0 resolution_diags=0 type_diags=30` to
+`semantic_diags=0 resolution_diags=0 type_diags=29`. Boundary: this closes the
+`File::Error.from_os_error(..., result, file: ...)` case-assignment branch, but
+stage3 is still not green and the new honest head has shifted to later
+runtime/file tails like `Nil.close`, `Location.read_zoneinfo`, `EventLoop.remove`,
+`file_descriptor_close`, and `LibPCRE2#jit_stack_assign`.
+{F/G/R: 0.98/0.76/0.98} [verified]
+
 [LM-408|verified]: After [LM-407], the next runtime/context split was not one
 single `process` bug. Two exact falsifiers proved the branch had two linked
 blind spots in semantic context preservation. First, the richer no-prelude
