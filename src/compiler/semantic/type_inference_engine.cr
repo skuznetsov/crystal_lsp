@@ -376,7 +376,7 @@ module CrystalV2
           Frontend::Watchdog.check!
 
           result_type = if node.is_a?(Frontend::SplatNode)
-                          @context.nil_type
+                          infer_expression(node.expr)
                         else
                           case node_kind_for(expr_id, node)
                         when .number?
@@ -1463,7 +1463,7 @@ module CrystalV2
             receiver_type = implicit_receiver_type_for(method)
             next false unless receiver_type
 
-            required = count_required_params(method.params)
+            required = required_arg_count_for_matching(method.params, arg_types)
             actual_count = positional_arg_count_for_matching(method.params, arg_types)
             max = max_positional_arg_count(method.params)
             next false unless actual_count >= required && actual_count <= max
@@ -1511,7 +1511,7 @@ module CrystalV2
               receiver_type = implicit_receiver_type_for(method)
               next false unless receiver_type
 
-              required = count_required_params(method.params)
+              required = required_arg_count_for_matching(method.params, combo_arg_types)
               actual_count = positional_arg_count_for_matching(method.params, combo_arg_types)
               max = max_positional_arg_count(method.params)
               next false unless actual_count >= required && actual_count <= max
@@ -6990,7 +6990,7 @@ module CrystalV2
           return nil if candidates.empty?
 
           matching_count = candidates.select do |method|
-            required = count_required_params(method.params)
+            required = required_arg_count_for_matching(method.params, arg_types)
             actual_count = positional_arg_count_for_matching(method.params, arg_types)
             max = max_positional_arg_count(method.params)
             next false unless actual_count >= required && actual_count <= max
@@ -7166,7 +7166,8 @@ module CrystalV2
                        matches.max_by { |entry| specificity_score(entry[0], entry[1]) }
                      end
 
-          infer_method_call_result(selected[0], receiver_type, selected[1], call_node)
+          forwarded_arg_types = append_keyword_rest_carrier(selected[0], selected[1], named_arg_types)
+          infer_method_call_result(selected[0], receiver_type, forwarded_arg_types, call_node)
         end
 
         private def ordered_call_arguments(
@@ -7229,6 +7230,33 @@ module CrystalV2
           end
 
           {ordered, ordered_expr_ids}
+        end
+
+        private def append_keyword_rest_carrier(
+          method : MethodSymbol,
+          ordered_arg_types : Array(Type),
+          named_arg_types : Hash(String, Type)
+        ) : Array(Type)
+          return ordered_arg_types unless method.params.any?(&.is_double_splat)
+
+          consumed_named = Set(String).new
+          method.params.each do |param|
+            next if param.is_block || param.is_double_splat || named_only_separator?(param)
+            if param_name = named_argument_lookup_name(param)
+              consumed_named << param_name
+            end
+          end
+
+          rest_entries = [] of {String, Type}
+          named_arg_types.each do |name, type|
+            next if consumed_named.includes?(name)
+            rest_entries << {name, type}
+          end
+
+          result = Array(Type).new(ordered_arg_types.size + 1)
+          ordered_arg_types.each { |type| result << type }
+          result << (rest_entries.empty? ? @context.nil_type : NamedTupleType.new(rest_entries))
+          result
         end
 
         private def named_argument_lookup_name(param : Frontend::Parameter) : String?
@@ -7559,7 +7587,7 @@ module CrystalV2
 
           # Check parameter count (accounting for default values, splat, double_splat)
           actual_count = arg_types.size
-          required_count = count_required_params(method.params)
+          required_count = required_arg_count_for_matching(method.params, arg_types)
           actual_count = positional_arg_count_for_matching(method.params, arg_types)
           max_count = max_positional_arg_count(method.params)
 
@@ -7594,7 +7622,7 @@ module CrystalV2
 
         private def infer_top_level_overload_call(symbol : OverloadSetSymbol, arg_types : Array(Type)) : Type?
           matches = symbol.overloads.select do |method|
-            required = count_required_params(method.params)
+            required = required_arg_count_for_matching(method.params, arg_types)
             actual_count = positional_arg_count_for_matching(method.params, arg_types)
             max = max_positional_arg_count(method.params)
             next false unless actual_count >= required && actual_count <= max
@@ -8009,7 +8037,7 @@ module CrystalV2
 
           # Filter by parameter count (accounting for default values, splat, double_splat)
           matching_count = candidates.select do |m|
-            required = count_required_params(m.params)
+            required = required_arg_count_for_matching(m.params, arg_types)
             actual_count = positional_arg_count_for_matching(m.params, arg_types)
             max = max_positional_arg_count(m.params)
             actual_count >= required && actual_count <= max
@@ -8680,7 +8708,12 @@ module CrystalV2
         # Check if method parameters match argument types
         # Accounts for default parameter values
         private def parameters_match?(method : MethodSymbol, arg_types : Array(Type), receiver_type : Type? = nil, arg_expr_ids : Array(ExprId?)? = nil) : Bool
-          arg_types, arg_expr_ids = strip_trailing_double_splat_hash_arg(method.params, arg_types, arg_expr_ids)
+          if ordered_arguments = ordered_arguments_from_keyword_carrier(method, arg_types, arg_expr_ids)
+            arg_types = ordered_arguments[0]
+            arg_expr_ids = ordered_arguments[1]
+          else
+            arg_types, arg_expr_ids = strip_trailing_double_splat_hash_arg(method.params, arg_types, arg_expr_ids)
+          end
           params = method.params.reject { |param| param.is_block || param.is_double_splat || named_only_separator?(param) }
           required_count = count_required_params(params)
           method_type_params = method.type_parameters || [] of String
@@ -10774,24 +10807,123 @@ module CrystalV2
           params.count { |p| p.default_value.nil? && !positional_splat?(p) && !p.is_double_splat && !p.is_block && !named_only_separator?(p) }
         end
 
-        private def double_splat_carrier_type?(type : Type) : Bool
+        private def count_required_positional_params(params : Array(Frontend::Parameter)) : Int32
+          seen_named_only_separator = false
+          count = 0
+
+          params.each do |param|
+            next if param.is_block || param.is_double_splat
+
+            if named_only_separator?(param)
+              seen_named_only_separator = true
+              next
+            end
+
+            return count if positional_splat?(param)
+            next if seen_named_only_separator
+            next unless param.default_value.nil?
+
+            count += 1
+          end
+
+          count
+        end
+
+        private def required_arg_count_for_matching(params : Array(Frontend::Parameter), arg_types : Array(Type)) : Int32
+          trailing_keyword_carrier_arg?(params, arg_types) ? count_required_positional_params(params) : count_required_params(params)
+        end
+
+        private def keyword_carrier_type?(type : Type) : Bool
           case type
           when HashType
             true
+          when NamedTupleType
+            true
           when UnionType
-            type.types.all? { |member| double_splat_carrier_type?(member) }
+            type.types.all? { |member| keyword_carrier_type?(member) }
           else
             type == @context.nil_type
           end
+        end
+
+        private def accepts_keyword_arguments?(params : Array(Frontend::Parameter)) : Bool
+          seen_named_only_separator = false
+
+          params.any? do |param|
+            next false if param.is_block
+            if named_only_separator?(param)
+              seen_named_only_separator = true
+              next false
+            end
+
+            param.is_double_splat || seen_named_only_separator || !param.external_name.nil?
+          end
+        end
+
+        private def trailing_keyword_carrier_arg?(params : Array(Frontend::Parameter), arg_types : Array(Type)) : Bool
+          return false unless accepts_keyword_arguments?(params)
+          return false if arg_types.empty?
+          return false unless last_arg = arg_types.last?
+          return false unless keyword_carrier_type?(last_arg)
+
+          arg_types.size > max_positional_arg_count(params)
         end
 
         private def trailing_double_splat_carrier_arg?(params : Array(Frontend::Parameter), arg_types : Array(Type)) : Bool
           return false unless params.any?(&.is_double_splat)
           return false if arg_types.empty?
           return false unless last_arg = arg_types.last?
-          return false unless double_splat_carrier_type?(last_arg)
+          return false unless keyword_carrier_type?(last_arg)
 
           arg_types.size > max_positional_arg_count(params)
+        end
+
+        private def ordered_arguments_from_keyword_carrier(
+          method : MethodSymbol,
+          arg_types : Array(Type),
+          arg_expr_ids : Array(ExprId?)?
+        ) : Tuple(Array(Type), Array(ExprId?))?
+          return nil unless trailing_keyword_carrier_arg?(method.params, arg_types)
+          return nil unless carrier = arg_types.last?
+
+          named_arg_types = named_arg_types_from_keyword_carrier(carrier)
+          return nil unless named_arg_types
+
+          positional_arg_types = arg_types[0...-1]
+          positional_arg_ids = Array(ExprId).new(positional_arg_types.size)
+          if arg_expr_ids
+            positional_arg_types.size.times do |i|
+              arg_expr_id = arg_expr_ids[i]?
+              return nil unless arg_expr_id
+              positional_arg_ids << arg_expr_id
+            end
+          else
+            positional_arg_types.size.times do
+              positional_arg_ids << ExprId.new(-1)
+            end
+          end
+
+          ordered_call_arguments(method, positional_arg_ids, positional_arg_types, named_arg_types, {} of String => ExprId)
+        end
+
+        private def named_arg_types_from_keyword_carrier(type : Type) : Hash(String, Type)?
+          case type
+          when NamedTupleType
+            result = {} of String => Type
+            type.entries.each do |name, entry_type|
+              result[name] = entry_type
+            end
+            result
+          when PrimitiveType
+            type == @context.nil_type ? ({} of String => Type) : nil
+          when UnionType
+            non_nil_members = type.types.reject { |member| member == @context.nil_type }
+            return {} of String => Type if non_nil_members.empty?
+            return nil unless non_nil_members.size == 1
+            named_arg_types_from_keyword_carrier(non_nil_members.first)
+          else
+            nil
+          end
         end
 
         private def strip_trailing_double_splat_hash_arg(
@@ -10820,6 +10952,7 @@ module CrystalV2
         end
 
         private def positional_arg_count_for_matching(params : Array(Frontend::Parameter), arg_types : Array(Type)) : Int32
+          return arg_types.size - 1 if trailing_keyword_carrier_arg?(params, arg_types)
           trailing_double_splat_carrier_arg?(params, arg_types) ? arg_types.size - 1 : arg_types.size
         end
 
@@ -11733,7 +11866,9 @@ module CrystalV2
 
               arg_type = arg_types[index]?
               if arg_type.nil?
-                if default_value = param.default_value
+                if param.is_double_splat
+                  arg_type = @context.nil_type
+                elsif default_value = param.default_value
                   arg_type = infer_expression(default_value)
                 else
                   next

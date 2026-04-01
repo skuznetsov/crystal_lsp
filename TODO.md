@@ -6168,3 +6168,48 @@ Immediate next steps:
    `File::Error.from_os_error`, `GC` finalizer generics, `process/signal`,
    `unicode`, `Location.read_zoneinfo`, and the remaining nilable close / value
    corridors.
+
+## Checkpoint — 2026-04-01 (forwarded kwargs carriers in semantic body inference)
+
+Verified this turn:
+- The next `SystemError`-style falsifier after
+  `LM-stage3-non-positional-carriers-2026-04-01` was not another named-arg
+  ordering bug. The decisive exact carriers showed a narrower failure inside
+  semantic method-body inference:
+  - non-empty `**opts` forwarding reached `self.build_message(message, **opts)`
+    as a `NamedTuple(file: String)` carrier only after preserving the leftover
+    keyword-rest payload from the call-site;
+  - empty `**opts` forwarding still collapsed to `Unknown` until unfilled
+    double-splat params were bound explicitly as `Nil`.
+- The verified fix stays local to
+  `src/compiler/semantic/type_inference_engine.cr`:
+  - `infer_named_argument_method_call(...)` now appends a structured keyword
+    rest carrier (`NamedTupleType` for leftover named args, `Nil` for empty
+    `**opts`) before body inference of methods that declare a double splat;
+  - splat expressions in call/body inference now preserve the inner expression
+    type instead of collapsing unconditionally to `Nil`, which lets forwarded
+    `**opts` keep their named shape;
+  - arity filtering now treats a trailing keyword carrier as satisfying only the
+    positional prefix, leaving keyword presence/type checking to
+    `parameters_match?`;
+  - unfilled `**param` bindings inside `infer_method_body_type(...)` now default
+    to `Nil` instead of disappearing into `Unknown`.
+- Focused regressions are green in:
+  - `spec/semantic/type_inference_exception_spec.cr`
+  - `spec/semantic/type_inference_named_args_spec.cr`
+- Both exact reducers are green under `scripts/run_safe.sh`:
+  - `/tmp/semantic_runtime_error_empty_opts_probe.cr`
+  - `/tmp/semantic_file_error_from_os_error_probe.cr`
+- `../crystal/bin/crystal build src/crystal_v2.cr --no-codegen --error-trace`
+  is green, rebuild of `/tmp/crystal_v2_semantic_stage3probe` is green, but the
+  full semantic stage3 probe under `scripts/run_safe.sh` stays at
+  `semantic_diags=0 resolution_diags=0 type_diags=30`.
+
+Immediate next steps:
+1. Treat the forwarded-kwargs body-inference bug as closed; the remaining
+   `File::Error.from_os_error` live head is now more likely a split-file /
+   inherited-class-method lookup corridor than a local kwargs carrier bug.
+2. Take the unchanged live head in order:
+   `File::Error.from_os_error`, `GC` finalizer generics, `process/signal`,
+   `unicode`, `Location.read_zoneinfo`, and the remaining nilable close / value
+   corridors.
