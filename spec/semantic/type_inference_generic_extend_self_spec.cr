@@ -91,5 +91,75 @@ describe TypeInferenceEngine do
       root_type.should_not be_nil
       root_type.not_nil!.to_s.should eq("UInt32")
     end
+
+    it "resolves specialized module args for direct class-method calls" do
+      source = <<-CRYSTAL
+        module CacheMethods(D)
+        end
+
+        module Info
+          extend CacheMethods(self)
+        end
+
+        module CacheMethods(D)
+          def get_cache(k : Int32) : Int32
+            k + 1
+          end
+        end
+
+        module Host(F, ImplInfo)
+          def self.run
+            ImplInfo.get_cache(1)
+          end
+        end
+
+        Host(Float32, Info).run
+      CRYSTAL
+
+      program, _analyzer, engine = infer_types(source)
+
+      engine.diagnostics.should be_empty
+
+      root_type = engine.context.get_type(program.roots.last)
+      root_type.should_not be_nil
+      root_type.not_nil!.to_s.should eq("Int32")
+    end
+
+    it "keeps specialized generic module receivers for receiverless class-method calls" do
+      source = <<-CRYSTAL
+        module CacheMethods(D)
+        end
+
+        module Info
+          extend CacheMethods(self)
+        end
+
+        module CacheMethods(D)
+          def get_cache(k : Int32) : Int32
+            k + 1
+          end
+        end
+
+        module Host(F, ImplInfo)
+          def self.helper
+            ImplInfo.get_cache(1)
+          end
+
+          def self.run
+            helper
+          end
+        end
+
+        Host(Float32, Info).run
+      CRYSTAL
+
+      program, _analyzer, engine = infer_types(source)
+
+      engine.diagnostics.should be_empty
+
+      root_type = engine.context.get_type(program.roots.last)
+      root_type.should_not be_nil
+      root_type.not_nil!.to_s.should eq("Int32")
+    end
   end
 end

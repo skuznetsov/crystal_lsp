@@ -1,6 +1,61 @@
 # Crystal V2 Bootstrap — TODO (Updated 2026-04-01)
 
 ## Current Status
+- **Fresh semantic generic-receiverless checkpoint: receiverless calls inside specialized generic class/module methods now preserve the live specialized receiver context instead of falling back to unspecialized singleton owners, which clears the remaining `ImplInfo.get_cache` dragonbox corridor and moves the honest full-stage3 gate from `type_diags=158` to `type_diags=123` (2026-04-01, current session)**:
+  - trustworthy setup:
+    - `src/compiler/semantic/type_inference_engine.cr` now routes receiverless class-method dispatch through the live `@receiver_type_context` when available
+    - the affected helpers are:
+      - `infer_receiverless_current_context_call`
+      - `infer_receiverless_current_context_reference`
+      - `implicit_receiver_type_for`
+    - this is intentionally narrow: it does not rewrite method lookup or method-body cache keys; it only fixes the receiver chosen for receiverless dispatch in already-specialized generic class/module bodies
+    - focused regression coverage now lives in `spec/semantic/type_inference_generic_extend_self_spec.cr`
+  - decisive evidence:
+    - focused regression pack is green:
+      - `../crystal/bin/crystal spec spec/semantic/type_inference_generic_extend_self_spec.cr --error-trace`
+    - rebuild gates are green:
+      - `../crystal/bin/crystal build src/crystal_v2.cr --no-codegen --error-trace`
+      - `../crystal/bin/crystal build src/crystal_v2.cr -o /tmp/crystal_v2_semantic_stage3probe --error-trace`
+    - the new exact reproducer is green:
+      - `module CacheMethods(D); end; module Info; extend CacheMethods(self); end; module CacheMethods(D); def get_cache(k : Int32) : Int32; k + 1; end; end; module Host(F, ImplInfo); def self.helper; ImplInfo.get_cache(1); end; def self.run; helper; end; end; Host(Float32, Info).run`
+      - before: `Method 'get_cache' not found on ImplInfo.class`
+      - after: root type `Int32`
+    - the actual dragonbox carrier under the safe wrapper improves materially:
+      - `env CRYSTAL_V2_SEMANTIC_COMPILE=1 DEBUG_TYPE_TRACE_NAMES=ImplInfo,get_cache scripts/run_safe.sh /tmp/crystal_v2_semantic_stage3probe 120 2048 /tmp/semantic_dragonbox_get_cache_probe.cr --stats --no-link -o /tmp/semantic_dragonbox_get_cache_probe.out > /tmp/semantic_dragonbox_get_cache_probe_after_fix.log 2>&1`
+      - summary moved from:
+        - `semantic_diags=0`
+        - `resolution_diags=0`
+        - `type_diags=134`
+      - to:
+        - `semantic_diags=0`
+        - `resolution_diags=0`
+        - `type_diags=99`
+      - trace now shows:
+        - `lookup_method start method=get_cache receiver=ImplInfo_Float32`
+        - `lookup_method candidates method=get_cache count=1 receiver=ImplInfo_Float32`
+      - and the log no longer contains `ImplInfo.class` or `get_cache` misses
+    - the full semantic stage3 probe under the safe wrapper improves materially again:
+      - `env CRYSTAL_V2_SEMANTIC_COMPILE=1 scripts/run_safe.sh /tmp/crystal_v2_semantic_stage3probe 300 4096 src/crystal_v2.cr --stats --no-link -o /tmp/stage3_semantic_probe_after_receiver_ctx.out > /tmp/stage3_semantic_probe_after_receiver_ctx.log 2>&1`
+      - summary moved from:
+        - `semantic_diags=0`
+        - `resolution_diags=0`
+        - `type_diags=158`
+      - to:
+        - `semantic_diags=0`
+        - `resolution_diags=0`
+        - `type_diags=123`
+      - `src/stdlib/float/printer/dragonbox.cr` dropped from `54` errors to `18`
+      - the full log no longer contains:
+        - `Method 'get_cache' not found on ImplInfo.class`
+  - practical boundary:
+    - stage3 with the new inferer is still **not** green
+    - the live head is no longer `dragonbox`; it is now:
+      - `src/stdlib/time/tz.cr` (`29`)
+      - `src/stdlib/float/printer/dragonbox.cr` (`18`)
+      - `src/stdlib/pretty_print.cr` (`9`)
+      - `src/stdlib/option_parser.cr` (`9`)
+      - `src/stdlib/unicode/unicode.cr` (`8`)
+    - densest remaining families are now later `Nil` arithmetic, `EventLoop.current.open`, `LibC` gaps, and `Regex/File` surfaces, not the old generic receiverless `ImplInfo.get_cache` miss
 - **Fresh semantic generic-extend/path checkpoint: bound generic module self-mixins now carry canonical `self` type args into both annotation substitution and method-body path lookup, and primitive numeric constants like `UInt32::MAX` are typed as value paths, which clears the first `dragonbox` corridor and moves the honest full-stage3 gate from `type_diags=182` to `type_diags=158` (2026-04-01, current session)**:
   - trustworthy setup:
     - `src/compiler/semantic/collectors/symbol_collector.cr` now canonicalizes `SelfNode` in generic include/extend type-arg lists to the current owner name instead of storing an AST dump string

@@ -3,6 +3,43 @@
 Updated: 2026-04-01
 Context: compiler/bootstrap/stage2-stability
 
+[LM-395|verified]: After [LM-394], the remaining dense `dragonbox`
+head was no longer the old scoped type-parameter path problem. An actual-file
+carrier for `src/stdlib/float/printer/dragonbox.cr` showed the next real miss:
+`lookup_method candidates method=get_cache count=0 receiver=ImplInfo.class`.
+The decisive split came from a nested exact reducer with a receiverless class
+method call inside a specialized generic module:
+`module CacheMethods(D); end; module Info; extend CacheMethods(self); end;
+module CacheMethods(D); def get_cache(k : Int32) : Int32; k + 1; end; end;
+module Host(F, ImplInfo); def self.helper; ImplInfo.get_cache(1); end;
+def self.run; helper; end; end; Host(Float32, Info).run`.
+That reducer failed with `Method 'get_cache' not found on ImplInfo.class`,
+which falsified symbol-merge and include-traversal theories and isolated the
+real bug to receiverless dispatch inside specialized generic class/module
+methods. The verified fix in
+`src/compiler/semantic/type_inference_engine.cr` is narrow: receiverless
+class-method dispatch now prefers the live `@receiver_type_context` in
+`infer_receiverless_current_context_call`,
+`infer_receiverless_current_context_reference`, and
+`implicit_receiver_type_for`, instead of falling back first to unspecialized
+`class_type_for(current_class)` / `module_type_for(current_module)`. Focused
+regression `spec/semantic/type_inference_generic_extend_self_spec.cr` is
+green; rebuild gates for `src/crystal_v2.cr --no-codegen` and
+`/tmp/crystal_v2_semantic_stage3probe` are green; the exact reducer is green
+with root type `Int32`; the actual-file dragonbox carrier under the safe
+wrapper moves from `semantic_diags=0 resolution_diags=0 type_diags=134` to
+`semantic_diags=0 resolution_diags=0 type_diags=99`; the trace now shows
+`lookup_method start method=get_cache receiver=ImplInfo_Float32` with
+`count=1`; and the full safe stage3 probe moves from
+`semantic_diags=0 resolution_diags=0 type_diags=158` to
+`semantic_diags=0 resolution_diags=0 type_diags=123`. The file-local count for
+`src/stdlib/float/printer/dragonbox.cr` drops from `54` to `18`, and the full
+log no longer contains `Method 'get_cache' not found on ImplInfo.class`.
+Boundary: stage3 is still not green; the live head has now shifted to
+`time/tz` (`29`), with `dragonbox` demoted below it (`18`), followed by
+`pretty_print`, `option_parser`, and `unicode`. {F/G/R: 0.98/0.84/0.98}
+[verified]
+
 [LM-394|verified]: After [LM-393], the next honest live head was no longer
 `process/shell`; it was the first dense `dragonbox` corridor. The decisive
 split was a pair of exact reducers around generic `extend M(self)` mixins. The

@@ -1222,21 +1222,9 @@ module CrystalV2
         ) : Type?
           receiver_type =
             if @current_method_is_class_method_stack.last?
-              if current_class = @current_class
-                class_type_for(current_class)
-              elsif current_module = @current_module
-                module_type_for(current_module)
-              else
-                @receiver_type_context
-              end
+              current_class_method_receiver_type
             elsif @current_method_scope.nil?
-              if current_class = @current_class
-                class_type_for(current_class)
-              elsif current_module = @current_module
-                module_type_for(current_module)
-              else
-                @receiver_type_context
-              end
+              @receiver_type_context || @current_class.try { |klass| class_type_for(klass) } || @current_module.try { |mod| module_type_for(mod) }
             else
               @receiver_type_context || @current_class.try { |klass| instance_type_for(klass) } || @current_module.try { |mod| module_type_for(mod) }
             end
@@ -1264,21 +1252,9 @@ module CrystalV2
         private def infer_receiverless_current_context_reference(method_name : String) : Type?
           receiver_type =
             if @current_method_is_class_method_stack.last?
-              if current_class = @current_class
-                class_type_for(current_class)
-              elsif current_module = @current_module
-                module_type_for(current_module)
-              else
-                nil
-              end
+              current_class_method_receiver_type
             elsif @current_method_scope.nil?
-              if current_class = @current_class
-                class_type_for(current_class)
-              elsif current_module = @current_module
-                module_type_for(current_module)
-              else
-                nil
-              end
+              @receiver_type_context || @current_class.try { |klass| class_type_for(klass) } || @current_module.try { |mod| module_type_for(mod) }
             else
               @receiver_type_context || @current_class.try { |klass| instance_type_for(klass) } || @current_module.try { |mod| module_type_for(mod) }
             end
@@ -1446,13 +1422,7 @@ module CrystalV2
 
         private def implicit_receiver_type_for(method : MethodSymbol) : Type?
           if method.is_class_method?
-            if current_class = @current_class
-              return class_type_for(current_class)
-            end
-
-            if current_module = @current_module
-              return module_type_for(current_module)
-            end
+            return current_class_method_receiver_type
           else
             if receiver_type = @receiver_type_context
               return receiver_type
@@ -1465,6 +1435,22 @@ module CrystalV2
             if current_module = @current_module
               return module_type_for(current_module)
             end
+          end
+
+          nil
+        end
+
+        private def current_class_method_receiver_type : Type?
+          if receiver_type = @receiver_type_context
+            return receiver_type
+          end
+
+          if current_class = @current_class
+            return class_type_for(current_class)
+          end
+
+          if current_module = @current_module
+            return module_type_for(current_module)
           end
 
           nil
