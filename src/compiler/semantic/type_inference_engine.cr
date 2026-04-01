@@ -1769,6 +1769,7 @@ module CrystalV2
           guard_watchdog!
           previous_method_scope = @current_method_scope
           previous_assignments = @assignments.dup
+          previous_flow_narrowings = @flow_narrowings.dup
           previous_receiver_context = @receiver_type_context
           previous_class = @current_class
           previous_module = @current_module
@@ -1844,9 +1845,7 @@ module CrystalV2
             # untyped parameters also need call-site bindings to avoid seeding
             # stale Nil/Unknown diagnostics from placeholder eager inference.
             unless defer_body_inference
-              body.each do |stmt|
-                infer_expression(stmt)
-              end
+              infer_block_result(body)
             end
           end
 
@@ -1854,6 +1853,7 @@ module CrystalV2
           @context.nil_type
         ensure
           @assignments = previous_assignments.not_nil!
+          @flow_narrowings = previous_flow_narrowings.not_nil!
           @current_method_is_class_method_stack.pop unless @current_method_is_class_method_stack.empty?
           @current_method_scope = previous_method_scope
           @receiver_type_context = previous_receiver_context
@@ -2414,6 +2414,13 @@ module CrystalV2
             return inferred_type
           end
 
+          if current_class = @current_class
+            if seeded_type = seed_untyped_instance_var_type_from_methods(current_class, clean_name)
+              debug_hook("infer.instance_var.seeded_untyped", "name=#{clean_name} type=#{seeded_type}")
+              return seeded_type
+            end
+          end
+
           # Not found - return Nil
           if ENV["DEBUG"]?
             puts "  returning Nil (not found)"
@@ -2484,6 +2491,146 @@ module CrystalV2
           nil
         end
 
+        private def seed_untyped_instance_var_type_from_methods(current_class : ClassSymbol, clean_name : String) : Type?
+          seed_key = "#{current_class.name}##{clean_name}"
+          return nil unless @instance_var_seed_in_progress.add?(seed_key)
+
+          begin
+            receiver_type = if receiver = @receiver_type_context
+                              if receiver.is_a?(InstanceType) && receiver.class_symbol == current_class
+                                receiver
+                              else
+                                instance_type_for(current_class)
+                              end
+                            else
+                              instance_type_for(current_class)
+                            end
+
+            current_class.scope.each_local_symbol do |_name, symbol|
+              case symbol
+              when MethodSymbol
+                if seeded = seed_untyped_instance_var_type_from_method(symbol, receiver_type, clean_name)
+                  return seeded
+                end
+              when OverloadSetSymbol
+                symbol.overloads.each do |method|
+                  if seeded = seed_untyped_instance_var_type_from_method(method, receiver_type, clean_name)
+                    return seeded
+                  end
+                end
+              end
+            end
+          ensure
+            @instance_var_seed_in_progress.delete(seed_key)
+          end
+
+          nil
+        end
+
+        private def seed_untyped_instance_var_type_from_method(method : MethodSymbol, receiver_type : Type, clean_name : String) : Type?
+          previous_receiver_context = @receiver_type_context
+          previous_class = @current_class
+          previous_module = @current_module
+          previous_method_scope = @current_method_scope
+          previous_assignments = @assignments.dup
+          bound_param_names = [] of String
+          pushed_class_method_frame = false
+
+          return nil if method.is_class_method?
+          return nil unless method_assigns_instance_var?(method, clean_name)
+
+          def_node = @arena[method.node_id]
+          return nil unless def_node.is_a?(Frontend::DefNode)
+          body = def_node.body
+          return nil unless body
+
+          assignment_values = [] of ExprId
+          body.each do |expr_id|
+            collect_instance_var_assignment_values(expr_id, clean_name, assignment_values)
+          end
+          return nil if assignment_values.empty?
+
+          @current_method_is_class_method_stack << method.is_class_method?
+          pushed_class_method_frame = true
+          @current_class = nil
+          @current_module = nil
+          @receiver_type_context = nil
+
+          if receiver_type.is_a?(InstanceType)
+            @receiver_type_context = receiver_type
+            @current_class = receiver_type.class_symbol
+          elsif receiver_type.is_a?(ClassType)
+            @receiver_type_context = receiver_type
+            @current_class = receiver_type.symbol
+          elsif receiver_type.is_a?(EnumType)
+            @receiver_type_context = receiver_type
+          elsif receiver_type.is_a?(ModuleType)
+            @receiver_type_context = receiver_type
+            @current_module = receiver_type.symbol
+          elsif receiver_type.is_a?(PrimitiveType)
+            @receiver_type_context = receiver_type
+            @current_class = primitive_instance_class_symbol(receiver_type)
+          end
+          if owner_module = method.scope.owner_module
+            @current_module = owner_module
+          end
+          @current_method_scope = method.scope
+
+          method.params.each do |param|
+            next if param.is_block
+            next unless param_name_slice = param.name
+
+            bound_type = if type_annotation = param.type_annotation
+                           resolve_method_annotation_type(
+                             intern_name(type_annotation),
+                             receiver_type,
+                             method.scope,
+                             class_method_context: method.is_class_method?
+                           )
+                         elsif default_value = param.default_value
+                           infer_expression(default_value)
+                         end
+            next unless bound_type
+            next if unknownish_type?(bound_type)
+
+            param_name = intern_name(param_name_slice)
+            @assignments[param_name] = bound_type
+            bound_param_names << param_name
+          end
+
+          candidate_types = [] of Type
+          assignment_values.each do |value_id|
+            value_type = infer_expression(value_id)
+            next if unknownish_type?(value_type)
+            candidate_types << value_type
+          end
+          return nil if candidate_types.empty?
+
+          candidate = union_of(candidate_types)
+          @instance_var_types[clean_name] = candidate
+          candidate
+        ensure
+          @receiver_type_context = previous_receiver_context
+          @current_class = previous_class
+          @current_module = previous_module
+          @current_method_scope = previous_method_scope
+          if names = bound_param_names
+            previous_assignments_map = previous_assignments
+            names.each do |param_name|
+              if previous_assignments_map && previous_assignments_map.has_key?(param_name)
+                if previous_type = previous_assignments_map[param_name]
+                  @assignments[param_name] = previous_type
+                else
+                  @assignments.delete(param_name)
+                end
+              else
+                @assignments.delete(param_name)
+              end
+            end
+          end
+          @current_method_is_class_method_stack.pop if pushed_class_method_frame && !@current_method_is_class_method_stack.empty?
+        end
+
         private def method_assigns_instance_var?(method : MethodSymbol, clean_name : String) : Bool
           def_node = @arena[method.node_id]
           return false unless def_node.is_a?(Frontend::DefNode)
@@ -2506,6 +2653,25 @@ module CrystalV2
           end
 
           children_of(expr_id, node).any? { |child_id| expression_assigns_instance_var?(child_id, clean_name) }
+        end
+
+        private def collect_instance_var_assignment_values(expr_id : ExprId, clean_name : String, values : Array(ExprId)) : Nil
+          node = @arena[expr_id]
+
+          if node.is_a?(Frontend::AssignNode)
+            target_node = @arena[node.target]
+            if target_node.is_a?(Frontend::InstanceVarNode)
+              target_name = intern_name(target_node.name)
+              normalized_target = target_name.starts_with?("@") ? target_name[1..-1] : target_name
+              if normalized_target == clean_name
+                values << node.value
+              end
+            end
+          end
+
+          children_of(expr_id, node).each do |child_id|
+            collect_instance_var_assignment_values(child_id, clean_name, values)
+          end
         end
 
         # Phase 76: Infer type of class variable

@@ -107,5 +107,81 @@ describe Semantic::TypeInferenceEngine do
       engine.diagnostics.should be_empty
       engine.context.get_type(program.roots.last).to_s.should eq("Int32")
     end
+
+    it "keeps initialize-seeded collection ivars concrete across queue and stack helpers" do
+      source = <<-CRYSTAL
+        class Printer
+          def initialize
+            root = Group.new(0)
+
+            @group_stack = [] of Group
+            @group_stack << root
+
+            @group_queue = GroupQueue.new
+            @group_queue.enq root
+          end
+
+          def current_depth : Int32
+            @group_stack.last.depth
+          end
+
+          def consume : Int32
+            return 0 unless group = @group_queue.deq
+            group.depth
+          end
+
+          def push_and_pop : Int32
+            group = Group.new(@group_stack.last.depth + 1)
+            @group_stack.push group
+            @group_queue.enq group
+            begin
+              group.depth
+            ensure
+              @group_stack.pop
+              @group_queue.delete(group) if group.items.empty?
+            end
+          end
+
+          private class Group
+            getter depth
+            getter items
+
+            def initialize(@depth : Int32)
+              @items = [] of Int32
+            end
+          end
+
+          private class GroupQueue
+            def initialize
+              @groups = [] of Group
+            end
+
+            def enq(group : Group) : Nil
+              @groups << group
+            end
+
+            def deq : Group?
+              @groups.shift?
+            end
+
+            def delete(group : Group) : Nil
+              @groups.delete(group)
+            end
+          end
+        end
+
+        printer = Printer.new
+        printer.current_depth
+        printer.consume
+        printer.push_and_pop
+      CRYSTAL
+
+      program, analyzer, engine = infer_instance_var_refinement_types(source)
+
+      analyzer.semantic_diagnostics.should be_empty
+      analyzer.name_resolver_diagnostics.should be_empty
+      engine.diagnostics.should be_empty
+      engine.context.get_type(program.roots.last).to_s.should eq("Int32")
+    end
   end
 end

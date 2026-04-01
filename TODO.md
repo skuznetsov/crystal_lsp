@@ -5201,3 +5201,49 @@ Immediate next steps:
 1. Finish the active falsifier for `CRYSTAL_V2_SKIP_CLASS_BODY_UNWRAP=1` to check whether bypassing visibility unwrap makes the plain struct-field oracle green.
 2. If it does, replace the broad helper call with a bootstrap-safe fast path for non-visibility nodes and then re-run the plain-struct and lib-struct reducers.
 3. Only after that, re-run `src/crystal_v2.cr --release --no-ast-cache` with `CRYSTAL_V2_STOP_AFTER_HIR=1` and then resume stage2 -> stage3.
+
+## Fresh Frontier — 2026-04-01
+
+Verified this turn on semantic stage3 probes built from the current workspace:
+
+1. The old `pretty_print` head was not one bug but two stacked corridors.
+   - Focused regression `spec/semantic/type_inference_instance_var_refinement_spec.cr`
+     reproduced the method-body failure on a minimal initialize-seeded
+     `@group_stack` / `@group_queue` carrier.
+   - The first layer was eager method-body inference: eager `infer_def`
+     walked bodies statement-by-statement and skipped `infer_block_result`,
+     so post-`unless` truthy narrowings never survived to later statements.
+   - The second layer was constructor-only ivar state: `PrettyPrint#initialize`
+     is deferred because it has untyped params, so constructor-assigned ivars
+     like `@group_stack`, `@group_queue`, and nested `Group#@breakables` never
+     seeded eagerly.
+
+2. The verified fix is bounded and split accordingly.
+   - Eager `infer_def` now uses `infer_block_result(body)` and restores
+     `@flow_narrowings`, which fixes annotated methods like
+     `return unless group = @group_queue.deq; group.depth`.
+   - Missing untyped ivars now trigger a targeted fallback that scans direct
+     ivar assignments in local methods/constructors and infers only the RHS of
+     those assignments under the receiver/method scope, instead of eagerly
+     inferring all deferred untyped-parameter methods.
+
+3. Measured impact:
+   - Focused regression and adjacent `type_inference_logical_rhs_narrowing_spec`
+     are green.
+   - `../crystal/bin/crystal build src/crystal_v2.cr --no-codegen --error-trace`
+     is green.
+   - Full semantic stage3 probe via `scripts/run_safe.sh` moved from
+     `semantic_diags=0 resolution_diags=0 type_diags=82` to
+     `semantic_diags=0 resolution_diags=0 type_diags=77`.
+   - `src/stdlib/pretty_print.cr` dropped from 9 errors to 5 and is no longer
+     the top file-local blocker.
+
+Immediate next steps:
+1. Take the new live head from the fresh log:
+   `src/stdlib/option_parser.cr` and `src/stdlib/unicode/unicode.cr` at 8 each,
+   then `src/stdlib/float/printer/dragonbox.cr` at 7.
+2. Keep `pretty_print` as a smaller follow-up branch:
+   remaining file-local errors are now `Group#breakables`, `GroupQueue#@queue`
+   mutation surface (`<<`, `delete`), and `@buffer.clear`.
+3. Do not reopen the old `@group_stack` / `@group_queue` Nil theory; that
+   branch is now verified and closed.
