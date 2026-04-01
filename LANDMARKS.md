@@ -1,7 +1,34 @@
 # LANDMARKS
 
-Updated: 2026-03-31
+Updated: 2026-04-01
 Context: compiler/bootstrap/stage2-stability
+
+[LM-391|verified]: After [LM-390], the fresh whole-program head was no longer
+the old `File.info?` / `FileDescriptor#print` corridor. A full safe stage3 probe
+on `HEAD` showed `semantic_diags=0 resolution_diags=0 type_diags=196`, with a
+remaining hotspot in `src/stdlib/pretty_print.cr` (`15` errors) still starting
+from `Method 'last' not found on Nil`. A cheap exact reducer split the failure
+class cleanly: top-level constructor-seeded untyped ivars already worked, but a
+nested class with `def initialize; @cached = Group.new; end` and a later
+`def take; @cached.depth; end` still degraded to `Nil` when reached through
+`Breakable.new ...; inner.take`. That falsified a generic untyped-ivar bug and
+isolated the missing corridor to constructor side effects on instantiated
+class receivers. The verified fix in
+`src/compiler/semantic/type_inference_engine.cr` is narrow: both `ClassType.new`
+paths now instantiate the receiver as before, then call a new
+`infer_constructor_initialize_side_effects(...)` helper which looks up the
+matching `initialize` instance method on that instantiated receiver and runs
+`infer_method_body_type(...)` purely to seed ivar side effects. Focused
+regression `spec/semantic/type_inference_instance_var_refinement_spec.cr` is
+green; rebuild gates for `src/crystal_v2.cr --no-codegen` and
+`/tmp/crystal_v2_semantic_stage3probe` are green; the exact nested-constructor
+reducer is green with root type `Int32`; and the full safe stage3 probe moves
+from `semantic_diags=0 resolution_diags=0 type_diags=196` to
+`semantic_diags=0 resolution_diags=0 type_diags=187`. The hotspot count in
+`src/stdlib/pretty_print.cr` drops from `15` to `9`. Boundary: stage3 is still
+not green; the next live head is now dominated by `dragonbox`, `time/tz`, the
+remaining `pretty_print` corridor, and `process/shell`, not the old nested
+constructor ivar-loss pattern. {F/G/R: 0.97/0.82/0.98} [verified]
 
 [LM-390|verified]: After [LM-389], the exact stdlib carrier frontier through
 `/tmp/semantic_pwd_and_info_probe.cr` moved again. The first blocker

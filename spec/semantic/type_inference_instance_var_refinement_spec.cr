@@ -71,5 +71,41 @@ describe Semantic::TypeInferenceEngine do
       engine.diagnostics.should be_empty
       engine.context.get_type(program.roots.last).to_s.should eq("Nil")
     end
+
+    it "seeds untyped nested-class ivars from constructor bodies reached via .new" do
+      source = <<-CRYSTAL
+        class Outer
+          def push : Int32
+            inner = Breakable.new
+            inner.take
+          end
+
+          private class Breakable
+            def initialize
+              @cached = Group.new
+            end
+
+            def take : Int32
+              @cached.depth
+            end
+          end
+
+          private class Group
+            def depth : Int32
+              1
+            end
+          end
+        end
+
+        Outer.new.push
+      CRYSTAL
+
+      program, analyzer, engine = infer_instance_var_refinement_types(source)
+
+      analyzer.semantic_diagnostics.should be_empty
+      analyzer.name_resolver_diagnostics.should be_empty
+      engine.diagnostics.should be_empty
+      engine.context.get_type(program.roots.last).to_s.should eq("Int32")
+    end
   end
 end

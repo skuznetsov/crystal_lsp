@@ -1,6 +1,40 @@
 # Crystal V2 Bootstrap — TODO (Updated 2026-03-31)
 
 ## Current Status
+- **Fresh semantic constructor-side-effect checkpoint: class receiver `.new` now infers the matching `initialize` body for instance-ivar side effects, which clears a real nested-constructor ivar-loss corridor and moves the honest full-stage3 gate from `type_diags=196` to `type_diags=187` (2026-04-01, current session)**:
+  - trustworthy setup:
+    - `src/compiler/semantic/type_inference_engine.cr` now calls a new `infer_constructor_initialize_side_effects(...)` helper on the `ClassType.new` / `new!` paths, after selecting the instantiated receiver type
+    - the helper looks up the matching `initialize` instance method on that instantiated receiver and runs `infer_method_body_type(...)` only for constructor side effects; it does not change the constructor's return type contract
+    - focused regression coverage now lives in `spec/semantic/type_inference_instance_var_refinement_spec.cr`
+  - decisive evidence:
+    - focused regression is green:
+      - `../crystal/bin/crystal spec spec/semantic/type_inference_instance_var_refinement_spec.cr --error-trace`
+    - rebuild gates are green:
+      - `../crystal/bin/crystal build src/crystal_v2.cr --no-codegen --error-trace`
+      - `../crystal/bin/crystal build src/crystal_v2.cr -o /tmp/crystal_v2_semantic_stage3probe --error-trace`
+    - the exact semantic reducer is green and now covers the root bug class:
+      - nested private class `Breakable`, untyped ivar `@cached = Group.new` inside `initialize`, later `inner.take` reading `@cached.depth`
+      - before: `Method 'depth' not found on Nil`
+      - after: root type `Int32`
+    - the full semantic stage3 probe under the safe wrapper moves materially:
+      - `env CRYSTAL_V2_SEMANTIC_COMPILE=1 scripts/run_safe.sh /tmp/crystal_v2_semantic_stage3probe 300 4096 src/crystal_v2.cr --stats --no-link -o /tmp/stage3_semantic_probe_after_ctor_seed.out > /tmp/stage3_semantic_probe_after_ctor_seed.log 2>&1`
+      - summary moved from:
+        - `semantic_diags=0`
+        - `resolution_diags=0`
+        - `type_diags=196`
+      - to:
+        - `semantic_diags=0`
+        - `resolution_diags=0`
+        - `type_diags=187`
+      - the live file counts moved in the expected hotspot:
+        - `src/stdlib/pretty_print.cr`: `15 -> 9`
+  - practical boundary:
+    - stage3 with the new inferer is still **not** green
+    - current live frontier is now headed by:
+      - `src/stdlib/float/printer/dragonbox.cr`
+      - `src/stdlib/time/tz.cr`
+      - residual `src/stdlib/pretty_print.cr`
+      - `src/stdlib/process/shell.cr`
 - **Fresh exact-carrier runtime lookup checkpoint: `Info#same_file?` and `FileDescriptor#print` are both cleared on the stdlib carrier, but the last honest full-stage3 gate is still `type_diags=235` until a fresh whole-program probe is rerun (2026-03-31, current session)**:
   - trustworthy setup:
     - `src/compiler/semantic/type_inference_engine.cr` now passes `class_method_context: method.is_class_method?` while resolving parameter annotations inside `parameters_match?(...)`, which fixes `other : self` instance-method parameters when the call site lives inside a class-method body

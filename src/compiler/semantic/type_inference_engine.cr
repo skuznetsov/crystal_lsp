@@ -1560,6 +1560,20 @@ module CrystalV2
           instance_type_for(receiver_type.symbol, receiver_type.type_args)
         end
 
+        private def infer_constructor_initialize_side_effects(
+          instance_receiver : Type,
+          arg_types : Array(Type),
+          has_block : Bool,
+          call_node : Frontend::CallNode? = nil
+        ) : Nil
+          return unless instance_receiver.is_a?(InstanceType)
+
+          arg_expr_ids = call_node ? positional_call_arg_ids(call_node).map { |arg_id| arg_id.as(ExprId?) } : nil
+          return unless method = lookup_method(instance_receiver, "initialize", arg_types, has_block, arg_expr_ids)
+
+          infer_method_body_type(method, instance_receiver, arg_types, call_node)
+        end
+
         private def array_like_literal_receiver_type(type : Type) : Type?
           case type
           when ArrayType
@@ -5569,7 +5583,9 @@ module CrystalV2
             if receiver_type.is_a?(ClassType)
               # If ClassType has type_args (e.g., Box(Int32)), copy them to InstanceType
               debug("  Constructor call - returning InstanceType")
-              return instantiate_class_receiver(receiver_type)
+              instance_receiver = instantiate_class_receiver(receiver_type)
+              infer_constructor_initialize_side_effects(instance_receiver, [] of Type, false)
+              return instance_receiver
             elsif primitive_metaclass?(receiver_type)
               if value_type = primitive_metaclass_value_type(receiver_type.as(PrimitiveType))
                 return value_type
@@ -5907,12 +5923,18 @@ module CrystalV2
 
               # If ClassType already has type_args (explicit Box(Int32)), use them
               if receiver_type.type_args
-                return instantiate_class_receiver(receiver_type)
+                instance_receiver = instantiate_class_receiver(receiver_type)
+                infer_constructor_initialize_side_effects(instance_receiver, arg_types, has_block, node)
+                return instance_receiver
                 # Otherwise try to infer type arguments from constructor arguments
               elsif type_args = infer_type_arguments(receiver_type.symbol, arg_types)
-                return instantiate_class_receiver(ClassType.new(receiver_type.symbol, type_args))
+                instance_receiver = instantiate_class_receiver(ClassType.new(receiver_type.symbol, type_args))
+                infer_constructor_initialize_side_effects(instance_receiver, arg_types, has_block, node)
+                return instance_receiver
               else
-                return instantiate_class_receiver(receiver_type)
+                instance_receiver = instantiate_class_receiver(receiver_type)
+                infer_constructor_initialize_side_effects(instance_receiver, arg_types, has_block, node)
+                return instance_receiver
               end
             elsif primitive_metaclass?(receiver_type)
               if value_type = primitive_metaclass_value_type(receiver_type.as(PrimitiveType))
