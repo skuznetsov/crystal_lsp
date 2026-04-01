@@ -5247,3 +5247,53 @@ Immediate next steps:
    mutation surface (`<<`, `delete`), and `@buffer.clear`.
 3. Do not reopen the old `@group_stack` / `@group_queue` Nil theory; that
    branch is now verified and closed.
+
+## Fresh Frontier — 2026-04-01 (later)
+
+Verified this turn on semantic stage3 probes built from the current workspace:
+
+1. The next high-leverage live family after the `pretty_print` checkpoint was a
+   missing builtin surface, not a new control-flow bug.
+   - Focused regressions in `spec/semantic/type_inference_collection_builtin_spec.cr`
+     reproduced exactly:
+     - `Int32#zero?`
+     - `Int32#unsafe_chr`
+     - `Array(T)#sort!` with block
+     - `Array(T)#bsearch` with block
+     - `Array(T)#clone`
+     - `Array(T)#delete`
+     - `Array(T)#map_with_index`
+     - `Hash(K, V)#clone`
+   - All of them were missing from the semantic builtin tables.
+
+2. The verified fix is a narrow builtin-table expansion.
+   - Integer/float primitive builtins now include `zero?`, and integer
+     primitives include `unsafe_chr`.
+   - Array builtins now include `clone`, `delete`, `sort!`, `bsearch`, and
+     `map_with_index`.
+   - Hash builtins now include `clone`.
+
+3. Measured impact:
+   - Focused regression pack is green.
+   - Adjacent `type_inference_logical_rhs_narrowing_spec` remains green.
+   - `../crystal/bin/crystal build src/crystal_v2.cr --no-codegen --error-trace`
+     and rebuild of `/tmp/crystal_v2_semantic_stage3probe` are green.
+   - Full semantic stage3 probe via `scripts/run_safe.sh` moved from
+     `semantic_diags=0 resolution_diags=0 type_diags=77` to
+     `semantic_diags=0 resolution_diags=0 type_diags=68`.
+   - File-local deltas:
+     - `src/stdlib/unicode/unicode.cr`: `8 -> 3`
+     - `src/stdlib/option_parser.cr`: `8 -> 5`
+     - `src/stdlib/float/printer/dragonbox.cr`: unchanged at `7`
+     - `src/stdlib/pretty_print.cr`: unchanged at `5`
+
+Immediate next steps:
+1. `option_parser` still has a tuple-destructuring / branch-carrier bug:
+   `short_value_type` and `long_value_type` are still inferred as `String`
+   in `parse_flag_definition(...)`, plus `Array(String)#join(io, '\n')` still
+   needs the IO overload.
+2. `unicode` is now much narrower:
+   only the `second.zero?` nil-carrier on decomposition mappings and the
+   `unsafe_chr` receiver mismatch remain.
+3. `dragonbox` is now the densest top file-local frontier and should be the
+   next branch unless `option_parser` gets a tiny exact reducer faster.

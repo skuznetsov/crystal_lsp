@@ -8726,6 +8726,22 @@ module CrystalV2
                 return_annotation: type_name,
                 scope: dummy_scope
               )
+            when "zero?"
+              methods << MethodSymbol.new(
+                method_name,
+                dummy_node_id,
+                params: [] of Frontend::Parameter,
+                return_annotation: "Bool",
+                scope: dummy_scope
+              )
+            when "unsafe_chr"
+              methods << MethodSymbol.new(
+                method_name,
+                dummy_node_id,
+                params: [] of Frontend::Parameter,
+                return_annotation: "Char",
+                scope: dummy_scope
+              )
             when "sign"
               methods << MethodSymbol.new(
                 method_name,
@@ -8813,6 +8829,14 @@ module CrystalV2
                 dummy_node_id,
                 params: [] of Frontend::Parameter,
                 return_annotation: "Int32",
+                scope: dummy_scope
+              )
+            when "zero?"
+              methods << MethodSymbol.new(
+                method_name,
+                dummy_node_id,
+                params: [] of Frontend::Parameter,
+                return_annotation: "Bool",
                 scope: dummy_scope
               )
             when "to_s"
@@ -9138,6 +9162,14 @@ module CrystalV2
               return_annotation: "Array(#{element_type_name})",
               scope: dummy_scope
             )
+          when "clone"
+            methods << MethodSymbol.new(
+              method_name,
+              dummy_node_id,
+              params: [] of Frontend::Parameter,
+              return_annotation: "Array(#{element_type_name})",
+              scope: dummy_scope
+            )
           when "unsafe_fetch"
             param = Frontend::Parameter.new(name: "index".to_slice, type_annotation: "Int32".to_slice)
             methods << MethodSymbol.new(
@@ -9195,6 +9227,15 @@ module CrystalV2
               dummy_node_id,
               params: [param],
               return_annotation: "Array(#{element_type_name})",
+              scope: dummy_scope
+            )
+          when "delete"
+            param = Frontend::Parameter.new(name: "value".to_slice, type_annotation: element_type_name.to_slice)
+            methods << MethodSymbol.new(
+              method_name,
+              dummy_node_id,
+              params: [param],
+              return_annotation: "#{element_type_name} | Nil",
               scope: dummy_scope
             )
           when "concat"
@@ -9277,6 +9318,23 @@ module CrystalV2
               return_annotation: "Array(#{element_type_name})",
               scope: dummy_scope
             )
+          when "map_with_index"
+            offset_param = Frontend::Parameter.new(name: "offset".to_slice, type_annotation: "Int32".to_slice)
+            block_param = Frontend::Parameter.new(name: "block".to_slice, is_block: true)
+            methods << MethodSymbol.new(
+              method_name,
+              dummy_node_id,
+              params: [block_param],
+              return_annotation: "Array(#{element_type_name})",
+              scope: dummy_scope
+            )
+            methods << MethodSymbol.new(
+              method_name,
+              dummy_node_id,
+              params: [offset_param, block_param],
+              return_annotation: "Array(#{element_type_name})",
+              scope: dummy_scope
+            )
           when "select", "reject"
             # Array(T)#select(&block) : Array(T)
             methods << MethodSymbol.new(
@@ -9311,6 +9369,22 @@ module CrystalV2
               method_name,
               dummy_node_id,
               params: [] of Frontend::Parameter,
+              return_annotation: "Array(#{element_type_name})",
+              scope: dummy_scope
+            )
+          when "sort!"
+            block_param = Frontend::Parameter.new(name: "block".to_slice, is_block: true)
+            methods << MethodSymbol.new(
+              method_name,
+              dummy_node_id,
+              params: [] of Frontend::Parameter,
+              return_annotation: "Array(#{element_type_name})",
+              scope: dummy_scope
+            )
+            methods << MethodSymbol.new(
+              method_name,
+              dummy_node_id,
+              params: [block_param],
               return_annotation: "Array(#{element_type_name})",
               scope: dummy_scope
             )
@@ -9398,6 +9472,15 @@ module CrystalV2
               dummy_node_id,
               params: [param, offset_param],
               return_annotation: "Int32",
+              scope: dummy_scope
+            )
+          when "bsearch"
+            block_param = Frontend::Parameter.new(name: "block".to_slice, is_block: true)
+            methods << MethodSymbol.new(
+              method_name,
+              dummy_node_id,
+              params: [block_param],
+              return_annotation: "#{element_type_name} | Nil",
               scope: dummy_scope
             )
           end
@@ -9559,6 +9642,8 @@ module CrystalV2
             methods << MethodSymbol.new(method_name, dummy_node_id, params: [key_param, block_param], return_annotation: value_type_name, scope: dummy_scope)
           when "to_a"
             methods << MethodSymbol.new(method_name, dummy_node_id, params: [] of Frontend::Parameter, return_annotation: "Array(Tuple(#{key_type_name}, #{value_type_name}))", scope: dummy_scope)
+          when "clone"
+            methods << MethodSymbol.new(method_name, dummy_node_id, params: [] of Frontend::Parameter, return_annotation: "Hash(#{key_type_name}, #{value_type_name})", scope: dummy_scope)
           end
 
           methods
