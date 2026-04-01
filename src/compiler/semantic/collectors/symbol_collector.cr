@@ -1590,7 +1590,8 @@ module CrystalV2
           var_name = intern_name(node.name)
           var_name = var_name[2..-1] if var_name.starts_with?("@@")
           type_annotation = node.type.try { |slice| intern_name(slice) }
-          define_scoped_class_var_symbol(var_name, type_annotation, node_id)
+          default_value = node.value
+          define_scoped_class_var_symbol(var_name, type_annotation, node_id, default_value, !default_value.nil?)
         end
 
         private def handle_scoped_class_var_assignment(node_id : Frontend::ExprId, node : Frontend::AssignNode) : Bool
@@ -1599,19 +1600,31 @@ module CrystalV2
 
           var_name = intern_name(target_node.name)
           var_name = var_name[2..-1] if var_name.starts_with?("@@")
-          define_scoped_class_var_symbol(var_name, nil, node.target)
+          define_scoped_class_var_symbol(var_name, nil, node.target, node.value, true)
           visit(node.value)
           true
         end
 
-        private def define_scoped_class_var_symbol(name : String, type_annotation : String?, node_id : Frontend::ExprId) : Nil
+        private def define_scoped_class_var_symbol(
+          name : String,
+          type_annotation : String?,
+          node_id : Frontend::ExprId,
+          default_value : Frontend::ExprId? = nil,
+          has_default : Bool = false
+        ) : Nil
           if owner = @class_stack.last?
-            define_class_var_symbol(owner, name, type_annotation, node_id)
+            define_class_var_symbol(owner, name, type_annotation, node_id, default_value, has_default)
             return
           end
 
           sym_name = name.starts_with?("@@") ? name : "@@#{name}"
-          sym = ClassVarSymbol.new(sym_name, node_id, type_annotation)
+          if existing = current_table.lookup_local(sym_name).as?(ClassVarSymbol)
+            type_annotation ||= existing.declared_type
+            default_value ||= existing.default_value
+            has_default ||= existing.has_default?
+          end
+
+          sym = ClassVarSymbol.new(sym_name, node_id, type_annotation, default_value, has_default)
           assign_symbol_file(sym, node_id)
 
           if existing = current_table.lookup_local(sym_name)
@@ -1772,15 +1785,20 @@ module CrystalV2
             var_name = intern_name(node.name)
             var_name = var_name[2..-1] if var_name.starts_with?("@@")
             type_annotation = node.type.try { |slice| intern_name(slice) }
-            define_class_var_symbol(class_symbol, var_name, type_annotation, expr_id)
+            default_value = node.value
+            define_class_var_symbol(class_symbol, var_name, type_annotation, expr_id, default_value, !default_value.nil?)
           when Frontend::AssignNode
             target_id = node.target
             target_node = arena[target_id]
             if target_node.is_a?(Frontend::ClassVarNode)
               var_name = intern_name(target_node.name)
               var_name = var_name[2..-1] if var_name.starts_with?("@@")
-              type_annotation = nil
-              define_class_var_symbol(class_symbol, var_name, type_annotation, target_id)
+              existing = class_symbol.scope.lookup_local("@@#{var_name}").as?(ClassVarSymbol)
+              type_annotation = existing.try(&.declared_type)
+              in_class_body = current_method.nil?
+              default_value = existing.try(&.default_value) || (in_class_body ? node.value : nil)
+              has_default = existing.try(&.has_default?) || in_class_body
+              define_class_var_symbol(class_symbol, var_name, type_annotation, target_id, default_value, has_default)
             end
           when Frontend::DefNode
             (node.body || [] of Frontend::ExprId).each do |body_expr_id|
@@ -2367,9 +2385,22 @@ module CrystalV2
           end
         end
 
-        private def define_class_var_symbol(class_symbol : ClassSymbol, name : String, type_annotation : String?, node_id : Frontend::ExprId)
+        private def define_class_var_symbol(
+          class_symbol : ClassSymbol,
+          name : String,
+          type_annotation : String?,
+          node_id : Frontend::ExprId,
+          default_value : Frontend::ExprId? = nil,
+          has_default : Bool = false
+        )
           sym_name = name.starts_with?("@@") ? name : "@@#{name}"
-          sym = ClassVarSymbol.new(sym_name, node_id, type_annotation)
+          if existing = class_symbol.scope.lookup_local(sym_name).as?(ClassVarSymbol)
+            type_annotation ||= existing.declared_type
+            default_value ||= existing.default_value
+            has_default ||= existing.has_default?
+          end
+
+          sym = ClassVarSymbol.new(sym_name, node_id, type_annotation, default_value, has_default)
           assign_symbol_file(sym, node_id)
 
           {class_symbol.scope, class_symbol.class_scope}.each do |scope|

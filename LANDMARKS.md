@@ -3,6 +3,36 @@
 Updated: 2026-04-01
 Context: compiler/bootstrap/stage2-stability
 
+[LM-406|verified]: After [LM-405], the remaining `signal` corridor split again.
+The decisive falsifier was a tiny no-prelude carrier
+`/tmp/semantic_classvar_pending_probe.cr`, not the full stdlib file. It
+declared `@@pending = {} of Int32 => Int32`, then read it through
+`@@pending.delete(pid)` inside a module method. Before the fix it failed as
+`Method 'delete' not found on Hash(Nil, Nil)`, which falsified the earlier
+"remaining `signal` is only richer EventLoop/tuple context" theory and
+isolated a narrower root cause: class-var default re-inference was real, but it
+still collapsed the empty-hash default expression to `Hash(Nil, Nil)`. The
+verified fix is two-part. First, `src/compiler/semantic/symbol.cr` and
+`src/compiler/semantic/collectors/symbol_collector.cr` now preserve
+`default_value` / `has_default` metadata for class-body `@@var = ...` and
+`@@var : T = ...` declarations, mirroring the earlier ivar-default path.
+Second, `src/compiler/semantic/type_inference_engine.cr` now uses that class-var
+default metadata as an on-demand fallback with a seed-in-progress guard, and
+its empty-hash inference finally honors `HashLiteralNode#of_key_type` /
+`#of_value_type` instead of hardcoding `Hash(Nil, Nil)`. Focused regressions in
+`spec/semantic/symbol_collector_spec.cr` and `spec/semantic/type_inference_spec.cr`
+are green; rebuild gates for `src/crystal_v2.cr --no-codegen` and
+`/tmp/crystal_v2_semantic_stage3probe` are green; the exact safe no-prelude
+carrier is green; and the full safe stage3 probe moves from
+`semantic_diags=0 resolution_diags=0 type_diags=49` to
+`semantic_diags=0 resolution_diags=0 type_diags=47`. `Hash(Nil, Nil)` and the
+exact `@@pending.delete(pid)` failure disappear from the live log, and
+`src/stdlib/crystal/system/unix/signal.cr` drops from `3` errors to `2`.
+Boundary: stage3 is still not green; the new honest head remains
+`process` (`5`), then `hir`/`raise` (`3`), followed by `process [generated]`,
+`process`, `regex`, and `signal` at `2` each. {F/G/R: 0.98/0.84/0.98}
+[verified]
+
 [LM-405|verified]: After [LM-404], the next `signal`-side frontier was not a
 class-var storage bug in general; the decisive exact reducer was the tiny
 no-prelude carrier `/tmp/semantic_signal_pipe_probe.cr`, which declared

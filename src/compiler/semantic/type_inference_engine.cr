@@ -189,6 +189,7 @@ module CrystalV2
           @method_lookup_cache = {} of MethodLookupKey => MethodSymbol?
           @macro_expression_cache = {} of Int32 => ExprId
           @instance_var_seed_in_progress = Set(String).new
+          @class_var_seed_in_progress = Set(String).new
           @current_class = nil
           @current_module = nil
           @current_method_scope = nil
@@ -2968,9 +2969,28 @@ module CrystalV2
             if declared_type = symbol.declared_type
               return parse_type_name(declared_type)
             end
+
+            if default_type = infer_class_var_default_value_type(var_name, symbol)
+              return default_type
+            end
           end
 
           @context.nil_type
+        end
+
+        private def infer_class_var_default_value_type(var_name : String, symbol : ClassVarSymbol) : Type?
+          return nil unless default_value = symbol.default_value
+
+          seed_key = "#{class_var_key(var_name)}:default"
+          return nil unless @class_var_seed_in_progress.add?(seed_key)
+
+          begin
+            default_type = infer_expression(default_value)
+            return nil if unknownish_type?(default_type)
+            default_type
+          ensure
+            @class_var_seed_in_progress.delete(seed_key)
+          end
         end
 
         # Phase 75: Infer type of global variable
@@ -11710,7 +11730,15 @@ module CrystalV2
           entries = node.entries
 
           if entries.empty?
-            # TODO: honor explicit annotations in Phase 91B; current spec expects Nil/Nil
+            if key_type_name = node.of_key_type
+              if value_type_name = node.of_value_type
+                return HashType.new(
+                  parse_type_name(intern_name(key_type_name)),
+                  parse_type_name(intern_name(value_type_name))
+                )
+              end
+            end
+
             return HashType.new(@context.nil_type, @context.nil_type)
           end
 

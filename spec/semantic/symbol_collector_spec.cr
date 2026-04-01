@@ -757,4 +757,27 @@ describe Semantic::SymbolCollector do
     mach_timebase = thread_mod.as(Semantic::ModuleSymbol).scope.lookup("@@mach_timebase_info").should be_a(Semantic::ClassVarSymbol)
     mach_timebase.as(Semantic::ClassVarSymbol).declared_type.should eq("LibC::MachTimebaseInfo?")
   end
+
+  it "preserves class-body defaults for class variable assignments" do
+    source = <<-CR
+      module PendingStore
+        @@pending = {} of Int32 => Int32
+      end
+    CR
+
+    parser = Frontend::Parser.new(Frontend::Lexer.new(source))
+    program = parser.parse_program
+    context = Semantic::Context.new(Semantic::SymbolTable.new)
+    collector = Semantic::SymbolCollector.new(program, context)
+    collector.collect
+
+    collector.diagnostics.should be_empty
+
+    pending_store = context.symbol_table.lookup("PendingStore").should be_a(Semantic::ModuleSymbol)
+    pending = pending_store.as(Semantic::ModuleSymbol).scope.lookup("@@pending").should be_a(Semantic::ClassVarSymbol)
+    pending = pending.as(Semantic::ClassVarSymbol)
+
+    pending.has_default?.should be_true
+    pending.default_value.should_not be_nil
+  end
 end

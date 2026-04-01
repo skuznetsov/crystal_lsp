@@ -1228,6 +1228,37 @@ describe Semantic::TypeInferenceEngine do
       type.as(PrimitiveType).name.should eq("Int32")
     end
 
+    it "tracks class-body collection class vars for later reads" do
+      source = <<-CRYSTAL
+        module PendingStore
+          @@pending = {} of Int32 => Int32
+          @@waiting = {} of Int32 => Int32
+
+          def self.wait(pid : Int32)
+            if exit_code = @@pending.delete(pid)
+              exit_code
+            else
+              @@waiting[pid] = 1
+              0
+            end
+          end
+        end
+
+        PendingStore.wait(1)
+      CRYSTAL
+
+      program, analyzer, engine = infer_types(source)
+
+      analyzer.semantic_diagnostics.should be_empty
+      analyzer.name_resolver_diagnostics.should be_empty
+      engine.diagnostics.select(&.level.error?).should be_empty
+
+      call_id = program.roots.last
+      type = engine.context.get_type(call_id)
+      type.should be_a(PrimitiveType)
+      type.as(PrimitiveType).name.should eq("Int32")
+    end
+
     it "tracks uninitialized assignments as their declared runtime type" do
       source = <<-CRYSTAL
         class SpinLock
@@ -4526,10 +4557,8 @@ describe Semantic::TypeInferenceEngine do
 
       hash_type.should be_a(HashType)
       ht = hash_type.as(HashType)
-      # Phase 91A: Hash 'of' parsing not updated yet - keeps old behavior
-      # TODO: Update Hash to use ExprId like Array in Phase 91B
-      ht.key_type.as(PrimitiveType).name.should eq("Nil")
-      ht.value_type.as(PrimitiveType).name.should eq("Nil")
+      ht.key_type.as(PrimitiveType).name.should eq("String")
+      ht.value_type.as(PrimitiveType).name.should eq("Int32")
     end
 
     it "infers nested hash Hash(String, Hash(String, Int32))" do

@@ -1,6 +1,52 @@
 # Crystal V2 Bootstrap — TODO (Updated 2026-04-01)
 
 ## Current Status
+- **Fresh semantic class-var default + empty-hash annotation checkpoint: class-body class vars now preserve default-expression metadata, and empty hash literals now honor `of K => V` annotations during semantic re-inference, which fixes the exact `@@pending.delete(pid)` signal-child corridor and moves the honest whole-program stage3 gate from `type_diags=49` to `type_diags=47` (2026-04-01, current session)**:
+  - trustworthy setup:
+    - `src/compiler/semantic/symbol.cr` now lets `ClassVarSymbol` carry `default_value` / `has_default` metadata, mirroring the earlier instance-var default path
+    - `src/compiler/semantic/collectors/symbol_collector.cr` now preserves class-body `@@var = ...` defaults (and `@@var : T = ...` defaults) instead of silently dropping them
+    - `src/compiler/semantic/type_inference_engine.cr` now falls back to class-var default expressions when `@@var` has no tracked assignment or declared type, with a seed-in-progress guard to avoid recursion
+    - the same file now honors `HashLiteralNode#of_key_type` / `#of_value_type` for empty hashes, so re-inference of `{} of K => V` no longer collapses to `Hash(Nil, Nil)`
+    - focused regression coverage lives in:
+      - `spec/semantic/symbol_collector_spec.cr`
+      - `spec/semantic/type_inference_spec.cr`
+  - decisive evidence:
+    - focused regressions are green:
+      - `../crystal/bin/crystal spec spec/semantic/symbol_collector_spec.cr --example 'preserves class-body defaults for class variable assignments' --error-trace`
+      - `../crystal/bin/crystal spec spec/semantic/type_inference_spec.cr --example 'infers empty hash with type annotation' --error-trace`
+      - `../crystal/bin/crystal spec spec/semantic/type_inference_spec.cr --example 'tracks class-body collection class vars for later reads' --error-trace`
+    - rebuild gates are green:
+      - `../crystal/bin/crystal build src/crystal_v2.cr --no-codegen --error-trace`
+      - `../crystal/bin/crystal build src/crystal_v2.cr -o /tmp/crystal_v2_semantic_stage3probe --error-trace`
+    - the exact no-prelude falsifier is now green under the safe wrapper:
+      - `/tmp/semantic_classvar_pending_probe.cr`
+      - before: `Method 'delete' not found on Hash(Nil, Nil)` at `@@pending.delete(pid)`
+      - after:
+        - `env CRYSTAL_V2_SEMANTIC_COMPILE=1 scripts/run_safe.sh /tmp/crystal_v2_semantic_stage3probe 30 1024 /tmp/semantic_classvar_pending_probe.cr --no-prelude --stats --verbose`
+        - `semantic_diags=0`
+        - `resolution_diags=0`
+        - `type_diags=0`
+    - the full semantic stage3 probe under the safe wrapper improves again:
+      - `env CRYSTAL_V2_SEMANTIC_COMPILE=1 scripts/run_safe.sh /tmp/crystal_v2_semantic_stage3probe 300 4096 src/crystal_v2.cr --stats --no-link -o /tmp/stage3_semantic_probe_after_classvar_hash_fix.out > /tmp/stage3_semantic_probe_after_classvar_hash_fix.log 2>&1`
+      - summary moved from:
+        - `semantic_diags=0`
+        - `resolution_diags=0`
+        - `type_diags=49`
+      - to:
+        - `semantic_diags=0`
+        - `resolution_diags=0`
+        - `type_diags=47`
+      - `Hash(Nil, Nil)` / `@@pending.delete(pid)` disappear from the live log, and `src/stdlib/crystal/system/unix/signal.cr` drops from `3` errors to `2`
+  - practical boundary:
+    - this is a real semantic fix for class-var default seeding and empty-hash re-inference
+    - stage3 is still not green; the new live head remains runtime-heavy:
+      - `src/stdlib/crystal/system/unix/process.cr` (`5`)
+      - `src/compiler/hir/hir.cr` (`3`)
+      - `src/stdlib/raise.cr` (`3`)
+      - `src/stdlib/crystal/system/unix/process.cr [generated]` (`2`)
+      - `src/stdlib/process.cr` (`2`)
+      - `src/stdlib/regex.cr` (`2`)
+      - `src/stdlib/crystal/system/unix/signal.cr` (`2`)
 - **Fresh semantic brace-tuple namespace checkpoint: namespaced brace-tuple annotations now stay tuples instead of being misparsed as named tuples, which fixes the exact `@@pipe[0]` signal carrier and moves the honest whole-program stage3 gate from `type_diags=50` to `type_diags=49` (2026-04-01, current session)**:
   - trustworthy setup:
     - `src/compiler/semantic/type_inference_engine.cr` now ignores namespace separators `::` while detecting top-level named-tuple `:` separators inside brace annotations

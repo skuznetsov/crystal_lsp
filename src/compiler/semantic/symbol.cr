@@ -282,8 +282,17 @@ module CrystalV2
       # Class variable symbol (e.g., @@counter)
       class ClassVarSymbol < Symbol
         getter declared_type : String?
+        getter default_value : ExprId?
+        getter? has_default : Bool
 
-        def initialize(name : String, node_id : ExprId, declared_type : String? = nil, file_path : String? = nil)
+        def initialize(
+          name : String,
+          node_id : ExprId,
+          declared_type : String? = nil,
+          @default_value : ExprId? = nil,
+          @has_default : Bool = false,
+          file_path : String? = nil
+        )
           super(name, node_id, file_path)
           @declared_type = declared_type
         end
