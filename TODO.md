@@ -1,6 +1,64 @@
 # Crystal V2 Bootstrap — TODO (Updated 2026-04-01)
 
 ## Current Status
+- **Fresh semantic generic-macro-body checkpoint: specialized generic method bodies now expand macro branches only when concrete receiver type-parameter bindings are available, and plain integer `to_i` now participates in the integer builtin cast surface, which clears the remaining `dragonbox` macro branch corridor and moves the honest full-stage3 gate from `type_diags=90` to `type_diags=82` (2026-04-01, current session)**:
+  - trustworthy setup:
+    - `src/compiler/semantic/type_inference_engine.cr` now treats plain `to_i` as an integer builtin cast alias to `Int32`
+    - the same file no longer collapses macro nodes in semantic expression inference when a specialized generic receiver has concrete type arguments available
+    - macro expression expansion now receives current generic type-parameter bindings from `@receiver_type_context`, so method bodies like `{% if F == Float32 %}` evaluate against `F=Float32` instead of falling through to the generic `else` branch
+    - the macro expansion path remains intentionally gated: when there are no concrete receiver type-argument bindings, semantic expression inference preserves the previous non-expanding behavior to avoid waking unrelated stdlib macro surfaces
+    - focused regression coverage now lives in `spec/semantic/type_inference_operator_method_body_spec.cr`
+  - decisive evidence:
+    - focused regression pack is green:
+      - `../crystal/bin/crystal spec spec/semantic/type_inference_operator_method_body_spec.cr --error-trace`
+    - rebuild gates are green:
+      - `../crystal/bin/crystal build src/crystal_v2.cr --no-codegen --error-trace`
+      - `../crystal/bin/crystal build src/crystal_v2.cr -o /tmp/crystal_v2_semantic_stage3probe --error-trace`
+    - the exact macro-shaped reducer is green:
+      - `module WUInt; ...; end; module Impl(F, ImplInfo); def self.compute_mul(u, cache); {% if F == Float32 %} ... {% else %} {1_u64, true} {% end %}; end; def self.run(two_fc, beta); zi, is_z_integer = compute_mul((two_fc | 1) << beta, 123_u64); significand = zi // 10_u32; {significand, is_z_integer}; end; end; module Info; alias CarrierUInt = UInt32; end; module Wrapper; def self.to_decimal(signed_significand_bits, exponent_bits); exponent = exponent_bits.to_i; Impl(Float32, Info).run(signed_significand_bits, exponent); end; end; Wrapper.to_decimal(1_u32, 1_u32)`
+      - before narrowing the fix, that reducer proved two separate failures:
+        - first `Method 'to_i' not found on UInt32`
+        - then, after adding `to_i`, `compute_mul(...)` still took the wrong macro branch and yielded `Tuple(UInt64, Bool)` / downstream `Nil`
+      - after the final gated macro-binding fix, the reducer returns `Tuple(UInt32, Bool)` with no semantic diagnostics
+    - a temporary scratch harness in `tmp/semantic_dragonbox_harness.cr` confirmed the decisive inner split:
+      - direct `Impl(Float32, Info).compute_mul(3_u32, 123_u64)` returned `Nil` before macro-binding propagation
+      - after the final fix, the same direct call returns `Tuple(UInt32, Bool)`
+      - the scratch harness was removed after verification
+    - the actual `dragonbox` carrier under the safe wrapper improves materially:
+      - `env CRYSTAL_V2_SEMANTIC_COMPILE=1 scripts/run_safe.sh /tmp/crystal_v2_semantic_stage3probe 120 2048 /tmp/semantic_dragonbox_get_cache_probe.cr --stats --no-link -o /tmp/semantic_dragonbox_get_cache_probe_after_macro_bindings.out > /tmp/semantic_dragonbox_get_cache_probe_after_macro_bindings.log 2>&1`
+      - summary moved from:
+        - `semantic_diags=0`
+        - `resolution_diags=0`
+        - `type_diags=66`
+      - to:
+        - `semantic_diags=0`
+        - `resolution_diags=0`
+        - `type_diags=58`
+      - file-local `dragonbox` count moved from `18` to `7`
+    - the full semantic stage3 probe under the safe wrapper improves again:
+      - `env CRYSTAL_V2_SEMANTIC_COMPILE=1 scripts/run_safe.sh /tmp/crystal_v2_semantic_stage3probe 300 4096 src/crystal_v2.cr --stats --no-link -o /tmp/stage3_semantic_probe_after_macro_bindings.out > /tmp/stage3_semantic_probe_after_macro_bindings.log 2>&1`
+      - summary moved from:
+        - `semantic_diags=0`
+        - `resolution_diags=0`
+        - `type_diags=90`
+      - to:
+        - `semantic_diags=0`
+        - `resolution_diags=0`
+        - `type_diags=82`
+      - `src/stdlib/float/printer/dragonbox.cr` is no longer the live head; it drops to `7`, behind:
+        - `src/stdlib/pretty_print.cr` (`9`)
+        - `src/stdlib/option_parser.cr` (`9`)
+        - `src/stdlib/unicode/unicode.cr` (`8`)
+  - practical boundary:
+    - stage3 with the new inferer is still **not** green
+    - a broader intermediate experiment that enabled semantic macro expansion for all expression contexts regressed the whole-program gate to `type_diags=188`; that branch was intentionally not kept
+    - the final fix is specifically the gated variant tied to concrete receiver type-argument bindings
+    - the current live head is now:
+      - `src/stdlib/pretty_print.cr` (`9`)
+      - `src/stdlib/option_parser.cr` (`9`)
+      - `src/stdlib/unicode/unicode.cr` (`8`)
+      - `src/stdlib/float/printer/dragonbox.cr` (`7`)
+      - `src/stdlib/crystal/system/unix/process.cr` (`3`)
 - **Fresh semantic abstract-Int checkpoint: annotation lookup now keeps abstract `Int` / `UInt` primitive under full-prelude runtime symbols, and the builtin integer surface now covers abstract integer families, which clears the early `time/tz` eager-body corridor and moves the honest full-stage3 gate from `type_diags=123` to `type_diags=90` (2026-04-01, current session)**:
   - trustworthy setup:
     - `src/compiler/semantic/type_inference_engine.cr` now treats `Int` and `UInt` as builtin primitive annotations in `lookup_type_by_name(...)`, even when runtime `struct Int` / `struct UInt` symbols exist in scope

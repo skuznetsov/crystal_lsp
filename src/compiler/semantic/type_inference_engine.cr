@@ -563,10 +563,12 @@ module CrystalV2
                           # Grouping expressions: (expr)
                           # Type is the type of the wrapped expression
                           infer_expression(node.as(Frontend::GroupingNode).expression)
+                        when .macro_literal?, .macro_if?, .macro_for?, .macro_expression?
+                          current_macro_expansion_variables.empty? ? @context.nil_type : infer_macro_expression_value(expr_id)
                         else
                           # Unknown expression kind
                           @context.nil_type
-                        end
+	                        end
 
           end
 
@@ -943,7 +945,7 @@ module CrystalV2
                Frontend::MacroIfNode,
                Frontend::MacroForNode,
                Frontend::MacroExpressionNode
-            @context.nil_type
+            current_macro_expansion_variables.empty? ? @context.nil_type : nil
           # Note: DefNode, ClassNode, ModuleNode need recursive path
           # because they have special body processing (infer_def, infer_class, etc.)
           else
@@ -2284,23 +2286,51 @@ module CrystalV2
 
         private def expanded_macro_expression_text(expander : MacroExpander, expr_id : ExprId) : String
           node = @arena[expr_id]
+          variables = current_macro_expansion_variables
 
           case node
           when Frontend::MacroLiteralNode, Frontend::MacroIfNode, Frontend::MacroForNode
             expander.expand_top_level_text(
               expr_id,
+              variables: variables,
               owner_type: @current_class,
               scope: current_macro_expansion_scope
             )
           when Frontend::MacroExpressionNode
             expander.expand_expression(
               expr_id,
-              variables: {} of String => MacroValue,
+              variables: variables,
               owner_type: @current_class
             )
           else
             ""
           end
+        end
+
+        private def current_macro_expansion_variables : Hash(String, MacroValue)
+          variables = {} of String => MacroValue
+          receiver_type = @receiver_type_context
+          return variables unless receiver_type
+
+          type_params, type_args = case receiver_type
+                                  when ClassType
+                                    {receiver_type.symbol.type_parameters, receiver_type.type_args}
+                                  when ModuleType
+                                    {receiver_type.symbol.type_parameters, receiver_type.type_args}
+                                  when InstanceType
+                                    {receiver_type.class_symbol.type_parameters, receiver_type.type_args}
+                                  else
+                                    return variables
+                                  end
+
+          return variables unless type_params && type_args
+          return variables unless type_params.size == type_args.size
+
+          type_params.zip(type_args) do |type_param_name, type_arg|
+            variables[type_param_name] = MacroIdValue.new(type_arg.to_s)
+          end
+
+          variables
         end
 
         private def current_macro_expansion_scope : SymbolTable?
@@ -8320,6 +8350,7 @@ module CrystalV2
 
         private def integer_cast_target(method_name : String) : String?
           case method_name
+          when "to_i"     then "Int32"
           when "to_i8"    then "Int8"
           when "to_i16"   then "Int16"
           when "to_i32"   then "Int32"

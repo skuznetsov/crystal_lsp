@@ -3,6 +3,42 @@
 Updated: 2026-04-01
 Context: compiler/bootstrap/stage2-stability
 
+[LM-397|verified]: After [LM-396], the densest remaining `dragonbox`
+frontier no longer yielded to another arithmetic tweak; the decisive split came
+from a macro-shaped reducer inside a specialized generic module. A scratch
+reproducer proved that the corridor
+`Wrapper.to_decimal(1_u32, 1_u32) -> Impl(Float32, Info).run(...) ->
+compute_mul(...)` still failed even after adding plain integer `to_i`: first
+with `Method 'to_i' not found on UInt32`, and then, after adding that alias,
+with `compute_mul(...)` taking the wrong macro branch and returning
+`Tuple(UInt64, Bool)` / downstream `Nil`. A direct scratch-harness call to
+`Impl(Float32, Info).compute_mul(3_u32, 123_u64)` returned `Nil`, which
+falsified destructuring and caller-path theories and isolated the real bug to
+semantic macro expansion inside generic method bodies. The broad first fix
+(`MacroIfNode`/`MacroExpressionNode` always expand through the semantic
+expression path) was explicitly refuted by evidence: whole-program stage3
+regressed from `type_diags=90` to `type_diags=188`, so that branch was
+discarded. The verified final fix in
+`src/compiler/semantic/type_inference_engine.cr` is narrow and two-part:
+plain integer `to_i` is now modeled as an `Int32` cast alias, and semantic
+macro expression expansion now receives current generic type-parameter
+bindings from `@receiver_type_context`, but only when such concrete bindings
+exist; otherwise the previous non-expanding behavior is preserved. Focused
+regression `spec/semantic/type_inference_operator_method_body_spec.cr` is
+green; rebuild gates for `src/crystal_v2.cr --no-codegen` and
+`/tmp/crystal_v2_semantic_stage3probe` are green; the scratch harness is green
+with direct `compute_mul(...)` returning `Tuple(UInt32, Bool)` and was then
+removed; the actual `dragonbox` carrier under the safe wrapper moves from
+`semantic_diags=0 resolution_diags=0 type_diags=66` to
+`semantic_diags=0 resolution_diags=0 type_diags=58`, with file-local
+`src/stdlib/float/printer/dragonbox.cr` errors dropping from `18` to `7`; and
+the full safe stage3 probe moves from
+`semantic_diags=0 resolution_diags=0 type_diags=90` to
+`semantic_diags=0 resolution_diags=0 type_diags=82`. This also moves the live
+head away from `dragonbox`: the new top files are `pretty_print` (`9`),
+`option_parser` (`9`), `unicode` (`8`), then `dragonbox` (`7`).
+{F/G/R: 0.98/0.86/0.98} [verified]
+
 [LM-396|verified]: After [LM-395], the next honest whole-program head moved
 out of `time/tz` only after a second split, not after another `dragonbox`
 patch. The decisive exact reducer was not a plain `Int` arithmetic snippet

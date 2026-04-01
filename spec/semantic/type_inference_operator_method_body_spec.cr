@@ -121,6 +121,66 @@ describe Semantic::TypeInferenceEngine do
       root_type = engine.context.get_type(program.roots.last)
       root_type.to_s.should eq("Int64")
     end
+
+    it "supports plain integer to_i in macro-shaped generic helper bodies" do
+      source = <<-CRYSTAL
+        module WUInt
+          def self.umul64(x : UInt32, y : UInt32) : UInt64
+            x.to_u64 &* y
+          end
+
+          def self.umul96_upper64(x : UInt32, y : UInt64) : UInt64
+            yh = (y >> 32).to_u32!
+            yl = y.to_u32!
+            xyh = umul64(x, yh)
+            xyl = umul64(x, yl)
+            xyh &+ (xyl >> 32)
+          end
+        end
+
+        module Impl(F, ImplInfo)
+          def self.compute_mul(u, cache)
+            {% if F == Float32 %}
+              r = WUInt.umul96_upper64(u, cache)
+              {
+                ImplInfo::CarrierUInt.new!(r >> 32),
+                ImplInfo::CarrierUInt.new!(r) == 0,
+              }
+            {% else %}
+              {1_u64, true}
+            {% end %}
+          end
+
+          def self.run(two_fc, beta)
+            zi, is_z_integer = compute_mul((two_fc | 1) << beta, 123_u64)
+            significand = zi // 10_u32
+            {significand, is_z_integer}
+          end
+        end
+
+        module Info
+          alias CarrierUInt = UInt32
+        end
+
+        module Wrapper
+          def self.to_decimal(signed_significand_bits, exponent_bits)
+            exponent = exponent_bits.to_i
+            Impl(Float32, Info).run(signed_significand_bits, exponent)
+          end
+        end
+
+        Wrapper.to_decimal(1_u32, 1_u32)
+      CRYSTAL
+
+      program, analyzer, engine = infer_operator_method_body_types(source)
+
+      analyzer.semantic_diagnostics.should be_empty
+      analyzer.name_resolver_diagnostics.should be_empty
+      engine.diagnostics.select(&.level.error?).should be_empty
+
+      root_type = engine.context.get_type(program.roots.last)
+      root_type.to_s.should eq("Tuple(UInt32, Bool)")
+    end
   end
 
   describe "primitive annotations with runtime primitive classes" do
