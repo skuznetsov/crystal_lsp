@@ -1,6 +1,52 @@
 # Crystal V2 Bootstrap — TODO (Updated 2026-04-01)
 
 ## Current Status
+- **Fresh semantic abstract-Int checkpoint: annotation lookup now keeps abstract `Int` / `UInt` primitive under full-prelude runtime symbols, and the builtin integer surface now covers abstract integer families, which clears the early `time/tz` eager-body corridor and moves the honest full-stage3 gate from `type_diags=123` to `type_diags=90` (2026-04-01, current session)**:
+  - trustworthy setup:
+    - `src/compiler/semantic/type_inference_engine.cr` now treats `Int` and `UInt` as builtin primitive annotations in `lookup_type_by_name(...)`, even when runtime `struct Int` / `struct UInt` symbols exist in scope
+    - the same file now applies the integer builtin table to canonical abstract integer families too, so `Int` / `UInt` pick up arithmetic, comparison, shift, conversion, and formatting surface instead of falling through to nominal runtime lookup gaps
+    - focused regression coverage now lives in `spec/semantic/type_inference_operator_method_body_spec.cr`
+  - decisive evidence:
+    - focused regression pack is green:
+      - `../crystal/bin/crystal spec spec/semantic/type_inference_operator_method_body_spec.cr --error-trace`
+    - rebuild gates are green:
+      - `../crystal/bin/crystal build src/crystal_v2.cr --no-codegen --error-trace`
+      - `../crystal/bin/crystal build src/crystal_v2.cr -o /tmp/crystal_v2_semantic_stage3probe --error-trace`
+    - the exact synthetic reproducer is green:
+      - `struct Int; end; module Probe; def self.jan1_to_unix(year : Int) : Int64; year -= 1; days = year * 365 + year // 4 - year // 100 + year // 400; 86400_i64 * days.to_i64; end; end; Probe.jan1_to_unix(2024)`
+      - before: `Operator '-' not defined for Int and Int32` and `Method 'to_i64' not found on Int`
+      - after: root type `Int64`
+    - the actual `time/tz` carrier under the safe wrapper improves materially:
+      - `env CRYSTAL_V2_SEMANTIC_COMPILE=1 scripts/run_safe.sh /tmp/crystal_v2_semantic_stage3probe 120 2048 /tmp/semantic_time_tz_probe.cr --stats --no-link -o /tmp/semantic_time_tz_probe.out > /tmp/semantic_time_tz_probe_after_int_fix.log 2>&1`
+      - summary moved from:
+        - `semantic_diags=0`
+        - `resolution_diags=0`
+        - `type_diags=99`
+      - to:
+        - `semantic_diags=0`
+        - `resolution_diags=0`
+        - `type_diags=66`
+      - the early `Time::TZ.jan1_to_unix` / `unix_to_year` `Int` arithmetic cascade disappears from the carrier log
+    - the full semantic stage3 probe under the safe wrapper improves materially again:
+      - `env CRYSTAL_V2_SEMANTIC_COMPILE=1 scripts/run_safe.sh /tmp/crystal_v2_semantic_stage3probe 300 4096 src/crystal_v2.cr --stats --no-link -o /tmp/stage3_semantic_probe_after_int_primitive.out > /tmp/stage3_semantic_probe_after_int_primitive.log 2>&1`
+      - summary moved from:
+        - `semantic_diags=0`
+        - `resolution_diags=0`
+        - `type_diags=123`
+      - to:
+        - `semantic_diags=0`
+        - `resolution_diags=0`
+        - `type_diags=90`
+      - `src/stdlib/time/tz.cr` is no longer the live head
+  - practical boundary:
+    - stage3 with the new inferer is still **not** green
+    - the live head is now:
+      - `src/stdlib/float/printer/dragonbox.cr` (`18`)
+      - `src/stdlib/pretty_print.cr` (`9`)
+      - `src/stdlib/option_parser.cr` (`9`)
+      - `src/stdlib/unicode/unicode.cr` (`8`)
+      - `src/stdlib/crystal/system/unix/process.cr` (`5`)
+    - densest remaining families are now later `Nil` arithmetic, `EventLoop.current.open`, `LibC.sigdelset`, `Regex#version`, and `File.expand_path`, not the old abstract-`Int` `time/tz` cascade
 - **Fresh semantic generic-receiverless checkpoint: receiverless calls inside specialized generic class/module methods now preserve the live specialized receiver context instead of falling back to unspecialized singleton owners, which clears the remaining `ImplInfo.get_cache` dragonbox corridor and moves the honest full-stage3 gate from `type_diags=158` to `type_diags=123` (2026-04-01, current session)**:
   - trustworthy setup:
     - `src/compiler/semantic/type_inference_engine.cr` now routes receiverless class-method dispatch through the live `@receiver_type_context` when available

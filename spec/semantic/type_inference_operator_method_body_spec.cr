@@ -98,6 +98,29 @@ describe Semantic::TypeInferenceEngine do
       root_type = engine.context.get_type(program.roots.last)
       root_type.to_s.should eq("Tuple(Int128, UInt128)")
     end
+
+    it "supports Int arithmetic inside helper-heavy method bodies" do
+      source = <<-CRYSTAL
+        module Probe
+          def self.jan1_to_unix(year : Int) : Int64
+            year -= 1
+            days = year * 365 + year // 4 - year // 100 + year // 400
+            86400_i64 * days
+          end
+        end
+
+        Probe.jan1_to_unix(2024)
+      CRYSTAL
+
+      program, analyzer, engine = infer_operator_method_body_types(source)
+
+      analyzer.semantic_diagnostics.should be_empty
+      analyzer.name_resolver_diagnostics.should be_empty
+      engine.diagnostics.select(&.level.error?).should be_empty
+
+      root_type = engine.context.get_type(program.roots.last)
+      root_type.to_s.should eq("Int64")
+    end
   end
 
   describe "primitive annotations with runtime primitive classes" do
@@ -124,6 +147,30 @@ describe Semantic::TypeInferenceEngine do
       analyzer.name_resolver_diagnostics.should be_empty
       engine.diagnostics.select(&.level.error?).should be_empty
       engine.context.get_type(program.roots.last).to_s.should eq("Int32")
+    end
+
+    it "keeps Int annotations primitive even when a runtime Int struct symbol exists" do
+      source = <<-CRYSTAL
+        struct Int
+        end
+
+        module Probe
+          def self.jan1_to_unix(year : Int) : Int64
+            year -= 1
+            days = year * 365 + year // 4 - year // 100 + year // 400
+            86400_i64 * days.to_i64
+          end
+        end
+
+        Probe.jan1_to_unix(2024)
+      CRYSTAL
+
+      program, analyzer, engine = infer_operator_method_body_types(source)
+
+      analyzer.semantic_diagnostics.should be_empty
+      analyzer.name_resolver_diagnostics.should be_empty
+      engine.diagnostics.select(&.level.error?).should be_empty
+      engine.context.get_type(program.roots.last).to_s.should eq("Int64")
     end
   end
 end

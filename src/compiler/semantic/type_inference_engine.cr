@@ -8454,11 +8454,14 @@ module CrystalV2
             return methods
           end
 
-          if integer_primitive_name?(type_name)
+          canonical_integer_name = canonical_numeric_primitive_name(type_name)
+          abstract_integer_receiver = {"Int", "UInt"}.includes?(type_name)
+          if integer_primitive_name?(canonical_integer_name)
+            binary_param_annotation = abstract_integer_receiver ? "Int | UInt" : type_name
             # Integer arithmetic and bitwise operators
             case method_name
             when "+", "-", "*", "/", "//", "%", "&", "|", "^"
-              param = Frontend::Parameter.new(name: "other".to_slice, type_annotation: type_name.to_slice)
+              param = Frontend::Parameter.new(name: "other".to_slice, type_annotation: binary_param_annotation.to_slice)
               methods << MethodSymbol.new(
                 method_name,
                 dummy_node_id,
@@ -8501,7 +8504,7 @@ module CrystalV2
                 scope: dummy_scope
               )
             when "<", ">", "<=", ">=", "==", "!="
-              param = Frontend::Parameter.new(name: "other".to_slice, type_annotation: type_name.to_slice)
+              param = Frontend::Parameter.new(name: "other".to_slice, type_annotation: binary_param_annotation.to_slice)
               methods << MethodSymbol.new(
                 method_name,
                 dummy_node_id,
@@ -11030,6 +11033,10 @@ module CrystalV2
           end
 
           case name
+          when "Int"
+            PrimitiveType.new("Int")
+          when "UInt"
+            PrimitiveType.new("UInt")
           when "Int8"
             @context.int8_type
           when "Int16"

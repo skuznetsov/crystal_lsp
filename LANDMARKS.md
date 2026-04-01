@@ -3,6 +3,37 @@
 Updated: 2026-04-01
 Context: compiler/bootstrap/stage2-stability
 
+[LM-396|verified]: After [LM-395], the next honest whole-program head moved
+out of `time/tz` only after a second split, not after another `dragonbox`
+patch. The decisive exact reducer was not a plain `Int` arithmetic snippet
+(that was already green), but a runtime-shadowed primitive annotation case:
+`struct Int; end; module Probe; def self.jan1_to_unix(year : Int) : Int64;
+year -= 1; days = year * 365 + year // 4 - year // 100 + year // 400;
+86400_i64 * days.to_i64; end; end; Probe.jan1_to_unix(2024)`.
+That failed with `Operator '-' not defined for Int and Int32` and then
+`Method 'to_i64' not found on Int`, which matched the first `Time::TZ`
+carrier errors and proved the real divergence: under full prelude, annotation
+lookup was resolving `Int`/`UInt` through runtime `struct Int` / `struct UInt`
+symbols instead of preserving the abstract primitive carriers used by the
+already-green isolated reducers. The verified fix in
+`src/compiler/semantic/type_inference_engine.cr` is two-part and narrow:
+`lookup_type_by_name(...)` now treats `Int` and `UInt` as builtin primitive
+annotations even when runtime symbols exist in scope, and the integer builtin
+surface now applies to canonical abstract integer families too, so `Int` /
+`UInt` get arithmetic, comparison, shift, conversion, and formatting methods
+without falling through to nominal runtime gaps. Focused regression
+`spec/semantic/type_inference_operator_method_body_spec.cr` is green; rebuild
+gates for `src/crystal_v2.cr --no-codegen` and
+`/tmp/crystal_v2_semantic_stage3probe` are green; the synthetic shadowed-`Int`
+reducer is green with root type `Int64`; the actual `time/tz` carrier under the
+safe wrapper moves from `semantic_diags=0 resolution_diags=0 type_diags=99` to
+`semantic_diags=0 resolution_diags=0 type_diags=66`; and the full safe stage3
+probe moves from `semantic_diags=0 resolution_diags=0 type_diags=123` to
+`semantic_diags=0 resolution_diags=0 type_diags=90`. `src/stdlib/time/tz.cr`
+drops out of the live head completely; the new head is `dragonbox` (`18`),
+then `pretty_print` and `option_parser` (`9` each), followed by `unicode`
+(`8`) and `process` (`5`). {F/G/R: 0.98/0.86/0.98} [verified]
+
 [LM-395|verified]: After [LM-394], the remaining dense `dragonbox`
 head was no longer the old scoped type-parameter path problem. An actual-file
 carrier for `src/stdlib/float/printer/dragonbox.cr` showed the next real miss:
