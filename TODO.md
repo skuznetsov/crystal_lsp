@@ -1,6 +1,25 @@
 # Crystal V2 Bootstrap — TODO (Updated 2026-04-01)
 
 ## Current Status
+- **Fresh phase0 body-infer identity checkpoint: Phase0 return-type body-walk metrics now collapse reparsed copies by canonical `DefIdentity` instead of raw `DefNode.object_id`, which closes the current review finding around unstable/non-canonical body-infer accounting without changing the honest stage3 semantic gate (2026-04-01, current session)**:
+  - trustworthy setup:
+    - `src/compiler/hir/ast_to_hir.cr` now records `@phase0_body_infer_counts` by canonical `CrystalV2::Compiler::Semantic::DefIdentity{arena_id, expr_index}` after canonical arena resolution, rather than by heap-local `DefNode.object_id`
+    - the same file now routes body-infer dry-run identity through the same canonical helper, so this path no longer falls back to a mixed arena/node surrogate key inside `infer_concrete_return_type_from_body(...)`
+    - canonical recovery is bounded and cached for legacy call sites that still arrive without `node_expr_id`; it resolves the smallest fitting def arena and recovers the matching `ExprId` there
+    - focused regression coverage lives in `spec/hir/phase0_body_infer_metrics_spec.cr`
+    - `docs/phase0_contracts.md` now documents `body_infer_dupes` / `unique_defs` as canonical `DefIdentity` metrics instead of `DefNode.object_id`
+  - decisive evidence:
+    - focused HIR metric regression is green:
+      - `../crystal/bin/crystal spec spec/hir/phase0_body_infer_metrics_spec.cr --error-trace`
+    - build gate is green:
+      - `../crystal/bin/crystal build src/crystal_v2.cr --no-codegen --error-trace`
+    - the exact regression constructs two reparsed arenas for the same source and proves they now collapse into one metric key with count `2`
+  - practical boundary:
+    - this is a correctness fix for Phase0 instrumentation and identity accounting, not a stage3 semantic mover
+    - the honest live stage3 frontier remains unchanged by this checkpoint and still starts at:
+      - `src/stdlib/crystal/system/unix/pthread_mutex.cr` (`5`, `Errno.new`)
+      - `src/compiler/hir/hir.cr` (`3`, `Function 'new' not found`)
+      - `src/stdlib/raise.cr` (`3`)
 - **Fresh enum-receiver hardening checkpoint: `type_receiver_expression?` now trusts already-resolved `EnumSymbol` identifiers directly instead of requiring a second global type lookup, which closes a focused classifier regression but does **not** move the honest whole-program stage3 gate on the current compacted tree (`type_diags=35 -> 35`, 2026-04-01, current session)**:
   - trustworthy setup:
     - `src/compiler/semantic/type_inference_engine.cr` now treats `EnumSymbol` like `ClassSymbol`/`ModuleSymbol`/`AliasSymbol` in the direct-symbol branch for identifier type receivers

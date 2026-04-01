@@ -3,6 +3,32 @@
 Updated: 2026-04-01
 Context: compiler/bootstrap/stage2-stability
 
+[LM-413|verified]: The current review finding on
+`src/compiler/hir/ast_to_hir.cr` was correct in substance even after the old
+XOR key disappeared. Fresh source inspection showed that the actual Phase0
+metric `@phase0_body_infer_counts` still incremented before final arena
+resolution and still keyed by raw `DefNode.object_id`, while the neighboring
+identity dry-run path used a partly-canonical side channel only when
+`node_expr_id` happened to be present. That meant reparsed copies of the same
+syntactic `def` could still count as different `unique_defs`, and the contract
+doc in `docs/phase0_contracts.md` had become stale by describing
+`body_infer_dupes` as keyed by `DefNode.object_id`. The verified fix stays
+bounded to `src/compiler/hir/ast_to_hir.cr` plus one narrow HIR spec and doc
+update. `AstToHir` now has a canonical body-infer identity helper that (1)
+resolves the smallest fitting def arena via a dedicated cached
+`canonical_arena_for_def(...)`, (2) recovers the matching `ExprId` there when
+legacy call sites arrive without `node_expr_id`, and (3) records both
+`@phase0_body_infer_counts` and the body-infer dry-run path through canonical
+`CrystalV2::Compiler::Semantic::DefIdentity{arena_id, expr_index}` instead of
+heap-local `object_id` or mixed surrogates. Focused regression
+`spec/hir/phase0_body_infer_metrics_spec.cr` is green and proves that two
+reparsed arenas for the same source now collapse into one metric key with
+count `2`; the `src/crystal_v2.cr --no-codegen` build is green; and
+`docs/phase0_contracts.md` now documents `unique_defs` / `body_infer_dupes` as
+canonical `DefIdentity` metrics. Boundary: this is a Phase0 instrumentation
+correctness fix, not a stage3 semantic mover; it does not change the current
+whole-program `type_diags=35` frontier. {F/G/R: 0.98/0.74/0.99} [verified]
+
 [LM-412|verified]: After compaction, the trustworthy clean stage3 baseline on
 the current tree was no longer the old `type_diags=26/27` frontier but a much
 regressed `semantic_diags=0 resolution_diags=0 type_diags=178`. Fresh traces

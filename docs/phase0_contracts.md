@@ -73,8 +73,8 @@ These are passed separately through CLI orchestration:
 | `lower_def_calls` | `@phase0_lower_def_counts.values.sum` | Before `lower_def()` call, keyed by canonical name | Full HIR body emission entries |
 | `lower_def_dupes` | count with count>1 | same | Bodies emitted more than once |
 | `body_infer_walks` | `@phase0_body_infer_counts.values.sum` | `infer_concrete_return_type_from_body` PAST body guard | Actual body walks for return type inference |
-| `unique_defs` | `@phase0_body_infer_counts.size` | same | Unique DefNode identities walked |
-| `body_infer_dupes` | count with count>1 | same, keyed by `DefNode.object_id` | Same syntactic def walked >1 time |
+| `unique_defs` | `@phase0_body_infer_counts.size` | same | Unique canonical def identities walked |
+| `body_infer_dupes` | count with count>1 | same, keyed by canonical `DefIdentity` | Same syntactic def walked >1 time |
 | `total_hir_functions` | `@module.function_count` | dumped AFTER allocator flush + RTA pruning | Final emitted HIR function count |
 
 ### 2.2 Future metrics (not yet instrumented)
@@ -101,12 +101,12 @@ allocator flush and RTA pruning (in cli.cr, post-RTA section).
 
 Notes:
 - `body_infer_walks`: counts PAST body-presence guard (real walks, not attempts)
-- `body_infer_dupes`: keyed by `DefNode.object_id` (syntactic def identity).
-  This is a **syntax-level metric**: it counts repeated walks of the same
-  DefNode, but does NOT distinguish different generic/receiver inference
-  contexts for the same syntactic def. A future semantic-level metric keyed
-  by `DefInstanceKey` would give the exact count of redundant semantic work
-  that `def_instances` cache would eliminate. Current `401` is an upper bound.
+- `body_infer_dupes`: keyed by canonical `DefIdentity{arena_id, expr_index}`
+  after canonical arena resolution. This remains a **syntax-level metric**:
+  it counts repeated walks of the same syntactic def, but does NOT distinguish
+  different generic/receiver inference contexts for that def. A future
+  semantic-level metric keyed by `DefInstanceKey` would give the exact count
+  of redundant semantic work that `def_instances` cache would eliminate.
 - `lower_def_calls`: keyed by canonical target_name (post-lookup resolution)
 
 ## 3. SemanticTypeId Design

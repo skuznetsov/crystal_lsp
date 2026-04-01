@@ -1351,6 +1351,9 @@ module Crystal::HIR
     # Cache for resolve_arena_for_def keyed by
     # {DefNode object_id, fallback arena object_id, inline arenas object_id}.
     @arena_for_def_cache : Hash({UInt64, UInt64, UInt64}, CrystalV2::Compiler::Frontend::ArenaLike) = {} of {UInt64, UInt64, UInt64} => CrystalV2::Compiler::Frontend::ArenaLike
+    # Canonical variant of resolve_arena_for_def: always searches all candidate
+    # arenas instead of accepting the caller fallback when it merely "fits".
+    @canonical_arena_for_def_cache : Hash({UInt64, UInt64, UInt64}, CrystalV2::Compiler::Frontend::ArenaLike) = {} of {UInt64, UInt64, UInt64} => CrystalV2::Compiler::Frontend::ArenaLike
     # Deduplicated set of unique arenas (by object_id) for resolve_arena_for_def candidates.
     @unique_def_arenas : Hash(UInt64, CrystalV2::Compiler::Frontend::ArenaLike) = {} of UInt64 => CrystalV2::Compiler::Frontend::ArenaLike
     # Cached list of unique arenas to avoid per-call allocations.
@@ -1956,8 +1959,11 @@ module Crystal::HIR
     @phase0_lower_def_counts : Hash(String, Int32) = Hash(String, Int32).new(0)
     # Separate counter for return-type body inference (infer_concrete_return_type_from_body).
     # This walks method bodies to infer return types WITHOUT full lower_def.
-    # Keyed by def identity (arena_object_id ^ node_object_id), not label strings.
-    @phase0_body_infer_counts : Hash(UInt64, Int32) = Hash(UInt64, Int32).new(0)
+    # Keyed by canonical DefIdentity{arena_id, expr_index} after final arena resolution.
+    @phase0_body_infer_counts : Hash(CrystalV2::Compiler::Semantic::DefIdentity, Int32) = Hash(CrystalV2::Compiler::Semantic::DefIdentity, Int32).new(0)
+    # Cached recovered expr_index for legacy body-infer call sites that still
+    # arrive without node_expr_id. Value -1 means recovery failed.
+    @phase0_body_infer_expr_index_cache : Hash({UInt64, UInt64}, Int32) = {} of {UInt64, UInt64} => Int32
 
     # Phase 1: Identity dry-run tracker (side-channel, no behavior change)
     getter identity_tracker : CrystalV2::Compiler::Semantic::IdentityDryRunTracker?
@@ -9796,6 +9802,20 @@ module Crystal::HIR
       resolved
     end
 
+    private def canonical_arena_for_def(
+      func_def : CrystalV2::Compiler::Frontend::DefNode,
+      fallback : CrystalV2::Compiler::Frontend::ArenaLike,
+    ) : CrystalV2::Compiler::Frontend::ArenaLike
+      inline_arenas_id = @inline_arenas ? @inline_arenas.not_nil!.object_id : 0_u64
+      cache_key = {func_def.object_id, fallback.object_id, inline_arenas_id}
+      if cached = @canonical_arena_for_def_cache[cache_key]?
+        return cached
+      end
+      resolved = resolve_arena_for_def_uncached(func_def, fallback)
+      @canonical_arena_for_def_cache[cache_key] = resolved
+      resolved
+    end
+
     private def body_max_index_for_def(func_def : CrystalV2::Compiler::Frontend::DefNode) : Int32
       def_id = func_def.object_id
       if cached = @def_body_max_index_cache[def_id]?
@@ -9841,6 +9861,7 @@ module Crystal::HIR
         end
       end
       @arena_for_def_cache.clear
+      @canonical_arena_for_def_cache.clear
       if env_has?("DEBUG_SET_FARENA")
         if filter = env_get("DEBUG_SET_FDEF")
           if name.includes?(filter)
@@ -10014,6 +10035,92 @@ module Crystal::HIR
       return false if max_index >= 0 && max_index >= arena.size
       return false unless def_body_nodes_match_arena?(arena, func_def)
       span_fits_source?(arena, func_def.span)
+    end
+
+    private def def_matches_phase0_body_infer_identity?(
+      candidate : CrystalV2::Compiler::Frontend::DefNode,
+      original : CrystalV2::Compiler::Frontend::DefNode,
+    ) : Bool
+      return false unless candidate.span == original.span
+      return false unless (safe_slice_to_string(candidate.name) || "") == (safe_slice_to_string(original.name) || "")
+      return false unless same_optional_slice_text?(candidate.receiver, original.receiver)
+      return false unless same_optional_slice_text?(candidate.return_type, original.return_type)
+      return false unless candidate.is_abstract == original.is_abstract
+      return false unless candidate.visibility == original.visibility
+
+      candidate_params = candidate.params
+      original_params = original.params
+      return false unless (candidate_params ? candidate_params.size : 0) == (original_params ? original_params.size : 0)
+
+      candidate_body = candidate.body
+      original_body = original.body
+      return false unless (candidate_body ? candidate_body.size : -1) == (original_body ? original_body.size : -1)
+
+      true
+    end
+
+    private def same_optional_slice_text?(left : Slice(UInt8)?, right : Slice(UInt8)?) : Bool
+      return true if left.nil? && right.nil?
+      return false if left.nil? || right.nil?
+      (safe_slice_to_string(left.not_nil!) || "") == (safe_slice_to_string(right.not_nil!) || "")
+    end
+
+    private def phase0_body_infer_expr_index(
+      node : CrystalV2::Compiler::Frontend::DefNode,
+      canonical_arena : CrystalV2::Compiler::Frontend::ArenaLike,
+      node_expr_id : CrystalV2::Compiler::Frontend::ExprId? = nil,
+    ) : Int32
+      if expr_id = node_expr_id
+        if expr_id_matches_arena?(canonical_arena, expr_id)
+          candidate = canonical_arena[expr_id]
+          if candidate.is_a?(CrystalV2::Compiler::Frontend::DefNode) &&
+             def_matches_phase0_body_infer_identity?(candidate, node)
+            return expr_id.index
+          end
+        end
+      end
+
+      cache_key = {canonical_arena.object_id.to_u64, node.object_id.to_u64}
+      if cached = @phase0_body_infer_expr_index_cache[cache_key]?
+        return cached
+      end
+
+      i = 0
+      while i < canonical_arena.size
+        expr_id = CrystalV2::Compiler::Frontend::ExprId.new(i)
+        candidate = canonical_arena[expr_id]
+        if candidate.is_a?(CrystalV2::Compiler::Frontend::DefNode) &&
+           def_matches_phase0_body_infer_identity?(candidate, node)
+          @phase0_body_infer_expr_index_cache[cache_key] = i
+          return i
+        end
+        i += 1
+      end
+
+      @phase0_body_infer_expr_index_cache[cache_key] = -1
+      -1
+    end
+
+    private def canonical_def_identity_for_body_infer(
+      node : CrystalV2::Compiler::Frontend::DefNode,
+      resolved_arena : CrystalV2::Compiler::Frontend::ArenaLike,
+      node_expr_id : CrystalV2::Compiler::Frontend::ExprId? = nil,
+    ) : CrystalV2::Compiler::Semantic::DefIdentity?
+      canonical_arena = canonical_arena_for_def(node, resolved_arena)
+      expr_index = phase0_body_infer_expr_index(node, canonical_arena, node_expr_id)
+      return nil if expr_index < 0
+      CrystalV2::Compiler::Semantic::DefIdentity.new(canonical_arena.object_id.to_u64, expr_index)
+    end
+
+    private def record_phase0_body_infer_walk(
+      node : CrystalV2::Compiler::Frontend::DefNode,
+      resolved_arena : CrystalV2::Compiler::Frontend::ArenaLike,
+      node_expr_id : CrystalV2::Compiler::Frontend::ExprId? = nil,
+    ) : CrystalV2::Compiler::Semantic::DefIdentity?
+      def_identity = canonical_def_identity_for_body_infer(node, resolved_arena, node_expr_id)
+      return nil unless def_identity
+      @phase0_body_infer_counts[def_identity] = (@phase0_body_infer_counts[def_identity]? || 0) + 1
+      def_identity
     end
 
     private def arena_fits_body_ids?(
@@ -13861,11 +13968,6 @@ module Crystal::HIR
       end
       return nil unless body && !body.empty?
 
-      # Phase 0 metric: count ACTUAL body inference walks (past body-presence guard).
-      # Keyed by DefNode object_id — unique per heap object, stable, injective.
-      # No arena/XOR needed: each DefNode is a distinct class instance.
-      @phase0_body_infer_counts[node.object_id] = (@phase0_body_infer_counts[node.object_id]? || 0) + 1
-
       old_body_context = @infer_body_context
       old_method = @current_method
       old_class = @current_class
@@ -13884,8 +13986,13 @@ module Crystal::HIR
         end
       end
 
+      # Phase 0 metric: count ACTUAL body inference walks (past body-presence guard),
+      # but key by canonical DefIdentity after arena resolution instead of the
+      # caller-local DefNode heap identity.
+      body_infer_identity = record_phase0_body_infer_walk(node, resolved_arena, node_expr_id)
+
       # Phase 1.5: identity dry-run — AFTER final arena resolution so the key
-      # uses the same arena that the actual body inference will use.
+      # uses the same canonical def identity that the actual body-walk metric uses.
       if tracker = @identity_tracker
         recv_type = self_type_name ? tracker.intern_type_name(self_type_name) : nil
 
@@ -13910,10 +14017,7 @@ module Crystal::HIR
           end
         end
 
-        if eid = node_expr_id
-          # Canonical path: real DefIdentity{arena_id, ExprId.index}
-          def_id = CrystalV2::Compiler::Semantic::DefIdentity.new(
-            resolved_arena.object_id.to_u64, eid.index)
+        if def_id = body_infer_identity
           key = CrystalV2::Compiler::Semantic::DefInstanceKey.new(
             def_identity: def_id,
             receiver_type: recv_type,
@@ -13921,17 +14025,6 @@ module Crystal::HIR
             block_type: block_sem_type,
           )
           tracker.record_canonical(key)
-        else
-          # Surrogate fallback: ExprId not available at this call site
-          def_key = CrystalV2::Compiler::Semantic::DryRunDefKey.new(
-            resolved_arena.object_id.to_u64, node.object_id.to_u64)
-          key = CrystalV2::Compiler::Semantic::DryRunInstanceKey.new(
-            def_key: def_key,
-            receiver_type: recv_type,
-            arg_types: arg_sem_types,
-            block_type: block_sem_type,
-          )
-          tracker.record_surrogate(key)
         end
       end
       extra_type_params = {} of String => String
