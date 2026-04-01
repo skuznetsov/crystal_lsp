@@ -3,6 +3,39 @@
 Updated: 2026-04-01
 Context: compiler/bootstrap/stage2-stability
 
+[LM-398|verified]: After [LM-397], the next cheap whole-program frontier was
+not a broad tuple-destructuring regression and not another missing builtin in
+`OptionParser`. A two-step exact split isolated the real bug. First, a minimal
+instance-method reducer
+`class OptionParser; enum FlagValue; Required; Optional; None; end; def test;
+FlagValue::None; end; end; OptionParser.new.test` inferred `Nil` with no
+diagnostics, which falsified `MultipleAssignNode` as the root cause. Second, an
+exact `parse_flag_definition` carrier reproduced the full stdlib shape:
+`short_flag, short_value_type = parse_flag_definition(short_flag)` followed by
+`short_value_type.required?` / `optional?`, and it failed because
+`parse_flag_definition(...)` itself inferred as `Tuple(String, Nil)`. That
+isolated the bug to enum-member path inference for nested enums inside class
+scope: `resolve_enum_member_access(...)` only walked the global table, so
+relative paths like `FlagValue::None` fell through to ordinary path resolution,
+resolved `None` as a constant, and then collapsed through
+`infer_constant_value_expression(...)` to `Nil`. The verified fix in
+`src/compiler/semantic/type_inference_engine.cr` is narrow: enum-member prefix
+resolution now consults relative lookup tables and enclosing namespaces via a
+new `resolve_enum_symbol_prefix(...)` helper, while absolute paths still use
+the global table. Focused regression
+`spec/semantic/type_inference_enum_constant_spec.cr` is green; rebuild gates
+for `src/crystal_v2.cr --no-codegen` and `/tmp/crystal_v2_semantic_stage3probe`
+are green; both exact reducers now infer `EnumType(FlagValue)` with no
+semantic diagnostics; and the full safe stage3 probe moves from
+`semantic_diags=0 resolution_diags=0 type_diags=68` to
+`semantic_diags=0 resolution_diags=0 type_diags=64`. File-local counts confirm
+the leverage: `src/stdlib/option_parser.cr` drops from `5` errors to `1`, and
+the old `optional?` / `required?` family disappears from the live log.
+Boundary: stage3 is still not green; the new live heads are `dragonbox` (`7`),
+`pretty_print` (`5`), `process` (`5`), `signal` (`4`), `raise` (`4`),
+`unicode` (`3`), and the remaining `option_parser` `Array(String)#join`
+overload gap (`1`). {F/G/R: 0.97/0.85/0.98} [verified]
+
 [LM-397|verified]: After [LM-396], the densest remaining `dragonbox`
 frontier no longer yielded to another arithmetic tweak; the decisive split came
 from a macro-shaped reducer inside a specialized generic module. A scratch

@@ -1,6 +1,45 @@
 # Crystal V2 Bootstrap — TODO (Updated 2026-04-01)
 
 ## Current Status
+- **Fresh semantic nested-enum-member checkpoint: scoped enum member paths now resolve relative to the current class/module context during semantic path inference, which clears the `OptionParser::FlagValue::*` corridor and moves the honest full-stage3 gate from `type_diags=68` to `type_diags=64` (2026-04-01, current session)**:
+  - trustworthy setup:
+    - `src/compiler/semantic/type_inference_engine.cr` now resolves enum-member prefixes through relative lookup tables and enclosing namespaces, not only through the global table
+    - the fix is intentionally narrow: it changes `resolve_enum_member_access(...)` only, leaving general path/type lookup untouched
+    - focused regression coverage now lives in `spec/semantic/type_inference_enum_constant_spec.cr`
+  - decisive evidence:
+    - focused regression pack is green:
+      - `../crystal/bin/crystal spec spec/semantic/type_inference_enum_constant_spec.cr --error-trace`
+    - rebuild gates are green:
+      - `../crystal/bin/crystal build src/crystal_v2.cr --no-codegen --error-trace`
+      - `../crystal/bin/crystal build src/crystal_v2.cr -o /tmp/crystal_v2_semantic_stage3probe --error-trace`
+    - the exact reducers are green:
+      - `class OptionParser; enum FlagValue; Required; Optional; None; end; def test; FlagValue::None; end; end; OptionParser.new.test`
+      - `class OptionParser; enum FlagValue; Required; Optional; None; end; def parse_flag_definition(flag : String); {flag, FlagValue::None}; end; def test(short_flag : String, long_flag : String); short_flag, short_value_type = parse_flag_definition(short_flag); long_flag, long_value_type = parse_flag_definition(long_flag); if short_value_type.required? || long_value_type.required?; FlagValue::Required; elsif short_value_type.optional? || long_value_type.optional?; FlagValue::Optional; else; FlagValue::None; end; end; end; OptionParser.new.test("-x", "--x")`
+      - before: direct `FlagValue::None` inferred as `Nil`, and the tuple-return variant raised `required?/optional?` misses on `Nil`
+      - after: both reducers infer `EnumType(FlagValue)` with no semantic diagnostics
+    - the full semantic stage3 probe under the safe wrapper improves again:
+      - `env CRYSTAL_V2_SEMANTIC_COMPILE=1 scripts/run_safe.sh /tmp/crystal_v2_semantic_stage3probe 300 4096 src/crystal_v2.cr --stats --no-link -o /tmp/stage3_semantic_probe_after_enum_member.out > /tmp/stage3_semantic_probe_after_enum_member.log 2>&1`
+      - summary moved from:
+        - `semantic_diags=0`
+        - `resolution_diags=0`
+        - `type_diags=68`
+      - to:
+        - `semantic_diags=0`
+        - `resolution_diags=0`
+        - `type_diags=64`
+      - `src/stdlib/option_parser.cr` dropped from `5` errors to `1`
+      - the old `optional?` / `required?` family is absent from the new log
+  - practical boundary:
+    - stage3 with the new inferer is still **not** green
+    - the new live head is:
+      - `src/stdlib/float/printer/dragonbox.cr` (`7`)
+      - `src/stdlib/pretty_print.cr` (`5`)
+      - `src/stdlib/crystal/system/unix/process.cr` (`5`)
+      - `src/stdlib/crystal/system/unix/signal.cr` (`4`)
+      - `src/stdlib/raise.cr` (`4`)
+      - `src/stdlib/unicode/unicode.cr` (`3`)
+      - `src/stdlib/option_parser.cr` (`1`)
+    - the cheapest follow-up surfaces now look like `Array(String)#join(io, '\n')`, `unicode`'s residual nil/char corridor, or the remaining `pretty_print` collection surface
 - **Fresh semantic generic-macro-body checkpoint: specialized generic method bodies now expand macro branches only when concrete receiver type-parameter bindings are available, and plain integer `to_i` now participates in the integer builtin cast surface, which clears the remaining `dragonbox` macro branch corridor and moves the honest full-stage3 gate from `type_diags=90` to `type_diags=82` (2026-04-01, current session)**:
   - trustworthy setup:
     - `src/compiler/semantic/type_inference_engine.cr` now treats plain `to_i` as an integer builtin cast alias to `Int32`

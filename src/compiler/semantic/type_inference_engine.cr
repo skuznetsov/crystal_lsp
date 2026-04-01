@@ -5066,36 +5066,14 @@ module CrystalV2
           segments = [] of String
           collect_path_segments(node, segments)
           return nil if segments.size < 2
+          absolute = absolute_path?(node)
 
           # Try to find an enum in the path (e.g., Color in Color::Red)
           # Check all prefixes to find enum
           (1...(segments.size)).each do |split|
             prefix = segments[0...split]
             suffix = segments[split..-1]
-
-            # Look up prefix as symbol path
-            current_table = @global_table
-            enum_symbol : EnumSymbol? = nil
-
-            prefix.each_with_index do |seg, idx|
-              return nil unless current_table
-              symbol = current_table.lookup(seg)
-              return nil unless symbol
-
-              if idx == prefix.size - 1
-                # Last segment - check if it's an enum
-                if symbol.is_a?(EnumSymbol)
-                  enum_symbol = symbol
-                end
-              else
-                # Intermediate - navigate scope
-                current_table = case symbol
-                when ModuleSymbol then symbol.scope
-                when ClassSymbol then symbol.scope
-                else nil
-                end
-              end
-            end
+            enum_symbol = resolve_enum_symbol_prefix(prefix, absolute)
 
             # If we found an enum and suffix is a single member name
             if enum_symbol && suffix.size == 1
@@ -5104,6 +5082,24 @@ module CrystalV2
                 # Return the EnumType (value is an instance of the enum)
                 return EnumType.new(enum_symbol)
               end
+            end
+          end
+
+          nil
+        end
+
+        private def resolve_enum_symbol_prefix(prefix : Array(String), absolute : Bool) : EnumSymbol?
+          if absolute
+            return resolve_path_symbol_in_table(@global_table.not_nil!, prefix).as?(EnumSymbol)
+          end
+
+          if enclosing_symbol = resolve_enclosing_namespace_path(prefix)
+            return enclosing_symbol.as?(EnumSymbol)
+          end
+
+          path_lookup_tables.each do |table|
+            if symbol = resolve_path_symbol_in_table(table, prefix)
+              return symbol.as?(EnumSymbol)
             end
           end
 
