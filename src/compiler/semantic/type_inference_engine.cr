@@ -8046,8 +8046,36 @@ module CrystalV2
             return expected.types.any? { |t| type_matches?(actual, t) }
           end
 
+          if expected.is_a?(ModuleType)
+            if actual_module_arg = structural_module_match_argument_type(actual, expected)
+              expected_type_args = expected.type_args
+              return true unless expected_type_args && !expected_type_args.empty?
+              return false unless expected_type_args.size == 1
+
+              return type_matches?(actual_module_arg, expected_type_args.first)
+            end
+          end
+
           # Subtype check: actual is subtype of expected
           is_subtype?(actual, expected)
+        end
+
+        private def structural_module_match_argument_type(actual : Type, expected : ModuleType) : Type?
+          case expected.symbol.name
+          when "Enumerable", "Indexable", "Indexable::Mutable"
+            case actual
+            when ArrayType
+              actual.element_type
+            when TupleType
+              union_of(actual.element_types)
+            when HashType
+              TupleType.new([actual.key_type, actual.value_type])
+            else
+              nil
+            end
+          else
+            nil
+          end
         end
 
         # Check if child_type is a subtype of parent_type (class inheritance)

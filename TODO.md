@@ -1,6 +1,47 @@
 # Crystal V2 Bootstrap — TODO (Updated 2026-03-31)
 
 ## Current Status
+- **Fresh semantic structural-collection checkpoint: `Tuple`/`Array`/`Hash` receivers now satisfy generic traversal module parameters by element contract, which clears the `Process.quote*` overload misses and moves the honest full-stage3 gate from `type_diags=187` to `type_diags=184` (2026-04-01, current session)**:
+  - trustworthy setup:
+    - `src/compiler/semantic/type_inference_engine.cr` now lets structural collection carriers match generic module parameters in `type_matches?(...)` through a narrow helper:
+      - `Array(T) <= Enumerable(T)`
+      - `Tuple(T1, T2, ...) <= Enumerable(T1 | T2 | ...)`
+      - `Hash(K, V) <= Enumerable({K, V})`
+      - the same structural element contract also covers `Indexable` / `Indexable::Mutable`
+    - this is intentionally kept in the semantic matcher; it does not rewrite symbol tables or fake nominal inheritance edges
+    - focused regression coverage now lives in `spec/semantic/overload_resolution_spec.cr`
+  - decisive evidence:
+    - focused regression is green:
+      - `../crystal/bin/crystal spec spec/semantic/overload_resolution_spec.cr --error-trace`
+    - rebuild gates are green:
+      - `../crystal/bin/crystal build src/crystal_v2.cr --no-codegen --error-trace`
+      - `../crystal/bin/crystal build src/crystal_v2.cr -o /tmp/crystal_v2_semantic_stage3probe --error-trace`
+    - the exact overload reducer is green:
+      - `Process.quote(arg : String)` delegating to `quote({arg})`
+      - `Process.quote(args : Enumerable(String))` delegating to `quote_posix(args)`
+      - before: `Function 'quote' not found` / `Function 'quote_posix' not found`
+      - after: no semantic type errors
+    - the full semantic stage3 probe under the safe wrapper moves again:
+      - `env CRYSTAL_V2_SEMANTIC_COMPILE=1 scripts/run_safe.sh /tmp/crystal_v2_semantic_stage3probe 300 4096 src/crystal_v2.cr --stats --no-link -o /tmp/stage3_semantic_probe_after_structural_enum.out > /tmp/stage3_semantic_probe_after_structural_enum.log 2>&1`
+      - summary moved from:
+        - `semantic_diags=0`
+        - `resolution_diags=0`
+        - `type_diags=187`
+      - to:
+        - `semantic_diags=0`
+        - `resolution_diags=0`
+        - `type_diags=184`
+      - `src/stdlib/process/shell.cr` moved from `5` errors to `2`
+      - removed families:
+        - `Function 'quote' not found`
+        - `Function 'quote_posix' not found`
+  - practical boundary:
+    - stage3 with the new inferer is still **not** green
+    - the current top frontier remains:
+      - `src/stdlib/float/printer/dragonbox.cr`
+      - `src/stdlib/time/tz.cr`
+      - `src/stdlib/pretty_print.cr`
+      - residual `src/stdlib/process/shell.cr` (`String#matches?`)
 - **Fresh semantic constructor-side-effect checkpoint: class receiver `.new` now infers the matching `initialize` body for instance-ivar side effects, which clears a real nested-constructor ivar-loss corridor and moves the honest full-stage3 gate from `type_diags=196` to `type_diags=187` (2026-04-01, current session)**:
   - trustworthy setup:
     - `src/compiler/semantic/type_inference_engine.cr` now calls a new `infer_constructor_initialize_side_effects(...)` helper on the `ClassType.new` / `new!` paths, after selecting the instantiated receiver type

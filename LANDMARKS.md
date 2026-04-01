@@ -3,6 +3,34 @@
 Updated: 2026-04-01
 Context: compiler/bootstrap/stage2-stability
 
+[LM-392|verified]: After [LM-391], the next cheap exact reducer moved out of
+`pretty_print` and into `src/stdlib/process/shell.cr`. A minimal overload chain
+reproducer showed that `Process.quote(arg : String)` delegating to
+`quote({arg})`, and `Process.quote(args : Enumerable(String))` delegating to
+`quote_posix(args)`, still failed with `Function 'quote' not found` and
+`Function 'quote_posix' not found` even though receiverless class-method lookup
+did find candidates. Trace on the exact reducer proved this was not a
+class-self lookup bug: `lookup_method candidates method=quote count=2
+receiver=Process` and the same for `quote_posix` were both present. The real
+miss was generic parameter matching: tuple literals are inferred as
+`Tuple(String)`, but the semantic matcher did not yet let structural collection
+types satisfy generic traversal module parameters like `Enumerable(String)`.
+The verified narrow fix in `src/compiler/semantic/type_inference_engine.cr`
+adds a structural collection matcher inside `type_matches?(...)`:
+`Array(T) <= Enumerable(T)`, `Tuple(T1, T2, ...) <= Enumerable(T1 | T2 | ...)`,
+and `Hash(K, V) <= Enumerable({K, V})`, with the same element contract also
+covering `Indexable` / `Indexable::Mutable`. Focused regression
+`spec/semantic/overload_resolution_spec.cr` is green; rebuild gates for
+`src/crystal_v2.cr --no-codegen` and `/tmp/crystal_v2_semantic_stage3probe`
+are green; the exact `Process.quote` reducer is green; and the full safe stage3
+probe moves from `semantic_diags=0 resolution_diags=0 type_diags=187` to
+`semantic_diags=0 resolution_diags=0 type_diags=184`. The file-local count for
+`src/stdlib/process/shell.cr` drops from `5` to `2`, and the full log no
+longer contains `Function 'quote' not found` or `Function 'quote_posix' not
+found`. Boundary: stage3 is still not green; the live head is still dominated
+by `dragonbox`, `time/tz`, `pretty_print`, and the residual `String#matches?`
+surface in `process/shell`. {F/G/R: 0.97/0.82/0.98} [verified]
+
 [LM-391|verified]: After [LM-390], the fresh whole-program head was no longer
 the old `File.info?` / `FileDescriptor#print` corridor. A full safe stage3 probe
 on `HEAD` showed `semantic_diags=0 resolution_diags=0 type_diags=196`, with a

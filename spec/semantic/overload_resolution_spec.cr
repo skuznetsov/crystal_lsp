@@ -196,6 +196,61 @@ describe "Phase 98: Method Overload Resolution" do
     end
   end
 
+  describe "structural collection module matching" do
+    it "matches tuple literals to Enumerable(T) overloads" do
+      source = <<-CRYSTAL
+        module Enumerable(T)
+          def join(sep : Char) : String
+            ""
+          end
+        end
+
+        class String
+          def empty? : Bool
+            false
+          end
+
+          def matches?(re) : Bool
+            false
+          end
+
+          def gsub(pattern, replacement) : String
+            self
+          end
+        end
+
+        class Process
+          def self.quote(args : Enumerable(String)) : String
+            quote_posix(args)
+          end
+
+          def self.quote(arg : String) : String
+            quote({arg})
+          end
+
+          def self.quote_posix(args : Enumerable(String)) : String
+            args.join(' ')
+          end
+        end
+
+        Process.quote("x")
+      CRYSTAL
+
+      lexer = Frontend::Lexer.new(source)
+      parser = Frontend::Parser.new(lexer)
+      program = parser.parse_program
+
+      analyzer = Semantic::Analyzer.new(program)
+      analyzer.collect_symbols
+      name_result = analyzer.resolve_names
+
+      engine = Semantic::TypeInferenceEngine.new(program, name_result.identifier_symbols, analyzer.global_context.symbol_table)
+      engine.infer_types
+
+      engine.diagnostics.select(&.level.error?).should be_empty
+    end
+  end
+
   # ==================================================================
   # Category 3: Union type matching in overloads
   # ==================================================================
