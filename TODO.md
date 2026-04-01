@@ -1,6 +1,47 @@
 # Crystal V2 Bootstrap — TODO (Updated 2026-04-01)
 
 ## Current Status
+- **Fresh semantic class-body ivar-default checkpoint: class-body instance-var assignments now preserve default-value metadata during symbol collection, which fixes the explicit-receiver `threads.@mutex.lock` corridor and moves the honest whole-program stage3 gate from `type_diags=54` to `type_diags=50` (2026-04-01, current session)**:
+  - trustworthy setup:
+    - `src/compiler/semantic/collectors/symbol_collector.cr` now treats class-body `@ivar = ...` assignments as default-value seeds, not just `initialize` assignments and constructor shorthand
+    - existing constructor/default metadata is still preserved on merge, so the fix does not regress the earlier `initialize`-param/default corridors
+    - focused regression coverage lives in `spec/semantic/type_inference_explicit_ivar_receiver_spec.cr`
+  - decisive evidence:
+    - focused regression pack is green:
+      - `../crystal/bin/crystal spec spec/semantic/type_inference_explicit_ivar_receiver_spec.cr --error-trace`
+    - rebuild gates are green:
+      - `../crystal/bin/crystal build src/crystal_v2.cr --no-codegen --error-trace`
+      - `../crystal/bin/crystal build src/crystal_v2.cr -o /tmp/crystal_v2_semantic_stage3probe --error-trace`
+    - analyzer-side introspection now shows the missing metadata on the exact nested generic owner:
+      - `Thread::LinkedList#@mutex` now reports `has_default=true` with a `MemberAccessNode` default seed
+      - before the fix, the same introspection reported `has_default=false` and `default=nil`
+    - the exact no-prelude carrier is green under the safe wrapper:
+      - `/tmp/semantic_thread_mutex_probe.cr`
+      - before: `Method '@mutex' not found on LinkedList(Thread)` and downstream `Method 'lock' not found on Nil`
+      - after:
+        - `env CRYSTAL_V2_SEMANTIC_COMPILE=1 scripts/run_safe.sh /tmp/crystal_v2_semantic_stage3probe 30 1024 /tmp/semantic_thread_mutex_probe.cr --no-prelude --stats --verbose`
+        - `semantic_diags=0`
+        - `resolution_diags=0`
+        - `type_diags=0`
+    - the full semantic stage3 probe under the safe wrapper improves again:
+      - `env CRYSTAL_V2_SEMANTIC_COMPILE=1 scripts/run_safe.sh /tmp/crystal_v2_semantic_stage3probe 300 4096 src/crystal_v2.cr --stats --no-link -o /tmp/stage3_semantic_probe_after_class_body_ivar_default.out > /tmp/stage3_semantic_probe_after_class_body_ivar_default.log 2>&1`
+      - summary moved from:
+        - `semantic_diags=0`
+        - `resolution_diags=0`
+        - `type_diags=54`
+      - to:
+        - `semantic_diags=0`
+        - `resolution_diags=0`
+        - `type_diags=50`
+      - `src/stdlib/crystal/system/thread.cr` drops out of the live head entirely
+  - practical boundary:
+    - this is a real collector/semantic integration fix for explicit receiver ivars on nested generic owners
+    - the new live head is concentrated in runtime/process-side corridors:
+      - `src/stdlib/crystal/system/unix/process.cr` (`5`)
+      - `src/stdlib/crystal/system/unix/signal.cr` (`4`)
+      - `src/compiler/hir/hir.cr` (`3`)
+      - `src/stdlib/raise.cr` (`3`)
+      - then smaller residuals like `regex`, `file`, `reference`, `mutex`, `gc/boehm`
 - **Fresh semantic accessor-default checkpoint: untyped ivars now consult accessor-recorded default values during direct ivar inference, which fixes exact `getter x = ...` reducers but leaves the honest whole-program stage3 gate flat at `type_diags=61` (2026-04-01, current session)**:
   - trustworthy setup:
     - `src/compiler/semantic/type_inference_engine.cr` now checks `ClassSymbol#get_instance_var_info(...).default_value` for untyped ivars before falling back to method-based seeding

@@ -1651,8 +1651,9 @@ module CrystalV2
                 # Week 1: Try to infer type from RHS if it's a parameter reference
                 type_annotation = infer_ivar_type_from_assignment(node.value, current_method)
                 in_initialize = current_method.try { |m| intern_name(m.name.not_nil!) == "initialize" } || false
-                default_value = existing.try(&.default_value) || (in_initialize ? node.value : nil)
-                has_default = existing.try(&.has_default?) || in_initialize
+                in_class_body = current_method.nil?
+                default_value = existing.try(&.default_value) || ((in_initialize || in_class_body) ? node.value : nil)
+                has_default = existing.try(&.has_default?) || in_initialize || in_class_body
                 class_symbol.add_instance_var(var_name, type_annotation, default_value, has_default)
               end
               define_instance_var_symbol(class_symbol, var_name, nil, target_id)

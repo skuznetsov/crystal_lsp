@@ -3,6 +3,39 @@
 Updated: 2026-04-01
 Context: compiler/bootstrap/stage2-stability
 
+[LM-404|verified]: After [LM-403], the newly exposed runtime head was not a
+generic nested-owner lookup problem in `Thread::LinkedList(T)`. The decisive
+exact reducer was the existing explicit-receiver ivar carrier
+`threads.@mutex.lock`, both in
+`spec/semantic/type_inference_explicit_ivar_receiver_spec.cr` and in the
+standalone no-prelude probe `/tmp/semantic_thread_mutex_probe.cr`. A filtered
+type trace showed `threads` already resolving to `InstanceType(LinkedList(Thread))`,
+which falsified the "receiver is misclassified as class/module" theory; the
+miss happened one step later when semantic fallback tried to resolve `@mutex`
+as a field and found no default metadata. The decisive analyzer-side
+introspection proved that `Thread::LinkedList#instance_var_infos["mutex"]`
+existed but carried `has_default=false` and `default=nil` before the fix, even
+though the source was a class-body assignment `@mutex = Thread::Mutex.new`.
+That isolated the real bug to symbol collection: `scan_for_instance_vars(...)`
+preserved default values for `InstanceVarDeclNode`, `initialize` assignments,
+and constructor shorthand, but silently discarded class-body `@ivar = ...`
+defaults. The verified narrow fix in
+`src/compiler/semantic/collectors/symbol_collector.cr` now treats class-body
+instance-var assignments (`current_method.nil?`) as default-value seeds,
+preserving both `default_value` and `has_default`. Focused regression
+`spec/semantic/type_inference_explicit_ivar_receiver_spec.cr` is green; rebuild
+gates for `src/crystal_v2.cr --no-codegen` and
+`/tmp/crystal_v2_semantic_stage3probe` are green; analyzer introspection now
+shows `Thread::LinkedList#@mutex` with `has_default=true` and a
+`MemberAccessNode` default seed; the exact safe no-prelude carrier is green;
+and the full safe stage3 probe moves from
+`semantic_diags=0 resolution_diags=0 type_diags=54` to
+`semantic_diags=0 resolution_diags=0 type_diags=50`, with
+`src/stdlib/crystal/system/thread.cr` dropping out of the live head entirely.
+Boundary: stage3 is still not green; the new top files are
+`process` (`5`), `signal` (`4`), `hir` (`3`), and `raise` (`3`), followed by
+smaller residual runtime/API gaps. {F/G/R: 0.98/0.83/0.98} [verified]
+
 [LM-403|verified]: After [LM-402], the early `pretty_print` head was not one
 broad queue/container regression. The decisive split was a tiny reducer:
 `class Group; getter breakables = [] of Breakable; end; Group.new.breakables.empty?`.

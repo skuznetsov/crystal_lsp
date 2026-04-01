@@ -103,9 +103,15 @@ describe Semantic::TypeInferenceEngine do
       CRYSTAL
 
       program, analyzer, engine = infer_explicit_ivar_receiver_types(source)
+      thread_symbol = analyzer.global_context.symbol_table.lookup("Thread").as(Semantic::ClassSymbol)
+      linked_list_symbol = thread_symbol.scope.lookup("LinkedList").as(Semantic::ClassSymbol)
+      mutex_info = linked_list_symbol.get_instance_var_info("mutex")
 
       analyzer.semantic_diagnostics.should be_empty
       analyzer.name_resolver_diagnostics.should be_empty
+      mutex_info.should_not be_nil
+      mutex_info.not_nil!.has_default?.should be_true
+      mutex_info.not_nil!.default_value.should_not be_nil
       engine.diagnostics.should be_empty
       engine.context.get_type(program.roots.last).to_s.should eq("Nil")
     end
