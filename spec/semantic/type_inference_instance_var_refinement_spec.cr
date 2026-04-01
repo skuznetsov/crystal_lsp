@@ -183,5 +183,26 @@ describe Semantic::TypeInferenceEngine do
       engine.diagnostics.should be_empty
       engine.context.get_type(program.roots.last).to_s.should eq("Int32")
     end
+
+    it "keeps getter default-value ivars concrete without explicit initialize bodies" do
+      source = <<-CRYSTAL
+        class Breakable
+        end
+
+        class Group
+          getter breakables = [] of Breakable
+        end
+
+        group = Group.new
+        group.breakables.empty?
+      CRYSTAL
+
+      program, analyzer, engine = infer_instance_var_refinement_types(source)
+
+      analyzer.semantic_diagnostics.should be_empty
+      analyzer.name_resolver_diagnostics.should be_empty
+      engine.diagnostics.should be_empty
+      engine.context.get_type(program.roots.last).to_s.should eq("Bool")
+    end
   end
 end

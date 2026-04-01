@@ -3,6 +3,32 @@
 Updated: 2026-04-01
 Context: compiler/bootstrap/stage2-stability
 
+[LM-403|verified]: After [LM-402], the early `pretty_print` head was not one
+broad queue/container regression. The decisive split was a tiny reducer:
+`class Group; getter breakables = [] of Breakable; end; Group.new.breakables.empty?`.
+Before the fix it failed as `Method 'empty?' not found on Nil`, while both the
+equivalent explicit ivar form (`@breakables = [] of Breakable`) and a manual
+getter method were already green. That falsified general ivar seeding and
+isolated the real gap to accessor metadata: untyped ivars created through
+`getter x = ...` had `default_value` recorded in `ClassSymbol#instance_var_infos`,
+but `infer_instance_var(...)` only consulted explicit type annotations,
+`@instance_var_types`, and method-based seeding. The verified narrow fix in
+`src/compiler/semantic/type_inference_engine.cr` now checks
+`get_instance_var_info(clean_name).default_value` for untyped ivars before
+falling back to method-based seeding, while preserving receiver/current-owner
+context and guarding recursion through the existing seed set. Focused
+regression `spec/semantic/type_inference_instance_var_refinement_spec.cr` is
+green; rebuild gates for `src/crystal_v2.cr --no-codegen` and
+`/tmp/crystal_v2_semantic_stage3probe` are green; both the plain reducer and a
+nested `PrettyPrint::Group` reducer are green; a richer nested queue carrier
+with `@queue = [] of Array(Group)` is also green; and the full safe stage3
+probe stays flat at `semantic_diags=0 resolution_diags=0 type_diags=61`.
+Adversary diff against the previous specialization-cache checkpoint shows an
+identical error multiset. Boundary: this is a real local semantic fix that
+narrows the remaining `pretty_print` bug class, but it does not yet remove the
+full-file `pretty_print` misses; the next honest step still needs a richer
+actual-file reducer. {F/G/R: 0.97/0.63/0.98} [verified]
+
 [LM-402|verified]: After [LM-401], the next `dragonbox`-adjacent branch was not
 another macro-path tweak. The decisive exact reducers were two generic-mixin
 specialization poison cases:

@@ -1,6 +1,37 @@
 # Crystal V2 Bootstrap — TODO (Updated 2026-04-01)
 
 ## Current Status
+- **Fresh semantic accessor-default checkpoint: untyped ivars now consult accessor-recorded default values during direct ivar inference, which fixes exact `getter x = ...` reducers but leaves the honest whole-program stage3 gate flat at `type_diags=61` (2026-04-01, current session)**:
+  - trustworthy setup:
+    - `src/compiler/semantic/type_inference_engine.cr` now checks `ClassSymbol#get_instance_var_info(...).default_value` for untyped ivars before falling back to method-based seeding
+    - the fallback preserves the active receiver/class/module context and uses the existing instance-var seed guard to avoid recursion
+    - focused regression coverage lives in `spec/semantic/type_inference_instance_var_refinement_spec.cr`
+  - decisive evidence:
+    - focused regression pack is green:
+      - `../crystal/bin/crystal spec spec/semantic/type_inference_instance_var_refinement_spec.cr --error-trace`
+    - rebuild gates are green:
+      - `../crystal/bin/crystal build src/crystal_v2.cr --no-codegen --error-trace`
+      - `../crystal/bin/crystal build src/crystal_v2.cr -o /tmp/crystal_v2_semantic_stage3probe --error-trace`
+    - the plain exact reducer is green:
+      - `class Group; getter breakables = [] of Breakable; end; Group.new.breakables.empty?`
+      - before: `Method 'empty?' not found on Nil`
+      - after: root type `Bool` with no semantic diagnostics
+    - the nested pretty-print-shaped reducer is also green:
+      - `class PrettyPrint; private class Group; getter breakables = [] of Breakable; end; def probe; group = Group.new; group.breakables.empty?; end; end; PrettyPrint.new.probe`
+      - after: root type `Bool` with no semantic diagnostics
+    - the richer queue-shaped nested reducer is green too:
+      - `PrettyPrint::GroupQueue#probe(depth, group)` with `@queue = [] of Array(Group)` and `@queue[group.breakables.size].delete(group)`
+      - after: no semantic diagnostics
+    - the full semantic stage3 probe under the safe wrapper is non-regressing but flat:
+      - `env CRYSTAL_V2_SEMANTIC_COMPILE=1 scripts/run_safe.sh /tmp/crystal_v2_semantic_stage3probe 300 4096 src/crystal_v2.cr --stats --no-link -o /tmp/stage3_semantic_probe_after_accessor_default.out > /tmp/stage3_semantic_probe_after_accessor_default.log 2>&1`
+      - summary remains:
+        - `semantic_diags=0`
+        - `resolution_diags=0`
+        - `type_diags=61`
+      - adversary diff against `/tmp/stage3_semantic_probe_after_specialization_cache_each_char.log` shows an identical error multiset
+  - practical boundary:
+    - this is a real local semantic fix and narrows the remaining `pretty_print` bug class
+    - it does **not** yet explain the full-file `pretty_print` misses, so the next honest branch still needs a richer actual-file reducer
 - **Fresh semantic specialization-cache checkpoint: generic/module method body caches are now specialization-aware, and annotated block methods now re-type their block params before returning annotated results, which fixes the exact generic-mixin cache poison reducers while keeping the honest whole-program stage3 gate flat at `type_diags=61` (2026-04-01, current session)**:
   - trustworthy setup:
     - `src/compiler/semantic/type_inference_engine.cr` now keys `@method_body_cache` / `@method_body_in_progress` by `{method, concrete receiver}` instead of `MethodSymbol` alone

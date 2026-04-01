@@ -2590,6 +2590,11 @@ module CrystalV2
           end
 
           if current_class = @current_class
+            if default_type = infer_untyped_instance_var_default_value_type(current_class, clean_name)
+              debug_hook("infer.instance_var.default_untyped", "name=#{clean_name} type=#{default_type}")
+              return default_type
+            end
+
             if seeded_type = seed_untyped_instance_var_type_from_methods(current_class, clean_name)
               debug_hook("infer.instance_var.seeded_untyped", "name=#{clean_name} type=#{seeded_type}")
               return seeded_type
@@ -2602,6 +2607,39 @@ module CrystalV2
           end
           debug_hook("infer.instance_var.nil", "name=#{clean_name}")
           @context.nil_type
+        end
+
+        private def infer_untyped_instance_var_default_value_type(current_class : ClassSymbol, clean_name : String) : Type?
+          ivar_info = current_class.get_instance_var_info(clean_name)
+          return nil unless default_value = ivar_info.try(&.default_value)
+
+          seed_key = "#{current_class.name}##{clean_name}:default"
+          return nil unless @instance_var_seed_in_progress.add?(seed_key)
+
+          previous_receiver_context = @receiver_type_context
+          previous_class = @current_class
+          previous_module = @current_module
+
+          if receiver = previous_receiver_context
+            @receiver_type_context = receiver
+          else
+            @receiver_type_context = instance_type_for(current_class)
+          end
+          @current_class = current_class
+          if owner_module = current_class.scope.owner_module
+            @current_module = owner_module
+          end
+
+          begin
+            default_type = infer_expression(default_value)
+            return nil if unknownish_type?(default_type)
+            default_type
+          ensure
+            @receiver_type_context = previous_receiver_context
+            @current_class = previous_class
+            @current_module = previous_module
+            @instance_var_seed_in_progress.delete(seed_key)
+          end
         end
 
         private def prefer_inferred_instance_var_type?(inferred_type : Type, annotated_type : Type) : Bool
