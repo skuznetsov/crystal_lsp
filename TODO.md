@@ -5547,3 +5547,40 @@ Immediate next steps:
    corridor next, not the old `Pointer(Breakable)` theory.
 2. Then revisit the remaining `signal/file/time` runtime head only after the
    `pretty_print` file-local blockers shrink again.
+
+## Fresh Frontier — 2026-04-01 (while guard narrowing)
+
+Verified this turn on semantic stage3 probes built from the current workspace:
+
+1. The next `pretty_print` blocker after owner-scoped ivars was not queue
+   storage itself, but a control-flow narrowing gap inside loop bodies.
+   - The exact no-prelude oracle:
+     `while true; return 0 unless group = @queue.deq; group.breakables.empty?`
+     reproduced the live `group : Nil | Group` failure under
+     `scripts/run_safe.sh`.
+   - This proved the active bug class was `return unless <assignment>` inside
+     `while`, not another `Deque`/`GroupQueue` carrier issue.
+
+2. The verified fix is narrow:
+   - `infer_while` now runs the body through `infer_block_result(...)` so
+     post-guard narrowings from `unless` survive to later statements in the
+     same loop body.
+   - Focused regression lives in
+     `spec/semantic/type_inference_logical_rhs_narrowing_spec.cr`.
+
+3. Measured impact:
+   - Focused regression pack is green.
+   - `../crystal/bin/crystal build src/crystal_v2.cr --no-codegen --error-trace`
+     and rebuild of `/tmp/crystal_v2_semantic_stage3probe` are green.
+   - Full semantic stage3 probe via `scripts/run_safe.sh` moved from
+     `semantic_diags=0 resolution_diags=0 type_diags=66` to
+     `semantic_diags=0 resolution_diags=0 type_diags=64`.
+   - Exact removals from the live log:
+     - `Method 'breakables' not found on Nil | Group`
+     - `Method 'empty?' not found on Nil`
+   - `src/stdlib/pretty_print.cr` dropped from `8` file-local errors to `6`.
+
+Immediate next steps:
+1. Stay on `pretty_print`: the remaining file-local tail is now arithmetic/state
+   (`@indent -= indent`, `output_width + @width`), not `group.breakables`.
+2. After that, `dragonbox` remains the densest top file-local frontier at `7`.

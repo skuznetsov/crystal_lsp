@@ -296,5 +296,57 @@ describe Semantic::TypeInferenceEngine do
       engine.diagnostics.should be_empty
       {"UInt32 | Nil", "Nil | UInt32"}.should contain(engine.context.get_type(program.roots.last).to_s)
     end
+
+    it "preserves return-unless assignment narrowing inside while bodies" do
+      source = <<-CRYSTAL
+        class Breaks
+          def empty?
+            false
+          end
+        end
+
+        class Group
+          def breakables
+            Breaks.new
+          end
+        end
+
+        class GroupQueue
+          def initialize
+            @done = false
+          end
+
+          def deq
+            unless @done
+              @done = true
+              Group.new
+            end
+          end
+        end
+
+        class Box
+          def initialize
+            @queue = GroupQueue.new
+          end
+
+          def probe
+            while true
+              return 0 unless group = @queue.deq
+              return 1 if group.breakables.empty?
+              return 2
+            end
+          end
+        end
+
+        Box.new.probe
+      CRYSTAL
+
+      program, analyzer, engine = infer_logical_rhs_narrowing_types(source)
+
+      analyzer.semantic_diagnostics.should be_empty
+      analyzer.name_resolver_diagnostics.should be_empty
+      engine.diagnostics.should be_empty
+      {"Int32", "Nil | Int32", "Int32 | Nil"}.should contain(engine.context.get_type(program.roots.last).to_s)
+    end
   end
 end

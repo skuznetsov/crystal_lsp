@@ -4560,7 +4560,7 @@ module CrystalV2
           # Crystal allows any type as condition (truthy check)
           # No need to require Bool type
 
-          node.body.each { |expr_id| infer_expression(expr_id) }
+          infer_block_result(node.body)
 
           @context.nil_type
         end
