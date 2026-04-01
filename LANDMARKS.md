@@ -3,6 +3,43 @@
 Updated: 2026-04-01
 Context: compiler/bootstrap/stage2-stability
 
+[LM-408|verified]: After [LM-407], the next runtime/context split was not one
+single `process` bug. Two exact falsifiers proved the branch had two linked
+blind spots in semantic context preservation. First, the richer no-prelude
+carrier `/tmp/semantic_unix_file_open_probe.cr` showed that
+`perm = ::File::Permissions.new(perm) if perm.is_a? Int32` still collapsed
+before `EventLoop.current.open(... perm ...)`, even though the eventual
+receiver lookup on `EventLoop+` was alive; that isolated a receiverless enum
+constructor + absolute-annotation corridor rather than a remaining virtual
+dispatch miss. Second, the tiny yielded-block carrier
+`/tmp/semantic_mutex_queue_probe.cr` proved that `@lock.sync { @queue.shift? }`
+typed `@queue` as `Nil`, and DEBUG traces showed the failure sequence exactly:
+the old WIP first mis-bound lexical self to `SpinLock`, and after narrowing the
+branch further it became clear that `infer_method_block_result_type(...)`
+returned early for untyped blocks but still ran its method-level `ensure`,
+which restored uninitialized `previous_*` locals and wiped
+`@current_class/@receiver_type_context` to nil before `infer_method_body_type`
+pushed the yield frame. The verified fix remains bounded to
+`src/compiler/semantic/type_inference_engine.cr`: receiverless semantic lookup
+now treats `EnumType.new(...)` / `new!(...)` as concrete enum constructors when
+their single argument matches the enum base type, semantic annotation parsing
+now strips a leading `::` before path resolution, and untyped yielded-block
+inference now preserves lexical receiver/class/module/method scope through a
+`YieldLexicalContext` stack while `infer_method_block_result_type(...)` snapshots
+its restore state before any early return. Focused regressions
+`spec/semantic/type_inference_enum_class_method_spec.cr`,
+`spec/semantic/type_inference_absolute_path_spec.cr`, and
+`spec/semantic/type_inference_block_lexical_self_spec.cr` are green; rebuild
+gates for `src/crystal_v2.cr --no-codegen` and
+`/tmp/crystal_v2_semantic_stage3probe` are green; both exact safe carriers are
+green under `scripts/run_safe.sh`; and the full safe stage3 probe moves from
+`semantic_diags=0 resolution_diags=0 type_diags=49` to
+`semantic_diags=0 resolution_diags=0 type_diags=48`. Boundary: this closes the
+false `open(... perm ...)` / `@lock.sync` lexical-self branch, but stage3 is
+still not green and the new honest head sits in `time`, then smaller `hir`,
+`process`, `regex`, and `signal` families rather than the old `EventLoop` or
+mutex context corridors. {F/G/R: 0.97/0.74/0.98} [verified]
+
 [LM-407|verified]: After [LM-406], the next `process/signal`-side runtime head
 was not another class-var/hash-default bug. The decisive exact falsifier was a
 tiny no-prelude carrier `/tmp/semantic_eventloop_after_fork_probe2.cr`, which

@@ -64,6 +64,7 @@ module CrystalV2
         @current_method_is_class_method_stack : Array(Bool)
         @yield_return_stack : Array(Type?)
         @yield_call_stack : Array(Frontend::CallNode?)
+        @yield_lexical_context_stack : Array(YieldLexicalContext?)
 
         # Instance-level cycle guard for expression inference (prevents infinite recursion)
         @expr_in_progress : Set(Int32) = Set(Int32).new
@@ -159,6 +160,23 @@ module CrystalV2
           end
         end
 
+        private struct YieldLexicalContext
+          getter receiver_type_context : Type?
+          getter current_class : ClassSymbol?
+          getter current_module : ModuleSymbol?
+          getter method_scope : SymbolTable?
+          getter class_method_context : Bool?
+
+          def initialize(
+            @receiver_type_context : Type?,
+            @current_class : ClassSymbol?,
+            @current_module : ModuleSymbol?,
+            @method_scope : SymbolTable?,
+            @class_method_context : Bool?,
+          )
+          end
+        end
+
         def initialize(
           @program : Frontend::Program,
           @identifier_symbols : Hash(ExprId, Symbol),
@@ -198,6 +216,7 @@ module CrystalV2
           @current_method_is_class_method_stack = [] of Bool
           @yield_return_stack = [] of Type?
           @yield_call_stack = [] of Frontend::CallNode?
+          @yield_lexical_context_stack = [] of YieldLexicalContext?
           @depth = 0
           @debug_enabled = ENV["TYPE_INFERENCE_DEBUG"]? == "1"
           @unknown_type = PrimitiveType.new("Unknown")
@@ -1363,6 +1382,10 @@ module CrystalV2
           receiver_type = implicit_receiver_type_for(method)
           return nil unless receiver_type
 
+          if {"new", "new!"}.includes?(method.name) && receiver_type.is_a?(EnumType)
+            return receiver_type if enum_constructor_arguments_match?(receiver_type, arg_types)
+          end
+
           infer_method_call_result(method, receiver_type, arg_types, call_node)
         end
 
@@ -1426,6 +1449,14 @@ module CrystalV2
         ) : Type?
           if symbol.overloads.any? { |method| unresolved_generic_module_receiver?(method) }
             return @context.nil_type
+          end
+
+          if {"new", "new!"}.includes?(symbol.name)
+            if receiver_type = @receiver_type_context
+              if receiver_type.is_a?(EnumType) && enum_constructor_arguments_match?(receiver_type, arg_types)
+                return receiver_type
+              end
+            end
           end
 
           matches = symbol.overloads.select do |method|
@@ -1498,6 +1529,18 @@ module CrystalV2
           arg_types : Array(Type),
           call_node : Frontend::CallNode? = nil
         ) : Type
+          lexical_block_context = if call_node && call_has_block?(call_node)
+                                    YieldLexicalContext.new(
+                                      @receiver_type_context,
+                                      @current_class,
+                                      @current_module,
+                                      @current_method_scope,
+                                      @current_method_is_class_method_stack.last?
+                                    )
+                                  else
+                                    nil
+                                  end
+
           if type_params = method.type_parameters
             type_args = infer_method_type_arguments(method, receiver_type, arg_types, call_node)
             if ret_ann = method.return_annotation
@@ -1508,7 +1551,7 @@ module CrystalV2
             return resolve_method_annotation_type(ann, receiver_type, method.scope, class_method_context: method.is_class_method?)
           end
 
-          infer_method_body_type(method, receiver_type, arg_types, call_node)
+          infer_method_body_type(method, receiver_type, arg_types, call_node, lexical_block_context: lexical_block_context)
         end
 
         private def ensure_annotated_method_block_inferred(
@@ -3043,6 +3086,7 @@ module CrystalV2
         # For Phase 1: Only built-in primitive types
         private def parse_type_name(name : String) : Type
           guard_watchdog!
+          name = name.lchop("::") if name.starts_with?("::")
           if cached = @parse_type_cache[name]?
             return cached
           end
@@ -7784,8 +7828,20 @@ module CrystalV2
         private def infer_method_block_result_type(
           method : MethodSymbol,
           receiver_type : Type,
-          call_node : Frontend::CallNode
+          call_node : Frontend::CallNode,
+          *,
+          lexical_receiver_context : Type? = @receiver_type_context,
+          lexical_class : ClassSymbol? = @current_class,
+          lexical_module : ModuleSymbol? = @current_module,
+          lexical_method_scope : SymbolTable? = @current_method_scope,
+          lexical_class_method_context : Bool? = @current_method_is_class_method_stack.last?
         ) : {Type, String?}?
+          previous_receiver_context = @receiver_type_context
+          previous_class = @current_class
+          previous_module = @current_module
+          previous_method_scope = @current_method_scope
+          pushed_class_method_flag = false
+
           block_param = method.params.find(&.is_block)
           return nil unless type_ann = block_param.try(&.type_annotation)
 
@@ -7793,10 +7849,26 @@ module CrystalV2
           return nil unless signature
 
           block_param_types, return_type_name = signature
+
+          @receiver_type_context = lexical_receiver_context
+          @current_class = lexical_class
+          @current_module = lexical_module
+          @current_method_scope = lexical_method_scope
+          unless lexical_class_method_context.nil?
+            @current_method_is_class_method_stack << lexical_class_method_context.not_nil!
+            pushed_class_method_flag = true
+          end
+
           block_result = infer_call_block_with_param_types(call_node, block_param_types)
           return nil unless block_result
 
           {block_result, return_type_name}
+        ensure
+          @receiver_type_context = previous_receiver_context
+          @current_class = previous_class
+          @current_module = previous_module
+          @current_method_scope = previous_method_scope
+          @current_method_is_class_method_stack.pop if pushed_class_method_flag && !@current_method_is_class_method_stack.empty?
         end
 
         # Depth-first search for a method name in the given scope (SymbolTable)
@@ -10389,10 +10461,34 @@ module CrystalV2
           if current_call = @yield_call_stack.last?
             saved_call = @yield_call_stack.pop
             saved_return = @yield_return_stack.pop
+            saved_lexical_context = @yield_lexical_context_stack.pop
 
             begin
+              previous_receiver_context = @receiver_type_context
+              previous_class = @current_class
+              previous_module = @current_module
+              previous_method_scope = @current_method_scope
+              pushed_class_method_flag = false
+
+              if lexical_context = saved_lexical_context
+                @receiver_type_context = lexical_context.receiver_type_context
+                @current_class = lexical_context.current_class
+                @current_module = lexical_context.current_module
+                @current_method_scope = lexical_context.method_scope
+                unless lexical_context.class_method_context.nil?
+                  @current_method_is_class_method_stack << lexical_context.class_method_context.not_nil!
+                  pushed_class_method_flag = true
+                end
+              end
+
               return infer_call_block_with_param_types(current_call, arg_types) || saved_return || @context.nil_type
             ensure
+              @receiver_type_context = previous_receiver_context
+              @current_class = previous_class
+              @current_module = previous_module
+              @current_method_scope = previous_method_scope
+              @current_method_is_class_method_stack.pop if pushed_class_method_flag && !@current_method_is_class_method_stack.empty?
+              @yield_lexical_context_stack << saved_lexical_context
               @yield_return_stack << saved_return
               @yield_call_stack << saved_call
             end
@@ -10582,6 +10678,7 @@ module CrystalV2
         end
 
         private def resolve_method_annotation_type(type_name : String, receiver_type : Type?, scope : SymbolTable? = nil, *, class_method_context : Bool? = nil) : Type
+          type_name = type_name.lchop("::") if type_name.starts_with?("::")
           if type_name == "self"
             method_is_class_method = class_method_context.nil? ? @current_method_is_class_method_stack.last? : class_method_context
 
@@ -10763,6 +10860,7 @@ module CrystalV2
         end
 
         private def resolve_annotation_scoped_symbol(type_name : String, scope : SymbolTable) : Symbol?
+          type_name = type_name.lchop("::") if type_name.starts_with?("::")
           return nil unless type_name.includes?("::")
 
           segments = type_name.split("::")
@@ -11253,7 +11351,9 @@ module CrystalV2
           method : MethodSymbol,
           receiver_type : Type,
           arg_types : Array(Type)? = nil,
-          call_node : Frontend::CallNode? = nil
+          call_node : Frontend::CallNode? = nil,
+          *,
+          lexical_block_context : YieldLexicalContext? = nil
         ) : Type
           guard_watchdog!
           if defer_generic_module_method_body?(method, receiver_type)
@@ -11311,6 +11411,7 @@ module CrystalV2
           previous_class = @current_class
           previous_module = @current_module
           previous_method_scope = @current_method_scope
+          previous_class_method_context = @current_method_is_class_method_stack.last?
           previous_assignments = @assignments.dup
           previous_flow_narrowings = @flow_narrowings.dup
           @current_method_is_class_method_stack << method.is_class_method?
@@ -11394,6 +11495,18 @@ module CrystalV2
                                  call_node
                                end
           @yield_call_stack << untyped_yield_call
+          pushed_lexical_context = if untyped_yield_call
+                                     lexical_block_context || YieldLexicalContext.new(
+                                       previous_receiver_context,
+                                       previous_class,
+                                       previous_module,
+                                       previous_method_scope,
+                                       previous_class_method_context
+                                     )
+                                   else
+                                     nil
+                                   end
+          @yield_lexical_context_stack << pushed_lexical_context
           pushed_yield_call_frame = true
 
           # Re-infer the body under the current receiver/return context instead
@@ -11435,6 +11548,7 @@ module CrystalV2
           end
           @current_method_is_class_method_stack.pop unless @current_method_is_class_method_stack.empty?
           @yield_call_stack.pop if pushed_yield_call_frame && !@yield_call_stack.empty?
+          @yield_lexical_context_stack.pop if pushed_yield_call_frame && !@yield_lexical_context_stack.empty?
           @yield_return_stack.pop if pushed_yield_return_frame && !@yield_return_stack.empty?
           @method_return_stack.pop if pushed_return_frame && !@method_return_stack.empty?
           @method_body_in_progress.delete(body_cache_key)

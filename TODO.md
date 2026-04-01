@@ -1,6 +1,50 @@
 # Crystal V2 Bootstrap — TODO (Updated 2026-04-01)
 
 ## Current Status
+- **Fresh semantic enum-helper + yielded-block lexical-context checkpoint: enum helper constructors now stay concrete through narrowed union reassignment, and untyped yielded blocks now preserve the caller's lexical owner context instead of wiping `@current_class` on early block-signature exits; together these close the exact `EventLoop.current.open(... perm ...)` and `@lock.sync { @queue.shift? }` falsifiers and move the honest whole-program stage3 gate from `type_diags=49` to `type_diags=48` (2026-04-01, current session)**:
+  - trustworthy setup:
+    - `src/compiler/semantic/type_inference_engine.cr` now treats `EnumType.new(...)` / `new!(...)` as concrete enum constructors in receiverless semantic lookup, which keeps narrowed reassignment flows like `perm = ::File::Permissions.new(perm) if perm.is_a? Int32` concrete instead of collapsing to `Nil`
+    - the same file now normalizes leading `::` in semantic annotation/path parsing so absolute type annotations like `::File::Permissions` resolve through the current semantic scope instead of staying as raw nominal strings
+    - the same file now preserves yielded-block lexical context across untyped `yield` inference by carrying the caller's lexical receiver/class/module/method scope through the yield stack, and `infer_method_block_result_type(...)` no longer wipes that context on early `return nil` exits before its `ensure`
+    - focused regression coverage lives in:
+      - `spec/semantic/type_inference_enum_class_method_spec.cr`
+      - `spec/semantic/type_inference_absolute_path_spec.cr`
+      - `spec/semantic/type_inference_block_lexical_self_spec.cr`
+  - decisive evidence:
+    - focused regressions are green:
+      - `../crystal/bin/crystal spec spec/semantic/type_inference_enum_class_method_spec.cr --error-trace`
+      - `../crystal/bin/crystal spec spec/semantic/type_inference_absolute_path_spec.cr --error-trace`
+      - `../crystal/bin/crystal spec spec/semantic/type_inference_block_lexical_self_spec.cr --error-trace`
+    - rebuild gates are green:
+      - `../crystal/bin/crystal build src/crystal_v2.cr --no-codegen --error-trace`
+      - `../crystal/bin/crystal build src/crystal_v2.cr -o /tmp/crystal_v2_semantic_stage3probe --error-trace`
+    - the exact no-prelude enum/absolute-path carrier is green under the safe wrapper:
+      - `env DEBUG_TYPE_TRACE_NAMES='open,new,consume' CRYSTAL_V2_SEMANTIC_COMPILE=1 scripts/run_safe.sh /tmp/crystal_v2_semantic_stage3probe 60 1536 /tmp/semantic_unix_file_open_probe.cr --no-prelude --stats --verbose`
+      - `semantic_diags=0`, `resolution_diags=0`, `type_diags=0`
+      - trace now shows `lookup_method candidates method=open count=1 receiver=EventLoop+` with the `perm` path staying concrete instead of degrading before the call
+    - the exact no-prelude yielded-block lexical-self carrier is green under the safe wrapper:
+      - `env DEBUG_TYPE_TRACE_NAMES='shift?,unlock' CRYSTAL_V2_SEMANTIC_COMPILE=1 scripts/run_safe.sh /tmp/crystal_v2_semantic_stage3probe 60 1536 /tmp/semantic_mutex_queue_probe.cr --no-prelude --stats --verbose`
+      - `semantic_diags=0`, `resolution_diags=0`, `type_diags=0`
+      - trace now shows `lookup_method candidates method=shift? count=1 receiver=PointerLinkedList(PointerLinkedListNode)` instead of `receiver=Nil`
+    - the full semantic stage3 probe under the safe wrapper improves again:
+      - `env CRYSTAL_V2_SEMANTIC_COMPILE=1 scripts/run_safe.sh /tmp/crystal_v2_semantic_stage3probe 300 4096 src/crystal_v2.cr --stats --no-link -o /tmp/stage3_semantic_probe_after_block_lexical_self.out > /tmp/stage3_semantic_probe_after_block_lexical_self.log 2>&1`
+      - summary moved from:
+        - `semantic_diags=0`
+        - `resolution_diags=0`
+        - `type_diags=49`
+      - to:
+        - `semantic_diags=0`
+        - `resolution_diags=0`
+        - `type_diags=48`
+  - practical boundary:
+    - this is a real semantic context-preservation checkpoint, not a cosmetic spec shuffle
+    - stage3 is still not green; the new honest head stays runtime-heavy:
+      - `src/stdlib/crystal/system/unix/time.cr` (`5`)
+      - `src/compiler/hir/hir.cr` (`3`)
+      - `src/stdlib/crystal/system/unix/process.cr` (`2`)
+      - `src/stdlib/process.cr` (`2`)
+      - `src/stdlib/regex.cr` (`2`)
+      - `src/stdlib/crystal/system/unix/signal.cr` (`2`)
 - **Fresh semantic abstract-`self` virtual dispatch checkpoint: abstract class methods annotated with `: self` now resolve to a virtual receiver, and virtual lookup now lifts subclass-only instance methods through nested/global scopes, which closes the exact `EventLoop.current.after_fork_before_exec` falsifier and moves the honest whole-program stage3 gate from `type_diags=47` to `type_diags=46` (2026-04-01, current session)**:
   - trustworthy setup:
     - `src/compiler/semantic/type_inference_engine.cr` now resolves `: self` on non-generic abstract class methods to `VirtualType`, instead of eagerly collapsing to a plain base-class instance

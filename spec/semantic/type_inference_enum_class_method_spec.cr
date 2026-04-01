@@ -126,5 +126,41 @@ describe Semantic::TypeInferenceEngine do
       engine.diagnostics.select(&.level.error?).should be_empty
       engine.context.get_type(program.roots.last).to_s.should eq("Errno")
     end
+
+    it "keeps enum helper constructors concrete through narrowed union reassignment" do
+      source = <<-CRYSTAL
+        class File
+          @[Flags]
+          enum Permissions : Int16
+            OwnerRead = 0o400
+
+            def self.new(int : Int)
+              new(int.to_i16)
+            end
+          end
+        end
+
+        module Checker
+          def self.consume(value : ::File::Permissions) : Nil
+          end
+        end
+
+        module Crystal::System::File
+          def self.open(filename : String, mode : String, perm : Int32 | ::File::Permissions, blocking : Bool?) : Nil
+            perm = ::File::Permissions.new(perm) if perm.is_a? Int32
+            Checker.consume(perm)
+          end
+        end
+
+        Crystal::System::File.open("x", "w", 0, true)
+      CRYSTAL
+
+      program, analyzer, engine = infer_enum_class_method_types(source)
+
+      analyzer.semantic_diagnostics.should be_empty
+      analyzer.name_resolver_diagnostics.should be_empty
+      engine.diagnostics.select(&.level.error?).should be_empty
+      engine.context.get_type(program.roots.last).to_s.should eq("Nil")
+    end
   end
 end
