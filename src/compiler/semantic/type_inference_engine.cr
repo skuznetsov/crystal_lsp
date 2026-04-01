@@ -10678,7 +10678,6 @@ module CrystalV2
         end
 
         private def resolve_method_annotation_type(type_name : String, receiver_type : Type?, scope : SymbolTable? = nil, *, class_method_context : Bool? = nil) : Type
-          type_name = type_name.lchop("::") if type_name.starts_with?("::")
           if type_name == "self"
             method_is_class_method = class_method_context.nil? ? @current_method_is_class_method_stack.last? : class_method_context
 
@@ -10740,6 +10739,10 @@ module CrystalV2
         end
 
         private def resolve_annotation_type_in_scope(type_name : String, scope : SymbolTable?) : Type
+          if absolute_resolved = resolve_absolute_annotation_type(type_name, scope)
+            return absolute_resolved
+          end
+
           return parse_type_name(type_name) unless scope
 
           if proc_type = resolve_proc_type_name_in_scope(type_name, scope)
@@ -10859,7 +10862,110 @@ module CrystalV2
           parse_type_name(type_name)
         end
 
+        private def resolve_absolute_annotation_type(type_name : String, scope : SymbolTable?) : Type?
+          return nil unless type_name.starts_with?("::")
+
+          absolute_name = type_name.lchop("::")
+          return nil if absolute_name.empty?
+
+          if absolute_name.ends_with?("?") && absolute_name.size > 1
+            base_type = resolve_annotation_type_in_scope("::#{absolute_name[0...-1]}", scope)
+            return union_of([base_type, @context.nil_type])
+          end
+
+          if absolute_name.ends_with?("*") && absolute_name.size > 1
+            element_type = resolve_annotation_type_in_scope("::#{absolute_name[0...-1]}", scope)
+            return PointerType.new(element_type)
+          end
+
+          if absolute_name.ends_with?(".class") && absolute_name.size > 6
+            base_type = resolve_annotation_type_in_scope("::#{absolute_name[0...-6]}", scope)
+            return class_type_reference_for(base_type)
+          end
+
+          if proc_type = parse_proc_type_name(absolute_name)
+            return proc_type
+          end
+
+          if union = resolve_annotation_union_type_in_scope(type_name, scope)
+            return union
+          end
+
+          if tuple_like = parse_brace_collection_type_name(absolute_name) { |type_part| resolve_annotation_type_in_scope(type_part, scope) }
+            return tuple_like
+          end
+
+          if absolute_name.includes?('(') && absolute_name.includes?(')')
+            paren_start = absolute_name.index('(').not_nil!
+            paren_end = absolute_name.rindex(')').not_nil!
+            base_type = absolute_name[0...paren_start]
+            type_args = split_top_level_generic_args(absolute_name[(paren_start + 1)...paren_end])
+            resolved_args = Array(Type).new(type_args.size)
+            type_args.each do |arg_name|
+              resolved_args << resolve_annotation_type_in_scope(arg_name, scope)
+            end
+
+            case base_type
+            when "Array", "Slice", "StaticArray"
+              return ArrayType.new(resolved_args.first? || @context.nil_type)
+            when "Pointer"
+              return PointerType.new(resolved_args.first? || @context.nil_type)
+            when "Pointer::Appender"
+              return PrimitiveType.new(pointer_appender_type_name((resolved_args.first? || @context.nil_type).to_s))
+            when "Tuple"
+              return TupleType.new(resolved_args)
+            end
+
+            if symbol = lookup_absolute_type_symbol(base_type)
+              case symbol
+              when AliasSymbol
+                return resolve_annotation_type_in_scope(symbol.target, scope)
+              when ClassSymbol
+                return instance_type_for(symbol, resolved_args.empty? ? nil : resolved_args)
+              when EnumSymbol
+                return EnumType.new(symbol)
+              when ModuleSymbol
+                return module_type_for(symbol, resolved_args.empty? ? nil : resolved_args)
+              end
+            end
+          end
+
+          if builtin_type = lookup_type_by_name(absolute_name)
+            return builtin_type
+          end
+
+          if symbol = lookup_absolute_type_symbol(absolute_name)
+            case symbol
+            when AliasSymbol
+              return resolve_annotation_type_in_scope(symbol.target, scope)
+            when ClassSymbol
+              return instance_type_for(symbol)
+            when EnumSymbol
+              return EnumType.new(symbol)
+            when ModuleSymbol
+              return module_type_for(symbol)
+            end
+          end
+
+          if class_symbol = find_class_symbol_by_suffix(absolute_name)
+            return instance_type_for(class_symbol)
+          end
+
+          nil
+        end
+
+        private def lookup_absolute_type_symbol(name : String) : Symbol?
+          return nil unless table = @global_table
+
+          if name.includes?("::")
+            resolve_scoped_symbol(name)
+          else
+            table.lookup(name)
+          end
+        end
+
         private def resolve_annotation_scoped_symbol(type_name : String, scope : SymbolTable) : Symbol?
+          return nil if type_name.starts_with?("::")
           type_name = type_name.lchop("::") if type_name.starts_with?("::")
           return nil unless type_name.includes?("::")
 

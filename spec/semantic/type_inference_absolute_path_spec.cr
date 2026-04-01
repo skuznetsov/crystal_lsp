@@ -113,5 +113,36 @@ describe Semantic::TypeInferenceEngine do
       engine.diagnostics.should be_empty
       engine.context.get_type(program.roots.last).to_s.should eq("Bool")
     end
+
+    it "keeps absolute annotations rooted at the top level inside shadowing modules" do
+      source = <<-CRYSTAL
+        struct Time
+          NANOSECONDS_PER_MICROSECOND = 1_000_i64
+
+          def to_unix : Int64
+            1_i64
+          end
+
+          def nanosecond : Int32
+            2
+          end
+        end
+
+        module Crystal::System::Time
+          def self.to_timeval(time : ::Time)
+            time.to_unix + time.nanosecond // ::Time::NANOSECONDS_PER_MICROSECOND
+          end
+        end
+
+        Crystal::System::Time.to_timeval(uninitialized Time)
+      CRYSTAL
+
+      program, analyzer, engine = infer_absolute_path_types(source)
+
+      analyzer.semantic_diagnostics.should be_empty
+      analyzer.name_resolver_diagnostics.should be_empty
+      engine.diagnostics.should be_empty
+      engine.context.get_type(program.roots.last).to_s.should eq("Int64")
+    end
   end
 end

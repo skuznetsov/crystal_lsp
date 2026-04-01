@@ -5883,3 +5883,146 @@ Immediate next steps:
    frontier starting with `process` / `signal` / `thread`.
 2. Keep using exact no-prelude carriers first; the next fixes are likely in
    semantic/runtime API modeling rather than flow or ivar-state again.
+
+Verified this turn on semantic stage3 probes built from the current workspace:
+
+1. Absolute method annotations under shadowing modules were still losing their
+   global root.
+   - A new no-prelude oracle in `/tmp/semantic_absolute_time_annotation_probe.cr`
+     reproduced the exact runtime shape from `Crystal::System::Time`:
+     `def self.to_timeval(time : ::Time)` followed by `time.to_unix` /
+     `time.nanosecond` typed `time` as module `Time`, not instance `Time`.
+   - The richer carrier `/tmp/semantic_system_time_real_probe.cr` confirmed the
+     same bug against real stdlib `Time` + `Crystal::System::Time`, with live
+     trace showing `receiver_class=ModuleType` for `time.to_unix`.
+
+2. The verified fix is to resolve absolute annotation types through the global
+   type table before any lexical scope lookup.
+   - `resolve_method_annotation_type(...)` no longer strips leading `::`
+     prematurely.
+   - `resolve_annotation_type_in_scope(...)` now routes `::T`, `::T?`,
+     `::T*`, `::T.class`, and absolute generic forms through a dedicated global
+     resolver instead of local `scope.lookup`.
+   - Focused regression lives in
+     `spec/semantic/type_inference_absolute_path_spec.cr` and checks that
+     `time : ::Time` stays rooted at the top level inside `module Crystal::System::Time`.
+
+3. Measured impact:
+   - Focused absolute-path regression is green.
+   - `../crystal/bin/crystal build src/crystal_v2.cr --no-codegen --error-trace`
+     and rebuild of `/tmp/crystal_v2_semantic_stage3probe` are green.
+   - Exact no-prelude oracle is green under `scripts/run_safe.sh`.
+   - Richer stdlib carrier improved from
+     `semantic_diags=0 resolution_diags=0 type_diags=34` to
+     `semantic_diags=0 resolution_diags=0 type_diags=27`.
+   - Full semantic stage3 probe via `scripts/run_safe.sh` moved from
+     `semantic_diags=0 resolution_diags=0 type_diags=48` to
+     `semantic_diags=0 resolution_diags=0 type_diags=41`.
+   - The old `Time#to_unix` / `Time#nanosecond` family disappeared from the live
+     stage3 head.
+
+Immediate next steps:
+1. Take the new runtime/API head from the fresh live log:
+   `Regex.version`, `File.expand_path`, `raise`, and the remaining
+   `process/signal` tail.
+2. Keep the same proof strategy: exact carrier first, then one full safe probe.
+
+## Fresh Frontier — 2026-04-01 (absolute annotations in shadowing modules)
+
+Verified this turn on semantic stage3 probes built from the current workspace:
+
+1. The live `unix/time` blocker was not a missing builtin surface for
+   `Time#to_unix` / `Time#nanosecond`.
+   - A decisive no-prelude oracle in
+     `tmp/semantic_absolute_time_annotation_probe.cr` reproduced the real
+     shape with no stdlib noise:
+     `module Crystal::System::Time; def self.to_timeval(time : ::Time); ...`
+     still typed `time` as module `Time`, so `time.to_unix` and
+     `time.nanosecond` failed even though the instance methods existed.
+   - A richer carrier in `tmp/semantic_system_time_real_probe.cr` confirmed the
+     same behavior under real stdlib load: trace showed
+     `receiver_class=ModuleType` before the fix and `receiver_class=InstanceType`
+     after it.
+
+2. The verified fix is absolute-annotation resolution, not generic variable
+   annotation normalization.
+   - `resolve_method_annotation_type(...)` now preserves the leading `::`
+     long enough for scope resolution to see that the annotation is absolute.
+   - `resolve_annotation_type_in_scope(...)` now routes absolute annotations
+     through a dedicated global-only resolver instead of `scope.lookup(...)`,
+     so local shadowing modules like `Crystal::System::Time` no longer capture
+     `::Time`.
+   - Focused regression lives in
+     `spec/semantic/type_inference_absolute_path_spec.cr` and asserts that
+     `time : ::Time` inside `Crystal::System::Time` stays rooted at the
+     top-level `Time`.
+
+3. Measured impact:
+   - Focused spec pack is green.
+   - `../crystal/bin/crystal build src/crystal_v2.cr --no-codegen --error-trace`
+     and rebuild of `/tmp/crystal_v2_semantic_stage3probe` are green.
+   - The exact no-prelude oracle is green under `scripts/run_safe.sh`.
+   - The richer real-stdlib probe moved from
+     `semantic_diags=0 resolution_diags=0 type_diags=34` to
+     `semantic_diags=0 resolution_diags=0 type_diags=27`.
+   - Full semantic stage3 probe via `scripts/run_safe.sh` moved from
+     `semantic_diags=0 resolution_diags=0 type_diags=48` to
+     `semantic_diags=0 resolution_diags=0 type_diags=41`.
+   - `src/stdlib/crystal/system/unix/time.cr` is no longer the live head; the
+     new file-local frontier is `raise (5)`, then `process (4)`.
+
+Immediate next steps:
+1. Stay off the old `time` branch; the `::Time` / `to_unix` corridor is closed.
+2. Take the new runtime/API tail in `raise`, `process`, `regex`, and `file`
+   using exact carriers first.
+
+## Fresh Frontier — 2026-04-01 (absolute annotation root preservation)
+
+Verified this turn on semantic stage3 probes built from the current workspace:
+
+1. The live `Crystal::System::Time` blocker was not a missing builtin surface
+   for `Time#to_unix` / `Time#nanosecond`.
+   - A minimal no-prelude oracle in
+     `tmp/semantic_absolute_time_annotation_probe.cr` reproduced the exact
+     failure with no stdlib noise:
+     `module Crystal::System::Time; def self.to_timeval(time : ::Time); ...`
+     still typed `time` as module `Time`, so `time.to_unix` and
+     `time.nanosecond` failed before any unix-specific helper logic mattered.
+   - A richer stdlib carrier in `tmp/semantic_system_time_real_probe.cr`
+     confirmed the same shape under real `require "time"` /
+     `require "crystal/system/unix/time"` context: trace showed
+     `receiver_class=ModuleType` for the `time` parameter before the fix.
+
+2. The verified fix is to preserve leading `::` through annotation resolution
+   and resolve absolute annotations against the global symbol table instead of
+   the local method scope.
+   - `resolve_method_annotation_type(...)` now keeps the original annotation
+     string instead of stripping `::` up front.
+   - `resolve_annotation_type_in_scope(...)` now delegates absolute annotations
+     to a dedicated global-only resolver, and local scoped lookup explicitly
+     skips absolute names.
+   - Focused regression lives in
+     `spec/semantic/type_inference_absolute_path_spec.cr` and asserts that
+     `time : ::Time` inside shadowing `Crystal::System::Time` still yields a
+     runtime `Time` receiver and an `Int64` result.
+
+3. Measured impact:
+   - `../crystal/bin/crystal spec spec/semantic/type_inference_absolute_path_spec.cr --error-trace`
+     is green.
+   - `../crystal/bin/crystal build src/crystal_v2.cr --no-codegen --error-trace`
+     and rebuild of `/tmp/crystal_v2_semantic_stage3probe` are green.
+   - The exact no-prelude oracle is green under `scripts/run_safe.sh`.
+   - The richer real carrier moved from
+     `semantic_diags=0 resolution_diags=0 type_diags=34` to
+     `semantic_diags=0 resolution_diags=0 type_diags=27`, and trace now shows
+     `receiver_class=InstanceType` for the `time` parameter.
+   - Full semantic stage3 probe via `scripts/run_safe.sh` moved from
+     `semantic_diags=0 resolution_diags=0 type_diags=48` to
+     `semantic_diags=0 resolution_diags=0 type_diags=41`.
+
+Immediate next steps:
+1. Stay off the old `Time#to_unix` / `Time#nanosecond` theory; that branch is
+   now closed by exact falsifiers.
+2. Take the new runtime tail exposed by the lower gate:
+   `Regex.version`, `File.expand_path`, `Time::Location.read_zoneinfo`, and the
+   remaining `raise.cr` union/Nil corridor.
