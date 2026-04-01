@@ -1,6 +1,29 @@
 # Crystal V2 Bootstrap — TODO (Updated 2026-04-01)
 
 ## Current Status
+- **Fresh enum-receiver hardening checkpoint: `type_receiver_expression?` now trusts already-resolved `EnumSymbol` identifiers directly instead of requiring a second global type lookup, which closes a focused classifier regression but does **not** move the honest whole-program stage3 gate on the current compacted tree (`type_diags=35 -> 35`, 2026-04-01, current session)**:
+  - trustworthy setup:
+    - `src/compiler/semantic/type_inference_engine.cr` now treats `EnumSymbol` like `ClassSymbol`/`ModuleSymbol`/`AliasSymbol` in the direct-symbol branch for identifier type receivers
+    - focused regression coverage lives in `spec/semantic/type_inference_enum_class_method_spec.cr`, where the test intentionally clears `@global_table` and still expects a resolved enum identifier to remain a type receiver
+  - decisive evidence:
+    - focused enum and pthread semantic packs are green:
+      - `../crystal/bin/crystal spec spec/semantic/type_inference_enum_class_method_spec.cr --error-trace`
+      - `../crystal/bin/crystal spec spec/semantic/type_inference_pthread_mutex_spec.cr --error-trace`
+    - rebuild gates are green:
+      - `../crystal/bin/crystal build src/crystal_v2.cr --no-codegen --error-trace`
+      - `../crystal/bin/crystal build src/crystal_v2.cr -o /tmp/crystal_v2_semantic_stage3probe --error-trace`
+    - the fresh full semantic stage3 probe under the safe wrapper stays flat:
+      - `env CRYSTAL_V2_SEMANTIC_COMPILE=1 scripts/run_safe.sh /tmp/crystal_v2_semantic_stage3probe 300 4096 src/crystal_v2.cr --stats --no-link -o /tmp/stage3_semantic_probe_after_enum_receiver_fix.out > /tmp/stage3_semantic_probe_after_enum_receiver_fix.log 2>&1`
+      - summary remains:
+        - `semantic_diags=0`
+        - `resolution_diags=0`
+        - `type_diags=35`
+  - practical boundary:
+    - this is a real helper hardening fix with a focused regression, not the live `pthread_mutex` root cause
+    - the active head remains:
+      - `src/stdlib/crystal/system/unix/pthread_mutex.cr` (`5`, `Errno.new`)
+      - `src/compiler/hir/hir.cr` (`3`, `Function 'new' not found`)
+      - `src/stdlib/raise.cr` (`3`)
 - **Fresh runtime-String indexing checkpoint: semantic index-target normalization now folds runtime `String` wrapper instances back into canonical string indexing, which closes the exact `mode[0]` falsifier and moves the honest clean whole-program stage3 gate from `type_diags=47` to `type_diags=35` on the current compacted tree (2026-04-01, current session)**:
   - trustworthy setup:
     - `src/compiler/semantic/type_inference_engine.cr` now normalizes `InstanceType(String)` and `ClassType(String)` through `normalize_index_target_type(...)`, matching the existing normalization already used for `Array`, `Slice`, `Hash`, and `Pointer`

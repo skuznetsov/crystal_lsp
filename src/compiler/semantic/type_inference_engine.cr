@@ -1954,7 +1954,7 @@ module CrystalV2
             symbol ||= @global_table.try(&.lookup(identifier_name))
 
             case symbol
-            when ClassSymbol, ModuleSymbol, AliasSymbol
+            when ClassSymbol, ModuleSymbol, AliasSymbol, EnumSymbol
               true
             else
               type_symbol = lookup_type_symbol(identifier_name)

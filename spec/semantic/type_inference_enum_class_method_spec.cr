@@ -9,6 +9,16 @@ require "../../src/compiler/semantic/type_inference_engine"
 alias Frontend = CrystalV2::Compiler::Frontend
 alias Semantic = CrystalV2::Compiler::Semantic
 
+class Semantic::TypeInferenceEngine
+  def __spec_type_receiver_expression(expr_id : Frontend::ExprId) : Bool
+    type_receiver_expression?(expr_id)
+  end
+
+  def __spec_global_table=(value : Semantic::SymbolTable?) : Nil
+    @global_table = value
+  end
+end
+
 private def infer_enum_class_method_types(source : String)
   parser = Frontend::Parser.new(Frontend::Lexer.new(source))
   program = parser.parse_program
@@ -161,6 +171,37 @@ describe Semantic::TypeInferenceEngine do
       analyzer.name_resolver_diagnostics.should be_empty
       engine.diagnostics.select(&.level.error?).should be_empty
       engine.context.get_type(program.roots.last).to_s.should eq("Nil")
+    end
+
+    it "treats resolved enum identifiers as type receivers without a second global lookup" do
+      source = <<-CRYSTAL
+        module Outer
+          enum Errno
+            NONE = 0
+          end
+
+          def self.probe(code : Int32)
+            Errno.new(code)
+          end
+        end
+
+        Outer.probe(0)
+      CRYSTAL
+
+      program, analyzer, engine = infer_enum_class_method_types(source)
+
+      analyzer.semantic_diagnostics.should be_empty
+      analyzer.name_resolver_diagnostics.should be_empty
+      engine.diagnostics.select(&.level.error?).should be_empty
+
+      module_node = program.arena[program.roots.first].as(Frontend::ModuleNode)
+      def_id = module_node.body.not_nil!.last
+      def_node = program.arena[def_id].as(Frontend::DefNode)
+      call_node = program.arena[def_node.body.not_nil!.first].as(Frontend::CallNode)
+      callee = program.arena[call_node.callee].as(Frontend::MemberAccessNode)
+
+      engine.__spec_global_table = Semantic::SymbolTable.new(nil)
+      engine.__spec_type_receiver_expression(callee.object).should be_true
     end
   end
 end
