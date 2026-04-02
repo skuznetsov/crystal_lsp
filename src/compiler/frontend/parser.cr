@@ -2076,11 +2076,33 @@ module CrystalV2
             macro_name_slice = "".to_slice
 
             # Handle identifier-like macro names (including keywords used as names)
-            name_is_identifier = name_token.kind == Token::Kind::Identifier
-            unless name_is_identifier
-              name_is_identifier = is_keyword_identifier?(name_token)
-            end
-            if name_is_identifier
+            if name_token.kind == Token::Kind::Identifier
+              macro_name_slice = name_token.slice
+              advance
+              trace_macro_def("name", name_token, extra: "size=#{macro_name_slice.size}")
+
+              # Macro can't have a receiver: detect identifier DOT identifier
+              if current_token.kind == Token::Kind::Operator && slice_eq?(current_token.slice, ".")
+                @diagnostics << Diagnostic.new("macro can't have a receiver", name_token.span.cover(current_token.span))
+                # Consume dot and next identifier to recover
+                advance
+                skip_trivia
+                if current_token.kind == Token::Kind::Identifier
+                  advance
+                end
+                return PREFIX_ERROR
+              end
+
+              # Support setter-like macro names foo=
+              if current_token.kind == Token::Kind::Eq
+                advance
+                setter_name = String.build do |io|
+                  io.write(macro_name_slice)
+                  io.write_byte('='.ord.to_u8)
+                end
+                macro_name_slice = intern_retained_text(setter_name)
+              end
+            elsif is_keyword_identifier?(name_token)
               macro_name_slice = name_token.slice
               advance
               trace_macro_def("name", name_token, extra: "size=#{macro_name_slice.size}")
@@ -2144,7 +2166,7 @@ module CrystalV2
                    Token::Kind::Amp, Token::Kind::Pipe, Token::Kind::Caret, Token::Kind::Tilde,
                    Token::Kind::LShift, Token::Kind::RShift,
                    Token::Kind::DotDot, Token::Kind::DotDotDot,
-                   Token::Kind::AmpPlus, Token::Kind::AmpMinus, Token::Kind::AmpStar, Token::Kind::AmpStarStar
+                  Token::Kind::AmpPlus, Token::Kind::AmpMinus, Token::Kind::AmpStar, Token::Kind::AmpStarStar
                 macro_name_slice = name_token.slice
                 advance
               else
@@ -15110,7 +15132,7 @@ current_token.kind == Token::Kind::Identifier &&
           case keyword_kind
           when :if, :unless
             result = parse_macro_if_control(start_span, keyword)
-            unless result == PREFIX_ERROR
+            unless result.invalid?
               return result
             end
             # Failed to parse — restore position for recovery

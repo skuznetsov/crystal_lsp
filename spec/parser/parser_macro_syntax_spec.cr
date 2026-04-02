@@ -70,6 +70,37 @@ describe "CrystalV2::Compiler::Frontend::Parser" do
       text.should contain("./unix/file_descriptor")
     end
 
+    it "parses keyword-named macros with bare splat and block params as a single macro def" do
+      source = <<-CRYSTAL
+      macro spawn(call, *, name = nil, same_thread = false, &block)
+        {% if block %}
+          {% raise "bad" %}
+        {% end %}
+
+        {% if call.is_a?(Call) %}
+          {{call}}
+        {% else %}
+          spawn do
+            {{call}}
+          end
+        {% end %}
+      end
+      CRYSTAL
+
+      parser = CrystalV2::Compiler::Frontend::Parser.new(CrystalV2::Compiler::Frontend::Lexer.new(source))
+      program = parser.parse_program
+
+      parser.diagnostics.should be_empty
+      program.roots.size.should eq(1)
+
+      arena = program.arena
+      macro_def = arena[program.roots[0]]
+      CrystalV2::Compiler::Frontend.node_kind(macro_def).should eq(CrystalV2::Compiler::Frontend::NodeKind::MacroDef)
+
+      macro_name = CrystalV2::Compiler::Frontend.node_macro_name(macro_def).not_nil!
+      String.new(macro_name).should eq("spawn")
+    end
+
     it "keeps class body members after a macro begin block with nested header controls" do
       source = <<-CRYSTAL
       class File

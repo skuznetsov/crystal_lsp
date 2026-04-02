@@ -1,6 +1,34 @@
 # Crystal V2 Bootstrap — TODO (Updated 2026-04-02)
 
 ## Current Status
+- **Fresh self-hosted parser root checkpoint: stage1-generated parsers no longer split top-level `macro spawn(...)` or `{% if %}` roots during bootstrap probing; the old `src/stdlib/concurrent.cr` parser-root family is closed, and a fresh `stage2` parse/HIR split on `src/stdlib/prelude.cr --no-prelude` now lands with parse green and a later HIR red instead of the previous parser-root drift (2026-04-02, current session)**:
+  - trustworthy setup:
+    - `src/compiler/frontend/parser.cr` now treats successful `parse_macro_if_control(...)` results by `invalid?` rather than raw `== PREFIX_ERROR`, so self-hosted `%{ if/unless }` control blocks stop falling through to raw `MacroLiteral` recovery
+    - `src/compiler/frontend/parser.cr` `parse_macro_definition(...)` no longer routes keyword-like macro names through a temporary `name_is_identifier` boolean before the accepted-name branch; it now takes the identifier and keyword-identifier paths directly with `if/elsif`, avoiding the self-hosted control-flow corruption that previously rejected `macro spawn`
+    - focused host coverage now also locks the intended syntax for keyword-named macros with bare splat and block params in `spec/parser/parser_macro_syntax_spec.cr`
+  - decisive evidence:
+    - host parser coverage is green:
+      - `../crystal/bin/crystal spec spec/parser/parser_macro_syntax_spec.cr --error-trace`
+      - `../crystal/bin/crystal spec spec/parser/parser_spec.cr --error-trace --example 'parses keyword identifiers like union in expressions'`
+    - exact self-hosted parser matrix is green after rebuilding the probe through `/tmp/stage1_collectfilter_gate`:
+      - `scripts/run_safe.sh /tmp/stage1_collectfilter_gate 240 8192 tmp/parser_roots_kinds_probe.cr -o /tmp/parser_roots_kinds_probe_stage1_fix7 > /tmp/parser_roots_kinds_probe_stage1_fix7_build.log 2>&1`
+      - `scripts/run_safe.sh /tmp/parser_roots_kinds_probe_stage1_fix7 20 1024 /tmp/rootprobe_macro_if.cr`
+      - `scripts/run_safe.sh /tmp/parser_roots_kinds_probe_stage1_fix7 20 1024 /tmp/rootprobe_begin_spawn.cr`
+      - `scripts/run_safe.sh /tmp/parser_roots_kinds_probe_stage1_fix7 20 1024 /tmp/rootprobe_macro_spawn.cr`
+      - `scripts/run_safe.sh /tmp/parser_roots_kinds_probe_stage1_fix7 20 1024 /tmp/rootprobe_macro_foo.cr`
+      - result: all four collapse to `roots=1`, and both `macro spawn` / `macro foo` parse as `NodeKind::MacroDef`
+    - adversary mechanism probes mattered here:
+      - a tiny stage1-built probe showed slice-based keyword matching is untrustworthy under self-hosted codegen (`spawn slice=false`) while direct enum checks remain green, so the earlier slice-matching branch was refuted
+      - fixed-string parser tracing then proved `is_keyword_identifier?(Spawn)` already returned true; the actual remaining bug was the later temporary-bool branch, not keyword recognition itself
+    - fresh bootstrap ladder from current tree is later and different:
+      - `../crystal/bin/crystal build src/crystal_v2.cr -o /tmp/stage1_collectfilter_gate_fix7 --error-trace`
+      - `env CRYSTAL2_STAGE2_DEBUG=1 scripts/run_safe.sh /tmp/stage1_collectfilter_gate_fix7 420 12288 src/crystal_v2.cr -o /tmp/stage2_collectfilter_gate_fix7 > /tmp/stage2_collectfilter_gate_fix7_build.log 2>&1`
+      - `env CRYSTAL_V2_STOP_AFTER_PARSE=1 scripts/run_safe.sh /tmp/stage2_collectfilter_gate_fix7 120 12288 src/stdlib/prelude.cr --no-prelude > /tmp/stage2_collectfilter_gate_fix7_parse.log 2>&1`
+      - `env CRYSTAL_V2_STOP_AFTER_HIR=1 scripts/run_safe.sh /tmp/stage2_collectfilter_gate_fix7 120 12288 src/stdlib/prelude.cr --no-prelude > /tmp/stage2_collectfilter_gate_fix7_hir_329.log 2>&1`
+      - result: parse is green, while HIR still fails later with `error: End of file reached`; the old filtered `concurrent.cr` collector trace does not reappear as the earliest head
+  - practical boundary:
+    - this closes the parser-root family around top-level `MacroIf` and keyword-named `MacroDef` drift in self-hosted bootstrap probing
+    - it does not make self-hosted `stage2` HIR green; the next honest frontier is later than parsing and should be investigated as a new HIR/runtime corridor, not as continued `concurrent.cr` root leakage
 - **Fresh stage2 parser macro-control checkpoint: self-hosted `stage2` no longer leaks `protected def` members from `src/stdlib/file.cr` to the top level after a `{% begin %}`-wrapped method header with nested macro controls; the live head has moved past parser root collection to later runtime stubs (`LibMachVM.mach_task_self` / later prelude crash), proving this was a real parser-root corridor and not just accumulated stage slowdown (2026-04-02, current session)**:
   - trustworthy setup:
     - `src/compiler/frontend/parser.cr` now stops re-classifying macro push/pop depth from `MacroPiece#control_keyword` strings inside `parse_macro_body(...)`; it uses the already-verified `effect` returned by `parse_macro_control_piece(...)` instead

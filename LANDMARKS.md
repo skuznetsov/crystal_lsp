@@ -3,6 +3,52 @@
 Updated: 2026-04-02
 Context: compiler/bootstrap/stage2-stability
 
+[LM-445|verified]: After [LM-444], the next apparent self-hosted `stage2`
+parser frontier looked like one broad top-level macro-expansion family inside
+`collect_top_level_nodes(...)`, but the contradiction ledger falsified that
+frame. The decisive sequence matters. First, a filtered collector trace on the
+old head (`CRYSTAL2_COLLECT_TRACE_FILTER=329`) mapped the early `EOF` to
+`src/stdlib/concurrent.cr`, and a host parser oracle proved the real file
+should have only ten roots while the self-hosted parser produced `34`. Second,
+exact matrix carriers split the issue: with a stage1-built parser probe,
+top-level `{% if %}` degraded into `MacroLiteral + leaked require`, and
+`macro spawn(...)` exploded into `Identifier + MacroIf + MacroIf`. The first
+root cause was precise and verified: `parse_percent_macro_control(...)`
+compared success to raw `PREFIX_ERROR` instead of `invalid?`, so self-hosted
+`{% if %}` results fell through to raw-literal recovery. The second root cause
+was subtler. A tiny stage1-built mechanism probe refuted the slice-matching
+branch by showing `slice_eq?`-based keyword checks are unreliable under
+self-hosted codegen (`spawn slice=false`, `raise slice=false`) while direct
+enum checks stay green. But fixed-string tracing inside
+`parse_macro_definition(...)` then falsified the next guess as well:
+`is_keyword_identifier?(Spawn)` already returned true. The live failure was the
+temporary `name_is_identifier` boolean itself: under self-hosted stage1, the
+accepted-name branch still did not execute after the helper returned true.
+Replacing that temporary-boolean split with direct `if name_token.kind ==
+Identifier ... elsif is_keyword_identifier?(name_token) ... else ...` control
+flow closes the `macro spawn` corridor. Verification chain:
+- host parser guards are green:
+  `../crystal/bin/crystal spec spec/parser/parser_macro_syntax_spec.cr --error-trace`
+  and
+  `../crystal/bin/crystal spec spec/parser/parser_spec.cr --error-trace --example 'parses keyword identifiers like union in expressions'`
+- rebuilt self-hosted parser matrix via `/tmp/stage1_collectfilter_gate` is
+  green:
+  `/tmp/rootprobe_macro_if.cr`, `/tmp/rootprobe_begin_spawn.cr`,
+  `/tmp/rootprobe_macro_spawn.cr`, and `/tmp/rootprobe_macro_foo.cr` all now
+  collapse to `roots=1`, with both `macro spawn` and `macro foo` returning
+  `NodeKind::MacroDef`
+- fresh bootstrap ladder from the current tree is later and different:
+  host-built `/tmp/stage1_collectfilter_gate_fix7` and self-hosted
+  `/tmp/stage2_collectfilter_gate_fix7` are green; `STOP_AFTER_PARSE` on
+  `src/stdlib/prelude.cr --no-prelude` is green; `STOP_AFTER_HIR` is still red
+  but now fails later with `error: End of file reached` before the old
+  `concurrent.cr` collector trace reappears
+Reusable lesson: for self-hosted parser drift around macro roots, do not jump
+from “helper returned true” to “helper is fixed”. Exact mechanism probes plus
+fixed-string branch tracing showed the real second bug was a temporary boolean
+control-flow corruption in `parse_macro_definition(...)`, not the keyword test
+itself. {F/G/R: 0.99/0.84/0.99} [verified]
+
 [LM-444|verified]: After [LM-443], the next exact self-hosted parser/root-loop
 frontier in `stage2` was no longer the earlier `typeof(...)` transport bug, but
 a nested macro-control drift inside `src/stdlib/file.cr`. The decisive
