@@ -15,6 +15,8 @@ module CrystalV2
         @at_statement_start : Bool      # Phase 57: Track statement boundaries for regex disambiguation
         @whitespace_before : Bool       # Track if whitespace preceded current token (for regex disambiguation)
         @macro_expr_depth : Int32       # Track nesting of {{ ... }} macro expressions
+        @macro_body_depth : Int32       # Track whether strings may contain macro {{...}} interpolation
+        @block_stack : Array(Token::Kind)
         @string_pool : StringPool       # String interning for memory optimization
         getter string_pool : StringPool # Week 1 Day 2: expose for parser generic type interning
         @source : String
@@ -38,6 +40,8 @@ module CrystalV2
           @at_statement_start = true       # Phase 57: Start of file is statement start
           @whitespace_before = false       # Track if whitespace preceded current token
           @macro_expr_depth = 0
+          @macro_body_depth = 0
+          @block_stack = [] of Token::Kind
           @string_pool = StringPool.new # String interning for memory optimization
           @diagnostics = diagnostics
         end
@@ -71,6 +75,7 @@ module CrystalV2
         def next_token : Token
           return eof_token if @offset >= @byte_size
 
+          token_at_statement_start = @at_statement_start
           byte = current_byte
 
           if @@stage2_lexer_debug_enabled && @offset < 200
@@ -261,7 +266,43 @@ module CrystalV2
             @whitespace_before = false
           end
 
+          update_macro_body_depth(token, token_at_statement_start)
+
           token
+        end
+
+        private def macro_string_context? : Bool
+          @macro_body_depth > 0
+        end
+
+        private def update_macro_body_depth(token : Token, token_at_statement_start : Bool) : Nil
+          case token.kind
+          when Token::Kind::End
+            return unless token_at_statement_start
+            opener = @block_stack.pop?
+            if opener == Token::Kind::Macro && @macro_body_depth > 0
+              @macro_body_depth -= 1
+            end
+          when Token::Kind::Do, Token::Kind::Begin
+            @block_stack << token.kind
+          when Token::Kind::Def,
+               Token::Kind::Class,
+               Token::Kind::Module,
+               Token::Kind::Struct,
+               Token::Kind::Enum,
+               Token::Kind::If,
+               Token::Kind::Unless,
+               Token::Kind::While,
+               Token::Kind::Until,
+               Token::Kind::Case,
+               Token::Kind::Select,
+               Token::Kind::Lib,
+               Token::Kind::Macro,
+               Token::Kind::Fun
+            return unless token_at_statement_start
+            @block_stack << token.kind
+            @macro_body_depth += 1 if token.kind == Token::Kind::Macro
+          end
         end
 
         private def eof_token
@@ -1220,12 +1261,13 @@ module CrystalV2
           from = @offset
           has_interpolation = false
           has_escapes = false
+          allow_macro_interpolation = macro_string_context?
 
           # Phase 54: Check if string contains escapes or interpolation.
-          # Track interpolation depth so embedded quotes inside #{...} or
-          # macro-style {{...}} don't terminate scanning.
+          # Track interpolation depth so embedded quotes inside #{...} or,
+          # in macro bodies, {{...}} don't terminate scanning.
           scan_offset = @offset
-          interpolation_mode = 0_i8 # 0=none, 1=#{...}, 2={{...}}
+          interpolation_mode = 0_i8 # 0=none, 1=#{...}, 2={{...}} in macro bodies
           interpolation_depth = 0
           heredoc_inside_interpolation = false
           while scan_offset < @rope.size
@@ -1243,7 +1285,7 @@ module CrystalV2
               next
             end
 
-            if interpolation_mode == 0 && byte == LEFT_BRACE && scan_offset + 1 < @rope.size && @rope.bytes[scan_offset + 1] == LEFT_BRACE
+            if allow_macro_interpolation && interpolation_mode == 0 && byte == LEFT_BRACE && scan_offset + 1 < @rope.size && @rope.bytes[scan_offset + 1] == LEFT_BRACE
               has_interpolation = true
               interpolation_mode = 2
               interpolation_depth = 1
@@ -1277,9 +1319,7 @@ module CrystalV2
                   interpolation_depth -= 1
                   interpolation_mode = 0 if interpolation_depth == 0
                 end
-                scan_offset += 1
-                next
-              else
+              elsif allow_macro_interpolation
                 if byte == LEFT_BRACE && scan_offset + 1 < @rope.size && @rope.bytes[scan_offset + 1] == LEFT_BRACE
                   interpolation_depth += 1
                   scan_offset += 2
@@ -1325,7 +1365,7 @@ module CrystalV2
                 interpolation_depth_fast = 1
                 advance(2)
                 next
-              elsif interpolation_mode_fast == 0 && current_byte == LEFT_BRACE && @offset + 1 < @rope.size && @rope.bytes[@offset + 1] == LEFT_BRACE
+              elsif allow_macro_interpolation && interpolation_mode_fast == 0 && current_byte == LEFT_BRACE && @offset + 1 < @rope.size && @rope.bytes[@offset + 1] == LEFT_BRACE
                 interpolation_mode_fast = 2
                 interpolation_depth_fast = 1
                 advance(2)
@@ -1354,9 +1394,7 @@ module CrystalV2
                     interpolation_depth_fast -= 1
                     interpolation_mode_fast = 0 if interpolation_depth_fast == 0
                   end
-                  advance
-                  next
-                else
+                elsif allow_macro_interpolation
                   if current_byte == LEFT_BRACE && @offset + 1 < @rope.size && @rope.bytes[@offset + 1] == LEFT_BRACE
                     interpolation_depth_fast += 1
                     advance(2)
@@ -1368,6 +1406,8 @@ module CrystalV2
                     next
                   end
                 end
+                advance
+                next
               end
 
               advance
@@ -1402,7 +1442,7 @@ module CrystalV2
               interpolation_mode_processed = 1
               interpolation_depth_processed = 1
               next
-            elsif interpolation_mode_processed == 0 && current_byte == LEFT_BRACE && @offset + 1 < @rope.size && @rope.bytes[@offset + 1] == LEFT_BRACE
+            elsif allow_macro_interpolation && interpolation_mode_processed == 0 && current_byte == LEFT_BRACE && @offset + 1 < @rope.size && @rope.bytes[@offset + 1] == LEFT_BRACE
               buffer.write_byte(current_byte)
               advance
               buffer.write_byte(current_byte)
@@ -1439,10 +1479,7 @@ module CrystalV2
                   interpolation_depth_processed -= 1
                   interpolation_mode_processed = 0 if interpolation_depth_processed == 0
                 end
-                buffer.write_byte(current_byte)
-                advance
-                next
-              else
+              elsif allow_macro_interpolation
                 if current_byte == LEFT_BRACE && @offset + 1 < @rope.size && @rope.bytes[@offset + 1] == LEFT_BRACE
                   interpolation_depth_processed += 1
                   buffer.write_byte(current_byte)

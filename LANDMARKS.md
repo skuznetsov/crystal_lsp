@@ -3,6 +3,35 @@
 Updated: 2026-04-01
 Context: compiler/bootstrap/stage2-stability
 
+[LM-429|verified]: After the stage3 no-link bootstrap turned green again, a new
+parser/CLI regression appeared that initially looked like another self-hosted
+runtime divergence: the real `src/compiler/cli.cr` class body silently stopped
+at `parse_macro_literal_program`, so later methods like `log` and
+`emit_stage_timing` vanished with `DIAGS=0`. The decisive falsifier was a host
+lexer dump around `sanitized.includes?("{{")`, which showed that
+`src/compiler/frontend/lexer.cr` still treated plain runtime `{{` as the start
+of `StringInterpolation` and therefore swallowed the rest of `cli.cr` through
+EOF. The first broad fix "remove `{{...}}` handling from `lex_string`
+globally" immediately failed the old adversarial parser regression for
+macro-body strings containing `{{"#".id}}`, which proved the real requirement
+was contextual rather than syntactic. The verified fix stays narrow and local:
+`Lexer` now tracks macro-body context via a lightweight block stack plus
+`@macro_body_depth`, and `lex_string` only enables quote-safe `{{...}}`
+scanning when that context is active. Focused regressions
+`spec/lexer/lexer_spec.cr` and `spec/parser/parser_spec.cr` are green for both
+plain runtime `{{` and the old macro-body string case; the rebuild gate
+`../crystal/bin/crystal build src/crystal_v2.cr --no-codegen --error-trace` is
+green; the host parser on the real `src/compiler/cli.cr` now reports
+`CLI_FOUND=true DIAGS=0`, `CLI_BODY_SIZE=156`, `CLI_HAS_LOG=true`, and
+`CLI_HAS_EMIT_STAGE_TIMING=true`; and the rebuilt generated compiler under
+`scripts/run_safe.sh` keeps both the tiny `Demo` reducer and the real `CLI`
+tail alive, with debug body dumps showing `before`/`after` and
+`parse_macro_literal_program`/`sanitize_macro_literal_text`/`log`/
+`emit_stage_timing` respectively. Boundary: this is a lexer-context checkpoint,
+not a parser-recovery or macro-expander fix; the bug was the global `{{...}}`
+path in ordinary runtime strings, while macro-body quote safety still had to
+remain intact. {F/G/R: 0.99/0.82/0.99} [verified]
+
 [LM-428|verified]: After [LM-427], the next honest mover was no longer in
 MIR traversal and not another semantic/HIR branch, but the final LLVM store
 emitted by `emit_array_set(...)` for union-typed array elements. The decisive

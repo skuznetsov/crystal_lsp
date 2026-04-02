@@ -1,6 +1,37 @@
 # Crystal V2 Bootstrap — TODO (Updated 2026-04-01)
 
 ## Current Status
+- **Fresh lexer macro-string context checkpoint: regular runtime strings containing plain `{{` no longer swallow the rest of the file, while macro-body strings still preserve quote-safe `{{...}}` parsing (2026-04-01, current session)**:
+  - trustworthy setup:
+    - `src/compiler/frontend/lexer.cr` now tracks whether the current string lives inside a `macro` body via a lightweight block stack plus `@macro_body_depth`
+    - `lex_string` only treats `{{...}}` as interpolation when that macro-body context is active; ordinary runtime strings now only honor `#{...}`
+    - this keeps macro-body strings like `{{"#".id}}` quote-safe without globally reintroducing the old “`{{` opens interpolation everywhere” lexer bug
+    - focused regression coverage now lives in:
+      - `spec/lexer/lexer_spec.cr`
+      - `spec/parser/parser_spec.cr`
+  - decisive evidence:
+    - focused regressions are green:
+      - `../crystal/bin/crystal spec spec/lexer/lexer_spec.cr --example 'keeps plain double braces inside regular strings' --error-trace`
+      - `../crystal/bin/crystal spec spec/parser/parser_spec.cr --example 'does not swallow following defs after regular strings containing double braces' --error-trace`
+      - `../crystal/bin/crystal spec spec/parser/parser_spec.cr --example 'does not swallow following macro defs after macro expressions inside string literals' --error-trace`
+    - rebuild gate is green:
+      - `../crystal/bin/crystal build src/crystal_v2.cr --no-codegen --error-trace`
+    - the host parser no longer truncates the real `CLI` class on `text.includes?("{{")`:
+      - `../crystal/bin/crystal eval '...'`
+      - fresh result on the current tree is:
+        - `CLI_FOUND=true DIAGS=0`
+        - `CLI_BODY_SIZE=156`
+        - `CLI_HAS_SANITIZE=true`
+        - `CLI_HAS_LOG=true`
+        - `CLI_HAS_EMIT_STAGE_TIMING=true`
+    - the generated compiler also keeps the tail alive under the safe wrapper:
+      - `env DEBUG_CLASS_BODY_DUMP=Demo CRYSTAL_V2_STOP_AFTER_HIR=1 scripts/run_safe.sh /tmp/stage1_original_debug_lexerctx 120 3072 /tmp/double_brace_string_tail_repro.cr --emit hir --no-link --no-prelude -o /tmp/double_brace_string_tail_repro`
+      - `env DEBUG_CLASS_BODY_DUMP=CrystalV2::Compiler::CLI CRYSTAL_V2_STOP_AFTER_HIR=1 scripts/run_safe.sh /tmp/stage1_original_debug_lexerctx 240 4096 src/compiler/cli.cr --emit hir --no-link -o /tmp/cli_only_hir_after_lexer_fix`
+      - fresh logs there show `def=before` + `def=after` for `Demo`, and `def=parse_macro_literal_program`, `def=sanitize_macro_literal_text`, `def=log`, `def=emit_stage_timing` for the real `CLI` tail
+  - practical boundary:
+    - this is a real lexer-context fix, not a parser recovery workaround
+    - the decisive root cause was lexer-side: `lex_string` globally recognized `{{...}}`, so the plain runtime string at `src/compiler/cli.cr` `text.includes?("{{")` swallowed the rest of the file through EOF with `DIAGS=0`
+    - the fix is intentionally narrow: macro-body strings still support quote-safe `{{...}}`, but ordinary runtime strings do not reopen the global macro interpolation path
 - **Fresh LLVM union-array-store checkpoint: the safe full stage3 bootstrap now completes end-to-end with `semantic_diags=0 resolution_diags=0 type_diags=0` and `[EXIT: 0]`, because LLVM array element stores now normalize union nil literals against the emitted slot type instead of emitting invalid `store %Union 0` IR (2026-04-01, current session)**:
   - trustworthy setup:
     - `src/compiler/mir/llvm_backend.cr` now normalizes the final `emit_array_set(...)` store operand through `normalize_value_for_store_type(...)` before writing into the array element slot

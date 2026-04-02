@@ -364,6 +364,36 @@ bar")
     String.new(setter_macro.name).should eq("setter")
   end
 
+  it "does not swallow following defs after regular strings containing double braces" do
+    source = <<-'CR'
+      class Demo
+        def before
+          text.includes?("{{")
+        end
+
+        def after
+          1
+        end
+      end
+    CR
+
+    parser = CrystalV2::Compiler::Frontend::Parser.new(CrystalV2::Compiler::Frontend::Lexer.new(source), recovery_mode: true)
+    program = parser.parse_program
+
+    parser.diagnostics.should be_empty
+    program.roots.size.should eq(1)
+
+    arena = program.arena
+    demo_class = arena[program.roots.first].as(CrystalV2::Compiler::Frontend::ClassNode)
+    body = demo_class.body.not_nil!
+    body.size.should eq(2)
+
+    first_def = arena[body[0]].as(CrystalV2::Compiler::Frontend::DefNode)
+    second_def = arena[body[1]].as(CrystalV2::Compiler::Frontend::DefNode)
+    String.new(first_def.name).should eq("before")
+    String.new(second_def.name).should eq("after")
+  end
+
   # ECR feature, not Crystal macros
   it "trims whitespace around macro expressions" do
     source = <<-'CR'
