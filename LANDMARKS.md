@@ -3,6 +3,37 @@
 Updated: 2026-04-01
 Context: compiler/bootstrap/stage2-stability
 
+[LM-427|verified]: After [LM-426], the next honest mover was not another
+semantic tweak and not a new HIR lowering workaround, but MIR traversal itself.
+The decisive full-program debug falsifier was
+`/tmp/stage3_probe_debug_required_suffix3.log`, which showed the concrete
+specialization
+`CrystalV2::Compiler::Semantic::TypeInferenceEngine#required_suffix_positional_count$Array(... )_Hash(... )`
+with `blocks=21` yet two predecessors (`block=7` and `block=18`) jumping to
+missing HIR block id `24`. That made the local defect explicit in
+`src/compiler/mir/hir_to_mir.cr`: `order_blocks_for(...)` still called
+`hir_func.get_block(block_id)`, and `HIR::Function#get_block(...)` indexes
+`@blocks[id]`, so the traversal assumed dense block ids even though later HIR
+cleanup/inlining can leave dangling successor ids behind. A cheap source-level
+carrier with the same `count { next false if ... }` shape stayed green, which
+refuted the idea that the bug was generic `Array#count` lowering by itself; the
+failure required the concrete compiler CFG, not just the surface syntax. The
+verified fix stays narrow and structural: `order_blocks_for(...)` now builds a
+`BlockId -> Block` map, traverses only concrete blocks, and skips missing
+successor ids while preserving them for later `mir_block_for(...)`, which
+already synthesizes unreachable MIR blocks for missing HIR targets. Focused
+regression `spec/mir/hir_to_mir_spec.cr` is green on a synthetic dangling
+successor HIR function; rebuild gates for `src/crystal_v2.cr --no-codegen` and
+`/tmp/crystal_v2_semantic_stage3probe` are green; and the clean full safe probe
+moves from a MIR `Index out of bounds` crash to a later `llc` failure in the
+emitted LLVM IR. The new honest frontier is now the union-constant typing
+corridor in `Crystal::HIR::AstToHir#block_param_types_for_call(...)`, where the
+emitted IR still contains
+`store %Nil$_$OR$_Crystal$CCHIR$CCTypeRef.union 0, ptr ...`. Boundary: this is
+a real MIR checkpoint, but bootstrap is still not green and the next mover is
+in LLVM emission / union constant materialization, not block ordering anymore.
+{F/G/R: 0.99/0.84/0.99} [verified]
+
 [LM-426|verified]: After [LM-425], the next honest mover was no longer in
 semantic inference at all, but in HIR lowering of splatted multiple assignment
 targets. The decisive full-program trace showed the old bootstrap head had

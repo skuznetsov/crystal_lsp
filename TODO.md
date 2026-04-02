@@ -1,6 +1,39 @@
 # Crystal V2 Bootstrap — TODO (Updated 2026-04-01)
 
 ## Current Status
+- **Fresh MIR sparse-block checkpoint: block ordering no longer assumes dense HIR block ids, which closes the live `required_suffix_positional_count(...)` `Index out of bounds` crash and moves bootstrap past MIR into the later LLVM/llc frontier (2026-04-01, current session)**:
+  - trustworthy setup:
+    - `src/compiler/mir/hir_to_mir.cr` now orders HIR blocks through a `BlockId -> Block` map instead of indexing `hir_func.blocks` directly by block id
+    - missing/dangling HIR successor ids are now skipped during DFS ordering, which matches the existing `mir_block_for(...)` behavior that synthesizes unreachable MIR targets for missing HIR blocks
+    - focused MIR regression coverage now lives in:
+      - `spec/mir/hir_to_mir_spec.cr`
+  - decisive evidence:
+    - focused regression is green:
+      - `../crystal/bin/crystal spec spec/mir/hir_to_mir_spec.cr --example 'tolerates dangling HIR successor ids during block ordering' --error-trace`
+    - rebuild gates are green:
+      - `../crystal/bin/crystal build src/crystal_v2.cr --no-codegen --error-trace`
+      - `../crystal/bin/crystal build src/crystal_v2.cr -o /tmp/crystal_v2_semantic_stage3probe --error-trace`
+    - the decisive full bootstrap probe under the safe wrapper now clears MIR instead of crashing in `order_blocks_for(...)`:
+      - `env CRYSTAL_V2_SEMANTIC_COMPILE=1 scripts/run_safe.sh /tmp/crystal_v2_semantic_stage3probe 300 4096 src/crystal_v2.cr --stats --no-link -o /tmp/stage3_probe_after_mir_sparse_block_fix.out > /tmp/stage3_probe_after_mir_sparse_block_fix.log 2>&1`
+      - fresh summary on the current tree is:
+        - `semantic_diags=0`
+        - `resolution_diags=0`
+        - `type_diags=0`
+        - `Stage 4/6 mir ...` completes successfully
+        - `Stage 5/6 llvm ...` completes successfully
+      - the new frontier is later and deeper:
+        - `llc: error: ... integer constant must have integer type`
+        - concrete site in the emitted IR:
+          - `AstToHir#block_param_types_for_call(...)`
+          - `store %Nil$_$OR$_Crystal$CCHIR$CCTypeRef.union 0, ptr %r863.elem_ptr`
+    - the debug falsifier that proved the old MIR head is gone lives in:
+      - `/tmp/stage3_probe_debug_required_suffix3.log`
+      - before the fix it showed `block=7` / `block=18` jumping to missing HIR block `24`, then crashed on `hir_func.get_block(24)`
+      - after the fix the same function still reports the missing successor ids, but bootstrap proceeds through MIR and only fails later in `llc`
+  - practical boundary:
+    - this is a real MIR traversal fix, not a workaround in semantic or HIR lowering
+    - the full `spec/mir/hir_to_mir_spec.cr` file still has a pre-existing unrelated ARC-allocation failure (`inserts RC operations for ARC allocations`), so the new focused regression is the honest spec signal for this checkpoint
+    - bootstrap is still not green; the next honest frontier is the LLVM/llc union-constant typing corridor in `AstToHir#block_param_types_for_call(...)`
 - **Fresh HIR multiple-assignment splat checkpoint: HIR lowering now supports splatted multiple-assignment targets, which closes the live `NameResolver#resolve_path_in_tables` `first, *rest = segments` blocker and moves bootstrap past the old `Unsupported assignment target: CrystalV2::Compiler::Frontend::SplatNode` head (2026-04-01, current session)**:
   - trustworthy setup:
     - `src/compiler/hir/ast_to_hir.cr` now recognizes `SplatNode` targets in `MultipleAssignNode` lowering instead of sending them through the generic assignment-target fallback

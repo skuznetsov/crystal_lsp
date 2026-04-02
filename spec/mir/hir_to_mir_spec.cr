@@ -75,6 +75,27 @@ describe Crystal::MIR::HIRToMIRLowering do
       const.should_not be_nil
       const.as(Crystal::MIR::Constant).value.should eq(true)
     end
+
+    it "tolerates dangling HIR successor ids during block ordering" do
+      hir_mod = Crystal::HIR::Module.new("test")
+      hir_func = hir_mod.create_function("dangling_successor", Crystal::HIR::TypeRef::VOID)
+      entry = hir_func.get_block(hir_func.entry_block)
+      scope = entry.scope
+
+      body_block_id = hir_func.create_block(scope)
+      body_block = hir_func.get_block(body_block_id)
+
+      entry.terminator = Crystal::HIR::Jump.new(body_block_id)
+      body_block.terminator = Crystal::HIR::Jump.new(24_u32)
+
+      mir_mod = hir_mod.lower_to_mir
+      mir_func = mir_mod.functions.find { |f| f.name == "dangling_successor" }
+      mir_func.should_not be_nil
+      mir_func = mir_func.not_nil!
+
+      mir_func.blocks.size.should be >= 3
+      mir_func.blocks.any?(&.terminator.is_a?(Crystal::MIR::Unreachable)).should be_true
+    end
   end
 
   # ═══════════════════════════════════════════════════════════════════════════
