@@ -66,5 +66,56 @@ describe Semantic::TypeInferenceEngine do
       engine.diagnostics.select(&.level.error?).should be_empty
       {"Item | Nil", "Nil | Item"}.should contain(engine.context.get_type(program.roots.last).to_s)
     end
+
+    it "does not reuse cached untyped block method results across different block returns" do
+      source = <<-CRYSTAL
+        class Lock
+          def lock
+          end
+
+          def unlock
+          end
+
+          def sync(&)
+            lock
+            begin
+              yield
+            ensure
+              unlock
+            end
+          end
+        end
+
+        lib BoxLib
+          fun build : Void*
+        end
+
+        module Probe
+          @@lock = Lock.new
+
+          def self.seed
+            @@lock.sync do
+              1
+            end
+          end
+
+          def self.ptr
+            @@lock.sync do
+              BoxLib.build || raise "no"
+            end
+          end
+        end
+
+        Probe.seed
+        Probe.ptr
+      CRYSTAL
+
+      program, analyzer, engine = infer_block_lexical_self_types(source)
+
+      analyzer.semantic_diagnostics.should be_empty
+      analyzer.name_resolver_diagnostics.should be_empty
+      engine.diagnostics.select(&.level.error?).should be_empty
+      engine.context.get_type(program.roots.last).to_s.should eq("Pointer(Void)")
+    end
   end
 end

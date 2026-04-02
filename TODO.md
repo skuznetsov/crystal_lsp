@@ -7016,3 +7016,50 @@ Immediate next steps:
    closed.
 2. Continue from the new live head at `type_diags=3`: the two remaining
    `Cannot index type Nil` diagnostics and `LibPCRE2.jit_stack_assign`.
+
+## Checkpoint — 2026-04-01 (untyped block method body cache contamination)
+
+Verified this turn:
+- The remaining `LibPCRE2.jit_stack_assign` head at `type_diags=3` was not a
+  callback ABI mismatch and not a `ThreadLocalValue#get` / `Hash#fetch` surface
+  gap. The decisive falsifier chain split the branch by wrapper:
+  `yield`-only, `fetch`-only, and local `begin/ensure + fetch` carriers all
+  stayed green, while actual-runtime carriers using `Crystal::SpinLock#sync`
+  went red.
+- The exact local reproducer `/tmp/semantic_untyped_block_cache_probe.cr`
+  proved the contamination mechanism directly: a local untyped block method
+  `Lock#sync(&)` first called with block result `Int32` and then with
+  `Pointer(Void)` still inferred the second call as `Int32`. That isolates the
+  bug to semantic method-body caching, not to stdlib threading or regex code.
+- The bounded compiler fix in
+  `src/compiler/semantic/type_inference_engine.cr` is to stop caching method
+  body results for methods that accept an untyped block parameter. Those
+  methods can legitimately return different types for different yielded block
+  bodies, so `method + receiver` alone is not a sound cache key. The focused
+  regression lives in
+  `spec/semantic/type_inference_block_lexical_self_spec.cr`.
+
+Focused verification:
+- `../crystal/bin/crystal spec spec/semantic/type_inference_block_lexical_self_spec.cr --error-trace`
+- `../crystal/bin/crystal build src/crystal_v2.cr --no-codegen --error-trace`
+- `../crystal/bin/crystal build src/crystal_v2.cr -o /tmp/crystal_v2_semantic_stage3probe --error-trace`
+- `env CRYSTAL_V2_SEMANTIC_COMPILE=1 scripts/run_safe.sh /tmp/crystal_v2_semantic_stage3probe 90 2048 /tmp/semantic_untyped_block_cache_probe.cr --stats --verbose --no-link -o /tmp/semantic_untyped_block_cache_probe_after_fix.out > /tmp/semantic_untyped_block_cache_probe_after_fix.log 2>&1`
+- `env CRYSTAL_V2_SEMANTIC_COMPILE=1 scripts/run_safe.sh /tmp/crystal_v2_semantic_stage3probe 120 2048 /tmp/semantic_actual_runtime_ladder_probe.cr --stats --verbose --no-link -o /tmp/semantic_actual_runtime_ladder_probe_after_fix.out > /tmp/semantic_actual_runtime_ladder_probe_after_fix.log 2>&1`
+- `env CRYSTAL_V2_SEMANTIC_COMPILE=1 scripts/run_safe.sh /tmp/crystal_v2_semantic_stage3probe 120 2048 /tmp/semantic_threadlocal_get_pointer_probe.cr --stats --verbose --no-link -o /tmp/semantic_threadlocal_get_pointer_probe_after_fix.out > /tmp/semantic_threadlocal_get_pointer_probe_after_fix.log 2>&1`
+- `env CRYSTAL_V2_SEMANTIC_COMPILE=1 scripts/run_safe.sh /tmp/crystal_v2_semantic_stage3probe 300 4096 src/crystal_v2.cr --stats --no-link -o /tmp/stage3_semantic_probe_after_untyped_block_cache_fix.out > /tmp/stage3_semantic_probe_after_untyped_block_cache_fix.log 2>&1`
+
+Whole-program effect:
+- The local cache falsifier now infers `Probe.ptr : Pointer(Void)`.
+- The actual-runtime ladder now infers `via_sync`, `via_fetch`, and
+  `via_sync_fetch` all as `Pointer(Void)`.
+- The real `ThreadLocalValue#get` / `Regex::PCRE2.jit_stack` carrier now infers
+  `Probe.jit_stack : Pointer(Void)`, and `Method 'jit_stack_assign' not found on
+  LibPCRE2` disappears from the whole-program log.
+- The full semantic stage3 probe under `scripts/run_safe.sh` moves from
+  `semantic_diags=0 resolution_diags=0 type_diags=3` to
+  `semantic_diags=0 resolution_diags=0 type_diags=2`.
+
+Immediate next steps:
+1. Treat untyped block method cache contamination as closed.
+2. Continue from the new live head at `type_diags=2`: the last two
+   `Cannot index type Nil` diagnostics.

@@ -12246,7 +12246,7 @@ module CrystalV2
           pushed_yield_call_frame = false
           bound_param_names = [] of String
           previous_param_assignments = {} of String => Type?
-          cacheable = arg_types.nil? || arg_types.empty?
+          cacheable = (arg_types.nil? || arg_types.empty?) && method_body_cacheable?(method)
           body_cache_key = MethodBodyCacheKey.new(method, receiver_type)
 
           # If we've already inferred this method body, reuse it to prevent cycles
@@ -12434,6 +12434,10 @@ module CrystalV2
           @yield_return_stack.pop if pushed_yield_return_frame && !@yield_return_stack.empty?
           @method_return_stack.pop if pushed_return_frame && !@method_return_stack.empty?
           @method_body_in_progress.delete(body_cache_key)
+        end
+
+        private def method_body_cacheable?(method : MethodSymbol) : Bool
+          !method.params.any? { |param| param.is_block && param.type_annotation.nil? }
         end
 
         private def combine_method_return_types(implicit_return_type : Type, explicit_return_types : Array(Type)) : Type
