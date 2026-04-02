@@ -1,6 +1,24 @@
 # Crystal V2 Bootstrap — TODO (Updated 2026-04-02)
 
 ## Current Status
+- **Fresh Phase 2.1 summary-count boundary checkpoint: per-unit shadow diagnostic counting now lives on the compile-shadow aggregate instead of `cli.cr`, which shrinks the remaining summary/parity glue without changing diagnostic behavior (2026-04-02, current session)**:
+  - trustworthy setup:
+    - `src/compiler/semantic/compile_shadow_aggregate.cr` now owns `diagnostic_counts_by_unit(...)` and `generated_diagnostic_counts_by_unit(...)` for both frontend and semantic diagnostics
+    - `src/compiler/cli.cr` no longer keeps local shadow-diagnostic counting helpers for semantic, resolution, and generated diagnostic buckets
+    - summary construction still consumes raw diagnostics, but the unit-ownership and generated-provenance counting logic now stays behind the aggregate boundary where `unit_index_for(...)` and generated provenance already live
+  - decisive evidence:
+    - focused aggregate counting coverage is green:
+      - `../crystal/bin/crystal spec spec/semantic/compile_shadow_aggregate_spec.cr --error-trace --example 'tracks shadow reparse diagnostics per unit'`
+      - `../crystal/bin/crystal spec spec/semantic/compile_shadow_aggregate_spec.cr --error-trace --example 'reports type diagnostics inside generated top-level def bodies'`
+    - focused CLI summary coverage stays green:
+      - `../crystal/bin/crystal spec spec/semantic_cli_spec.cr --error-trace --example 'reports compile and shadow parse diagnostics separately in semantic shadow summaries'`
+      - `../crystal/bin/crystal spec spec/semantic_cli_spec.cr --error-trace --example 'keeps strict semantic shadow green when parse parity matches'`
+      - `../crystal/bin/crystal spec spec/semantic_cli_spec.cr --error-trace --example 'reports generated type diagnostics separately in semantic shadow summaries'`
+    - build gate stays green:
+      - `../crystal/bin/crystal build src/crystal_v2.cr --no-codegen --error-trace`
+  - practical boundary:
+    - this is still a behavior-preserving provenance refactor; it does not change parser parity identities or the separate generated-resolution frontier
+    - the next honest provenance seam is now narrower: collapse the remaining duplicated summary assembly in `cli.cr` or move more of the shadow summary object construction behind one aggregate-facing API
 - **Fresh Phase 2.1 raw-diagnostic rendering checkpoint: `cli.cr` now keeps shadow diagnostics raw and lets the aggregate own the final enrichment/render path, which removes the remaining double materialization seam from the compile-shadow pipeline (2026-04-02, current session)**:
   - trustworthy setup:
     - `src/compiler/cli.cr` no longer precomputes `shadow_*_diagnostics` via `aggregate.enrich_shadow_diagnostic(...)` before parity, counting, and verbose rendering

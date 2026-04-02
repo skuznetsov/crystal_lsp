@@ -300,6 +300,52 @@ module CrystalV2
           generated_shadow_node?(primary_node_id)
         end
 
+        def diagnostic_counts_by_unit(diagnostics : Array(Frontend::Diagnostic)) : Array(Int32)
+          counts = Array(Int32).new(@unit_summaries.size, 0)
+          diagnostics.each do |diagnostic|
+            next unless node_id = diagnostic.node_id
+            if unit_index = unit_index_for(node_id)
+              counts[unit_index] += 1
+            end
+          end
+          counts
+        end
+
+        def diagnostic_counts_by_unit(diagnostics : Array(Semantic::Diagnostic)) : Array(Int32)
+          counts = Array(Int32).new(@unit_summaries.size, 0)
+          diagnostics.each do |diagnostic|
+            next unless primary_node_id = diagnostic.primary_node_id
+            if unit_index = unit_index_for(primary_node_id)
+              counts[unit_index] += 1
+            end
+          end
+          counts
+        end
+
+        def generated_diagnostic_counts_by_unit(diagnostics : Array(Frontend::Diagnostic)) : Array(Int32)
+          counts = Array(Int32).new(@unit_summaries.size, 0)
+          diagnostics.each do |diagnostic|
+            next unless node_id = diagnostic.node_id
+            next unless generated_shadow_diagnostic?(diagnostic)
+            if unit_index = unit_index_for(node_id)
+              counts[unit_index] += 1
+            end
+          end
+          counts
+        end
+
+        def generated_diagnostic_counts_by_unit(diagnostics : Array(Semantic::Diagnostic)) : Array(Int32)
+          counts = Array(Int32).new(@unit_summaries.size, 0)
+          diagnostics.each do |diagnostic|
+            next unless primary_node_id = diagnostic.primary_node_id
+            next unless generated_shadow_diagnostic?(diagnostic)
+            if unit_index = unit_index_for(primary_node_id)
+              counts[unit_index] += 1
+            end
+          end
+          counts
+        end
+
         def enrich_shadow_diagnostic(diagnostic : Frontend::Diagnostic) : Frontend::Diagnostic
           related_spans = diagnostic.related_spans.map do |related|
             next related if related.file_path

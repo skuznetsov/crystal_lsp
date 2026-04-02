@@ -6294,66 +6294,6 @@ module CrystalV2
         counts[unit_index]? || raise "semantic shadow internal error: missing #{label} for unit_index=#{unit_index} size=#{counts.size}"
       end
 
-      private def count_shadow_diagnostics_by_unit(
-        diagnostics : Array(Semantic::Diagnostic),
-        aggregate : Semantic::CompileShadowAggregate
-      ) : Array(Int32)
-        counts = Array(Int32).new(aggregate.unit_summaries.size, 0)
-        diagnostics.each do |diagnostic|
-          if primary_node_id = diagnostic.primary_node_id
-            if unit_index = aggregate.unit_index_for(primary_node_id)
-              counts[unit_index] += 1
-            end
-          end
-        end
-        counts
-      end
-
-      private def count_shadow_resolution_diagnostics_by_unit(
-        diagnostics : Array(Frontend::Diagnostic),
-        aggregate : Semantic::CompileShadowAggregate
-      ) : Array(Int32)
-        counts = Array(Int32).new(aggregate.unit_summaries.size, 0)
-        diagnostics.each do |diagnostic|
-          if node_id = diagnostic.node_id
-            if unit_index = aggregate.unit_index_for(node_id)
-              counts[unit_index] += 1
-            end
-          end
-        end
-        counts
-      end
-
-      private def count_shadow_generated_diagnostics_by_unit(
-        diagnostics : Array(Semantic::Diagnostic),
-        aggregate : Semantic::CompileShadowAggregate,
-      ) : Array(Int32)
-        counts = Array(Int32).new(aggregate.unit_summaries.size, 0)
-        diagnostics.each do |diagnostic|
-          next unless primary_node_id = diagnostic.primary_node_id
-          next unless aggregate.generated_shadow_diagnostic?(diagnostic)
-          if unit_index = aggregate.unit_index_for(primary_node_id)
-            counts[unit_index] += 1
-          end
-        end
-        counts
-      end
-
-      private def count_shadow_generated_resolution_diagnostics_by_unit(
-        diagnostics : Array(Frontend::Diagnostic),
-        aggregate : Semantic::CompileShadowAggregate,
-      ) : Array(Int32)
-        counts = Array(Int32).new(aggregate.unit_summaries.size, 0)
-        diagnostics.each do |diagnostic|
-          next unless node_id = diagnostic.node_id
-          next unless aggregate.generated_shadow_diagnostic?(diagnostic)
-          if unit_index = aggregate.unit_index_for(node_id)
-            counts[unit_index] += 1
-          end
-        end
-        counts
-      end
-
       private def build_shadow_collector_declaration_inventory(
         aggregate : Semantic::CompileShadowAggregate
       ) : Semantic::CompileShadowDeclarationInventory
@@ -6750,12 +6690,12 @@ module CrystalV2
         symbols_by_unit = count_shadow_symbols_by_unit(analyzer.global_context.symbol_table, aggregate)
         generated_symbols_by_unit = count_shadow_generated_symbols_by_unit(analyzer.global_context.symbol_table, aggregate)
         identifiers_by_unit = count_shadow_identifiers_by_unit(resolve_result.identifier_symbols, aggregate)
-        semantic_diagnostics_by_unit = count_shadow_diagnostics_by_unit(semantic_diagnostics, aggregate)
-        generated_semantic_diagnostics_by_unit = count_shadow_generated_diagnostics_by_unit(semantic_diagnostics, aggregate)
-        resolution_diagnostics_by_unit = count_shadow_resolution_diagnostics_by_unit(resolution_diagnostics, aggregate)
-        generated_resolution_diagnostics_by_unit = count_shadow_generated_resolution_diagnostics_by_unit(resolution_diagnostics, aggregate)
-        type_diagnostics_by_unit = count_shadow_diagnostics_by_unit(type_diagnostics, aggregate)
-        generated_type_diagnostics_by_unit = count_shadow_generated_diagnostics_by_unit(type_diagnostics, aggregate)
+        semantic_diagnostics_by_unit = aggregate.diagnostic_counts_by_unit(semantic_diagnostics)
+        generated_semantic_diagnostics_by_unit = aggregate.generated_diagnostic_counts_by_unit(semantic_diagnostics)
+        resolution_diagnostics_by_unit = aggregate.diagnostic_counts_by_unit(resolution_diagnostics)
+        generated_resolution_diagnostics_by_unit = aggregate.generated_diagnostic_counts_by_unit(resolution_diagnostics)
+        type_diagnostics_by_unit = aggregate.diagnostic_counts_by_unit(type_diagnostics)
+        generated_type_diagnostics_by_unit = aggregate.generated_diagnostic_counts_by_unit(type_diagnostics)
         declaration_summary_lines = declaration_parity.summary_lines(5, "collector", "semantic")
         declaration_summary_lines.concat(collector_inventory.provenance_lines("collector"))
         declaration_summary_lines.concat(semantic_inventory.provenance_lines("semantic"))

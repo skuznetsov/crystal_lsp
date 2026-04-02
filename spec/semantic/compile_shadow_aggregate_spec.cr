@@ -67,6 +67,8 @@ describe "compile semantic shadow aggregate" do
     aggregate.parse_diagnostics.size.should eq(1)
     aggregate.parse_diagnostics.first.message.should eq("unexpected RParen")
     aggregate.parse_diagnostics.first.file_path.should eq("unit_0.cr")
+    aggregate.diagnostic_counts_by_unit(aggregate.parse_diagnostics).should eq([1, 0])
+    aggregate.generated_diagnostic_counts_by_unit(aggregate.parse_diagnostics).should eq([0, 0])
   end
 
   it "resolves cross-file method calls in a shared AstArena aggregate" do
@@ -1018,6 +1020,8 @@ describe "compile semantic shadow aggregate" do
     aggregate.path_for(diagnostic.primary_node_id.not_nil!).should eq("unit_1.cr")
     aggregate.generated_node?(diagnostic.primary_node_id.not_nil!).should be_true
     aggregate.generated_source_for(diagnostic.primary_node_id.not_nil!).not_nil!.should contain("1 + \"x\"")
+    aggregate.diagnostic_counts_by_unit(analyzer.type_inference_diagnostics).should eq([0, 1])
+    aggregate.generated_diagnostic_counts_by_unit(analyzer.type_inference_diagnostics).should eq([0, 1])
   end
 
   it "reports resolution diagnostics inside generated top-level class bodies" do
