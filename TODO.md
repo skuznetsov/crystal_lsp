@@ -7385,3 +7385,75 @@ Immediate next steps:
 1. Treat untyped block method cache contamination as closed.
 2. Continue from the new live head at `type_diags=2`: the last two
    `Cannot index type Nil` diagnostics.
+
+## Checkpoint — 2026-04-02 (HIR enum/macro/module-return cleanup, adversary-hardened)
+
+Verified this turn:
+- The remaining HIR enum shorthand failures were not a late call replay bug.
+  The decisive trace on `trace :sched, foo: 1` showed
+  `reorder_named_args(...)` already invoked
+  `lower_arg_with_expected_type(...)`, but `enum_member_value(...)` still
+  missed because `@enum_info` had no top-level `Section` entry while the
+  namespaced control case produced `Crystal::Tracing::Section`.
+- A direct host-side probe against `register_enum(...)` confirmed the root
+  cause: top-level enums without reliable source maps were dropping their leaf
+  names. The bounded fix in `src/compiler/hir/ast_to_hir.cr` is
+  `enum_name_from_node(...)` preferring the parser-provided `node.name` before
+  source-header recovery.
+- The other two real HIR blockers were also independent of that enum path:
+  macro-expanded module bodies were skipping `extend self` because
+  `register_module_members_from_macro_expansion(...)` handled `BlockNode` but
+  not `BeginNode`, and module-like return annotations (`: M`) were re-resolving
+  back to the module type even when `infer_concrete_return_type_from_body(...)`
+  had already proved a concrete includer return.
+- The bounded fixes are:
+  - `register_module_members_from_macro_expansion(...)` now treats `BeginNode`
+    like `BlockNode`, so macro-expanded module bodies register `extend self`
+    and nested `def`s correctly.
+  - module-like annotated returns now prefer concrete body inference before
+    falling back to `annotation_type_ref(...)`, both during initial resolution
+    and after merged type-param resolution.
+  - the stale HIR expectation for enum member method calls was updated from
+    `Signal::CHLD.reset` to the current lowering shape `Signal#reset`.
+- Adversary pass found two additional hazards after the HIR spec went green:
+  - a broad lazy-enum discovery branch that reparsed current sources, all
+    cached sources, and loaded paths on enum misses. It was not required for
+    the green HIR pack and correlated with whole-program RSS blow-up, so it was
+    removed.
+  - a stage3 `SIGSEGV` in `safe_slice_to_string(...)` from `lower_unary` on an
+    unreadable operator slice (`0x6e6f6974`). A broad hardening attempt on
+    `safe_slice_to_string(...)` itself was refuted because it turned
+    `ast_to_hir_spec` massively red. The bounded final fix is instead
+    `unary_operator_text(...)`: recover unary operators from source span
+    (`node.span ... operand.span`) first, and only fall back to the slice path
+    when source recovery is unavailable.
+
+Focused verification:
+- `../crystal/bin/crystal spec spec/hir/ast_to_hir_spec.cr --error-trace --example "enum symbol arguments"`
+- `../crystal/bin/crystal spec spec/hir/ast_to_hir_spec.cr --error-trace --example "lowers enum literal to_i/value without a method call"`
+- `../crystal/bin/crystal spec spec/hir/ast_to_hir_spec.cr --error-trace --example "registers extend self methods from macro bodies"`
+- `../crystal/bin/crystal spec spec/hir/ast_to_hir_spec.cr --error-trace --example "prefers concrete self type for module-like return annotations"`
+- `../crystal/bin/crystal spec spec/hir/ast_to_hir_spec.cr --error-trace --example "returns nil for unreadable slices instead of crashing"`
+- `../crystal/bin/crystal spec spec/hir/ast_to_hir_spec.cr --error-trace`
+- `../crystal/bin/crystal build src/crystal_v2.cr --no-codegen --error-trace`
+- `../crystal/bin/crystal build src/crystal_v2.cr -o /tmp/crystal_v2_hir_stage3probe --error-trace`
+- `env CRYSTAL2_STAGE2_DEBUG=1 CRYSTAL_V2_SEMANTIC_COMPILE=1 scripts/run_safe.sh /tmp/crystal_v2_hir_stage3probe 240 12288 src/crystal_v2.cr --stats -o /tmp/stage3_link_probe_after_unary_fix_debug.out > /tmp/stage3_link_probe_after_unary_fix_debug.log 2>&1`
+
+Whole-spec / integration effect:
+- `spec/hir/ast_to_hir_spec.cr` is fully green:
+  `120 examples, 0 failures, 0 errors, 2 pending`.
+- `../crystal/bin/crystal build src/crystal_v2.cr --no-codegen --error-trace`
+  stays green.
+- Full safe stage3 bootstrap is green again after the bounded unary fix:
+  `/tmp/stage3_link_probe_after_unary_fix_debug.log` reports
+  `semantic_diags=0 resolution_diags=0 type_diags=0` and `[EXIT: 0]`.
+- Integration timing there is:
+  `Stage 2/6 hir 165727.4ms`, `Stage 4/6 mir 27167.1ms`,
+  `Stage 5/6 llvm 13739.4ms`, total `243507.5ms`.
+- The HIR spec pack now has one extra regression example for the bogus unreadable
+  slice corridor, so the final count is `121 examples, 0 failures, 0 errors,
+  2 pending`.
+
+Immediate next steps:
+1. Treat the HIR enum/macro/module-return/unary package as closed.
+2. Return to the remaining post-stage3 frontier outside this HIR checkpoint.

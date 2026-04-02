@@ -4714,17 +4714,17 @@ module Crystal::HIR
       node : CrystalV2::Compiler::Frontend::EnumNode,
       source : String? = nil,
     ) : String?
-      source ||= source_text_for_arena_or_file(@arena)
-      return nil unless source
-      header = enum_header_text_from_source(node, source)
-      return nil unless header
-
-      if name = definition_leaf_name_from_header_text(header, ["enum "])
-        return name
-      end
-
       if name = safe_slice_to_string(node.name)
         return name unless name.empty?
+      end
+
+      source ||= source_text_for_arena_or_file(@arena)
+      if source
+        if header = enum_header_text_from_source(node, source)
+          if name = definition_leaf_name_from_header_text(header, ["enum "])
+            return name
+          end
+        end
       end
 
       nil
@@ -5467,6 +5467,7 @@ module Crystal::HIR
         loaded_paths << path
         searched_dirs << File.dirname(path)
       end
+
       searched_dirs.each do |dir|
         index_lazy_enum_candidates_for_dir(dir, loaded_paths)
       end
@@ -8095,10 +8096,7 @@ module Crystal::HIR
 
     private def resolve_path_like_name(expr_id : ExprId) : String?
       return nil if expr_id.invalid?
-      if expr_id.index < 0 || expr_id.index >= @arena.size
-        Crystal::System.print_error "[MOD_EXTEND] resolve_oob expr=%d arena_size=%d\n", expr_id.index, @arena.size
-        return nil
-      end
+      return nil if expr_id.index < 0 || expr_id.index >= @arena.size
 
       node = @arena[expr_id]
       case node
@@ -8254,7 +8252,7 @@ module Crystal::HIR
       when CrystalV2::Compiler::Frontend::UnaryNode
         base = stringify_type_expr(node.operand)
         return nil unless base
-        op = (safe_slice_to_string(node.operator) || "")
+        op = unary_operator_text(node)
         case op
         when "?"
           "#{base}?"
@@ -9566,6 +9564,7 @@ module Crystal::HIR
       # The pointer may be NULL. In V2, even unsafe_as dereferences memory.
       # Check the raw pointer value via pointerof (accesses the stack slot,
       # not the heap object, so it's safe even when the pointer is NULL).
+      trust_slice_addr = env_has?("CRYSTAL_V2_TRUST_SLICE_ADDR")
       slot_raw = pointerof(slice).as(UInt64*).value
       return nil if slot_raw == 0_u64
       raw = slot_raw
@@ -9577,15 +9576,39 @@ module Crystal::HIR
       return nil if addr == 0_u64
       return nil if addr < 4096_u64 # likely corrupted/null-page pointer
       return nil if addr > 0x0000_7FFF_FFFF_FFFF_u64
+      return nil unless trust_slice_addr || readable_address?(addr)
       sz = slice.size
       return nil if sz < 0 || sz > 10_000_000 # sanity check
       if sizeof(Slice(UInt8)) <= 8
-        trust_slice_addr = env_has?("CRYSTAL_V2_TRUST_SLICE_ADDR")
         return nil unless trust_slice_addr || readable_address?(raw)
-        return nil unless trust_slice_addr || readable_address?(addr)
       end
       return "" if sz == 0
       String.new(slice)
+    end
+
+    private def safe_unary_operator_string(node : CrystalV2::Compiler::Frontend::UnaryNode) : String
+      if op = safe_slice_to_string(node.operator)
+        return op
+      end
+
+      source = source_for_arena(@arena)
+      return "" unless source
+
+      start = node.span.start_offset
+      return "" if start < 0 || start >= source.bytesize
+
+      finish = node.span.end_offset
+      if operand = node.operand
+        if operand.index >= 0 && operand.index < @arena.size
+          operand_start = @arena[operand].span.start_offset
+          if operand_start > start && operand_start <= finish
+            finish = operand_start
+          end
+        end
+      end
+      return "" if finish <= start || finish > source.bytesize
+
+      source.byte_slice(start, finish - start).strip
     end
 
     # Extract alias name and target type from source text when Slice fields are corrupted.
@@ -16748,9 +16771,6 @@ module Crystal::HIR
           body.each do |expr_id|
             next if expr_id.null_ptr? || expr_id.invalid?
             member = unwrap_visibility_member(@arena[expr_id])
-            if module_name == "M"
-              STDERR.puts "[OWNER_MOD_MEMBER] owner=#{module_name} expr=#{expr_id.index} klass=#{member.class.name}"
-            end
             case member
             when CrystalV2::Compiler::Frontend::ClassVarDeclNode
               safe_str_guard(member.name, "next")
@@ -17755,6 +17775,15 @@ module Crystal::HIR
         member.body.each do |child_id|
           register_module_members_from_macro_expansion(module_name, child_id, depth)
         end
+      when CrystalV2::Compiler::Frontend::BeginNode
+        member.body.each do |child_id|
+          child = unwrap_visibility_member(@arena[child_id])
+          next unless child.is_a?(CrystalV2::Compiler::Frontend::ExtendNode)
+          mark_module_extend_self(child, module_name)
+        end
+        member.body.each do |child_id|
+          register_module_members_from_macro_expansion(module_name, child_id, depth)
+        end
       when CrystalV2::Compiler::Frontend::DefNode
         register_module_method_from_def(member, module_name)
       when CrystalV2::Compiler::Frontend::AliasNode
@@ -17815,18 +17844,6 @@ module Crystal::HIR
     end
 
     private def mark_module_extend_self(node : CrystalV2::Compiler::Frontend::ExtendNode, module_name : String) : Nil
-      target_idx = node.target.index
-      in_bounds = target_idx >= 0 && target_idx < @arena.size
-      Crystal::System.print_error "[MOD_EXTEND] module=%s target=%d arena_size=%d in_bounds=%d\n",
-        module_name, target_idx, @arena.size, in_bounds ? 1 : 0
-      unless in_bounds
-        if candidate_arena = arena_for_expr?(node.target)
-          Crystal::System.print_error "[MOD_EXTEND] fallback_arena_size=%d current_matches=%d\n",
-            candidate_arena.size, candidate_arena.same?(@arena) ? 1 : 0
-        else
-          Crystal::System.print_error "[MOD_EXTEND] fallback_arena_size=-1 current_matches=0\n"
-        end
-      end
       target_node = @arena[node.target]
       case target_node
       when CrystalV2::Compiler::Frontend::SelfNode
@@ -20243,7 +20260,10 @@ module Crystal::HIR
           if contextual_alias = resolve_contextual_type_alias_name(rt_name)
             rt_name = contextual_alias
           end
-          annotation_type_ref(rt_name, module_name)
+          inferred = if !is_class_method && module_like_type_name?(rt_name)
+                       infer_concrete_return_type_from_body(node, module_name)
+                     end
+          inferred || annotation_type_ref(rt_name, module_name)
         end
         if extra_type_params.empty?
           return_type = resolve_module_return.call
@@ -20268,7 +20288,10 @@ module Crystal::HIR
           if contextual_alias = resolve_contextual_type_alias_name(rt_name)
             rt_name = contextual_alias
           end
-          annotation_type_ref(rt_name, module_name)
+          inferred = if !is_class_method && module_like_type_name?(rt_name)
+                       infer_concrete_return_type_from_body(node, module_name)
+                     end
+          inferred || annotation_type_ref(rt_name, module_name)
         end
         if resolved_return != TypeRef::VOID || return_type == TypeRef::VOID
           return_type = resolved_return
@@ -25221,7 +25244,7 @@ module Crystal::HIR
                           class_info.type_ref
                         elsif module_like_type_name?(rt_name)
                           inferred = infer_concrete_return_type_from_body(node, class_name)
-                          inferred || type_ref_for_name(rt_name)
+                          inferred || annotation_type_ref(rt_name, class_name)
                         else
                           type_ref_for_name(rt_name)
                         end
@@ -25245,7 +25268,8 @@ module Crystal::HIR
                           if rt_name == "self"
                             class_info.type_ref
                           elsif module_like_type_name?(rt_name)
-                            type_ref_for_name(rt_name)
+                            inferred = infer_concrete_return_type_from_body(node, class_name)
+                            inferred || annotation_type_ref(rt_name, class_name)
                           else
                             type_ref_for_name(rt_name)
                           end
@@ -25291,14 +25315,19 @@ module Crystal::HIR
           rt_name = (safe_slice_to_string(rt) || "")
           if rt_name == "self"
             class_info.type_ref
-          else
+          elsif module_like_type_name?(rt_name)
+            inferred = infer_concrete_return_type_from_body(node, class_name)
             annotated = annotation_type_ref(rt_name, class_name)
-            if annotated == TypeRef::VOID && module_like_type_name?(rt_name)
-              inferred = infer_concrete_return_type_from_body(node, class_name)
-              inferred || type_ref_for_name(resolve_type_name_in_context(rt_name))
+            if inferred && inferred != TypeRef::VOID && inferred != TypeRef::NIL
+              inferred
+            elsif annotated == TypeRef::VOID
+              type_ref_for_name(resolve_type_name_in_context(rt_name))
             else
               annotated
             end
+          else
+            annotated = annotation_type_ref(rt_name, class_name)
+            annotated
           end
         end
         if resolved_return != TypeRef::VOID || return_type == TypeRef::VOID
@@ -41017,8 +41046,6 @@ module Crystal::HIR
         ctx.emit(ptr)
         ptr.id
       when CrystalV2::Compiler::Frontend::EnumNode
-        # Enum declarations are processed during registration phase
-        # Just return nil literal during lowering
         nil_lit = Literal.new(ctx.next_id, TypeRef::NIL, nil)
         ctx.emit(nil_lit)
         nil_lit.id
@@ -42358,7 +42385,7 @@ module Crystal::HIR
         end
       when CrystalV2::Compiler::Frontend::UnaryNode
         # Handle !flag?(:name)
-        op_str = (safe_slice_to_string(cond_node.operator) || "")
+        op_str = unary_operator_text(cond_node)
         if op_str == "!"
           inner = try_evaluate_macro_condition(cond_node.operand)
           return inner.nil? ? nil : !inner
@@ -42473,7 +42500,7 @@ module Crystal::HIR
       when CrystalV2::Compiler::Frontend::UnaryNode
         inner = macro_condition_int_value(node.operand)
         return nil unless inner
-        case (safe_slice_to_string(node.operator) || "")
+        case unary_operator_text(node)
         when "+"
           inner
         when "-"
@@ -47032,7 +47059,7 @@ module Crystal::HIR
       when CrystalV2::Compiler::Frontend::GroupingNode
         non_nil_narrowing_targets(node.expression, when_truthy: when_truthy)
       when CrystalV2::Compiler::Frontend::UnaryNode
-        op = (safe_slice_to_string(node.operator) || "")
+        op = unary_operator_text(node)
         if op == "!"
           non_nil_narrowing_targets(node.operand, when_truthy: !when_truthy)
         else
@@ -47201,7 +47228,7 @@ module Crystal::HIR
       when CrystalV2::Compiler::Frontend::NilNode
         false
       when CrystalV2::Compiler::Frontend::UnaryNode
-        op = (safe_slice_to_string(node.operator) || "")
+        op = unary_operator_text(node)
         return nil unless op == "!"
         inner = static_literal_condition_value(node.operand)
         inner.nil? ? nil : !inner
@@ -47258,7 +47285,7 @@ module Crystal::HIR
         end
         nil
       when CrystalV2::Compiler::Frontend::UnaryNode
-        op = (safe_slice_to_string(node.operator) || "")
+        op = unary_operator_text(node)
         return nil unless op == "!"
         inner = static_is_a_condition_value(ctx, node.operand)
         inner.nil? ? nil : !inner
@@ -47327,7 +47354,7 @@ module Crystal::HIR
         end
         nil
       when CrystalV2::Compiler::Frontend::UnaryNode
-        op = (safe_slice_to_string(node.operator) || "")
+        op = unary_operator_text(node)
         return nil unless op == "!"
         inner = static_nil_condition_value(ctx, node.operand)
         inner.nil? ? nil : !inner
@@ -47944,7 +47971,7 @@ module Crystal::HIR
     private def lower_unary(ctx : LoweringContext, node : CrystalV2::Compiler::Frontend::UnaryNode) : ValueId
       operand_id = lower_expr(ctx, node.operand)
 
-      op_str = (safe_slice_to_string(node.operator) || "")
+      op_str = unary_operator_text(node)
       op = case op_str
            when "-" then UnaryOp::Neg
            when "!" then UnaryOp::Not
@@ -47987,6 +48014,25 @@ module Crystal::HIR
       ctx.emit(unop)
       track_enum_operator_result(ctx, operand_id, unop.id, op_str)
       unop.id
+    end
+
+    private def unary_operator_text(node : CrystalV2::Compiler::Frontend::UnaryNode) : String
+      source = source_for_arena(@arena) || source_text_for_arena_or_file(@arena)
+      if source
+        operand_span = @arena[node.operand].span
+        start = node.span.start_offset
+        finish = operand_span.start_offset
+        if start >= 0 && finish > start && finish <= source.bytesize
+          prefix = source.byte_slice(start, finish - start).strip
+          return prefix unless prefix.empty?
+        end
+      end
+
+      if env_has?("DEBUG_SAFE_SLICE_UNARY")
+        STDERR.puts "[LOWER_UNARY_TRACE] class=#{@current_class || "(nil)"} method=#{@current_method || "(nil)"}"
+        debug_safe_slice_eval("lower_unary.operator", node.operator)
+      end
+      safe_slice_to_string(node.operator) || ""
     end
 
     # ═══════════════════════════════════════════════════════════════════════

@@ -8,6 +8,10 @@ class Crystal::HIR::AstToHir
   def __test_split_generic_type_args(params_str : String) : Array(String)
     split_generic_type_args(params_str)
   end
+
+  def __test_safe_slice_to_string(slice : Slice(UInt8)) : String?
+    safe_slice_to_string(slice)
+  end
 end
 
 # Helper to parse Crystal code and get AST
@@ -172,6 +176,16 @@ private def hir_text(func : Crystal::HIR::Function) : String
 end
 
 describe Crystal::HIR::AstToHir do
+  describe "slice hardening" do
+    it "returns nil for unreadable slices instead of crashing" do
+      arena, _ = parse("def foo; 1; end")
+      converter = Crystal::HIR::AstToHir.new(arena)
+      bogus = Slice.new(Pointer(UInt8).new(0x6e6f6974_u64), 4)
+
+      converter.__test_safe_slice_to_string(bogus).should be_nil
+    end
+  end
+
   # ═══════════════════════════════════════════════════════════════════════════
   # POSITIVE TESTS: LITERALS
   # ═══════════════════════════════════════════════════════════════════════════
@@ -656,7 +670,7 @@ describe Crystal::HIR::AstToHir do
       call = func.not_nil!.blocks.flat_map(&.instructions)
         .find { |inst| inst.is_a?(Crystal::HIR::Call) }
       call.should_not be_nil
-      call.not_nil!.as(Crystal::HIR::Call).method_name.should eq("Signal::CHLD.reset")
+      call.not_nil!.as(Crystal::HIR::Call).method_name.should eq("Signal#reset")
     end
 
     it "applies default args for member access calls" do
