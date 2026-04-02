@@ -143,6 +143,58 @@ describe "compile semantic shadow aggregate" do
     enriched.secondary_spans.first.file_path.should eq("unit_0.cr")
   end
 
+  it "formats parsed diagnostics without prior manual enrichment" do
+    aggregate = build_shared_shadow_aggregate([
+      "def alpha\nend\n",
+      "alpha()\n",
+    ])
+    program = aggregate.program
+    sources = build_shadow_sources(aggregate)
+    call_root = program.roots.last
+    call_node = program.arena[call_root].as(Frontend::CallNode)
+    callee_id = call_node.callee.not_nil!
+    related_span = Frontend::RelatedSpan.new(program.arena[program.roots.first].span, "defined here", program.roots.first, nil)
+    diagnostic = Frontend::Diagnostic.new(
+      "test",
+      program.arena[callee_id].span,
+      node_id: callee_id,
+      related_spans: [related_span],
+    )
+
+    formatted = aggregate.format_shadow_diagnostic(diagnostic, sources)
+
+    formatted.should contain("unit_1.cr:")
+    formatted.should contain("note: defined here")
+    formatted.should contain("unit_0.cr:")
+  end
+
+  it "formats semantic diagnostics without prior manual enrichment" do
+    aggregate = build_shared_shadow_aggregate([
+      "def alpha\nend\n",
+      "alpha()\n",
+    ])
+    program = aggregate.program
+    sources = build_shadow_sources(aggregate)
+    call_root = program.roots.last
+    call_node = program.arena[call_root].as(Frontend::CallNode)
+    callee_id = call_node.callee.not_nil!
+    secondary = Semantic::SecondarySpan.new(program.arena[program.roots.first].span, "defined here", program.roots.first, nil)
+    diagnostic = Semantic::Diagnostic.new(
+      Semantic::DiagnosticLevel::Error,
+      "E9999",
+      "test",
+      program.arena[callee_id].span,
+      [secondary],
+      primary_node_id: callee_id,
+    )
+
+    formatted = aggregate.format_shadow_diagnostic(diagnostic, sources)
+
+    formatted.should contain("unit_1.cr:")
+    formatted.should contain("note: defined here")
+    formatted.should contain("unit_0.cr:")
+  end
+
   it "infers types across aggregated files in shared AstArena order" do
     aggregate = build_shared_shadow_aggregate([
       <<-CR,

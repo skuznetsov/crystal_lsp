@@ -1,6 +1,26 @@
 # Crystal V2 Bootstrap — TODO (Updated 2026-04-02)
 
 ## Current Status
+- **Fresh Phase 2.1 raw-diagnostic rendering checkpoint: `cli.cr` now keeps shadow diagnostics raw and lets the aggregate own the final enrichment/render path, which removes the remaining double materialization seam from the compile-shadow pipeline (2026-04-02, current session)**:
+  - trustworthy setup:
+    - `src/compiler/cli.cr` no longer precomputes `shadow_*_diagnostics` via `aggregate.enrich_shadow_diagnostic(...)` before parity, counting, and verbose rendering
+    - `src/compiler/semantic/compile_shadow_aggregate.cr` now enriches raw frontend/semantic diagnostics inside `format_shadow_diagnostic(...)` itself before applying generated provenance context and selecting formatter sources
+    - existing parsed/raw formatting regressions in `spec/semantic/compile_shadow_aggregate_spec.cr` now directly cover the contract the CLI relies on
+  - decisive evidence:
+    - focused aggregate formatting coverage is green:
+      - `../crystal/bin/crystal spec spec/semantic/compile_shadow_aggregate_spec.cr --error-trace --example 'formats parsed diagnostics without prior manual enrichment'`
+      - `../crystal/bin/crystal spec spec/semantic/compile_shadow_aggregate_spec.cr --error-trace --example 'formats semantic diagnostics without prior manual enrichment'`
+      - `../crystal/bin/crystal spec spec/semantic/compile_shadow_aggregate_spec.cr --error-trace --example 'adds origin note for generated type diagnostics'`
+      - `../crystal/bin/crystal spec spec/semantic/compile_shadow_aggregate_spec.cr --error-trace --example 'adds macro definition note for cross-file generated type diagnostics'`
+    - focused CLI rendering coverage remains green on the raw path:
+      - `../crystal/bin/crystal spec spec/semantic_cli_spec.cr --error-trace --example 'prints macro definition note for cross-file generated type diagnostics'`
+      - `../crystal/bin/crystal spec spec/semantic_cli_spec.cr --error-trace --example 'does not print redundant macro definition note for same-file generated type diagnostics'`
+    - build gate stays green:
+      - `../crystal/bin/crystal build src/crystal_v2.cr --no-codegen --error-trace`
+  - practical boundary:
+    - this is still a behavior-preserving provenance refactor; semantic analysis and diagnostic identities themselves are unchanged
+    - the generated-resolution CLI case in `spec/semantic_cli_spec.cr` remains a separate pre-existing red frontier and is not reinterpreted here as a regression from this render-path cleanup
+    - the next honest provenance follow-up is now narrower: collapse the remaining duplicate raw-diagnostic array plumbing in `cli.cr` or move parity/count formatting behind one aggregate-facing summary API
 - **Fresh Phase 2.1 provenance boundary-freeze checkpoint: compile-shadow provenance is now diagnostic-facing at the aggregate boundary, so `cli.cr` no longer reaches into raw `provenance_for(node_id)` just to classify generated diagnostics (2026-04-02, current session)**:
   - trustworthy setup:
     - `src/compiler/semantic/compile_shadow_aggregate.cr` now exposes diagnostic-facing overloads of `diagnostic_provenance_context_for(...)` for both frontend and semantic diagnostics

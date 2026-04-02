@@ -338,26 +338,28 @@ module CrystalV2
           diagnostic : Frontend::Diagnostic,
           base_sources : Hash(String, String)
         ) : String
-          if context = diagnostic_provenance_context_for(diagnostic)
+          enriched = enrich_shadow_diagnostic(diagnostic)
+          if context = diagnostic_provenance_context_for(enriched)
             return Frontend::DiagnosticFormatter.format(
               context.sources_with_generated(base_sources),
-              context.apply(diagnostic)
+              context.apply(enriched)
             )
           end
-          Frontend::DiagnosticFormatter.format(base_sources, diagnostic)
+          Frontend::DiagnosticFormatter.format(base_sources, enriched)
         end
 
         def format_shadow_diagnostic(
           diagnostic : Semantic::Diagnostic,
           base_sources : Hash(String, String)
         ) : String
-          if context = diagnostic_provenance_context_for(diagnostic)
+          enriched = enrich_shadow_diagnostic(diagnostic)
+          if context = diagnostic_provenance_context_for(enriched)
             return Semantic::DiagnosticFormatter.format(
               context.sources_with_generated(base_sources),
-              context.apply(diagnostic)
+              context.apply(enriched)
             )
           end
-          Semantic::DiagnosticFormatter.format(base_sources, diagnostic)
+          Semantic::DiagnosticFormatter.format(base_sources, enriched)
         end
 
         def generated_top_level_roots : Array(Frontend::ExprId)
