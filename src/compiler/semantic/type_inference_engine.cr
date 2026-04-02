@@ -8160,14 +8160,6 @@ module CrystalV2
             return matches.first
           end
 
-          if method_name == "clamp" && ENV["DEBUG_CLAMP_SELECTION"]? == "1"
-            matches.each do |entry|
-              score = specificity_score(entry, arg_types, arg_expr_ids)
-              param_sigs = entry.params.map { |param| param.type_annotation || "_" }.join(",")
-              STDERR.puts "[CLAMP_SELECT] receiver=#{receiver_type} score=#{score} ann=#{entry.return_annotation || "-"} node_valid=#{!entry.node_id.invalid?} params=#{param_sigs}"
-            end
-          end
-
           # Phase 98: Specificity ranking - prefer more specific overload
           #
           # Sort by specificity score (highest first) and return best match
