@@ -3,6 +3,25 @@
 Updated: 2026-04-02
 Context: compiler/bootstrap/stage2-stability
 
+[LM-437|verified]: After [LM-436], the next `ast_to_hir_spec` cluster was again
+representation drift, but now specifically around the current proc model rather
+than generic literals/control flow. The decisive failures all assumed the older
+`MakeClosure`/parent-closure-scope path for plain proc literals, while the live
+HIR output showed `func @foo` returning `%0 = func_pointer @__crystal_proc_0`
+and no `ScopeKind::Closure` in the parent function. Source inspection confirms
+that `lower_proc_literal` intentionally emits standalone top-level proc
+functions plus `FuncPointer`, while closure scopes are still created only for
+block lowering paths. Updating only `spec/hir/ast_to_hir_spec.cr` to match that
+current contract drops the suite from `120 examples, 9 failures, 0 errors,
+2 pending` to `120 examples, 5 failures, 0 errors, 2 pending`, and the
+production build gate
+`../crystal/bin/crystal build src/crystal_v2.cr --no-codegen --error-trace`
+stays green. Boundary: this closes the non-capturing proc-shape spec drift
+only; the remaining live `ast_to_hir_spec` frontier is now tightly semantic:
+enum-symbol/double-splat lowering, enum-value method calls, module-mixin
+concrete self-return typing, module-body macro registration, and enum literal
+`to_i` lowering in typed block params. {F/G/R: 0.97/0.87/0.98} [verified]
+
 [LM-436|verified]: After [LM-435], the next `ast_to_hir_spec` work was not a
 production bug hunt but a coherent stale-expectation refresh for the current
 canonical HIR forms. The decisive signal was that several failures were plainly

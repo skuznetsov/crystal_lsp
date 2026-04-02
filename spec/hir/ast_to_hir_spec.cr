@@ -763,14 +763,16 @@ describe Crystal::HIR::AstToHir do
       func = lower_function("def foo; -> { 1 }; end")
       text = hir_text(func)
 
-      text.should contain("make_closure")
+      text.should contain("func_pointer")
+      text.should contain("__crystal_proc_")
     end
 
     it "lowers proc with parameters" do
       func = lower_function("def foo; ->(x : Int32) { x + 1 }; end")
       text = hir_text(func)
 
-      text.should contain("make_closure")
+      text.should contain("func_pointer")
+      text.should contain("__crystal_proc_")
     end
 
     it "lowers block argument" do
@@ -781,13 +783,13 @@ describe Crystal::HIR::AstToHir do
       text.should contain("with_block")
     end
 
-    it "marks closures as HeapEscape" do
+    it "lowers standalone proc literals without make_closure wrappers" do
       func = lower_function("def foo; -> { 1 }; end")
 
-      # Find MakeClosure instruction
       closure = func.blocks.flat_map(&.instructions).find { |i| i.is_a?(Crystal::HIR::MakeClosure) }
-      closure.should_not be_nil
-      closure.not_nil!.lifetime.should eq(Crystal::HIR::LifetimeTag::HeapEscape)
+      closure.should be_nil
+
+      func.blocks.flat_map(&.instructions).any? { |i| i.is_a?(Crystal::HIR::FuncPointer) }.should be_true
     end
   end
 
@@ -1011,11 +1013,11 @@ describe Crystal::HIR::AstToHir do
       loop_scopes.size.should be >= 1
     end
 
-    it "creates closure scope for proc" do
+    it "keeps proc literals as standalone functions without parent closure scopes" do
       func = lower_function("def foo; -> { 1 }; end")
 
       closure_scopes = func.scopes.select { |s| s.kind == Crystal::HIR::ScopeKind::Closure }
-      closure_scopes.size.should be >= 1
+      closure_scopes.should be_empty
     end
 
     it "nests scopes correctly" do
