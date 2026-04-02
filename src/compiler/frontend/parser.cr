@@ -204,6 +204,22 @@ module CrystalV2
           accessor_macro_name?(slice) || slice_eq?(slice, "record")
         end
 
+        private def typed_macro_args_callee?(callee : ExprId) : Bool
+          node = @arena[callee]
+          case node
+          when IdentifierNode, ConstantNode
+            if slice = Frontend.node_literal(node)
+              typed_macro_args_name?(slice)
+            else
+              false
+            end
+          when MemberAccessNode
+            typed_macro_args_name?(node.member)
+          else
+            false
+          end
+        end
+
         private def parse_block_body_with_optional_rescue : Tuple(Array(ExprId), Array(RescueClause)?, Array(ExprId)?, Array(ExprId)?)
           # Self-hosted release builds still show corruption when growable
           # parser buffers store ExprId wrappers directly. Keep the transient
@@ -12024,6 +12040,7 @@ module CrystalV2
           advance
           @paren_depth += 1 # Phase 103: entering parentheses
           skip_whitespace_and_optional_newlines
+          typed_macro_callee = typed_macro_args_callee?(callee)
 
           args_b = ExprIdBuffer.new(4)
           named_b = NamedArgumentBuffer.new(2)
@@ -12182,107 +12199,198 @@ module CrystalV2
                     next
                   end
                 end
+                if typed_macro_callee && (current_token.kind == Token::Kind::Identifier || is_keyword_identifier?(current_token))
+                  save_idx = @index
+                  name_tok = current_token
+                  advance
+                  skip_whitespace_and_optional_newlines
+
+                  if current_token.kind == Token::Kind::Colon
+                    advance
+                    skip_whitespace_and_optional_newlines
+
+                    type_start = current_token
+                    type_slice = parse_type_annotation
+                    type_end = previous_token || type_start
+                    skip_whitespace_and_optional_newlines
+
+                    typed_value_expr : ExprId? = nil
+                    if current_token.kind == Token::Kind::Eq
+                      advance
+                      skip_whitespace_and_optional_newlines
+                      typed_value_expr = with_pointer_suffix { parse_op_assign }
+                      return PREFIX_ERROR if typed_value_expr.invalid?
+                    end
+
+                    full_span = if typed_value_expr
+                                  name_tok.span.cover(@arena[typed_value_expr].span)
+                                else
+                                  name_tok.span.cover(type_end.span)
+                                end
+
+                    arg_expr = @arena.add_typed(
+                      TypeDeclarationNode.new(
+                        full_span,
+                        name_tok.slice,
+                        type_slice,
+                        typed_value_expr
+                      )
+                    )
+                    have_arg_expr = true
+                    args_b << arg_expr
+                    pushed = true
+                    skip_whitespace_and_optional_newlines
+                  else
+                    @index = save_idx
+                  end
+                end
+
                 # Phase NAMED_ARGUMENTS: Check if this is named argument BEFORE parsing expression
                 # Pattern: identifier/keyword : value
                 # This handles keywords like 'of:' which wouldn't create Identifier nodes
                 # Also handles no-space form: `bar:a` where lexer produces Identifier + Symbol
-                if named_arg_start?
-                  # Named argument detected
-                  name_token = current_token
-                  name_slice = name_token.slice
-                  name_span = name_token.span
+                unless have_arg_expr
+                  if named_arg_start?
+                    # Named argument detected
+                    name_token = current_token
+                    name_slice = name_token.slice
+                    name_span = name_token.span
 
-                  # Check if this is the no-space form (bar:a) where next is Symbol
-                  no_space_form = named_arg_no_space?
+                    # Check if this is the no-space form (bar:a) where next is Symbol
+                    no_space_form = named_arg_no_space?
 
-                  advance # consume name (identifier/keyword)
+                    advance # consume name (identifier/keyword)
 
-                  if no_space_form
-                    # No-space form: current token is now Symbol like `:a`
-                    # The value identifier is embedded in the symbol slice (minus leading ':')
-                    sym_token = current_token
-                    value_slice = symbol_to_identifier_slice(sym_token)
-                    value_span = Span.new(
-                      sym_token.span.start_line,
-                      sym_token.span.start_column + 1, # skip the ':'
-                      sym_token.span.start_offset + 1,
-                      sym_token.span.end_line,
-                      sym_token.span.end_column,
-                      sym_token.span.end_offset
-                    )
-                    # Create Identifier node for the value
-                    value_expr = @arena.add(IdentifierNode.new(value_span, value_slice))
-                    advance # consume the Symbol
-                    skip_whitespace_and_optional_newlines
-                  else
-                    skip_whitespace_and_optional_newlines
+                    if no_space_form
+                      # No-space form: current token is now Symbol like `:a`
+                      # The value identifier is embedded in the symbol slice (minus leading ':')
+                      sym_token = current_token
+                      value_slice = symbol_to_identifier_slice(sym_token)
+                      value_span = Span.new(
+                        sym_token.span.start_line,
+                        sym_token.span.start_column + 1, # skip the ':'
+                        sym_token.span.start_offset + 1,
+                        sym_token.span.end_line,
+                        sym_token.span.end_column,
+                        sym_token.span.end_offset
+                      )
+                      # Create Identifier node for the value
+                      value_expr = @arena.add(IdentifierNode.new(value_span, value_slice))
+                      advance # consume the Symbol
+                      skip_whitespace_and_optional_newlines
+                    else
+                      skip_whitespace_and_optional_newlines
 
-                    # Expect colon (with-space form)
-                    unless current_token.kind == Token::Kind::Colon
-                      emit_unexpected(current_token)
-                      return PREFIX_ERROR
-                    end
-                    advance # consume ':'
-                    skip_whitespace_and_optional_newlines
-
-                    # Parse value expression (allow assignments inside args)
-                    # Note: We do NOT disable type declarations here because
-                    # the value may include type restrictions like `result : Int32`
-                    value_expr = with_pointer_suffix { parse_op_assign }
-                    return PREFIX_ERROR if value_expr.invalid?
-                    value_span = @arena[value_expr].span
-                  end
-
-                  # Create NamedArgument (zero-copy)
-                  named_b << NamedArgument.new(name_slice, value_expr, name_span, value_span)
-                  skip_whitespace_and_optional_newlines
-                else
-                  # Parse first argument expression (allow assignments)
-                  # Disable type declarations to allow identifier: syntax for named args
-                  @no_type_declaration += 1
-                  arg_expr = with_pointer_suffix { parse_op_assign }
-                  have_arg_expr = true
-                  @no_type_declaration -= 1
-                  if arg_expr.invalid?
-                    emit_unexpected(current_token)
-                    return PREFIX_ERROR
-                  end
-                  skip_whitespace_and_optional_newlines
-
-                  # Check if this is named argument (identifier followed by colon)
-                  # This handles case where identifier was already parsed
-                  if current_token.kind == Token::Kind::Colon
-                    arg_node = @arena[arg_expr]
-                    if Frontend.node_kind(arg_node) == Frontend::NodeKind::Identifier
-                      # Named argument: name: value (zero-copy)
-                      name_slice = Frontend.node_literal(arg_node).not_nil!
-                      name_span = arg_node.span
-
+                      # Expect colon (with-space form)
+                      unless current_token.kind == Token::Kind::Colon
+                        emit_unexpected(current_token)
+                        return PREFIX_ERROR
+                      end
                       advance # consume ':'
                       skip_whitespace_and_optional_newlines
 
-                      # Parse value expression
-                      # Disable type declarations in value (may contain nested named tuples/args)
-                      @no_type_declaration += 1
+                      # Parse value expression (allow assignments inside args)
+                      # Note: We do NOT disable type declarations here because
+                      # the value may include type restrictions like `result : Int32`
                       value_expr = with_pointer_suffix { parse_op_assign }
-                      @no_type_declaration -= 1
                       return PREFIX_ERROR if value_expr.invalid?
                       value_span = @arena[value_expr].span
+                    end
 
-                      # Create NamedArgument
-                      named_b << NamedArgument.new(name_slice, value_expr, name_span, value_span)
-                      skip_whitespace_and_optional_newlines
-                    else
-                      # Expression followed by colon is invalid
+                    # Create NamedArgument (zero-copy)
+                    named_b << NamedArgument.new(name_slice, value_expr, name_span, value_span)
+                    skip_whitespace_and_optional_newlines
+                  else
+                    # Parse first argument expression (allow assignments)
+                    # Disable type declarations to allow identifier: syntax for named args
+                    @no_type_declaration += 1
+                    arg_expr = with_pointer_suffix { parse_op_assign }
+                    have_arg_expr = true
+                    @no_type_declaration -= 1
+                    if arg_expr.invalid?
                       emit_unexpected(current_token)
                       return PREFIX_ERROR
                     end
-                  else
-                    # Positional argument
-                    args_b << arg_expr
-                    pushed = true
+                    skip_whitespace_and_optional_newlines
+
+                    # Check if this is named argument (identifier followed by colon)
+                    # This handles case where identifier was already parsed
+                    if typed_macro_callee && current_token.kind == Token::Kind::Colon
+                      arg_node = @arena[arg_expr]
+                      if Frontend.node_kind(arg_node) == Frontend::NodeKind::Identifier
+                        name_slice = Frontend.node_literal(arg_node).not_nil!
+                        name_span = arg_node.span
+
+                        advance # consume ':'
+                        skip_whitespace_and_optional_newlines
+
+                        type_start_token = current_token
+                        type_slice = parse_type_annotation
+                        type_end_token = previous_token || type_start_token
+                        skip_whitespace_and_optional_newlines
+
+                        decl_value_expr : ExprId? = nil
+                        if current_token.kind == Token::Kind::Eq
+                          advance
+                          skip_whitespace_and_optional_newlines
+                          decl_value_expr = with_pointer_suffix { parse_op_assign }
+                          return PREFIX_ERROR if decl_value_expr.invalid?
+                        end
+
+                        full_span = if decl_value_expr
+                                      name_span.cover(@arena[decl_value_expr].span)
+                                    else
+                                      name_span.cover(type_end_token.span)
+                                    end
+
+                        decl = @arena.add_typed(
+                          TypeDeclarationNode.new(
+                            full_span,
+                            name_slice,
+                            type_slice,
+                            decl_value_expr
+                          )
+                        )
+                        args_b << decl
+                        pushed = true
+                        skip_whitespace_and_optional_newlines
+                      else
+                        emit_unexpected(current_token)
+                        return PREFIX_ERROR
+                      end
+                    elsif current_token.kind == Token::Kind::Colon
+                      arg_node = @arena[arg_expr]
+                      if Frontend.node_kind(arg_node) == Frontend::NodeKind::Identifier
+                        # Named argument: name: value (zero-copy)
+                        name_slice = Frontend.node_literal(arg_node).not_nil!
+                        name_span = arg_node.span
+
+                        advance # consume ':'
+                        skip_whitespace_and_optional_newlines
+
+                        # Parse value expression
+                        # Disable type declarations in value (may contain nested named tuples/args)
+                        @no_type_declaration += 1
+                        value_expr = with_pointer_suffix { parse_op_assign }
+                        @no_type_declaration -= 1
+                        return PREFIX_ERROR if value_expr.invalid?
+                        value_span = @arena[value_expr].span
+
+                        # Create NamedArgument
+                        named_b << NamedArgument.new(name_slice, value_expr, name_span, value_span)
+                        skip_whitespace_and_optional_newlines
+                      else
+                        # Expression followed by colon is invalid
+                        emit_unexpected(current_token)
+                        return PREFIX_ERROR
+                      end
+                    else
+                      # Positional argument
+                      args_b << arg_expr
+                      pushed = true
+                    end
                   end
-                end # close if named_arg_start?
+                end
                 # After any branch, ensure amp-based arguments are captured
                 if have_arg_expr && !arg_expr.invalid? && !pushed
                   # If additional expression fragments remain (e.g., ternary tails),

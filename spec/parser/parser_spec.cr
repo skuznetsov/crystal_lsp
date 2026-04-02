@@ -110,6 +110,30 @@ bar")
     call.block.should_not be_nil
   end
 
+  it "parses parenthesized class_property typed fields as positional type declarations" do
+    source = <<-CR
+      class Time::Location
+        class_property(local : Location) { self }
+      end
+    CR
+
+    parser = CrystalV2::Compiler::Frontend::Parser.new(CrystalV2::Compiler::Frontend::Lexer.new(source))
+    program = parser.parse_program
+    arena = program.arena
+
+    outer = arena[program.roots.first].as(CrystalV2::Compiler::Frontend::ModuleNode)
+    klass = arena[outer.body.not_nil!.first].as(CrystalV2::Compiler::Frontend::ClassNode)
+    call = arena[klass.body.not_nil!.first].as(CrystalV2::Compiler::Frontend::CallNode)
+
+    call.args.size.should eq(1)
+    call.named_args.should be_nil
+
+    decl = arena[call.args.first].as(CrystalV2::Compiler::Frontend::TypeDeclarationNode)
+    String.new(decl.name).should eq("local")
+    String.new(decl.declared_type).should eq("Location")
+    call.block.should_not be_nil
+  end
+
   it "covers no-parens positional call spans through the last argument" do
     source = "setter path_index"
     parser = CrystalV2::Compiler::Frontend::Parser.new(CrystalV2::Compiler::Frontend::Lexer.new(source))
