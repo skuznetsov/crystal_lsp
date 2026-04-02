@@ -1,6 +1,34 @@
 # Crystal V2 Bootstrap — TODO (Updated 2026-04-01)
 
 ## Current Status
+- **Fresh HIR multiple-assignment splat checkpoint: HIR lowering now supports splatted multiple-assignment targets, which closes the live `NameResolver#resolve_path_in_tables` `first, *rest = segments` blocker and moves bootstrap past the old `Unsupported assignment target: CrystalV2::Compiler::Frontend::SplatNode` head (2026-04-01, current session)**:
+  - trustworthy setup:
+    - `src/compiler/hir/ast_to_hir.cr` now recognizes `SplatNode` targets in `MultipleAssignNode` lowering instead of sending them through the generic assignment-target fallback
+    - tuple RHS values now materialize the splatted tail as a tuple value
+    - array RHS values now materialize the splatted tail via `size` plus `[](start, count)` and keep prefix/suffix element extraction explicit
+    - a repo-side regression carrier now lives in:
+      - `spec/hir/test_data/multiple_assign_splat_tail.cr`
+  - decisive evidence:
+    - rebuild gate is green:
+      - `../crystal/bin/crystal build src/crystal_v2.cr --no-codegen --error-trace`
+      - `../crystal/bin/crystal build src/crystal_v2.cr -o /tmp/crystal_v2_semantic_stage3probe --error-trace`
+    - the exact call-driven falsifier is now green under the safe wrapper:
+      - `env CRYSTAL_V2_SEMANTIC_COMPILE=1 scripts/run_safe.sh /tmp/crystal_v2_semantic_stage3probe 60 2048 spec/hir/test_data/multiple_assign_splat_tail.cr --stats --verbose --no-link -o /tmp/multiple_assign_splat_tail_probe.out > /tmp/multiple_assign_splat_tail_probe.log 2>&1`
+      - fresh result there reaches all the way through stage 6 with `[EXIT: 0]`
+    - the earlier `/tmp/hir_splat_array_assign_probe.cr` exact carrier is also green again under the safe wrapper, which falsifies the old HIR-only crash independently of the repo-side file
+    - the clean full bootstrap probe no longer dies in HIR on `SplatNode`:
+      - `env CRYSTAL_V2_SEMANTIC_COMPILE=1 scripts/run_safe.sh /tmp/crystal_v2_semantic_stage3probe 300 4096 src/crystal_v2.cr --stats --no-link -o /tmp/stage3_probe_after_multi_assign_splat_fix.out > /tmp/stage3_probe_after_multi_assign_splat_fix.log 2>&1`
+      - fresh summary on the current tree is:
+        - `semantic_diags=0`
+        - `resolution_diags=0`
+        - `type_diags=0`
+        - `Stage 2/6 hir ...` completes successfully
+        - `Stage 3/6 escape ...` completes successfully
+      - the new frontier is later and deeper:
+        - `error: Index out of bounds in function ... CrystalV2::Compiler::Semantic::TypeInferenceEngine#required_suffix_positional_count$Array(CrystalV2::Compiler::Frontend::Parameter)_Hash(String, CrystalV2::Compiler::Semantic::Type)`
+  - practical boundary:
+    - this is a real HIR lowering fix, not a source-level workaround in `name_resolver.cr`
+    - the old head is gone, but bootstrap is still not green; the next honest frontier is now MIR lowering / block ordering for `required_suffix_positional_count(...)`
 - **Fresh Tuple-annotation collector checkpoint: semantic collection no longer mistakes builtin `Tuple` annotations for method type parameters, which closes the live `Atomic(Bool)#cast_from(value : Tuple)` nil-overload corridor and drives the honest stage3 semantic gate to `semantic_diags=0 resolution_diags=0 type_diags=0` on the current verified tree (2026-04-01, current session)**:
   - trustworthy setup:
     - `src/compiler/semantic/collectors/symbol_collector.cr` now explicitly treats builtin annotation names like `Tuple` as non-generic when deciding whether a constant-like annotation should become a method type parameter

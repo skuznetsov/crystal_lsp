@@ -3,6 +3,36 @@
 Updated: 2026-04-01
 Context: compiler/bootstrap/stage2-stability
 
+[LM-426|verified]: After [LM-425], the next honest mover was no longer in
+semantic inference at all, but in HIR lowering of splatted multiple assignment
+targets. The decisive full-program trace showed the old bootstrap head had
+moved to `src/compiler/semantic/resolvers/name_resolver.cr` inside
+`NameResolver#resolve_path_in_tables`, specifically the line
+`first, *rest = segments`, and the clean minimal call-driven falsifier
+`/tmp/hir_splat_array_assign_probe.cr` reproduced the same HIR crash with
+`Unsupported assignment target: CrystalV2::Compiler::Frontend::SplatNode`.
+That refuted the idea that the failure still required rich stdlib context or a
+macro-generated shape. Source inspection then made the local defect explicit in
+`src/compiler/hir/ast_to_hir.cr`: `lower_multiple_assign(...)` always routed
+targets through `assign_value_to_target(...)`, but that helper had no
+`SplatNode` branch and therefore raised on any `first, *rest = ...` shape. The
+verified fix stays in HIR lowering: splatted multiple-assignment targets are
+now handled before generic target assignment; tuple RHS values materialize the
+tail as a tuple value; array RHS values materialize the tail via `size` plus
+`[](start, count)`; and a repo-side regression carrier now lives in
+`spec/hir/test_data/multiple_assign_splat_tail.cr`. Rebuild gates for
+`src/crystal_v2.cr --no-codegen` and `/tmp/crystal_v2_semantic_stage3probe`
+are green; the repo-side regression file is green under `scripts/run_safe.sh`
+through all six compiler stages; the earlier exact `/tmp` carrier is green
+again; and the clean full bootstrap probe no longer dies in HIR on
+`SplatNode`, instead progressing through semantic prepass, HIR, and escape
+analysis before failing later in MIR lowering on
+`CrystalV2::Compiler::Semantic::TypeInferenceEngine#required_suffix_positional_count...`
+with an `Index out of bounds`. Boundary: this is a real HIR mover, but
+bootstrap is still not green; the next honest frontier is MIR block ordering /
+function lowering for `required_suffix_positional_count(...)`, not another
+multiple-assignment patch. {F/G/R: 0.98/0.84/0.99} [verified]
+
 [LM-425|verified]: After [LM-424], the cheapest honest mover was not another
 tuple builtin patch and not a broader overload-matcher rewrite, but a collector
 false positive around method type parameters. The decisive exact falsifier was

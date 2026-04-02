@@ -72813,6 +72813,13 @@ module Crystal::HIR
     end
 
     private def lower_multiple_assign(ctx : LoweringContext, node : CrystalV2::Compiler::Frontend::MultipleAssignNode) : ValueId
+      if splat_index = multiple_assign_splat_index(node.targets)
+        rhs_id = lower_expr(ctx, node.value)
+        rhs_type = ctx.type_of(rhs_id)
+        lower_multiple_assign_with_splat(ctx, node.targets, rhs_id, rhs_type, splat_index)
+        return rhs_id
+      end
+
       # MultipleAssignNode has a single value (destructured)
       # e.g., a, b, c = expr  where expr is a tuple/array
       if value_node = @arena[node.value]
@@ -72860,6 +72867,212 @@ module Crystal::HIR
       end
 
       rhs_id
+    end
+
+    private def multiple_assign_splat_index(targets : Array(CrystalV2::Compiler::Frontend::ExprId)) : Int32?
+      targets.each_with_index do |target_expr, idx|
+        return idx.to_i32 if @arena[target_expr].is_a?(CrystalV2::Compiler::Frontend::SplatNode)
+      end
+      nil
+    end
+
+    private def lower_multiple_assign_with_splat(
+      ctx : LoweringContext,
+      targets : Array(CrystalV2::Compiler::Frontend::ExprId),
+      rhs_id : ValueId,
+      rhs_type : TypeRef,
+      splat_index : Int32,
+    ) : Nil
+      prefix_count = splat_index
+      suffix_count = (targets.size - splat_index - 1).to_i32
+      splat_node = @arena[targets[splat_index]].as(CrystalV2::Compiler::Frontend::SplatNode)
+
+      prefix_count.times do |idx|
+        value_id = emit_multiple_assign_static_index_value(ctx, rhs_id, rhs_type, idx)
+        assign_value_to_target(ctx, targets[idx], value_id)
+      end
+
+      if tuple_size = multiple_assign_tuple_size(rhs_type)
+        suffix_count.times do |offset|
+          rhs_index = tuple_size - suffix_count + offset
+          value_id = emit_multiple_assign_static_index_value(ctx, rhs_id, rhs_type, rhs_index)
+          assign_value_to_target(ctx, targets[splat_index + 1 + offset], value_id)
+        end
+
+        rest_stop = tuple_size - suffix_count
+        rest_stop = prefix_count if rest_stop < prefix_count
+        rest_values = [] of ValueId
+        idx = prefix_count
+        while idx < rest_stop
+          rest_values << emit_multiple_assign_static_index_value(ctx, rhs_id, rhs_type, idx)
+          idx += 1
+        end
+
+        rest_id = build_multiple_assign_tuple_value(ctx, rest_values)
+        assign_value_to_target(ctx, splat_node.expr, rest_id)
+        return
+      end
+
+      if multiple_assign_array_element_type(rhs_type)
+        size_id = emit_multiple_assign_array_size_call(ctx, rhs_id, rhs_type)
+
+        if suffix_count > 0
+          suffix_base_id = emit_multiple_assign_int32_sub(ctx, size_id, emit_multiple_assign_int32_literal(ctx, suffix_count))
+          suffix_count.times do |offset|
+            rhs_index_id = if offset == 0
+                             suffix_base_id
+                           else
+                             emit_multiple_assign_int32_add(ctx, suffix_base_id, emit_multiple_assign_int32_literal(ctx, offset))
+                           end
+            value_id = emit_multiple_assign_dynamic_index_value(ctx, rhs_id, rhs_type, rhs_index_id)
+            assign_value_to_target(ctx, targets[splat_index + 1 + offset], value_id)
+          end
+        end
+
+        taken_count = prefix_count + suffix_count
+        rest_count_id = emit_multiple_assign_int32_sub(ctx, size_id, emit_multiple_assign_int32_literal(ctx, taken_count))
+        rest_id = emit_multiple_assign_array_tail_value(ctx, rhs_id, rhs_type, prefix_count, rest_count_id)
+        assign_value_to_target(ctx, splat_node.expr, rest_id)
+        return
+      end
+
+      raise LoweringError.new("Unsupported splatted multiple assignment source type: #{get_type_name_from_ref(rhs_type)}", @arena[targets[splat_index]])
+    end
+
+    private def multiple_assign_tuple_size(rhs_type : TypeRef) : Int32?
+      desc = @module.get_type_descriptor(rhs_type)
+      return nil unless desc
+      return nil unless desc.kind == TypeKind::Tuple || desc.name.starts_with?("Tuple(")
+
+      desc.type_params.reject { |t| t == TypeRef::VOID }.size.to_i32
+    end
+
+    private def multiple_assign_array_element_type(rhs_type : TypeRef) : TypeRef?
+      desc = @module.get_type_descriptor(rhs_type)
+      return nil unless desc
+      return nil unless desc.kind == TypeKind::Array
+      return nil unless desc.name == "Array" || desc.name.starts_with?("Array(")
+
+      desc.type_params.reject { |t| t == TypeRef::VOID }.first?
+    end
+
+    private def multiple_assign_element_type(rhs_type : TypeRef, index : Int32?) : TypeRef
+      if elem_type = tuple_element_type(rhs_type, index)
+        return elem_type unless elem_type == TypeRef::VOID
+      end
+
+      if elem_type = multiple_assign_array_element_type(rhs_type)
+        return elem_type unless elem_type == TypeRef::VOID
+      end
+
+      TypeRef::VOID
+    end
+
+    private def emit_multiple_assign_static_index_value(
+      ctx : LoweringContext,
+      rhs_id : ValueId,
+      rhs_type : TypeRef,
+      index : Int32,
+    ) : ValueId
+      index_id = emit_multiple_assign_int32_literal(ctx, index)
+      emit_multiple_assign_dynamic_index_value(ctx, rhs_id, rhs_type, index_id, index)
+    end
+
+    private def emit_multiple_assign_dynamic_index_value(
+      ctx : LoweringContext,
+      rhs_id : ValueId,
+      rhs_type : TypeRef,
+      index_id : ValueId,
+      static_index : Int32? = nil,
+    ) : ValueId
+      element_type = multiple_assign_element_type(rhs_type, static_index)
+      element_id = IndexGet.new(ctx.next_id, element_type, rhs_id, index_id)
+      ctx.emit(element_id)
+      ctx.register_type(element_id.id, element_type)
+      element_id.id
+    end
+
+    private def build_multiple_assign_tuple_value(ctx : LoweringContext, element_ids : Array(ValueId)) : ValueId
+      tuple_type = if element_ids.empty?
+                     type_ref_for_name("Tuple()")
+                   else
+                     element_names = element_ids.map { |id| get_type_name_from_ref(ctx.type_of(id)) }
+                     normalized_names = element_names.map do |name|
+                       (name == "Void" || name == "Unknown") ? "Unknown" : name
+                     end
+                     type_ref_for_name("Tuple(#{normalized_names.join(", ")})")
+                   end
+
+      alloc = Allocate.new(ctx.next_id, tuple_type, element_ids)
+      ctx.emit(alloc)
+      ctx.register_type(alloc.id, tuple_type)
+      alloc.id
+    end
+
+    private def emit_multiple_assign_array_size_call(
+      ctx : LoweringContext,
+      rhs_id : ValueId,
+      rhs_type : TypeRef,
+    ) : ValueId
+      owner_name = @module.get_type_descriptor(rhs_type).try(&.name) || "Array"
+      arg_types = [] of TypeRef
+      method_name = resolve_method_call(ctx, rhs_id, "size", arg_types, false)
+      primary_name = mangle_function_name("#{owner_name}#size", arg_types)
+      remember_callsite_arg_types(primary_name, arg_types)
+      remember_callsite_arg_types(method_name, arg_types) if method_name != primary_name
+      lower_function_if_needed(primary_name)
+      lower_function_if_needed(method_name) if method_name != primary_name
+      call_target = prefer_primary_call_target(method_name, primary_name, arg_types)
+      return_type = get_function_return_type(call_target)
+      return_type = TypeRef::INT32 if return_type == TypeRef::VOID
+      call = Call.new(ctx.next_id, return_type, rhs_id, call_target, [] of ValueId)
+      ctx.emit(call)
+      ctx.register_type(call.id, return_type)
+      call.id
+    end
+
+    private def emit_multiple_assign_array_tail_value(
+      ctx : LoweringContext,
+      rhs_id : ValueId,
+      rhs_type : TypeRef,
+      start_index : Int32,
+      count_id : ValueId,
+    ) : ValueId
+      owner_name = @module.get_type_descriptor(rhs_type).try(&.name) || "Array"
+      arg_types = [TypeRef::INT32, TypeRef::INT32]
+      start_id = emit_multiple_assign_int32_literal(ctx, start_index)
+      method_name = resolve_method_call(ctx, rhs_id, "[]", arg_types, false)
+      primary_name = mangle_function_name("#{owner_name}#[]", arg_types)
+      remember_callsite_arg_types(primary_name, arg_types)
+      remember_callsite_arg_types(method_name, arg_types) if method_name != primary_name
+      lower_function_if_needed(primary_name)
+      lower_function_if_needed(method_name) if method_name != primary_name
+      call_target = prefer_primary_call_target(method_name, primary_name, arg_types)
+      call = Call.new(ctx.next_id, rhs_type, rhs_id, call_target, [start_id, count_id])
+      ctx.emit(call)
+      ctx.register_type(call.id, rhs_type)
+      call.id
+    end
+
+    private def emit_multiple_assign_int32_literal(ctx : LoweringContext, value : Int32) : ValueId
+      literal = Literal.new(ctx.next_id, TypeRef::INT32, value.to_i64)
+      ctx.emit(literal)
+      ctx.register_type(literal.id, TypeRef::INT32)
+      literal.id
+    end
+
+    private def emit_multiple_assign_int32_add(ctx : LoweringContext, left_id : ValueId, right_id : ValueId) : ValueId
+      binop = BinaryOperation.new(ctx.next_id, TypeRef::INT32, BinaryOp::Add, left_id, right_id)
+      ctx.emit(binop)
+      ctx.register_type(binop.id, TypeRef::INT32)
+      binop.id
+    end
+
+    private def emit_multiple_assign_int32_sub(ctx : LoweringContext, left_id : ValueId, right_id : ValueId) : ValueId
+      binop = BinaryOperation.new(ctx.next_id, TypeRef::INT32, BinaryOp::Sub, left_id, right_id)
+      ctx.emit(binop)
+      ctx.register_type(binop.id, TypeRef::INT32)
+      binop.id
     end
 
     private def assign_value_to_target(
