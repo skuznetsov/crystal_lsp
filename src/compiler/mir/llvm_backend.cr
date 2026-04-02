@@ -18679,6 +18679,11 @@ module Crystal::MIR
         value = "null"
       end
 
+      # Final element stores must be normalized against the emitted LLVM slot
+      # type. In particular, union slots require `zeroinitializer` instead of a
+      # raw integer literal like `0`, which llc rejects.
+      value = normalize_value_for_store_type(value, element_type)
+
       # Tuple elements are value types represented as ptr in current ABI.
       # When writing into Array buffers, the incoming ptr often references a
       # transient stack slot. Persist by copying tuple bytes to heap first.

@@ -1,6 +1,42 @@
 # Crystal V2 Bootstrap — TODO (Updated 2026-04-01)
 
 ## Current Status
+- **Fresh LLVM union-array-store checkpoint: the safe full stage3 bootstrap now completes end-to-end with `semantic_diags=0 resolution_diags=0 type_diags=0` and `[EXIT: 0]`, because LLVM array element stores now normalize union nil literals against the emitted slot type instead of emitting invalid `store %Union 0` IR (2026-04-01, current session)**:
+  - trustworthy setup:
+    - `src/compiler/mir/llvm_backend.cr` now normalizes the final `emit_array_set(...)` store operand through `normalize_value_for_store_type(...)` before writing into the array element slot
+    - this keeps union-typed element stores aligned with the existing union normalization rules and forces `zeroinitializer` instead of raw integer literal `0`
+    - focused LLVM backend regression coverage now lives in:
+      - `spec/mir/llvm_backend_spec.cr`
+    - the same spec file now explicitly requires:
+      - `src/compiler/mir/optimizations.cr`
+      - so isolated backend generation can compile honestly instead of failing on the unrelated `optimize_with_potential` harness gap
+  - decisive evidence:
+    - focused regression is green:
+      - `../crystal/bin/crystal spec spec/mir/llvm_backend_spec.cr --example 'normalizes union nil array element stores to zeroinitializer' --error-trace`
+    - rebuild gates are green:
+      - `../crystal/bin/crystal build src/crystal_v2.cr --no-codegen --error-trace`
+      - `../crystal/bin/crystal build src/crystal_v2.cr -o /tmp/crystal_v2_semantic_stage3probe --error-trace`
+    - the decisive full bootstrap probe under the safe wrapper now completes all stages and exits cleanly:
+      - `env CRYSTAL_V2_SEMANTIC_COMPILE=1 scripts/run_safe.sh /tmp/crystal_v2_semantic_stage3probe 300 4096 src/crystal_v2.cr --stats --no-link -o /tmp/stage3_probe_after_union_array_store_fix.out > /tmp/stage3_probe_after_union_array_store_fix.log 2>&1`
+      - fresh summary on the current tree is:
+        - `semantic_diags=0`
+        - `resolution_diags=0`
+        - `type_diags=0`
+        - `Stage 4/6 mir ...` completes successfully
+        - `Stage 5/6 llvm ...` completes successfully
+        - `Stage 6/6 compile ...` completes successfully
+        - `[EXIT: 0] after ~170s`
+    - the old llc barrier is gone:
+      - `/tmp/stage3_probe_after_mir_sparse_block_fix.out.ll` previously contained:
+        - `store %Nil$_$OR$_Crystal$CCHIR$CCTypeRef.union 0, ptr %r863.elem_ptr`
+      - the new full probe no longer reports:
+        - `integer constant must have integer type`
+  - practical boundary:
+    - this is a real LLVM emission fix, not a MIR or semantic workaround
+    - the verified stage3 safe bootstrap goal for `src/crystal_v2.cr --stats --no-link` is now green on the current tree
+    - the next honest frontier is no longer stage3 bootstrap completion itself, but follow-up compiler/review work such as:
+      - the open `ast_to_hir` `body_infer` identity-key review finding
+      - any later stage/link/runtime bootstrap gaps outside the current no-link stage3 gate
 - **Fresh MIR sparse-block checkpoint: block ordering no longer assumes dense HIR block ids, which closes the live `required_suffix_positional_count(...)` `Index out of bounds` crash and moves bootstrap past MIR into the later LLVM/llc frontier (2026-04-01, current session)**:
   - trustworthy setup:
     - `src/compiler/mir/hir_to_mir.cr` now orders HIR blocks through a `BlockId -> Block` map instead of indexing `hir_func.blocks` directly by block id

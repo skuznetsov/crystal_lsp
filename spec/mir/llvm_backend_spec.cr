@@ -1,5 +1,7 @@
 require "../spec_helper"
 require "../../src/compiler/mir/mir"
+require "../../src/compiler/mir/hir_to_mir"
+require "../../src/compiler/mir/optimizations"
 require "../../src/compiler/mir/llvm_backend"
 
 describe Crystal::MIR::LLVMTypeMapper do
@@ -274,6 +276,56 @@ describe Crystal::MIR::LLVMIRGenerator do
       output = gen.generate
 
       output.should contain("store %IntOrNil.union zeroinitializer")
+    end
+
+    it "normalizes union nil array element stores to zeroinitializer" do
+      mod = Crystal::MIR::Module.new("test")
+      union_type = mod.type_registry.create_type(Crystal::MIR::TypeKind::Union, "IntOrNil", 16, 8)
+      union_ref = Crystal::MIR::TypeRef.new(union_type.id)
+      mod.register_union(
+        union_ref,
+        Crystal::MIR::UnionDescriptor.new(
+          "IntOrNil",
+          [
+            Crystal::MIR::UnionVariantDescriptor.new(
+              type_id: 0,
+              type_ref: Crystal::MIR::TypeRef::INT32,
+              full_name: "Int32",
+              size: 4,
+              alignment: 4,
+              field_offsets: nil
+            ),
+            Crystal::MIR::UnionVariantDescriptor.new(
+              type_id: 1,
+              type_ref: Crystal::MIR::TypeRef::NIL,
+              full_name: "Nil",
+              size: 0,
+              alignment: 1,
+              field_offsets: nil
+            ),
+          ],
+          16,
+          8
+        )
+      )
+
+      func = mod.create_function("union_array_set", Crystal::MIR::TypeRef::VOID)
+      array_param = func.add_param("arr", Crystal::MIR::TypeRef::POINTER)
+      builder = Crystal::MIR::Builder.new(func)
+      index = builder.const_int(0_i64, Crystal::MIR::TypeRef::INT32)
+
+      block = func.get_block(func.entry_block)
+      union_nil = Crystal::MIR::Constant.new(func.next_value_id, union_ref, nil)
+      block.add(union_nil)
+      block.add(Crystal::MIR::ArraySet.new(func.next_value_id, union_ref, array_param, index, union_nil.id))
+      builder.ret
+
+      gen = Crystal::MIR::LLVMIRGenerator.new(mod)
+      gen.emit_type_metadata = false
+      output = gen.generate
+
+      output.should contain("store %IntOrNil.union zeroinitializer")
+      output.should_not contain("store %IntOrNil.union 0")
     end
 
     it "skips emitting SSA values for void casts" do

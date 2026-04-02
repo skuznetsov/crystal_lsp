@@ -3,6 +3,36 @@
 Updated: 2026-04-01
 Context: compiler/bootstrap/stage2-stability
 
+[LM-428|verified]: After [LM-427], the next honest mover was no longer in
+MIR traversal and not another semantic/HIR branch, but the final LLVM store
+emitted by `emit_array_set(...)` for union-typed array elements. The decisive
+evidence chain started from the clean post-[LM-427] full probe, whose emitted
+IR still contained the concrete line
+`store %Nil$_$OR$_Crystal$CCHIR$CCTypeRef.union 0, ptr %r863.elem_ptr` inside
+`AstToHir#block_param_types_for_call(...)`, followed immediately by
+`llc: error: integer constant must have integer type`. Source inspection in
+`src/compiler/mir/llvm_backend.cr` then made the local defect explicit:
+`emit_array_set(...)` already normalized many intermediate union conversions,
+but its final element-slot store wrote the raw `value` directly, so union nil
+literals bypassed `normalize_union_value(...)` / `normalize_value_for_store_type(...)`
+and reached LLVM as invalid struct-typed integer constants. A focused backend
+regression was added to `spec/mir/llvm_backend_spec.cr` for
+`normalizes union nil array element stores to zeroinitializer`; during that
+work an unrelated harness hole was also verified and closed locally by adding
+the missing `src/compiler/mir/optimizations.cr` require, which let isolated
+backend generation compile honestly instead of failing on
+`optimize_with_potential`. The verified fix stays narrow: the final
+`emit_array_set(...)` store now normalizes its value against the emitted
+element LLVM type before emission. The focused LLVM spec is green; rebuild
+gates for `src/crystal_v2.cr --no-codegen` and
+`/tmp/crystal_v2_semantic_stage3probe` are green; and the decisive full safe
+probe under `scripts/run_safe.sh` now completes end-to-end with
+`semantic_diags=0 resolution_diags=0 type_diags=0`, `Stage 6/6 compile ...`,
+and `[EXIT: 0] after ~170s`. Boundary: this proves the stage3 safe no-link
+bootstrap gate is green on the current tree; subsequent work can move on to
+later review/compiler fronts instead of bootstrap completion itself.
+{F/G/R: 0.99/0.88/0.99} [verified]
+
 [LM-427|verified]: After [LM-426], the next honest mover was not another
 semantic tweak and not a new HIR lowering workaround, but MIR traversal itself.
 The decisive full-program debug falsifier was
