@@ -4954,9 +4954,6 @@ module CrystalV2
             member_types = [] of Type
             value_type.types.each do |member|
               member_type = destructured_multiple_assign_element_type(member, idx)
-              if ENV["DEBUG_MULTIPLE_ASSIGN"]? && idx == 1
-                STDERR.puts "[MULTI_ASSIGN_TRACE] idx=#{idx} union_member=#{member} member_class=#{member.class.name} extracted=#{member_type ? member_type.to_s : "nil"}"
-              end
               return nil unless member_type
               member_types << member_type
             end

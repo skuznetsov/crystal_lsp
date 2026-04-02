@@ -60,10 +60,6 @@ describe Semantic::TypeInferenceEngine do
             None
           end
 
-          def parse_flag_definition(flag : String)
-            {flag, FlagValue::None}
-          end
-
           def test(short_flag : String, long_flag : String)
             short_flag, short_value_type = parse_flag_definition(short_flag)
             long_flag, long_value_type = parse_flag_definition(long_flag)
@@ -76,9 +72,26 @@ describe Semantic::TypeInferenceEngine do
               FlagValue::None
             end
           end
+
+          private def parse_flag_definition(flag : String)
+            case flag
+            when /\A--(\S+)\s+\[\S+\]\z/
+              {"--\#{$1}", FlagValue::Optional}
+            when /\A--(\S+)(\s+|\=)(\S+)?\z/
+              {"--\#{$1}", FlagValue::Required}
+            when /\A--\S+\z/
+              {flag, FlagValue::None}
+            when /\A-(.)\s*\[\S+\]\z/
+              {flag[0..1], FlagValue::Optional}
+            when /\A-(.)\s+\S+\z/, /\A-(.)\s+\z/, /\A-(.)\S+\z/
+              {flag[0..1], FlagValue::Required}
+            else
+              {flag, FlagValue::None}
+            end
+          end
         end
 
-        OptionParser.new.test("-x", "--x")
+        OptionParser.new.test("-x ARG", "--long [ARG]")
       CRYSTAL
 
       program, analyzer, engine = infer_enum_constant_types(source)
