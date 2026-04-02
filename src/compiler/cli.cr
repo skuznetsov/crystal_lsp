@@ -3277,7 +3277,11 @@ module CrystalV2
           if cached = LSP::AstCache.load(abs_path, source_mtime_ns)
             @ast_cache_hits += 1
             arena = cached.arena
-            exprs = cached.roots
+            # Self-hosted release builds can mis-handle Array(ExprId) carriers
+            # returned from parser/cache paths. Duplicate roots immediately so
+            # downstream require scanning and lowering walk fresh GC-managed
+            # storage instead of reusing the original backing buffer.
+            exprs = cached.roots.dup
             base_dir = safe_dirname(abs_path)
             if cached_requires = load_require_cache(abs_path)
               if source_has_glob_require?(source) || cached_requires.any? { |path| !File.exists?(path) }
@@ -3292,20 +3296,8 @@ module CrystalV2
             else
               log(options, out_io, "  Require cache miss: #{abs_path}") if options.verbose
               requires = [] of String
-              # Cached AST roots hit the same ExprId iteration corruption as the
-              # uncached path in self-hosted stage2. Keep this scalar/indexed.
-              expr_i = 0
-              while expr_i < exprs.size
-                expr_id = exprs.unsafe_fetch(expr_i)
-                begin
-                  process_require_node(arena, expr_id, source, base_dir, input_file, input_base_dir, results, loaded, options, out_io, requires)
-                rescue ex : IndexError
-                  if options.verbose
-                    log(options, out_io, "    [req] IndexError in require scan expr=#{expr_id.index}: #{ex.message}")
-                  end
-                end
-                expr_i += 1
-              end
+              scan_requires_from_exprs(arena, exprs, source, base_dir, input_base_dir, options, out_io, requires)
+              parse_required_files(requires, 0, results, loaded, input_file, input_base_dir, options, out_io)
               needs_source_fallback = source_requires_fallback?(source, requires, loaded)
               if needs_source_fallback
                 if options.verbose && !requires.empty?
@@ -3325,6 +3317,7 @@ module CrystalV2
                 end
                 fallback_resolved = 0
                 fallback_unresolved = 0
+                fallback_start = requires.size
                 fallback_requires.each do |req_path|
                   resolved = resolve_require_path(req_path, base_dir, input_base_dir)
                   if resolved
@@ -3332,19 +3325,16 @@ module CrystalV2
                     when String
                       fallback_resolved += 1
                       requires << resolved
-                      parse_file_recursive(resolved, results, loaded, input_file, input_base_dir, options, out_io)
                     when Array
                       fallback_resolved += resolved.size
                       resolved.each do |file|
                         requires << file
-                        parse_file_recursive(file, results, loaded, input_file, input_base_dir, options, out_io)
                       end
                     end
                   elsif req_path.includes?('*')
                     Dir.glob(path_join(base_dir, req_path)).sort.each do |file|
                       fallback_resolved += 1
                       requires << file
-                      parse_file_recursive(file, results, loaded, input_file, input_base_dir, options, out_io)
                     end
                   else
                     fallback_unresolved += 1
@@ -3353,6 +3343,7 @@ module CrystalV2
                     end
                   end
                 end
+                parse_required_files(requires, fallback_start, results, loaded, input_file, input_base_dir, options, out_io)
                 if options.verbose
                   log(options, out_io, "  Source fallback resolved=#{fallback_resolved} unresolved=#{fallback_unresolved}")
                 end
@@ -3385,7 +3376,7 @@ module CrystalV2
           if @parse_trace
             bootstrap_trace_puts "[PARSE_OK] #{abs_path}"
           end
-          res
+          res.dup
         rescue ex : IndexError
           if env_enabled?("CRYSTAL_V2_PARSER_INDEX_TRACE") || env_enabled?("CRYSTAL2_PARSER_INDEX_TRACE")
             bt = ex.backtrace?.try(&.first(30).join("\n")) || "(no backtrace)"
@@ -3429,21 +3420,11 @@ module CrystalV2
         # Process requires first
         base_dir = safe_dirname(abs_path)
         requires = [] of String
-        # V2 stage2: Array(ExprId)#each yields ExprId pointers that may be corrupted
-        # (8-byte GEP stride reads past actual element boundaries). Use index-based
-        # access with unsafe_fetch to work around the iteration bug.
-        i = 0
-        while i < expr_count
-          expr_id = exprs.unsafe_fetch(i)
-          begin
-            process_require_node(arena, expr_id, source, base_dir, input_file, input_base_dir, results, loaded, options, out_io, requires)
-          rescue ex : IndexError
-            if options.verbose
-              log(options, out_io, "    [req] IndexError in require scan expr=#{expr_id.index}: #{ex.message}")
-            end
-          end
-          i += 1
-        end
+        # V2 stage2: require scanning is isolated into its own helper to shrink
+        # the live recursive frame in parse_file_recursive before self-hosted
+        # bootstraps walk large prelude graphs.
+        scan_requires_from_exprs(arena, exprs, source, base_dir, input_base_dir, options, out_io, requires)
+        parse_required_files(requires, 0, results, loaded, input_file, input_base_dir, options, out_io)
         if @parse_trace
           bootstrap_trace_puts "[REQSCAN_DONE] #{abs_path} reqs=#{requires.size}"
         end
@@ -3468,6 +3449,7 @@ module CrystalV2
           end
           fallback_resolved = 0
           fallback_unresolved = 0
+          fallback_start = requires.size
           fallback_requires.each do |req_path|
             resolved = resolve_require_path(req_path, base_dir, input_base_dir)
             if resolved
@@ -3475,19 +3457,16 @@ module CrystalV2
               when String
                 fallback_resolved += 1
                 requires << resolved
-                parse_file_recursive(resolved, results, loaded, input_file, input_base_dir, options, out_io)
               when Array
                 fallback_resolved += resolved.size
                 resolved.each do |file|
                   requires << file
-                  parse_file_recursive(file, results, loaded, input_file, input_base_dir, options, out_io)
                 end
               end
             elsif req_path.includes?('*')
               Dir.glob(path_join(base_dir, req_path)).sort.each do |file|
                 fallback_resolved += 1
                 requires << file
-                parse_file_recursive(file, results, loaded, input_file, input_base_dir, options, out_io)
               end
             else
               fallback_unresolved += 1
@@ -3496,6 +3475,7 @@ module CrystalV2
               end
             end
           end
+          parse_required_files(requires, fallback_start, results, loaded, input_file, input_base_dir, options, out_io)
           if options.verbose
             log(options, out_io, "  Source fallback resolved=#{fallback_resolved} unresolved=#{fallback_unresolved}")
           end
@@ -3566,13 +3546,10 @@ module CrystalV2
         expr_id : Frontend::ExprId,
         source : String,
         base_dir : String,
-        input_file : String,
         input_base_dir : String,
-        results : Array(ParsedUnit),
-        loaded : Set(String),
         options : Options,
         out_io : IO,
-        requires_out : Array(String)? = nil
+        requires_out : Array(String)
       )
         if expr_id.index < 0 || expr_id.index >= arena.size
           if options.verbose
@@ -3600,7 +3577,7 @@ module CrystalV2
             body_i = 0
             while body_i < body.size
               child_id = body.unsafe_fetch(body_i)
-              process_require_node(arena, child_id, source, base_dir, input_file, input_base_dir, results, loaded, options, out_io, requires_out)
+              process_require_node(arena, child_id, source, base_dir, input_base_dir, options, out_io, requires_out)
               body_i += 1
             end
           end
@@ -3631,8 +3608,7 @@ module CrystalV2
               if options.verbose
                 log(options, out_io, "    [req-resolved] #{resolved}")
               end
-              requires_out << resolved if requires_out
-              parse_file_recursive(resolved, results, loaded, input_file, input_base_dir, options, out_io)
+              requires_out << resolved
             when Array
               if options.verbose
                 log(options, out_io, "    [req-resolved] array count=#{resolved.size}")
@@ -3641,8 +3617,7 @@ module CrystalV2
                 if options.verbose
                   log(options, out_io, "      [req-resolved-item] #{file}")
                 end
-                requires_out << file if requires_out
-                parse_file_recursive(file, results, loaded, input_file, input_base_dir, options, out_io)
+                requires_out << file
               end
             else
               log(options, out_io, "  Warning: Could not resolve require '#{req_path}'")
@@ -3653,15 +3628,15 @@ module CrystalV2
           # Fall back to both branches if the condition is unknown.
           condition = evaluate_macro_condition(arena, node.condition, Runtime.target_flags)
           if condition == true
-            process_require_node(arena, node.then_body, source, base_dir, input_file, input_base_dir, results, loaded, options, out_io, requires_out)
+            process_require_node(arena, node.then_body, source, base_dir, input_base_dir, options, out_io, requires_out)
           elsif condition == false
             if else_body = node.else_body
-              process_require_node(arena, else_body, source, base_dir, input_file, input_base_dir, results, loaded, options, out_io, requires_out)
+              process_require_node(arena, else_body, source, base_dir, input_base_dir, options, out_io, requires_out)
             end
           else
-            process_require_node(arena, node.then_body, source, base_dir, input_file, input_base_dir, results, loaded, options, out_io, requires_out)
+            process_require_node(arena, node.then_body, source, base_dir, input_base_dir, options, out_io, requires_out)
             if else_body = node.else_body
-              process_require_node(arena, else_body, source, base_dir, input_file, input_base_dir, results, loaded, options, out_io, requires_out)
+              process_require_node(arena, else_body, source, base_dir, input_base_dir, options, out_io, requires_out)
             end
           end
         when Frontend::MacroLiteralNode
@@ -3677,16 +3652,56 @@ module CrystalV2
               resolved = resolve_require_path(req_path, base_dir, input_base_dir)
               case resolved
               when String
-                requires_out << resolved if requires_out
-                parse_file_recursive(resolved, results, loaded, input_file, input_base_dir, options, out_io)
+                requires_out << resolved
               when Array
                 resolved.each do |file|
-                  requires_out << file if requires_out
-                  parse_file_recursive(file, results, loaded, input_file, input_base_dir, options, out_io)
+                  requires_out << file
                 end
               end
             end
           end
+        end
+      end
+
+      private def scan_requires_from_exprs(
+        arena : Frontend::AstArena,
+        exprs : Array(Frontend::ExprId),
+        source : String,
+        base_dir : String,
+        input_base_dir : String,
+        options : Options,
+        out_io : IO,
+        requires_out : Array(String)
+      ) : Nil
+        expr_i = 0
+        expr_count = exprs.size
+        while expr_i < expr_count
+          expr_id = exprs.unsafe_fetch(expr_i)
+          begin
+            process_require_node(arena, expr_id, source, base_dir, input_base_dir, options, out_io, requires_out)
+          rescue ex : IndexError
+            if options.verbose
+              log(options, out_io, "    [req] IndexError in require scan expr=#{expr_id.index}: #{ex.message}")
+            end
+          end
+          expr_i += 1
+        end
+      end
+
+      private def parse_required_files(
+        requires : Array(String),
+        start_index : Int32,
+        results : Array(ParsedUnit),
+        loaded : Set(String),
+        input_file : String,
+        input_base_dir : String,
+        options : Options,
+        out_io : IO
+      ) : Nil
+        req_i = start_index
+        while req_i < requires.size
+          parse_file_recursive(requires.unsafe_fetch(req_i), results, loaded, input_file, input_base_dir, options, out_io)
+          req_i += 1
         end
       end
 

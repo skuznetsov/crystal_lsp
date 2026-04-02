@@ -6686,6 +6686,22 @@ CRYSTAL_V2_STOP_AFTER_MIR=1 /tmp/crystal_v2_s2 /tmp/test.cr -o /tmp/out --no-pre
 6. Retry `stage3 --release` after the abstract-char / `enum.cr` parse frontier is fixed or reduced further.
 7. When stage3 goes green, record the exact stage1 vs stage2 release compile-time delta for `src/crystal_v2.cr`.
 
+### Checkpoint 2026-04-02
+
+- Verified compiler-only hardening in `src/compiler/cli.cr`: duplicate parser root arrays immediately (`cached.roots.dup`, `parse_program_roots.dup`) and defer recursive require loading until after the current root scan completes.
+- Fresh `host -> stage1 -> stage2` is green on the checkpoint artifacts:
+  - `/tmp/stage1_cli_exprdup_final`
+  - `/tmp/stage2_cli_exprdup_final`
+  - `/tmp/stage2_cli_exprdup_final_build.log`
+- Fresh `stage2` on both `/tmp/stage_hello.cr` and `src/stdlib/prelude.cr --no-prelude` no longer dies in the old early `Array(ExprId)#unsafe_fetch` family; both now reach `[RUNPROBE] 6b` and exit with `error: End of file reached`:
+  - `/tmp/stage2_cli_exprdup_final_hello.log`
+  - `/tmp/stage2_cli_exprdup_final_prelude.log`
+- Adversary split falsified the narrower `dup-only` branch: removing the deferred require-loading seam regressed the same fresh ladder to `SIGSEGV` in `CLI#parse_file_recursive` on both carriers:
+  - `/tmp/stage2_cli_exprdup_minimal_hello.log`
+  - `/tmp/stage2_cli_exprdup_minimal_prelude.log`
+  - `/tmp/stage2_cli_exprdup_minimal_hello_lldb.txt`
+- Independent parse/HIR split on the earlier full branch (`/tmp/stage2_exprdup`) shows `CRYSTAL_V2_STOP_AFTER_PARSE=1` green and `CRYSTAL_V2_STOP_AFTER_HIR=1` red, so the next root-cause corridor is `entry.roots` consumption during HIR/top-level setup, not parser-only require scanning.
+
 ## ROOT CAUSES FOUND
 
 ### 1. Union tag stripping (CRITICAL, partially fixed)
