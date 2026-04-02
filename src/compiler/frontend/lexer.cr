@@ -16,7 +16,8 @@ module CrystalV2
         @whitespace_before : Bool       # Track if whitespace preceded current token (for regex disambiguation)
         @macro_expr_depth : Int32       # Track nesting of {{ ... }} macro expressions
         @macro_body_depth : Int32       # Track whether strings may contain macro {{...}} interpolation
-        @block_stack : Array(Token::Kind)
+        @block_stack : Array(Int32)     # Token::Kind values; keep bootstrap-safe stack ops off enum Array#pop?
+        @block_stack_depth : Int32
         @string_pool : StringPool       # String interning for memory optimization
         getter string_pool : StringPool # Week 1 Day 2: expose for parser generic type interning
         @source : String
@@ -41,7 +42,8 @@ module CrystalV2
           @whitespace_before = false       # Track if whitespace preceded current token
           @macro_expr_depth = 0
           @macro_body_depth = 0
-          @block_stack = [] of Token::Kind
+          @block_stack = [] of Int32
+          @block_stack_depth = 0
           @string_pool = StringPool.new # String interning for memory optimization
           @diagnostics = diagnostics
         end
@@ -279,12 +281,12 @@ module CrystalV2
           case token.kind
           when Token::Kind::End
             return unless token_at_statement_start
-            opener = @block_stack.pop?
+            opener = pop_block_kind?
             if opener == Token::Kind::Macro && @macro_body_depth > 0
               @macro_body_depth -= 1
             end
           when Token::Kind::Do, Token::Kind::Begin
-            @block_stack << token.kind
+            push_block_kind(token.kind)
           when Token::Kind::Def,
                Token::Kind::Class,
                Token::Kind::Module,
@@ -300,9 +302,24 @@ module CrystalV2
                Token::Kind::Macro,
                Token::Kind::Fun
             return unless token_at_statement_start
-            @block_stack << token.kind
+            push_block_kind(token.kind)
             @macro_body_depth += 1 if token.kind == Token::Kind::Macro
           end
+        end
+
+        private def push_block_kind(kind : Token::Kind) : Nil
+          if @block_stack_depth < @block_stack.size
+            @block_stack.to_unsafe[@block_stack_depth] = kind.value
+          else
+            @block_stack << kind.value
+          end
+          @block_stack_depth += 1
+        end
+
+        private def pop_block_kind? : Token::Kind?
+          return nil if @block_stack_depth <= 0
+          @block_stack_depth -= 1
+          Token::Kind.new(@block_stack.to_unsafe[@block_stack_depth])
         end
 
         private def eof_token
