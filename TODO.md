@@ -1,6 +1,38 @@
 # Crystal V2 Bootstrap — TODO (Updated 2026-04-02)
 
 ## Current Status
+- **Fresh stage2 parser macro-control checkpoint: self-hosted `stage2` no longer leaks `protected def` members from `src/stdlib/file.cr` to the top level after a `{% begin %}`-wrapped method header with nested macro controls; the live head has moved past parser root collection to later runtime stubs (`LibMachVM.mach_task_self` / later prelude crash), proving this was a real parser-root corridor and not just accumulated stage slowdown (2026-04-02, current session)**:
+  - trustworthy setup:
+    - `src/compiler/frontend/parser.cr` now stops re-classifying macro push/pop depth from `MacroPiece#control_keyword` strings inside `parse_macro_body(...)`; it uses the already-verified `effect` returned by `parse_macro_control_piece(...)` instead
+    - the same parser path now collects `MacroPiece` values through `MacroPieceBuffer` in `src/compiler/frontend/small_vec.cr`, matching the repo's existing self-hosted parser discipline for growable value arrays
+    - focused grammar coverage in `spec/parser/parser_macro_syntax_spec.cr` now locks the intended host parse shape for a class containing:
+      - outer `{% begin %} ... {% end %}`
+      - an inner `{% if compare_versions(...) %} ... {% end %}` inside a `def` header
+      - a following `protected def`
+  - decisive evidence:
+    - host parser coverage is green:
+      - `../crystal/bin/crystal spec spec/parser/parser_macro_syntax_spec.cr --error-trace`
+    - host compiler gates are green:
+      - `../crystal/bin/crystal build src/crystal_v2.cr --no-codegen --error-trace`
+      - `../crystal/bin/crystal build src/crystal_v2.cr -o /tmp/stage1_macro_effect_fix --error-trace`
+    - fresh self-hosted `stage2` rebuild from that stage1 is green:
+      - `scripts/run_safe.sh /tmp/stage1_macro_effect_fix 900 12288 src/crystal_v2.cr -o /tmp/stage2_macro_effect_fix > /tmp/stage2_macro_effect_fix_build.log 2>&1`
+      - result: `[EXIT: 0] after ~215s`
+    - exact self-hosted falsifier is green again:
+      - `env CRYSTAL_V2_STOP_AFTER_PARSE=1 CRYSTAL_V2_TRACE_ROOT_LOOP=1 scripts/run_safe.sh /tmp/stage2_macro_effect_fix 60 4096 /tmp/stage2_root_reducer_c.cr --no-prelude -o /tmp/stage2_root_reducer_c_effect_fix.out > /tmp/stage2_root_reducer_c_effect_fix.log 2>&1`
+      - before the fix, the same reducer produced two top-level roots (`class` + leaked `protected def`)
+      - after the fix, the trace collapses back to a single top-level `class`
+    - the real `file.cr` sentinel also moved the right way:
+      - `env CRYSTAL_V2_STOP_AFTER_PARSE=1 CRYSTAL_V2_TRACE_ROOT_LOOP=1 scripts/run_safe.sh /tmp/stage2_macro_effect_fix 120 8192 src/stdlib/file.cr --no-prelude -o /tmp/stage2_file_effect_fix.out > /tmp/stage2_file_effect_fix.log 2>&1`
+      - the old bogus `ROOT_LOOP` family at `start token=62 index=688` / `expr=119` / `expr=279` / `expr=311` is absent
+    - adversary live heads after the parser fix are later and different:
+      - `scripts/run_safe.sh /tmp/stage2_macro_effect_fix 120 8192 src/stdlib/file.cr --no-prelude -o /tmp/stage2_file_effect_fix_full.out > /tmp/stage2_file_effect_fix_full.log 2>&1`
+        -> `STUB CALLED: LibMachVM$Dmach_task_self`
+      - `scripts/run_safe.sh /tmp/stage2_macro_effect_fix 120 8192 src/stdlib/prelude.cr --no-prelude -o /tmp/stage2_prelude_effect_fix_full.out > /tmp/stage2_prelude_effect_fix_full.log 2>&1`
+        -> later `Bus error: 10`, no longer the old parser-root drift
+  - practical boundary:
+    - this closes one real self-hosted parser/root-collection corridor in `stage2`
+    - it does not make self-hosted `stage2` user compilation green; the next honest frontier is later runtime/compiler stub behavior, not parser root-loop corruption in `file.cr`
 - **Fresh stage2 parser `typeof(...)` stabilization checkpoint: the earliest trustworthy self-hosted `stage2` parser crash is no longer in `parse_generic_type_argument_expr -> StringPool#intern`; exact no-prelude carriers now get past parsing and stop later in runtime/compiler stubs (2026-04-02, current session)**:
   - trustworthy setup:
     - `src/compiler/frontend/parser.cr` now stops materializing `typeof(...)` type text through `previous_token` plus raw pointer arithmetic in both generic type-arg parsing and annotation parsing

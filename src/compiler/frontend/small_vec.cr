@@ -165,6 +165,53 @@ module CrystalV2
           end
         end
       end
+
+      # MacroPiece carries several nested optional/value fields and remains
+      # fragile in growable self-hosted parser buffers. Box during collection
+      # and materialize the final Array(MacroPiece) only once.
+      private class MacroPieceBox
+        getter value : MacroPiece
+
+        def initialize(@value : MacroPiece)
+        end
+      end
+
+      struct MacroPieceBuffer
+        @items : Array(MacroPieceBox)
+
+        def initialize(capacity : Int32 = 0)
+          @items = Array(MacroPieceBox).new(capacity)
+        end
+
+        def size : Int32
+          @items.size
+        end
+
+        def empty? : Bool
+          @items.empty?
+        end
+
+        def push(value : MacroPiece)
+          @items << MacroPieceBox.new(value)
+        end
+
+        def <<(value : MacroPiece)
+          push(value)
+          self
+        end
+
+        def each(& : MacroPiece ->)
+          @items.each do |item|
+            yield item.value
+          end
+        end
+
+        def to_a : Array(MacroPiece)
+          Array(MacroPiece).new(@items.size) do |i|
+            @items.unsafe_fetch(i).value
+          end
+        end
+      end
     end
   end
 end

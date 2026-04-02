@@ -8526,22 +8526,46 @@ module CrystalV2
             previous_token.span.start_column == 1
         end
 
+        # Keep macro-body nesting state on a tiny dedicated heap object instead
+        # of generic Array(Int32) boxes. The latter still drifts under self-hosted
+        # stage2 in nested macro-control + def-header corridors.
+        private class MacroDepthState
+          getter control_depth : Int32
+          getter block_depth : Int32
+
+          def initialize
+            @control_depth = 0
+            @block_depth = 0
+          end
+
+          def push_control : Nil
+            @control_depth += 1
+          end
+
+          def pop_control : Nil
+            @control_depth -= 1 if @control_depth > 0
+          end
+
+          def push_block : Nil
+            @block_depth += 1
+          end
+
+          def pop_block : Nil
+            @block_depth -= 1 if @block_depth > 0
+          end
+        end
+
         private def parse_macro_body(stop_on_branch : Bool = false) : Array(MacroPiece)
           @macro_mode += 1
           begin
-            # Self-hosted release stage2 remains sensitive to early Array(MacroPiece)
-            # growth in macro-heavy parser paths. Starting with a wider capacity
-            # avoids the observed require/gc/boehm parse frontier without changing
-            # MacroPiece representation.
-            pieces = Array(MacroPiece).new(128)
+            # Self-hosted release builds are still sensitive to growable
+            # MacroPiece value arrays in macro-heavy parser paths. Box during
+            # collection and materialize the final Array(MacroPiece) once.
+            pieces = MacroPieceBuffer.new(128)
             buffer = IO::Memory.new
             buffer_start_span : Span? = nil
             buffer_end_span : Span? = nil
-            # Self-hosted release stage2 has shown local Int32 depth counters
-            # getting clobbered across ordinary text-token iterations in this
-            # macro loop. Keep them in heap-backed boxes so nesting survives.
-            control_depth = [0] of Int32
-            block_depth = [0] of Int32
+            depth_state = MacroDepthState.new
             trim_next_left = false
             trim_final = false
             trim_gap = false
@@ -8561,7 +8585,7 @@ module CrystalV2
               if debug_macro_for && debug_macro_for_steps < 32
                 macro_start = macro_control_start?
                 keyword = macro_start ? peek_macro_control_keyword : nil
-                STDERR.puts "[MACRO_BODY_STEP] step=#{debug_macro_for_steps} line=#{token.span.start_line + 1} token=#{token.kind}:#{token_text(token).inspect} peek=#{peek_token.kind}:#{token_text(peek_token).inspect} macro=#{macro_start ? 1 : 0} keyword=#{keyword.inspect} stop=#{stop_on_branch ? 1 : 0} control_depth=#{control_depth[0]} block_depth=#{block_depth[0]}"
+                STDERR.puts "[MACRO_BODY_STEP] step=#{debug_macro_for_steps} line=#{token.span.start_line + 1} token=#{token.kind}:#{token_text(token).inspect} peek=#{peek_token.kind}:#{token_text(peek_token).inspect} macro=#{macro_start ? 1 : 0} keyword=#{keyword.inspect} stop=#{stop_on_branch ? 1 : 0} control_depth=#{depth_state.control_depth} block_depth=#{depth_state.block_depth}"
               end
               debug_macro_for_steps += 1
 
@@ -8664,10 +8688,10 @@ module CrystalV2
               if macro_control_start?
                 keyword = peek_macro_control_keyword
                 if ENV["DEBUG_MACRO_BODY"]?
-                  STDERR.puts "[MACRO_BODY] line=#{token.span.start_line + 1} token=#{token.kind}:#{token_text(token).inspect} peek=#{peek_token.kind}:#{token_text(peek_token).inspect} keyword=#{keyword.inspect} stop=#{stop_on_branch ? 1 : 0} control_depth=#{control_depth[0]} block_depth=#{block_depth[0]}"
+                  STDERR.puts "[MACRO_BODY] line=#{token.span.start_line + 1} token=#{token.kind}:#{token_text(token).inspect} peek=#{peek_token.kind}:#{token_text(peek_token).inspect} keyword=#{keyword.inspect} stop=#{stop_on_branch ? 1 : 0} control_depth=#{depth_state.control_depth} block_depth=#{depth_state.block_depth}"
                 end
                 if stop_on_branch && keyword
-                  if control_depth[0] == 0 && block_depth[0] == 0 &&
+                  if depth_state.control_depth == 0 && depth_state.block_depth == 0 &&
                      keyword.in?(:elsif, :else, :end)
                     break
                   end
@@ -8715,16 +8739,16 @@ module CrystalV2
                   next
                 end
 
-                if macro_control_keyword_pushes_control_depth?(piece.control_keyword)
-                  control_depth[0] += 1
-                elsif macro_control_keyword_pops_control_depth?(piece.control_keyword)
-                  if !stop_on_branch && control_depth[0] == 0
+                if effect == MACRO_EFFECT_PUSH
+                  depth_state.push_control
+                elsif effect == MACRO_EFFECT_POP
+                  if !stop_on_branch && depth_state.control_depth == 0
                     break
                   end
-                  control_depth[0] -= 1 if control_depth[0] > 0
+                  depth_state.pop_control
                 end
                 if ENV["DEBUG_MACRO_BODY"]?
-                  STDERR.puts "[MACRO_BODY_DEPTH] keyword=#{piece.control_keyword.inspect} control_depth=#{control_depth[0]} block_depth=#{block_depth[0]}"
+                  STDERR.puts "[MACRO_BODY_DEPTH] keyword=#{piece.control_keyword.inspect} control_depth=#{depth_state.control_depth} block_depth=#{depth_state.block_depth}"
                 end
 
                 trim_next_left = skip_whitespace
@@ -8775,10 +8799,10 @@ module CrystalV2
               when Token::Kind::Begin, Token::Kind::Do
                 # begin/do always introduce a block that must be closed with end,
                 # even when used as expressions (e.g., x = begin ... end, foo do ... end).
-                block_depth[0] += 1
+                depth_state.push_block
               when Token::Kind::Fun
                 if starts_statement && macro_fun_starts_block?(@index)
-                  block_depth[0] += 1
+                  depth_state.push_block
                 end
               when Token::Kind::Def, Token::Kind::Class, Token::Kind::Module,
                    Token::Kind::Struct, Token::Kind::Enum,
@@ -8787,14 +8811,14 @@ module CrystalV2
                    Token::Kind::Lib, Token::Kind::Macro
                 # Abstract defs have no body/end; don't advance block depth for them.
                 if !abstract_def && starts_statement
-                  block_depth[0] += 1
+                  depth_state.push_block
                 end
               when Token::Kind::End
-                if !stop_on_branch && control_depth[0] == 0 && block_depth[0] == 0 && starts_statement
+                if !stop_on_branch && depth_state.control_depth == 0 && depth_state.block_depth == 0 && starts_statement
                   # Do not consume macro-def 'end'; leave it for caller
                   break
                 else
-                  block_depth[0] -= 1 if block_depth[0] > 0
+                  depth_state.pop_block
                 end
               end
 
@@ -8809,7 +8833,7 @@ module CrystalV2
             end
 
             flush_macro_text(buffer, pieces, trim_final, buffer_start_span, buffer_end_span)
-            pieces
+            pieces.to_a
           ensure
             @macro_mode -= 1
           end

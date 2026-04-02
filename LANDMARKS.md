@@ -3,6 +3,67 @@
 Updated: 2026-04-02
 Context: compiler/bootstrap/stage2-stability
 
+[LM-444|verified]: After [LM-443], the next exact self-hosted parser/root-loop
+frontier in `stage2` was no longer the earlier `typeof(...)` transport bug, but
+a nested macro-control drift inside `src/stdlib/file.cr`. The decisive
+contradiction ledger matters here. First, the old byte-offset reading of
+`ROOT_LOOP index=3121/3124/...` was refuted: token indexes are not source byte
+offsets. A host lexer window showed the real earliest leaked top-level member
+was much earlier, at `token 688 = protected def self.new_internal` around
+`src/stdlib/file.cr:174`, immediately after the first outer `{% begin %} ...
+{% end %}` wrapper. Second, the issue was reduced to an exact self-hosted
+carrier:
+
+```
+class File
+  {% begin %}
+    def self.new(filename : String, mode = "r", {% if compare_versions(Crystal::VERSION, "1.5.0") >= 0 %} @[Deprecated] {% end %} blocking = nil)
+      filename
+    end
+  {% end %}
+
+  protected def self.new_internal(filename, mode = "r", blocking = nil)
+    filename
+  end
+end
+```
+
+Host parser on that source produced one root, but self-hosted
+`/tmp/stage2_head_cli_trace` produced two (`class` plus leaked `protected
+def`). The strongest falsifier then came from `DEBUG_MACRO_BODY`: inside
+`parse_macro_body_until_branch(true)`, the inner `{% if ... %}` in the method
+header was already being parsed by `parse_macro_control_piece(...)` as
+`effect=push`, but `parse_macro_body(...)` immediately re-classified push/pop
+depth from `piece.control_keyword` string comparisons, and under self-hosted
+stage2 that duplicated string-based classification silently failed. The inner
+`{% end %}` therefore appeared at `control_depth=0`, so the outer `{% begin %}`
+body stopped on the wrong macro terminator and the enclosing `class File` ended
+early. The verified fix is narrow and source-level principled: keep
+`MacroPiece` collection boxed in `MacroPieceBuffer`, but more importantly trust
+the already-proven `effect` returned by `parse_macro_control_piece(...)` for
+depth bookkeeping instead of re-deriving push/pop from
+`MacroPiece#control_keyword`. Verification chain:
+- `../crystal/bin/crystal spec spec/parser/parser_macro_syntax_spec.cr --error-trace`
+- `../crystal/bin/crystal build src/crystal_v2.cr --no-codegen --error-trace`
+- `../crystal/bin/crystal build src/crystal_v2.cr -o /tmp/stage1_macro_effect_fix --error-trace`
+- `scripts/run_safe.sh /tmp/stage1_macro_effect_fix 900 12288 src/crystal_v2.cr -o /tmp/stage2_macro_effect_fix`
+- exact reducer under self-hosted stage2:
+  `env CRYSTAL_V2_STOP_AFTER_PARSE=1 CRYSTAL_V2_TRACE_ROOT_LOOP=1 scripts/run_safe.sh /tmp/stage2_macro_effect_fix 60 4096 /tmp/stage2_root_reducer_c.cr --no-prelude ...`
+  now collapses back to one root
+- real sentinel:
+  `env CRYSTAL_V2_STOP_AFTER_PARSE=1 CRYSTAL_V2_TRACE_ROOT_LOOP=1 scripts/run_safe.sh /tmp/stage2_macro_effect_fix 120 8192 src/stdlib/file.cr --no-prelude ...`
+  no longer shows the old `start token=62 index=688` / `expr=119` / `expr=279`
+  / `expr=311` family
+- adversary after the fix:
+  `src/stdlib/file.cr --no-prelude` now moves to `LibMachVM.mach_task_self`,
+  and `src/stdlib/prelude.cr --no-prelude` moves to a later bus error, so the
+  parser/root-loop leak is no longer the live earliest head.
+Reusable lesson: when a self-hosted parser branch looks like “premature class
+end”, distrust source-offset guesses from token indexes, reduce first to a
+macro-wrapped header carrier, and prefer already-computed enum/effect channels
+over re-classifying hot-loop state through Strings. {F/G/R: 0.99/0.83/0.99}
+[verified]
+
 [LM-443|verified]: After [LM-442], the earliest trustworthy self-hosted
 `stage2` red on current `HEAD` was no longer a vague “later stage slowdown” but
 an exact parser/string transport failure in generic type arguments. The

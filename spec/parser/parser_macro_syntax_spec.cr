@@ -69,5 +69,43 @@ describe "CrystalV2::Compiler::Frontend::Parser" do
       text.should contain("require")
       text.should contain("./unix/file_descriptor")
     end
+
+    it "keeps class body members after a macro begin block with nested header controls" do
+      source = <<-CRYSTAL
+      class File
+        {% begin %}
+          def self.new(filename : String, mode = "r", {% if compare_versions(Crystal::VERSION, "1.5.0") >= 0 %} @[Deprecated] {% end %} blocking = nil)
+            filename
+          end
+        {% end %}
+
+        protected def self.new_internal(filename, mode = "r", blocking = nil)
+          filename
+        end
+
+        getter path : String
+      end
+      CRYSTAL
+
+      parser = CrystalV2::Compiler::Frontend::Parser.new(CrystalV2::Compiler::Frontend::Lexer.new(source))
+      program = parser.parse_program
+
+      parser.diagnostics.should be_empty
+      program.roots.size.should eq(1)
+
+      arena = program.arena
+      class_node = arena[program.roots.first].as(CrystalV2::Compiler::Frontend::ClassNode)
+      class_body = class_node.body.not_nil!
+
+      class_body.size.should eq(3)
+
+      macro_if = arena[class_body[0]]
+      CrystalV2::Compiler::Frontend.node_kind(macro_if).should eq(CrystalV2::Compiler::Frontend::NodeKind::MacroIf)
+
+      protected_def = arena[class_body[1]]
+      CrystalV2::Compiler::Frontend.node_kind(protected_def).should eq(CrystalV2::Compiler::Frontend::NodeKind::Def)
+      String.new(CrystalV2::Compiler::Frontend.node_def_name(protected_def).not_nil!).should eq("new_internal")
+      CrystalV2::Compiler::Frontend.node_def_visibility(protected_def).should eq(CrystalV2::Compiler::Frontend::Visibility::Protected)
+    end
   end
 end
