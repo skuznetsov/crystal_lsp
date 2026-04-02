@@ -6276,24 +6276,6 @@ module CrystalV2
         counts
       end
 
-      private def ensure_shadow_unit_metric_size!(
-        counts : Array(Int32),
-        expected_size : Int32,
-        label : String
-      ) : Nil
-        return if counts.size == expected_size
-
-        raise "semantic shadow internal error: #{label} size=#{counts.size} expected=#{expected_size}"
-      end
-
-      private def shadow_unit_metric!(
-        counts : Array(Int32),
-        unit_index : Int32,
-        label : String
-      ) : Int32
-        counts[unit_index]? || raise "semantic shadow internal error: missing #{label} for unit_index=#{unit_index} size=#{counts.size}"
-      end
-
       private def build_shadow_collector_declaration_inventory(
         aggregate : Semantic::CompileShadowAggregate
       ) : Semantic::CompileShadowDeclarationInventory
@@ -6708,41 +6690,38 @@ module CrystalV2
             raise strict_message
           end
         end
-        expected_unit_count = aggregate.unit_summaries.size
-        ensure_shadow_unit_metric_size!(symbols_by_unit, expected_unit_count, "symbols_by_unit")
-        ensure_shadow_unit_metric_size!(generated_symbols_by_unit, expected_unit_count, "generated_symbols_by_unit")
-        ensure_shadow_unit_metric_size!(identifiers_by_unit, expected_unit_count, "identifiers_by_unit")
-        ensure_shadow_unit_metric_size!(compile_parse_diagnostics_by_unit, expected_unit_count, "compile_parse_diagnostics_by_unit")
-        ensure_shadow_unit_metric_size!(shadow_parse_diagnostics_by_unit, expected_unit_count, "shadow_parse_diagnostics_by_unit")
-        ensure_shadow_unit_metric_size!(semantic_diagnostics_by_unit, expected_unit_count, "semantic_diagnostics_by_unit")
-        ensure_shadow_unit_metric_size!(generated_semantic_diagnostics_by_unit, expected_unit_count, "generated_semantic_diagnostics_by_unit")
-        ensure_shadow_unit_metric_size!(resolution_diagnostics_by_unit, expected_unit_count, "resolution_diagnostics_by_unit")
-        ensure_shadow_unit_metric_size!(generated_resolution_diagnostics_by_unit, expected_unit_count, "generated_resolution_diagnostics_by_unit")
-        ensure_shadow_unit_metric_size!(type_diagnostics_by_unit, expected_unit_count, "type_diagnostics_by_unit")
-        ensure_shadow_unit_metric_size!(generated_type_diagnostics_by_unit, expected_unit_count, "generated_type_diagnostics_by_unit")
-        unit_summaries = [] of SemanticShadowUnitSummary
-        aggregate.unit_summaries.each_with_index do |unit_summary, unit_index|
-          unit_index_i = unit_index.to_i32
-          generated_root_count = aggregate.generated_root_count_for_unit(unit_index_i)
-          unit_summaries << SemanticShadowUnitSummary.new(
+        unit_summaries = aggregate.summary_unit_metrics(
+          symbols_by_unit,
+          generated_symbols_by_unit,
+          identifiers_by_unit,
+          compile_parse_diagnostics_by_unit,
+          shadow_parse_diagnostics_by_unit,
+          semantic_diagnostics_by_unit,
+          generated_semantic_diagnostics_by_unit,
+          resolution_diagnostics_by_unit,
+          generated_resolution_diagnostics_by_unit,
+          type_diagnostics_by_unit,
+          generated_type_diagnostics_by_unit,
+        ).map do |unit_summary|
+          SemanticShadowUnitSummary.new(
             path: unit_summary.path,
-            roots_count: unit_summary.roots.size,
-            analysis_root_count: unit_summary.roots.size + generated_root_count,
-            generated_root_count: generated_root_count,
+            roots_count: unit_summary.roots_count,
+            analysis_root_count: unit_summary.analysis_root_count,
+            generated_root_count: unit_summary.generated_root_count,
             node_count: unit_summary.node_count,
-            owned_node_count: aggregate.owned_node_count_for_unit(unit_index_i),
-            generated_node_count: aggregate.generated_node_count_for_unit(unit_index_i),
-            symbol_count: shadow_unit_metric!(symbols_by_unit, unit_index_i, "symbols_by_unit"),
-            generated_symbol_count: shadow_unit_metric!(generated_symbols_by_unit, unit_index_i, "generated_symbols_by_unit"),
-            identifier_count: shadow_unit_metric!(identifiers_by_unit, unit_index_i, "identifiers_by_unit"),
-            compile_parse_diagnostic_count: shadow_unit_metric!(compile_parse_diagnostics_by_unit, unit_index_i, "compile_parse_diagnostics_by_unit"),
-            shadow_parse_diagnostic_count: shadow_unit_metric!(shadow_parse_diagnostics_by_unit, unit_index_i, "shadow_parse_diagnostics_by_unit"),
-            semantic_diagnostic_count: shadow_unit_metric!(semantic_diagnostics_by_unit, unit_index_i, "semantic_diagnostics_by_unit"),
-            generated_semantic_diagnostic_count: shadow_unit_metric!(generated_semantic_diagnostics_by_unit, unit_index_i, "generated_semantic_diagnostics_by_unit"),
-            resolution_diagnostic_count: shadow_unit_metric!(resolution_diagnostics_by_unit, unit_index_i, "resolution_diagnostics_by_unit"),
-            generated_resolution_diagnostic_count: shadow_unit_metric!(generated_resolution_diagnostics_by_unit, unit_index_i, "generated_resolution_diagnostics_by_unit"),
-            type_diagnostic_count: shadow_unit_metric!(type_diagnostics_by_unit, unit_index_i, "type_diagnostics_by_unit"),
-            generated_type_diagnostic_count: shadow_unit_metric!(generated_type_diagnostics_by_unit, unit_index_i, "generated_type_diagnostics_by_unit"),
+            owned_node_count: unit_summary.owned_node_count,
+            generated_node_count: unit_summary.generated_node_count,
+            symbol_count: unit_summary.symbol_count,
+            generated_symbol_count: unit_summary.generated_symbol_count,
+            identifier_count: unit_summary.identifier_count,
+            compile_parse_diagnostic_count: unit_summary.compile_parse_diagnostic_count,
+            shadow_parse_diagnostic_count: unit_summary.shadow_parse_diagnostic_count,
+            semantic_diagnostic_count: unit_summary.semantic_diagnostic_count,
+            generated_semantic_diagnostic_count: unit_summary.generated_semantic_diagnostic_count,
+            resolution_diagnostic_count: unit_summary.resolution_diagnostic_count,
+            generated_resolution_diagnostic_count: unit_summary.generated_resolution_diagnostic_count,
+            type_diagnostic_count: unit_summary.type_diagnostic_count,
+            generated_type_diagnostic_count: unit_summary.generated_type_diagnostic_count,
           )
         end
         if options.verbose

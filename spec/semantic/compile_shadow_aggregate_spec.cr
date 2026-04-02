@@ -71,6 +71,62 @@ describe "compile semantic shadow aggregate" do
     aggregate.generated_diagnostic_counts_by_unit(aggregate.parse_diagnostics).should eq([0, 0])
   end
 
+  it "builds per-unit summary rows from aggregate-owned and raw metric counts" do
+    aggregate = build_shared_shadow_aggregate([
+      "def alpha\n  41\nend\n",
+      "alpha()\n",
+    ])
+
+    rows = aggregate.summary_unit_metrics(
+      symbols_by_unit: [1, 1],
+      generated_symbols_by_unit: [0, 0],
+      identifiers_by_unit: [0, 1],
+      compile_parse_diagnostics_by_unit: [0, 0],
+      shadow_parse_diagnostics_by_unit: [0, 0],
+      semantic_diagnostics_by_unit: [0, 0],
+      generated_semantic_diagnostics_by_unit: [0, 0],
+      resolution_diagnostics_by_unit: [0, 0],
+      generated_resolution_diagnostics_by_unit: [0, 0],
+      type_diagnostics_by_unit: [0, 0],
+      generated_type_diagnostics_by_unit: [0, 0],
+    )
+
+    rows.size.should eq(2)
+    rows[0].path.should eq("unit_0.cr")
+    rows[0].roots_count.should eq(1)
+    rows[0].analysis_root_count.should eq(1)
+    rows[0].generated_root_count.should eq(0)
+    rows[0].node_count.should be > 0
+    rows[0].owned_node_count.should eq(rows[0].node_count)
+    rows[0].symbol_count.should eq(1)
+    rows[1].path.should eq("unit_1.cr")
+    rows[1].roots_count.should eq(1)
+    rows[1].identifier_count.should eq(1)
+  end
+
+  it "raises when per-unit summary metrics do not match aggregate unit count" do
+    aggregate = build_shared_shadow_aggregate([
+      "def alpha\n  41\nend\n",
+      "alpha()\n",
+    ])
+
+    expect_raises(Exception, /symbols_by_unit size=1 expected=2/) do
+      aggregate.summary_unit_metrics(
+        symbols_by_unit: [1],
+        generated_symbols_by_unit: [0, 0],
+        identifiers_by_unit: [0, 1],
+        compile_parse_diagnostics_by_unit: [0, 0],
+        shadow_parse_diagnostics_by_unit: [0, 0],
+        semantic_diagnostics_by_unit: [0, 0],
+        generated_semantic_diagnostics_by_unit: [0, 0],
+        resolution_diagnostics_by_unit: [0, 0],
+        generated_resolution_diagnostics_by_unit: [0, 0],
+        type_diagnostics_by_unit: [0, 0],
+        generated_type_diagnostics_by_unit: [0, 0],
+      )
+    end
+  end
+
   it "resolves cross-file method calls in a shared AstArena aggregate" do
     aggregate = build_shared_shadow_aggregate([
       <<-CR,

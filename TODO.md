@@ -1,6 +1,24 @@
 # Crystal V2 Bootstrap — TODO (Updated 2026-04-02)
 
 ## Current Status
+- **Fresh Phase 2.1 per-unit summary-row checkpoint: the compile-shadow aggregate now owns unit-row assembly and metric-size guards, so `cli.cr` no longer hand-zips per-unit counters into `SemanticShadowUnitSummary` (2026-04-02, current session)**:
+  - trustworthy setup:
+    - `src/compiler/semantic/compile_shadow_aggregate.cr` now exposes `summary_unit_metrics(...)`, which validates every metric array against aggregate unit count and assembles per-unit summary rows from aggregate-owned node/root facts plus raw counter arrays
+    - `src/compiler/cli.cr` no longer keeps `ensure_shadow_unit_metric_size!` / `shadow_unit_metric!` or the manual `aggregate.unit_summaries.each_with_index` row-construction loop
+    - symbol counting, strict parity checks, and top-level `SemanticShadowSummary.new(...)` still stay in `cli.cr`, so this step is bounded to the leftover row-assembly seam only
+  - decisive evidence:
+    - focused aggregate row-assembly coverage is green:
+      - `../crystal/bin/crystal spec spec/semantic/compile_shadow_aggregate_spec.cr --error-trace --example 'builds per-unit summary rows from aggregate-owned and raw metric counts'`
+      - `../crystal/bin/crystal spec spec/semantic/compile_shadow_aggregate_spec.cr --error-trace --example 'raises when per-unit summary metrics do not match aggregate unit count'`
+    - focused CLI summary coverage stays green:
+      - `../crystal/bin/crystal spec spec/semantic_cli_spec.cr --error-trace --example 'reports compile and shadow parse diagnostics separately in semantic shadow summaries'`
+      - `../crystal/bin/crystal spec spec/semantic_cli_spec.cr --error-trace --example 'keeps strict semantic shadow green when parse parity matches'`
+      - `../crystal/bin/crystal spec spec/semantic_cli_spec.cr --error-trace --example 'reports generated type diagnostics separately in semantic shadow summaries'`
+    - build gate stays green:
+      - `../crystal/bin/crystal build src/crystal_v2.cr --no-codegen --error-trace`
+  - practical boundary:
+    - the adversarial `generated resolution diagnostics separately in semantic shadow summaries` example remains red with `generated_resolution_diags=0`, which matches the pre-existing generated-resolution frontier rather than this refactor
+    - the next honest provenance seam is now narrower again: either move the remaining top-level summary object construction behind one aggregate-facing API, or stop here and pivot to the separate generated-resolution frontier explicitly
 - **Fresh Phase 2.1 summary-count boundary checkpoint: per-unit shadow diagnostic counting now lives on the compile-shadow aggregate instead of `cli.cr`, which shrinks the remaining summary/parity glue without changing diagnostic behavior (2026-04-02, current session)**:
   - trustworthy setup:
     - `src/compiler/semantic/compile_shadow_aggregate.cr` now owns `diagnostic_counts_by_unit(...)` and `generated_diagnostic_counts_by_unit(...)` for both frontend and semantic diagnostics
