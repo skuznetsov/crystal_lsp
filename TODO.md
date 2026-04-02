@@ -1,6 +1,33 @@
 # Crystal V2 Bootstrap — TODO (Updated 2026-04-02)
 
 ## Current Status
+- **Fresh stage4 self-hosted string-progress checkpoint: generated stage4 no longer re-emits zero-length runtime string tokens forever in `token_preload_capacity`, because the no-escape fast path in `Frontend::Lexer#lex_string` now advances the cursor explicitly instead of relying on the miscompiled `advance(count = 1)` call shape (2026-04-02, current session)**:
+  - trustworthy setup:
+    - `src/compiler/frontend/lexer.cr` now keeps the no-escape `lex_string` fast path on explicit `@offset/@line/@column` updates for opening quote, interpolation delimiters, nested quoted segments, ordinary bytes, and the closing quote
+    - this preserves the same source-level semantics as the existing `advance`-based path, but removes the self-hosted dependency on omitted default-arg lowering for the hottest string-token loop
+    - existing focused lexer coverage stays on:
+      - `spec/lexer/lexer_spec.cr`
+  - decisive evidence:
+    - quick host gates stay green:
+      - `../crystal/bin/crystal build src/crystal_v2.cr --no-codegen --error-trace`
+      - `../crystal/bin/crystal spec spec/lexer/lexer_spec.cr --error-trace`
+    - before the fix, the exact self-hosted no-prelude string reducer on `/tmp/crystal_v2_stage4_from_stage3_lexerfix` blew memory while `token_preload_capacity` climbed into millions of tokens:
+      - `env CRYSTAL_V2_SEMANTIC_COMPILE=1 CRYSTAL_V2_PARSER_INIT_TRACE=1 CRYSTAL_V2_TRACE_TOKEN_PRELOAD=1 scripts/run_safe.sh /tmp/crystal_v2_stage4_from_stage3_lexerfix 8 1024 /tmp/lexer_string.cr --no-prelude --stats -o /tmp/lexer_string_stage4_lexerfix > /tmp/lexer_string_stage4_lexerfix.log 2>&1`
+    - after rebuilding stage4 from the patched stage3 compiler, the same exact reducer tokenizes correctly instead of looping:
+      - `env CRYSTAL_V2_SEMANTIC_COMPILE=1 scripts/run_safe.sh /tmp/crystal_v2_hir_stage3probe 900 16384 src/crystal_v2.cr --stats -o /tmp/crystal_v2_stage4_from_stage3_stringfix > /tmp/stage4_from_stage3_stringfix.log 2>&1`
+      - `env CRYSTAL_V2_SEMANTIC_COMPILE=1 CRYSTAL_V2_PARSER_INIT_TRACE=1 CRYSTAL_V2_TRACE_TOKEN_PRELOAD=1 scripts/run_safe.sh /tmp/crystal_v2_stage4_from_stage3_stringfix 8 1024 /tmp/lexer_string.cr --no-prelude --stats -o /tmp/lexer_string_stage4_stringfix > /tmp/lexer_string_stage4_stringfix.log 2>&1`
+      - fresh trace now shows only the expected three tokens:
+        - `kind=5 size=1 offs=0..3`
+        - `kind=144 size=1 offs=3..4`
+        - `kind=147 size=0 offs=4..4`
+    - the same rebuilt stage4 also clears the exact tiny comment tokenization reducer:
+      - `env CRYSTAL_V2_SEMANTIC_COMPILE=1 CRYSTAL_V2_PARSER_INIT_TRACE=1 CRYSTAL_V2_TRACE_TOKEN_PRELOAD=1 scripts/run_safe.sh /tmp/crystal_v2_stage4_from_stage3_stringfix 8 1024 /tmp/lexer_comment_small.cr --no-prelude --stats -o /tmp/lexer_comment_small_stage4_stringfix > /tmp/lexer_comment_small_stage4_stringfix.log 2>&1`
+  - practical boundary:
+    - this is a real self-hosted lexer corridor fix, not a claim that stage4 no-prelude is fully healthy
+    - the honest next heads are now later and separate:
+      - with `--stats`: `CLI#compile` crashes in `Time::Span#to_i` / `total_milliseconds`
+      - without `--stats`: the no-prelude path aborts in later runtime/compiler stubs (`Array#empty?` under the safe wrapper; `LibMachVM.mach_task_self` in LLDB through `AstToHir#safe_slice_to_string`)
+    - broad default-arg propagation is still a live latent bug (`/tmp/default_arg_tiny.cr` still logs `hir=x=nil`, `llvm default=nil`), but it should not be conflated with this now-fixed exact string-token preload loop
 - **Fresh stage4 lexer perf checkpoint: generated stage4 no longer spends its exact no-prelude comment reducer inside `lex_comment/current_byte/advance`, because comment scanning now bulk-walks bytes instead of calling `advance` + `Watchdog.check!` per byte; the honest next heads are a separate no-prelude `CLI#compile` abort corridor plus HIR-to-MIR lowering, not RC elision or comment lexing anymore (2026-04-02, current session)**:
   - trustworthy setup:
     - `src/compiler/frontend/lexer.cr` now scans comment bodies with a local `scan` index and commits `@offset/@column` once, matching the existing bulk-scan shape already used by `lex_whitespace`

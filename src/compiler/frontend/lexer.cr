@@ -1259,7 +1259,8 @@ module CrystalV2
 
         private def lex_string
           start_offset, start_line, start_column = capture_position
-          advance # opening quote
+          @offset += 1
+          @column += 1
           from = @offset
           has_interpolation = false
           has_escapes = false
@@ -1365,24 +1366,34 @@ module CrystalV2
                 end
                 interpolation_mode_fast = 1
                 interpolation_depth_fast = 1
-                advance(2)
+                @offset += 2
+                @column += 2
                 next
               elsif allow_macro_interpolation && interpolation_mode_fast == 0 && current_byte == LEFT_BRACE && @offset + 1 < @rope.size && @rope.bytes[@offset + 1] == LEFT_BRACE
                 interpolation_mode_fast = 2
                 interpolation_depth_fast = 1
-                advance(2)
+                @offset += 2
+                @column += 2
                 next
               elsif interpolation_mode_fast != 0
                 if current_byte == DOUBLE_QUOTE || current_byte == SINGLE_QUOTE
                   quote = current_byte
-                  advance
+                  @offset += 1
+                  @column += 1
                   while @offset < @rope.size
                     b = current_byte
                     if b == '\\'.ord.to_u8 && @offset + 1 < @rope.size
-                      advance(2)
+                      @offset += 2
+                      @column += 2
                       next
                     end
-                    advance
+                    @offset += 1
+                    if b == NEWLINE
+                      @line += 1
+                      @column = 1
+                    else
+                      @column += 1
+                    end
                     break if b == quote
                   end
                   next
@@ -1399,22 +1410,41 @@ module CrystalV2
                 elsif allow_macro_interpolation
                   if current_byte == LEFT_BRACE && @offset + 1 < @rope.size && @rope.bytes[@offset + 1] == LEFT_BRACE
                     interpolation_depth_fast += 1
-                    advance(2)
+                    @offset += 2
+                    @column += 2
                     next
                   elsif current_byte == RIGHT_BRACE && @offset + 1 < @rope.size && @rope.bytes[@offset + 1] == RIGHT_BRACE
                     interpolation_depth_fast -= 1
-                    advance(2)
+                    @offset += 2
+                    @column += 2
                     interpolation_mode_fast = 0 if interpolation_depth_fast == 0
                     next
                   end
                 end
-                advance
+                byte = current_byte
+                @offset += 1
+                if byte == NEWLINE
+                  @line += 1
+                  @column = 1
+                else
+                  @column += 1
+                end
                 next
               end
 
-              advance
+              byte = current_byte
+              @offset += 1
+              if byte == NEWLINE
+                @line += 1
+                @column = 1
+              else
+                @column += 1
+              end
             end
-            advance if @offset < @rope.size # closing quote
+            if @offset < @rope.size # closing quote
+              @offset += 1
+              @column += 1
+            end
 
             kind = has_interpolation ? Token::Kind::StringInterpolation : Token::Kind::String
             if heredoc_inside_interpolation
@@ -1438,17 +1468,17 @@ module CrystalV2
 
             if interpolation_mode_processed == 0 && current_byte == HASH && @offset + 1 < @rope.size && @rope.bytes[@offset + 1] == LEFT_BRACE
               buffer.write_byte(current_byte)
-              advance
+              advance(1)
               buffer.write_byte(current_byte)
-              advance
+              advance(1)
               interpolation_mode_processed = 1
               interpolation_depth_processed = 1
               next
             elsif allow_macro_interpolation && interpolation_mode_processed == 0 && current_byte == LEFT_BRACE && @offset + 1 < @rope.size && @rope.bytes[@offset + 1] == LEFT_BRACE
               buffer.write_byte(current_byte)
-              advance
+              advance(1)
               buffer.write_byte(current_byte)
-              advance
+              advance(1)
               interpolation_mode_processed = 2
               interpolation_depth_processed = 1
               next
@@ -1456,17 +1486,17 @@ module CrystalV2
               if current_byte == DOUBLE_QUOTE || current_byte == SINGLE_QUOTE
                 quote = current_byte
                 buffer.write_byte(current_byte)
-                advance
+                advance(1)
                 while @offset < @rope.size
                   b = current_byte
                   buffer.write_byte(b)
                   if b == '\\'.ord.to_u8 && @offset + 1 < @rope.size
-                    advance
+                    advance(1)
                     buffer.write_byte(current_byte)
-                    advance
+                    advance(1)
                     next
                   end
-                  advance
+                  advance(1)
                   break if b == quote
                 end
                 next
@@ -1485,28 +1515,28 @@ module CrystalV2
                 if current_byte == LEFT_BRACE && @offset + 1 < @rope.size && @rope.bytes[@offset + 1] == LEFT_BRACE
                   interpolation_depth_processed += 1
                   buffer.write_byte(current_byte)
-                  advance
+                  advance(1)
                   buffer.write_byte(current_byte)
-                  advance
+                  advance(1)
                   next
                 elsif current_byte == RIGHT_BRACE && @offset + 1 < @rope.size && @rope.bytes[@offset + 1] == RIGHT_BRACE
                   interpolation_depth_processed -= 1
                   buffer.write_byte(current_byte)
-                  advance
+                  advance(1)
                   buffer.write_byte(current_byte)
-                  advance
+                  advance(1)
                   interpolation_mode_processed = 0 if interpolation_depth_processed == 0
                   next
                 end
               end
               buffer.write_byte(current_byte)
-              advance
+              advance(1)
               next
             end
 
             if current_byte == '\\'.ord.to_u8 && @offset + 1 < @rope.size
               # Escape sequence
-              advance # Skip backslash
+              advance(1) # Skip backslash
               case current_byte
               when 'n'.ord.to_u8
                 buffer.write_byte '\n'.ord.to_u8
@@ -1520,10 +1550,10 @@ module CrystalV2
                 buffer.write_byte '"'.ord.to_u8
               when 'u'.ord.to_u8
                 # Phase 58: Unicode escapes \uXXXX or \u{XXXX}
-                advance
+                advance(1)
                 if current_byte == '{'.ord.to_u8
                   # Variable length \u{X...XXXXXX}
-                  advance # Skip '{'
+                  advance(1) # Skip '{'
                   codepoint = parse_unicode_hex_digits('}'.ord.to_u8)
                   if codepoint
                     write_utf8(buffer, codepoint)
@@ -1546,7 +1576,7 @@ module CrystalV2
                 next # Don't advance again, helper methods already did
               when 'x'.ord.to_u8
                 # Phase 59: Hex escapes \xXX (2 hex digits)
-                advance
+                advance(1)
                 byte_value = parse_unicode_hex_fixed(2)
                 if byte_value
                   buffer.write_byte byte_value.to_u8
@@ -1574,14 +1604,14 @@ module CrystalV2
                   buffer.write_byte current_byte
                 end
               end
-              advance
+              advance(1)
             else
               buffer.write_byte current_byte
-              advance
+              advance(1)
             end
           end
 
-          advance if @offset < @rope.size # closing quote
+          advance(1) if @offset < @rope.size # closing quote
 
           # Store processed string
           processed_bytes = buffer.to_slice

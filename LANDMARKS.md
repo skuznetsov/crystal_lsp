@@ -3,6 +3,42 @@
 Updated: 2026-04-02
 Context: compiler/bootstrap/stage2-stability
 
+[LM-441|verified]: After [LM-440], the self-hosted stage4 no-prelude frontier was
+still not a generic RC/perf issue, but a narrower string-token progress corridor
+that only survived in the generated compiler. The decisive adversarial evidence
+came from the exact reducer `/tmp/lexer_string.cr` (`"a"\n`) run under
+`/tmp/crystal_v2_stage4_from_stage3_lexerfix`: with
+`CRYSTAL_V2_PARSER_INIT_TRACE=1 CRYSTAL_V2_TRACE_TOKEN_PRELOAD=1`, the old
+artifact still drove `Parser#token_preload_capacity` into millions of tokens and
+hit the memory limit, even though the earlier comment-only hot loop from
+[LM-440] was already gone. Source inspection in
+`src/compiler/frontend/lexer.cr` exposed the local asymmetry: `c5e24168`
+removed the hot block-based `advance` path from comments and from
+`Lexer#advance` itself, but the no-escape fast path in `lex_string` still
+depended on many plain `advance` calls in the generated compiler. The verified
+fix is bounded and local to the lexer: keep the no-escape fast path on explicit
+cursor updates (`@offset/@line/@column`) for the opening quote, interpolation
+delimiters, nested quoted segments, ordinary bytes, and the closing quote,
+mirroring the actual byte consumption directly instead of relying on the
+self-hosted omitted-default-arg call shape. Focused host gates
+`spec/lexer/lexer_spec.cr` and `../crystal/bin/crystal build src/crystal_v2.cr
+--no-codegen --error-trace` are green; the rebuilt
+`/tmp/crystal_v2_stage4_from_stage3_stringfix` stays green under the safe
+wrapper; and the exact self-hosted no-prelude string reducer now tokenizes
+correctly with only three tokens (`String`, newline, EOF) instead of running
+away. The same rebuilt artifact also clears the exact tiny comment reducer.
+Adversary / boundary: this is a real self-hosted lexer corridor fix because it
+removes the previously reproducible token-preload runaway from the exact
+generated compiler, but it is not yet a full stage4-no-prelude success. The
+new heads are later and separate: with `--stats`, the compiler crashes in
+`CLI#compile` via `Time::Span#to_i` / `total_milliseconds`; without `--stats`,
+the no-prelude path aborts in later runtime/compiler stubs such as
+`Array#empty?` and, under LLDB, `LibMachVM.mach_task_self` reached through
+`AstToHir#safe_slice_to_string`. A broader default-arg metadata loss still
+exists (`/tmp/default_arg_tiny.cr` logs `hir=x=nil`, `llvm default=nil`), but
+that latent bug should not be conflated with this now-closed exact string-token
+preload loop. {F/G/R: 0.98/0.73/0.98} [verified]
+
 [LM-440|verified]: The current stage4 perf head was not best explained by RC
 elision gaps. The decisive no-prelude matrix split the problem into three
 independent families for the generated `/tmp/crystal_v2_stage4_from_stage3`
