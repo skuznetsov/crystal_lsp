@@ -3,6 +3,37 @@
 Updated: 2026-04-02
 Context: compiler/bootstrap/stage2-stability
 
+[LM-448|verified]: After [LM-447], the next exact self-hosted `stage2` HIR
+blocker was not another parser bug but a top-level collector memory wall in
+control-only macro literals. The decisive minimal live carrier became
+`src/stdlib/crystal/system.cr --no-prelude`: parse was already green, but
+`CRYSTAL_V2_STOP_AFTER_HIR=1` hit the 4GB guard within `top-level collection
+walk start`. A bounded diagnostic matrix in `collect_top_level_nodes(...)`
+split the culprit cleanly. Skipping only raw-text reparsing did nothing;
+baseline and `CRYSTAL_V2_SKIP_TOP_LEVEL_MACRO_RAWTEXT=1` both still blew the
+guard. Skipping only the `MacroLiteral` expander path immediately made the
+carrier green, while skipping both routes regressed into an earlier segfault.
+That falsified the “raw-text path is primary” theory and localized the live
+family to control-only `MacroLiteralNode` blocks being sent through the full
+expander unnecessarily. The verified fix in
+`src/compiler/cli.cr` is deliberately narrow: add
+`macro_literal_simple_control_flow?(...)` to recognize top-level macro literals
+composed only of text plus `if/unless/elsif/else/end` control pieces, with no
+`for`, `{{ ... }}`, or macro-variable pieces, and let that family take
+`macro_literal_active_texts(...).join` + `parse_macro_literal_program(...)`
+before falling back to `expand_macro_literal_via_expander(...)`. Host
+`--no-codegen` and host build gates are green, the self-hosted rebuild to
+`/tmp/stage2_systemfix_clean` is green, the exact live sentinel
+`src/stdlib/crystal/system.cr --no-prelude` now exits `0` under
+`CRYSTAL_V2_STOP_AFTER_HIR=1`, the outer wrapper `src/stdlib/system.cr
+--no-prelude` also exits `0`, and focused semantic CLI regression
+`spec/semantic_cli_spec.cr` is green on a nested top-level `if/elsif/else`
+control-only literal. Boundary: this closes the verified simple-control-flow
+`MacroLiteralNode` collector corridor, but the full expander remains the active
+path for `for` loops, macro vars, and `{{ ... }}` expressions, so later
+collector/runtime frontiers should be sought there instead of reopening this
+closed family. {F/G/R: 0.97/0.85/0.98} [verified]
+
 [LM-447|verified]: After [LM-446], the next exact self-hosted parser drift was
 not in postfix `do` attachment itself but one notch earlier in method
 return-type handling. The decisive reducer pair was `/tmp/dir_empty_min.cr`

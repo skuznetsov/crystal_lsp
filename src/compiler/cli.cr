@@ -4095,6 +4095,19 @@ module CrystalV2
             end
           end
           if has_control_flow
+            if macro_literal_simple_control_flow?(node)
+              combined = macro_literal_active_texts(arena, node, flags).join
+              unless combined.strip.empty? || combined.includes?("{%")
+                if parsed = parse_macro_literal_program(combined)
+                  program, exp_source = parsed
+                  sources_by_arena[program.arena.object_id.to_u64] = exp_source
+                  program.roots.each do |inner_id|
+                    collect_top_level_nodes(program.arena, arena_index, inner_id, def_nodes, class_nodes, module_nodes, enum_nodes, macro_nodes, alias_nodes, lib_nodes, constant_exprs, main_exprs, pending_annotations, acyclic_types, top_level_type_names, top_level_class_kinds, flags, sources_by_arena, exp_source, depth + 1, false)
+                  end
+                  return
+                end
+              end
+            end
             # Use MacroExpander for full expansion of {% for %} loops, variable assignments, etc.
             if expanded = expand_macro_literal_via_expander(expr_id, arena, source, flags)
               if env_enabled?("DEBUG_MACRO_EXPAND")
@@ -4522,6 +4535,22 @@ module CrystalV2
         end
 
         exprs
+      end
+
+      private def macro_literal_simple_control_flow?(node : Frontend::MacroLiteralNode) : Bool
+        node.pieces.all? do |piece|
+          case piece.kind
+          when Frontend::MacroPiece::Kind::Text,
+               Frontend::MacroPiece::Kind::ControlElseIf,
+               Frontend::MacroPiece::Kind::ControlElse,
+               Frontend::MacroPiece::Kind::ControlEnd
+            true
+          when Frontend::MacroPiece::Kind::ControlStart
+            piece.control_keyword != "for"
+          else
+            false
+          end
+        end
       end
 
 

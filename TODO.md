@@ -1,6 +1,34 @@
 # Crystal V2 Bootstrap — TODO (Updated 2026-04-02)
 
 ## Current Status
+- **Fresh stage2 top-level simple macro-control checkpoint: self-hosted `stage2` no longer blows the 4GB guard on `src/stdlib/crystal/system.cr --no-prelude` during top-level collection, because control-only `MacroLiteralNode` branches now take the cheap active-text path before the full expander (2026-04-02, current session)**:
+  - trustworthy setup:
+    - `src/compiler/cli.cr` now recognizes a narrow `macro_literal_simple_control_flow?(...)` family: top-level macro literals composed only of text plus `if/unless/elsif/else/end` control pieces, with no `for`, `{{ ... }}`, or macro-variable pieces
+    - for that family only, `collect_top_level_nodes(...)` now tries `macro_literal_active_texts(...).join` + `parse_macro_literal_program(...)` before falling back to `expand_macro_literal_via_expander(...)`
+    - this keeps the expander for the real hard cases (`for` loops, macro expressions, macro vars), but avoids the self-hosted memory blow-up on nested control-only top-level literals
+    - focused regression coverage now locks the corridor in `spec/semantic_cli_spec.cr` with nested top-level `if/elsif/else` control literals and plain method definitions
+  - decisive evidence:
+    - focused semantic CLI regression is green:
+      - `../crystal/bin/crystal spec spec/semantic_cli_spec.cr --error-trace --example 'keeps semantic compile prepass green for nested top-level macro control literals without expander-only features'`
+    - host build gates are green:
+      - `../crystal/bin/crystal build src/crystal_v2.cr --no-codegen --error-trace`
+      - `../crystal/bin/crystal build src/crystal_v2.cr -o /tmp/stage1_systemfix_clean --error-trace`
+    - self-hosted rebuild is green:
+      - `scripts/run_safe.sh /tmp/stage1_systemfix_clean 240 12288 src/crystal_v2.cr -o /tmp/stage2_systemfix_clean > /tmp/stage2_systemfix_clean_build.log 2>&1`
+      - result: `[EXIT: 0]`
+    - the exact live sentinel now exits cleanly:
+      - `env STAGE2_DEBUG=1 CRYSTAL_V2_STOP_AFTER_HIR=1 scripts/run_safe.sh /tmp/stage2_systemfix_clean 20 4096 src/stdlib/crystal/system.cr --no-prelude > /tmp/systemfix_clean_crystal_system_hir.log 2>&1`
+      - before the fix, that carrier hit `[KILL] Memory limit ...` during `top-level collection walk start`
+      - after the fix, it reaches `top-level collection done ...` and exits `0`
+    - the outer wrapper also moves cleanly:
+      - `env STAGE2_DEBUG=1 CRYSTAL_V2_STOP_AFTER_HIR=1 scripts/run_safe.sh /tmp/stage2_systemfix 20 4096 src/stdlib/system.cr --no-prelude > /tmp/systemfix_system_hir.log 2>&1`
+      - result: `[EXIT: 0]`
+    - adversary matrix on the diagnostic gate branch split the culprit correctly before the final fix:
+      - baseline and `CRYSTAL_V2_SKIP_TOP_LEVEL_MACRO_RAWTEXT=1` both still hit the 4GB guard
+      - `CRYSTAL_V2_SKIP_TOP_LEVEL_MACRO_EXPANDER=1` made `src/stdlib/crystal/system.cr` green immediately
+  - practical boundary:
+    - this closes the simple-control-flow `MacroLiteralNode` collector corridor behind the old `system.cr` memory wall
+    - it does not claim the full top-level expander path is solved; `for` loops, macro vars, and `{{ ... }}` still rely on the expander and remain separate frontiers
 - **Fresh self-hosted `parse_def` return-type checkpoint: self-hosted `stage2` no longer loses simple return types before parenthesized `do ... end` bodies, so the old `src/stdlib/dir.cr --no-prelude` HIR red is closed and the next live frontier moves to later compile-side memory/runtime corridors (2026-04-02, current session)**:
   - trustworthy setup:
     - `src/compiler/frontend/parser.cr` `parse_def(...)` now parses method return types through `parse_union_type_for_annotation` first, falling back to the older normalized text collector only when the structured type path cannot parse anything
