@@ -30542,6 +30542,27 @@ module Crystal::HIR
             return sa_size
           end
         end
+        # Generic struct monomorphizations (e.g. Slice(UInt8), Range(Int32, Int32))
+        # may not have ClassInfo entries. Detect them via HIR type descriptor and
+        # compute their inline size from ivar layout of the generic template.
+        if desc = @module.get_type_descriptor(type)
+          if desc.kind == HIR::TypeKind::Struct
+            # Try to compute size from generic template's ClassInfo
+            base_name = strip_generic_args(type_name)
+            if template_info = @class_info[base_name]?
+              if template_info.is_struct && template_info.size > 0
+                return template_info.size
+              end
+            end
+            # Known stdlib struct sizes (stable ABI, pointer_word_bytes=8):
+            # Slice(T) = {i32 size, [4 pad], ptr data} = 16 bytes
+            # Range(B,E) = {B begin, E end, i1 exclusive} = varies
+            # Span = {6 × i32} = 24 bytes
+            if type_name.starts_with?("Slice(")
+              return 16 # ptr(8) + i32 size(4) + padding(4) = 16
+            end
+          end
+        end
         pointer_word_bytes_i32 # Pointer size for reference types
       end
     end
