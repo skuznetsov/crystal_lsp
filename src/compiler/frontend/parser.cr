@@ -2435,8 +2435,13 @@ module CrystalV2
 
             type_start_token = current_token
             start_index = @index
-            parsed_return_type = parse_type_annotation
-            if @index == start_index
+            parsed_return_type = parse_union_type_for_annotation
+            used_structured_return_type = !parsed_return_type.nil?
+            if parsed_return_type.nil?
+              parsed_return_type = parse_type_annotation
+            end
+
+            if parsed_return_type.nil? || @index == start_index
               # Fallback: handle atomic types like tuple types {A, B}
               if current_token.kind == Token::Kind::LBrace
                 atomic = parse_atomic_type_for_annotation
@@ -2449,7 +2454,7 @@ module CrystalV2
                 emit_unexpected(type_start_token)
               end
             else
-              return_type = parsed_return_type
+              return_type = used_structured_return_type ? normalize_union_pipe_spacing(parsed_return_type) : parsed_return_type
             end
           end
 
@@ -3303,6 +3308,36 @@ module CrystalV2
         private def retain_text_slice(text : String) : Slice(UInt8)
           @arena.retain_source(text) unless text.empty?
           text.to_slice
+        end
+
+        private def normalize_union_pipe_spacing(slice : Slice(UInt8)) : Slice(UInt8)
+          return slice unless slice.includes?('|'.ord.to_u8)
+
+          bytes = Array(UInt8).new(slice.size)
+          i = 0
+          while i < slice.size
+            byte = slice[i]
+            if byte == '|'.ord.to_u8
+              while !bytes.empty?
+                last = bytes.last
+                break unless last == ' '.ord.to_u8 || last == '\n'.ord.to_u8 || last == '\t'.ord.to_u8
+                bytes.pop
+              end
+              bytes << byte
+              i += 1
+              while i < slice.size
+                nxt = slice[i]
+                break unless nxt == ' '.ord.to_u8 || nxt == '\n'.ord.to_u8 || nxt == '\t'.ord.to_u8
+                i += 1
+              end
+              next
+            end
+
+            bytes << byte
+            i += 1
+          end
+
+          retain_text_slice(String.new(Slice.new(bytes.to_unsafe, bytes.size)))
         end
 
         private def retained_token_span_slice(start_token : Token, end_token : Token) : Slice(UInt8)

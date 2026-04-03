@@ -185,4 +185,42 @@ describe CrystalV2::Compiler::Frontend::Parser do
     body_node = program.arena[body.not_nil!.first]
     CrystalV2::Compiler::Frontend.node_kind(body_node).should eq(CrystalV2::Compiler::Frontend::NodeKind::Ternary)
   end
+
+  it "keeps parenthesized do blocks inside def bodies after simple return types" do
+    source = <<-CR
+      class Dir
+        def self.each_child(dirname : Path | String, & : String ->)
+        end
+
+        def self.empty?(path : Path | String) : Bool
+          each_child(path) do |f|
+            false
+          end
+          true
+        end
+      end
+    CR
+
+    parser = CrystalV2::Compiler::Frontend::Parser.new(CrystalV2::Compiler::Frontend::Lexer.new(source))
+    program = parser.parse_program
+
+    program.roots.size.should eq(1)
+    class_node = program.arena[program.roots.first].as(CrystalV2::Compiler::Frontend::ClassNode)
+    body = class_node.body.not_nil!
+    body.size.should eq(2)
+
+    empty_def = program.arena[body[1]].as(CrystalV2::Compiler::Frontend::DefNode)
+    return_type = empty_def.return_type
+    return_type.should_not be_nil
+    String.new(return_type.not_nil!).should eq("Bool")
+
+    empty_body = empty_def.body
+    empty_body.should_not be_nil
+    empty_body.not_nil!.size.should eq(2)
+
+    first_stmt = program.arena[empty_body.not_nil!.first]
+    second_stmt = program.arena[empty_body.not_nil!.last]
+    CrystalV2::Compiler::Frontend.node_kind(first_stmt).should eq(CrystalV2::Compiler::Frontend::NodeKind::Call)
+    CrystalV2::Compiler::Frontend.node_kind(second_stmt).should eq(CrystalV2::Compiler::Frontend::NodeKind::Bool)
+  end
 end

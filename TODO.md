@@ -1,6 +1,32 @@
 # Crystal V2 Bootstrap — TODO (Updated 2026-04-02)
 
 ## Current Status
+- **Fresh self-hosted `parse_def` return-type checkpoint: self-hosted `stage2` no longer loses simple return types before parenthesized `do ... end` bodies, so the old `src/stdlib/dir.cr --no-prelude` HIR red is closed and the next live frontier moves to later compile-side memory/runtime corridors (2026-04-02, current session)**:
+  - trustworthy setup:
+    - `src/compiler/frontend/parser.cr` `parse_def(...)` now parses method return types through `parse_union_type_for_annotation` first, falling back to the older normalized text collector only when the structured type path cannot parse anything
+    - the structured path result is normalized only for union-pipe spacing, preserving the older return-type contract expected by host parser specs while avoiding the self-hosted drift in the generic collector path
+    - focused parser coverage now locks the exact corridor in `spec/parser/parser_def_class_spec.cr` with `def self.empty?(...) : Bool` followed by `each_child(path) do ... end` and a later `true`
+  - decisive evidence:
+    - host parser spec pack is green:
+      - `../crystal/bin/crystal spec spec/parser/parser_def_class_spec.cr --error-trace`
+    - host compiler gate is green:
+      - `../crystal/bin/crystal build src/crystal_v2.cr -o /tmp/stage1_retfix --error-trace`
+    - self-hosted rebuild from that host is green:
+      - `scripts/run_safe.sh /tmp/stage1_retfix 240 12288 src/crystal_v2.cr -o /tmp/stage2_retfix > /tmp/stage2_retfix_build.log 2>&1`
+      - result: `[EXIT: 0]`
+    - the old exact parser reducer is now green under self-hosted `stage2`:
+      - `env STAGE2_DEBUG=1 DEBUG_LPAREN_DISPATCH=1 DEBUG_PAREN_CALL_ENTRY=1 DEBUG_PAREN_CALL_TAIL=1 DEBUG_PAREN_BLOCK_ATTACH=1 CRYSTAL_V2_STOP_AFTER_PARSE=1 scripts/run_safe.sh /tmp/stage2_retfix 12 4096 /tmp/dir_empty_min.cr --no-prelude > /tmp/stage2_retfix_bad_parse.log 2>&1`
+      - before the fix, self-hosted `stage2` never entered `parse_parenthesized_call` for `each_child(path) do ... end`
+      - after the fix, it takes the normal path again: `LPAREN_DISPATCH -> PAREN_CALL -> PAREN_TAIL -> PAREN_BLOCK`
+    - the exact HIR reducer is now green too:
+      - `env STAGE2_DEBUG=1 CRYSTAL_V2_STOP_AFTER_HIR=1 scripts/run_safe.sh /tmp/stage2_retfix 12 4096 /tmp/dir_empty_min.cr --no-prelude > /tmp/stage2_retfix_bad_hir.log 2>&1`
+      - result: `[EXIT: 0]`
+    - the real file-local sentinel moves the right way:
+      - `env STAGE2_DEBUG=1 CRYSTAL_V2_STOP_AFTER_HIR=1 scripts/run_safe.sh /tmp/stage2_retfix 20 4096 src/stdlib/dir.cr --no-prelude > /tmp/stage2_retfix_dir_hir.log 2>&1`
+      - result: `[EXIT: 0]` with `top-level collection done defs=0 classes=0 modules=0 constants=0 main=0`
+  - practical boundary:
+    - this closes the verified self-hosted `parse_def` return-type corridor behind the old `dir.cr` collapse
+    - it does not make all stage2 `STOP_AFTER_HIR` sentinels green; `src/stdlib/system.cr --no-prelude` still blows the 4GB guard during top-level collection, so the next honest frontier is later than this parser bug
 - **Fresh stage2 top-level `{% begin %}` collector checkpoint: self-hosted `stage2` no longer collapses the exact `src/stdlib/concurrent.cr` begin-wrapper branch to empty during top-level HIR collection; the exact reducer now moves from early `error: End of file reached` to the later `LibMachVM.mach_task_self` runtime-stub frontier, while wider `prelude` still remains red (2026-04-02, current session)**:
   - trustworthy setup:
     - `src/compiler/cli.cr` `collect_top_level_nodes(...)` now treats only exact begin-wrapped `MacroIfNode` raw-text spans (`{% begin %}`, `{%- begin %}`, `{%~ begin %}`) as a special corridor

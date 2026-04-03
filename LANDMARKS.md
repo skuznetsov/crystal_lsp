@@ -3,6 +3,36 @@
 Updated: 2026-04-02
 Context: compiler/bootstrap/stage2-stability
 
+[LM-447|verified]: After [LM-446], the next exact self-hosted parser drift was
+not in postfix `do` attachment itself but one notch earlier in method
+return-type handling. The decisive reducer pair was `/tmp/dir_empty_min.cr`
+versus `/tmp/dir_empty_min_noreturn.cr`: with the old self-hosted `stage2`,
+removing only `: Bool` restored the normal `each_child(path) do ... end`
+parse/HIR path, while the typed version collapsed the class body and never
+entered `parse_parenthesized_call`. Host-side traces then fixed the contract:
+for the typed reducer, the good parser entered `parse_def` return-type parsing
+on `Identifier(Bool)` and exited with a 4-byte slice before the body; the
+no-return control only showed the later `mkdir : Nil` gate. That falsified the
+older “postfix block attach” theory and narrowed the live seam to
+`parse_def(...)` return-type parsing. The bounded fix in
+`src/compiler/frontend/parser.cr` is to parse method return types through
+`parse_union_type_for_annotation` first, with fallback to the older
+`parse_type_annotation` collector only when the structured path cannot parse
+anything; the structured result is normalized only for union-pipe spacing so
+the existing host parser contract stays intact. Focused regression coverage in
+`spec/parser/parser_def_class_spec.cr` now locks the exact `: Bool` +
+parenthesized `do ... end` corridor, host parser specs stay green, host build
+to `/tmp/stage1_retfix` is green, and the self-hosted rebuild to
+`/tmp/stage2_retfix` is green. The exact bad reducer now re-enters the normal
+`LPAREN_DISPATCH -> PAREN_CALL -> PAREN_TAIL -> PAREN_BLOCK` path and its
+`STOP_AFTER_HIR` sentinel exits `0`; the real file-local sentinel
+`src/stdlib/dir.cr --no-prelude` also exits `0` under `STOP_AFTER_HIR` instead
+of dying in the old collapse family. Boundary: this closes the verified
+`parse_def` return-type corridor behind the former `dir.cr` red, but
+`src/stdlib/system.cr --no-prelude` still blows the 4GB guard during top-level
+collection, so the next honest frontier is later compile-side memory/runtime
+behavior rather than this parser seam. {F/G/R: 0.97/0.84/0.98} [verified]
+
 [LM-446|verified]: After [LM-445], the remaining self-hosted `stage2` HIR red
 on `src/stdlib/prelude.cr --no-prelude` still looked like one broad top-level
 macro collector family, but the next exact falsifier proved at least one
