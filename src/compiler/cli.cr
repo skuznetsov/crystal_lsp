@@ -922,6 +922,11 @@ module CrystalV2
       {% end %}
 
       def run(*, out_io : IO = STDOUT, err_io : IO = STDERR) : Int32
+        # V2 stage2 bootstrap: set STAGE2_BOOTSTRAP_TRACE to exercise LibC.getenv +
+        # String.new(C_ptr) code path in env_enabled?. Without this, stage2 hits
+        # EOFError during prelude File.read. Root cause: unknown initialization
+        # dependency in V2-compiled IO/String runtime.
+        LibC.setenv("STAGE2_BOOTSTRAP_TRACE".to_unsafe, "1".to_unsafe, 1)
         LibC.write(2, "[RUNPROBE] 0\n".to_unsafe, 13)
         bootstrap_trace_puts "[S2_RUN] start args=#{@args.size}"; STDERR.flush
         LibC.write(2, "[RUNPROBE] 1\n".to_unsafe, 13)
