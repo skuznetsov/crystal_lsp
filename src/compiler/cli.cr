@@ -317,9 +317,8 @@ module CrystalV2
       end
 
       private def stage2_debug(msg : String, io : IO = STDERR) : Nil
-        if env_enabled?("STAGE2_DEBUG") || env_enabled?("STAGE2_BOOTSTRAP_TRACE")
-          io.puts msg
-        end
+        # EXPERIMENT C2: unconditional io.puts (no env check)
+        io.puts msg
       end
 
       private def debug_cli_block_snapshot(
@@ -922,12 +921,9 @@ module CrystalV2
       {% end %}
 
       def run(*, out_io : IO = STDOUT, err_io : IO = STDERR) : Int32
-        # V2 stage2 bootstrap workaround: repeated env_enabled? calls prevent
-        # EOFError during prelude parsing. GC.disable does NOT fix it (tested
-        # 2026-04-04), so root cause is NOT GC/premature collection.
-        # Hypothesis: V2 runtime transport/layout mismatch in String/Slice paths,
-        # masked by allocation side effects of env_enabled? → String.new(C_ptr).
-        LibC.setenv("STAGE2_BOOTSTRAP_TRACE".to_unsafe, "1".to_unsafe, 1)
+        # V2 stage2: unconditional stage2_debug output stabilizes runtime.
+        # GC.disable does NOT fix EOF (tested 2026-04-04), so not GC-related.
+        # Setenv workaround is no longer needed with LibC.access + unconditional puts.
         LibC.write(2, "[RUNPROBE] 0\n".to_unsafe, 13)
         bootstrap_trace_puts "[S2_RUN] start args=#{@args.size}"; STDERR.flush
         LibC.write(2, "[RUNPROBE] 1\n".to_unsafe, 13)
