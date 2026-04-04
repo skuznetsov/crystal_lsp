@@ -18185,6 +18185,17 @@ module Crystal::MIR
             tuple_type_ref = alloc_elem
           end
         end
+        # When @value_types degraded to POINTER (common for call returns whose
+        # concrete type is a union of tuples), recover the concrete type from
+        # the defining instruction's MIR type. This lets the downstream tuple
+        # access path activate instead of falling through to Array buffer layout.
+        if tuple_type_ref == TypeRef::POINTER
+          if def_inst = find_def_inst(inst.array_value)
+            if def_inst.type != TypeRef::POINTER && def_inst.type != TypeRef::VOID
+              tuple_type_ref = def_inst.type
+            end
+          end
+        end
         if union_desc = @module.get_union_descriptor(tuple_type_ref)
           best_variant_ref = nil
           best_variant_size = 0_u64
