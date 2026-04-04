@@ -922,11 +922,13 @@ module CrystalV2
       {% end %}
 
       def run(*, out_io : IO = STDOUT, err_io : IO = STDERR) : Int32
-        # V2 stage2 bootstrap workaround: without STAGE2_BOOTSTRAP_TRACE, stage2 hits
-        # EOFError during prelude parsing. Setting it forces env_enabled? → LibC.getenv →
-        # String.new(C_ptr) → IO.puts paths that exercise runtime initialization.
-        # The EOF also requires File.exists? → LibC.access replacement (below).
-        # Root cause: V2 runtime initialization order dependency (struct-as-pointer ABI).
+        # V2 stage2 bootstrap workaround: repeated env_enabled? → LibC.getenv →
+        # String.new(C_ptr) calls stabilize V2's GC. Without this, premature
+        # collection causes EOFError/SIGBUS during prelude parsing.
+        # Root cause: V2 GC root scanning gaps in struct-as-pointer ABI.
+        # Experiment matrix (2026-04-04): env check path is critical stabilizer;
+        # io.puts extends stability from ~57 to 107+ files parsed.
+        # Combined with LibC.access fix below (replaces broken File.exists?).
         LibC.setenv("STAGE2_BOOTSTRAP_TRACE".to_unsafe, "1".to_unsafe, 1)
         LibC.write(2, "[RUNPROBE] 0\n".to_unsafe, 13)
         bootstrap_trace_puts "[S2_RUN] start args=#{@args.size}"; STDERR.flush
