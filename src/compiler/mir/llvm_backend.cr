@@ -746,6 +746,10 @@ module Crystal::MIR
     @dtor_type_ids : Set(UInt32) = Set(UInt32).new  # Type IDs that have ARC destructors
     @emit_regex_runtime : Bool = false
 
+    # Dominance info for phi edge definedness checking (Cooper's algorithm)
+    @dominance_in_time : Array(Int32) = [] of Int32
+    @dominance_out_time : Array(Int32) = [] of Int32
+
     # Cross-block value tracking for dominance fix
     @value_def_block : Hash(ValueId, BlockId) = {} of ValueId => BlockId  # value → block where defined
     @cross_block_values : Set(ValueId) = Set(ValueId).new  # values that need alloca slots
@@ -8433,6 +8437,9 @@ module Crystal::MIR
       # can recover pointee types before the defining Alloc is emitted.
       prepass_register_alloc_metadata(func)
 
+      # Pre-pass: compute dominance tree for phi edge definedness checking
+      prepass_compute_dominance(func)
+
       # Pre-pass: detect cross-block values that need alloca slots for dominance
       prepass_detect_cross_block_values(func)
 
@@ -9003,6 +9010,16 @@ module Crystal::MIR
 
             # Don't add duplicate entries
             next if @phi_predecessor_loads.has_key?({pred_block_id, val_id})
+
+            # Gate on reaching definition: only include predecessor load if
+            # the value's defining block dominates the predecessor block.
+            # Without this, the slot may contain only the null init value,
+            # which leaks into non-nil phi consumers as a runtime null.
+            if def_block = @value_def_block[val_id]?
+              unless def_block == pred_block_id || block_dominates?(def_block, pred_block_id)
+                next  # No reaching definition on this edge
+              end
+            end
 
             # Record that this predecessor block needs to emit a load for this value
             load_name = "r#{val_id}.phi_load.#{pred_block_id}"
@@ -9833,6 +9850,129 @@ module Crystal::MIR
     end
 
     # Detect values that are defined in one block but used in another
+    # Compute dominance tree for phi edge definedness checking.
+    # Uses Cooper's iterative dominator algorithm + DFS timestamps for O(1) queries.
+    private def prepass_compute_dominance(func : Function)
+      @dominance_in_time.clear
+      @dominance_out_time.clear
+      return if func.blocks.size <= 1
+
+      func.compute_predecessors
+      entry_id = func.blocks.first?.try(&.id) || 0_u32
+
+      # Reverse postorder via iterative DFS
+      visited = Set(BlockId).new
+      postorder = [] of BlockId
+      stack = [{entry_id, false}] of Tuple(BlockId, Bool)
+      while frame = stack.pop?
+        block_id, exiting = frame
+        if exiting
+          postorder << block_id
+          next
+        end
+        next if visited.includes?(block_id)
+        visited << block_id
+        stack << {block_id, true}
+        if block = func.get_block?(block_id)
+          succs = block.terminator.successors
+          i = succs.size - 1
+          while i >= 0
+            stack << {succs[i], false} unless visited.includes?(succs[i])
+            i -= 1
+          end
+        end
+      end
+      rpo = postorder.reverse!
+
+      max_id = func.blocks.max_of(&.id).to_i
+      size = max_id + 1
+      rpo_index = Array.new(size, -1)
+      rpo.each_with_index { |bid, idx| rpo_index[bid.to_i] = idx }
+
+      # Iterative dominator computation
+      idom = Array(Int32?).new(size, nil)
+      entry_idx = entry_id.to_i
+      idom[entry_idx] = entry_idx
+      changed = true
+      while changed
+        changed = false
+        rpo.each_with_index do |block_id, pos|
+          next if pos == 0
+          block = func.get_block?(block_id)
+          next unless block
+          new_idom : Int32? = nil
+          block.predecessors.each do |pred_id|
+            pred_idx = pred_id.to_i
+            next if pred_idx >= size
+            next unless idom[pred_idx]
+            if existing = new_idom
+              f1, f2 = existing, pred_idx
+              while f1 != f2
+                while rpo_index[f1] > rpo_index[f2]
+                  p = idom[f1]; break unless p; f1 = p
+                end
+                while rpo_index[f2] > rpo_index[f1]
+                  p = idom[f2]; break unless p; f2 = p
+                end
+              end
+              new_idom = f1
+            else
+              new_idom = pred_idx
+            end
+          end
+          next unless new_idom
+          bidx = block_id.to_i
+          if idom[bidx] != new_idom
+            idom[bidx] = new_idom
+            changed = true
+          end
+        end
+      end
+
+      # Build dominator tree + DFS timestamps
+      children = Array.new(size) { [] of Int32 }
+      rpo.each do |block_id|
+        bidx = block_id.to_i
+        next if bidx == entry_idx
+        parent = idom[bidx]
+        next unless parent
+        children[parent] << bidx
+      end
+      @dominance_in_time = Array.new(size, -1)
+      @dominance_out_time = Array.new(size, -1)
+      time = 0
+      dfs_stack = [{entry_idx, false}] of Tuple(Int32, Bool)
+      while frame = dfs_stack.pop?
+        bidx, exiting = frame
+        if exiting
+          @dominance_out_time[bidx] = time
+          time += 1
+          next
+        end
+        @dominance_in_time[bidx] = time
+        time += 1
+        dfs_stack << {bidx, true}
+        kids = children[bidx]
+        i = kids.size - 1
+        while i >= 0
+          dfs_stack << {kids[i], false}
+          i -= 1
+        end
+      end
+    end
+
+    # O(1) dominance query using precomputed DFS timestamps.
+    @[AlwaysInline]
+    private def block_dominates?(def_block : BlockId, use_block : BlockId) : Bool
+      di = def_block.to_i
+      ui = use_block.to_i
+      return false if di >= @dominance_in_time.size || ui >= @dominance_in_time.size
+      din = @dominance_in_time[di]
+      uin = @dominance_in_time[ui]
+      return false if din < 0 || uin < 0
+      din <= uin && @dominance_out_time[di] >= @dominance_out_time[ui]
+    end
+
     # without guaranteed dominance. These need alloca slots for correctness.
     private def prepass_detect_cross_block_values(func : Function)
       return if func.blocks.size <= 1  # Single block - no cross-block issues
