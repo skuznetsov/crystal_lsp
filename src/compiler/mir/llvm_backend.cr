@@ -569,7 +569,7 @@ module Crystal::MIR
                   @dwarf_next_md_id += 1
                   @dwarf_next_md_id - 1
                 end
-        file_id = dwarf_file_id("crystal_v2.cr")
+        file_id = 4  # Use default DIFile (!4) — per-file when source locations available
         func_display = if (cur = @current_mir_func)
                           cur.name
                         else
@@ -577,7 +577,6 @@ module Crystal::MIR
                         end
         line = 0
         if (cur = @current_mir_func) && (loc = cur.source_location)
-          file_id = dwarf_file_id(loc.file)
           line = loc.line
         end
         safe_display = func_display.gsub("\\", "\\\\").gsub("\"", "\\\"")
@@ -585,12 +584,11 @@ module Crystal::MIR
         # Emit DISubprogram immediately (before define) so it's included in worker output
         # Uses !5 as subroutine type placeholder (defined in module header)
         emit_raw "!#{sp_id} = distinct !DISubprogram(name: \"#{safe_display}\", linkageName: \"#{safe_linkage}\", scope: !#{file_id}, file: !#{file_id}, line: #{line}, type: !5, isLocal: false, isDefinition: true, scopeLine: #{line}, unit: !0)\n"
-        # Create a DILocation pointing to this subprogram (line 0 = function scope)
-        loc_id = sp_id + 500000  # offset to avoid collision
+        # Create a DILocation pointing to this subprogram
+        loc_id = sp_id * 1000 + 999  # unique per function, doesn't collide with var_ids (0..N)
         emit_raw "!#{loc_id} = !DILocation(line: #{line}, scope: !#{sp_id})\n"
         dbg_ref = " !dbg !#{sp_id}"
-        @dwarf_current_sp_id = loc_id  # instructions use the location, not the subprogram
-        # Emit parameter variable metadata (module-level, before define)
+        @dwarf_current_sp_id = loc_id
         if (cur = @current_mir_func)
           emit_dwarf_param_metadata(cur, param_types, sp_id)
         end
@@ -643,8 +641,13 @@ module Crystal::MIR
       end
     end
 
-    # Emit DILocalVariable metadata BEFORE function define, and dbg.declare INSIDE entry block
+    # Emit DILocalVariable metadata + alloca/declare for function parameters.
+    # Phase 1: metadata (before define) — returns array of var_ids
+    # Phase 2: declares (inside fn_entry) — uses stored var_ids
+    @dwarf_current_param_var_ids : Array(Int32) = [] of Int32
+
     private def emit_dwarf_param_metadata(func : Function, param_types : Array(String), sp_id : Int32)
+      @dwarf_current_param_var_ids.clear
       func.params.each_with_index do |param, idx|
         param_name = param.name.empty? ? "arg#{idx}" : param.name
         safe_name = param_name.gsub("\\", "\\\\").gsub("\"", "\\\"")
@@ -661,22 +664,25 @@ module Crystal::MIR
                       else 6
                       end
 
-        var_id = sp_id * 10 + 2000000 + idx  # unique per function+param
+        # var_id: sp_id * 1000 + idx — unique per (function, param)
+        # sp_id is unique per function, idx < 1000 params per function
+        var_id = sp_id * 1000 + idx
+        @dwarf_current_param_var_ids << var_id
         emit_raw "!#{var_id} = !DILocalVariable(name: \"#{safe_name}\", arg: #{idx + 1}, scope: !#{sp_id}, file: !4, type: !#{dbg_type_id})\n"
       end
     end
 
-    # Emit alloca + store + dbg.declare for each param INSIDE fn_entry block
     private def emit_dwarf_param_declares(func : Function, param_types : Array(String), sp_id : Int32)
-      loc_id = sp_id + 500000
+      loc_id = sp_id * 1000 + 999
       func.params.each_with_index do |param, idx|
         param_name = param.name.empty? ? "arg#{idx}" : param.name
         safe_name = param_name.gsub("\\", "\\\\").gsub("\"", "\\\"")
         llvm_type = param_types[idx]? || "ptr"
         base_type = llvm_type.split(' ').first
-        var_id = sp_id * 10 + 2000000 + idx
+        var_id = @dwarf_current_param_var_ids[idx]? || 0
+        next if var_id == 0
 
-        alloca_name = "%dbg.#{safe_name}.addr"
+        alloca_name = "%dbg.#{safe_name}.#{idx}.addr"
         param_reg = if param_types[idx]?
                       parts = param_types[idx].split(' ')
                       parts.size > 1 ? parts[1] : "%arg#{idx}"
@@ -723,6 +729,7 @@ module Crystal::MIR
     @dwarf_next_md_id : Int32 = 10  # start at 10, reserve 0-9 for module-level
     @dwarf_current_sp_id : Int32 = 0  # Current function's DILocation ID (0 = no debug)
     @dwarf_expr_id : Int32 = 900000   # ID for shared !DIExpression() node
+    @dwarf_var_counter : Int32 = 2000000  # Sequential counter for DILocalVariable IDs
     @dwarf_files : Hash(String, Int32) = {} of String => Int32
     @current_slab_frame : Bool = false
     @emit_family_tag : Int32 = 0
@@ -8881,7 +8888,7 @@ module Crystal::MIR
       emit_hoisted_allocas(func)
       # DWARF: emit debug declares for function parameters
       if @dwarf_current_sp_id > 0
-        sp_id = @dwarf_current_sp_id - 500000  # recover DISubprogram ID from DILocation ID
+        sp_id = (@dwarf_current_sp_id - 999) // 1000  # recover DISubprogram ID from loc_id
         emit_dwarf_param_declares(func, param_types, sp_id)
       end
       if @current_slab_frame
