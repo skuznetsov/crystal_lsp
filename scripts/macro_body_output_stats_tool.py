@@ -5,7 +5,7 @@
 # Usage:
 #   python3 scripts/macro_body_output_stats_tool.py extract [-o out.jsonl] [FILE|-]
 #   python3 scripts/macro_body_output_stats_tool.py sort [FILE|-]
-#   python3 scripts/macro_body_output_stats_tool.py diff LEFT.jsonl RIGHT.jsonl [--top N]
+#   python3 scripts/macro_body_output_stats_tool.py diff LEFT.jsonl RIGHT.jsonl [--top N] [--span-key]
 #   python3 scripts/macro_body_output_stats_tool.py summarize [FILE|-] [--top N]
 
 from __future__ import annotations
@@ -35,6 +35,36 @@ def stable_key_pretty(k: str) -> str:
         mf, sl, el, pc = parts
         return f"{mf}:{sl}-{el}:pieces={pc}"
     return k.replace("\t", " | ")
+
+
+def span_only_key(row: Dict[str, Any]) -> str:
+    return "{}\t{}\t{}".format(
+        row.get("span_start_line", ""),
+        row.get("span_end_line", ""),
+        row.get("pieces_count", ""),
+    )
+
+
+def span_only_key_pretty(k: str) -> str:
+    parts = k.split("\t")
+    if len(parts) == 3:
+        return f"L{parts[0]}-{parts[1]}:pieces={parts[2]}"
+    return k.replace("\t", " | ")
+
+
+def index_rows_by(
+    rows: List[Dict[str, Any]],
+    key_fn,
+    label: str,
+    pretty_fn,
+) -> Dict[str, Dict[str, Any]]:
+    d: Dict[str, Dict[str, Any]] = {}
+    for row in rows:
+        k = key_fn(row)
+        if k in d:
+            print(f"# warn [{label}] duplicate join key {pretty_fn(k)}", file=sys.stderr)
+        d[k] = row
+    return d
 
 
 def iter_json_objects(lines: Iterable[str]) -> Iterable[Dict[str, Any]]:
@@ -111,31 +141,55 @@ def num_delta(left: Any, right: Any) -> float:
 def cmd_diff(args: argparse.Namespace) -> int:
     left_rows = read_rows(args.left)
     right_rows = read_rows(args.right)
-    L = index_by_stable(left_rows)
-    R = index_by_stable(right_rows)
+    use_span = args.span_key
+    key_fn = span_only_key if use_span else stable_key
+    pretty = span_only_key_pretty if use_span else stable_key_pretty
+
+    L = (
+        index_rows_by(left_rows, key_fn, "left", pretty)
+        if use_span
+        else index_by_stable(left_rows)
+    )
+    R = (
+        index_rows_by(right_rows, key_fn, "right", pretty)
+        if use_span
+        else index_by_stable(right_rows)
+    )
     keys_l = set(L)
     keys_r = set(R)
     only_l = sorted(keys_l - keys_r)
     only_r = sorted(keys_r - keys_l)
     both = sorted(keys_l & keys_r)
 
+    join_desc = "span_start+span_end+pieces (ignore macro_file)" if use_span else "macro_file+span+pieces"
+    print(f"# join key: {join_desc}")
     print(f"# left rows: {len(left_rows)} unique keys: {len(L)}")
     print(f"# right rows: {len(right_rows)} unique keys: {len(R)}")
     print(f"# only in left: {len(only_l)}  only in right: {len(only_r)}  in both: {len(both)}")
     print()
 
     if only_l:
-        print("## only_in_left (macro_file:span-pieces)")
+        title = "## only_in_left (span + macro_file)" if use_span else "## only_in_left (macro_file:span-pieces)"
+        print(title)
         for k in only_l[: args.top]:
-            print(stable_key_pretty(k))
+            row = L[k]
+            if use_span:
+                print(f"{pretty(k)}\tmacro_file={row.get('macro_file')!r}")
+            else:
+                print(pretty(k))
         if len(only_l) > args.top:
             print(f"... ({len(only_l) - args.top} more)")
         print()
 
     if only_r:
-        print("## only_in_right (macro_file:span-pieces)")
+        title = "## only_in_right (span + macro_file)" if use_span else "## only_in_right (macro_file:span-pieces)"
+        print(title)
         for k in only_r[: args.top]:
-            print(stable_key_pretty(k))
+            row = R[k]
+            if use_span:
+                print(f"{pretty(k)}\tmacro_file={row.get('macro_file')!r}")
+            else:
+                print(pretty(k))
         if len(only_r) > args.top:
             print(f"... ({len(only_r) - args.top} more)")
         print()
@@ -161,18 +215,35 @@ def cmd_diff(args: argparse.Namespace) -> int:
 
     deltas.sort(key=lambda t: (-t[0], t[1]))
     print("## top deltas by |Δ cumulative_bytes| (left → right)")
-    print(
-        "location\tΔcum\tΔcalls\tΔsingle_max\tL_cum\tR_cum\tL_calls\tR_calls\tL_max\tR_max\tbody_id_L\tbody_id_R"
-    )
+    if use_span:
+        print(
+            "location\tmacro_file_L\tmacro_file_R\tΔcum\tΔcalls\tΔsingle_max\t"
+            "L_cum\tR_cum\tL_calls\tR_calls\tL_max\tR_max\tbody_id_L\tbody_id_R"
+        )
+    else:
+        print(
+            "location\tΔcum\tΔcalls\tΔsingle_max\tL_cum\tR_cum\tL_calls\tR_calls\tL_max\tR_max\tbody_id_L\tbody_id_R"
+        )
     for _absd, k, d in deltas[: args.top]:
         a, b = L[k], R[k]
-        print(
-            f"{stable_key_pretty(k)}\t{int(d['d_cumulative_bytes'])}\t{int(d['d_call_count'])}\t{int(d['d_single_bytes_max'])}\t"
-            f"{a.get('cumulative_bytes')}\t{b.get('cumulative_bytes')}\t"
-            f"{a.get('call_count')}\t{b.get('call_count')}\t"
-            f"{a.get('single_bytes_max')}\t{b.get('single_bytes_max')}\t"
-            f"{a.get('body_id')}\t{b.get('body_id')}"
-        )
+        loc = pretty(k)
+        if use_span:
+            print(
+                f"{loc}\t{a.get('macro_file')}\t{b.get('macro_file')}\t"
+                f"{int(d['d_cumulative_bytes'])}\t{int(d['d_call_count'])}\t{int(d['d_single_bytes_max'])}\t"
+                f"{a.get('cumulative_bytes')}\t{b.get('cumulative_bytes')}\t"
+                f"{a.get('call_count')}\t{b.get('call_count')}\t"
+                f"{a.get('single_bytes_max')}\t{b.get('single_bytes_max')}\t"
+                f"{a.get('body_id')}\t{b.get('body_id')}"
+            )
+        else:
+            print(
+                f"{loc}\t{int(d['d_cumulative_bytes'])}\t{int(d['d_call_count'])}\t{int(d['d_single_bytes_max'])}\t"
+                f"{a.get('cumulative_bytes')}\t{b.get('cumulative_bytes')}\t"
+                f"{a.get('call_count')}\t{b.get('call_count')}\t"
+                f"{a.get('single_bytes_max')}\t{b.get('single_bytes_max')}\t"
+                f"{a.get('body_id')}\t{b.get('body_id')}"
+            )
     print()
 
     by_calls = sorted(
@@ -181,15 +252,26 @@ def cmd_diff(args: argparse.Namespace) -> int:
         reverse=True,
     )
     print("## top deltas by |Δ call_count|")
-    print("location\tΔcalls\tΔcum\tL_calls\tR_calls\tL_cum\tR_cum")
+    if use_span:
+        print("location\tmacro_file_L\tmacro_file_R\tΔcalls\tΔcum\tL_calls\tR_calls\tL_cum\tR_cum")
+    else:
+        print("location\tΔcalls\tΔcum\tL_calls\tR_calls\tL_cum\tR_cum")
     for k in by_calls[: args.top]:
         a, b = L[k], R[k]
         dc = num_delta(a.get("call_count"), b.get("call_count"))
         du = num_delta(a.get("cumulative_bytes"), b.get("cumulative_bytes"))
-        print(
-            f"{stable_key_pretty(k)}\t{int(dc)}\t{int(du)}\t{a.get('call_count')}\t{b.get('call_count')}\t"
-            f"{a.get('cumulative_bytes')}\t{b.get('cumulative_bytes')}"
-        )
+        loc = pretty(k)
+        if use_span:
+            print(
+                f"{loc}\t{a.get('macro_file')}\t{b.get('macro_file')}\t"
+                f"{int(dc)}\t{int(du)}\t{a.get('call_count')}\t{b.get('call_count')}\t"
+                f"{a.get('cumulative_bytes')}\t{b.get('cumulative_bytes')}"
+            )
+        else:
+            print(
+                f"{loc}\t{int(dc)}\t{int(du)}\t{a.get('call_count')}\t{b.get('call_count')}\t"
+                f"{a.get('cumulative_bytes')}\t{b.get('cumulative_bytes')}"
+            )
 
     return 0
 
@@ -248,7 +330,12 @@ def main() -> int:
     pd.add_argument("left")
     pd.add_argument("right")
     pd.add_argument("--top", type=int, default=30, help="Max rows per section")
-    pd.set_defaults(func=cmd_diff)
+    pd.add_argument(
+        "--span-key",
+        action="store_true",
+        help="Join on span lines + pieces_count only (for comparing dumps when macro_file differs, e.g. (unknown) vs paths)",
+    )
+    pd.set_defaults(func=cmd_diff, span_key=False)
 
     pz = sub.add_parser("summarize", help="Top leaders in one dump (max / calls / cumulative)")
     pz.add_argument("input", nargs="?", default="-")
