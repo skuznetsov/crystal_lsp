@@ -8,7 +8,11 @@
 #
 # Carriers:
 #   scripts/macro_dump_heavy_carrier.cr — more macro volume than a one-liner
+#   scripts/macro_dump_flag_carrier.cr — top-level {% if flag?(:darwin) %} + {% begin %}
 #   /tmp/macro_oracle_carrier.cr — minimal (prelude only)
+#
+# If an older commit lacks DUMP telemetry, cherry-pick ffa32a87 onto each
+# worktree after add (clean on bootstrap-lineage commits; conflicts on tiny main trees).
 #
 # Requires: crystal, python3, git worktree support, ~30s+ compile per commit.
 set -euo pipefail
