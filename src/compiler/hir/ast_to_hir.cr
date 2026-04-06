@@ -2040,7 +2040,10 @@ module Crystal::HIR
     @phase0_body_infer_counts : Hash(CrystalV2::Compiler::Semantic::DefIdentity, Int32) = Hash(CrystalV2::Compiler::Semantic::DefIdentity, Int32).new(0)
     # Cached recovered expr_index for legacy body-infer call sites. Keyed by
     # canonical arena object_id + structural FNV mix of DefNode (not heap
-    # object_id — see Semantic::DefIdentity contract). Value -1 means recovery failed.
+    # object_id — see Semantic::DefIdentity contract). On hit, the cached index
+    # is confirmed with def_matches_phase0_body_infer_identity?; otherwise the
+    # entry is dropped. Value -1 is never returned from cache (would risk false
+    # miss on mix collision) — negative results are recomputed by linear scan.
     @phase0_body_infer_expr_index_cache : Hash(Tuple(UInt64, UInt64), Int32) = {} of Tuple(UInt64, UInt64) => Int32
 
     # Phase 1: Identity dry-run tracker (side-channel, no behavior change)
@@ -10277,7 +10280,17 @@ module Crystal::HIR
 
       cache_key = {canonical_arena.object_id.to_u64, body_infer_node_identity_mix(node)}
       if cached = @phase0_body_infer_expr_index_cache[cache_key]?
-        return cached
+        if cached >= 0
+          hit_id = CrystalV2::Compiler::Frontend::ExprId.new(cached)
+          if expr_id_matches_arena?(canonical_arena, hit_id)
+            hit_node = canonical_arena[hit_id]
+            if hit_node.is_a?(CrystalV2::Compiler::Frontend::DefNode) &&
+               def_matches_phase0_body_infer_identity?(hit_node, node)
+              return cached
+            end
+          end
+        end
+        @phase0_body_infer_expr_index_cache.delete(cache_key)
       end
 
       i = 0
@@ -10292,7 +10305,7 @@ module Crystal::HIR
         i += 1
       end
 
-      @phase0_body_infer_expr_index_cache[cache_key] = -1
+      # Omit caching -1: a later DefNode with the same FNV mix could match the arena.
       -1
     end
 
