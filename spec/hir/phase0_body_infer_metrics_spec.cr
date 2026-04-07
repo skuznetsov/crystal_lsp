@@ -6,10 +6,10 @@ require "../../src/compiler/frontend/lexer"
 class Crystal::HIR::AstToHir
   def __test_record_phase0_body_infer_walk(
     node : CrystalV2::Compiler::Frontend::DefNode,
-    preferred_arena : CrystalV2::Compiler::Frontend::ArenaLike,
+    resolved_arena : CrystalV2::Compiler::Frontend::ArenaLike,
     node_expr_id : CrystalV2::Compiler::Frontend::ExprId? = nil,
   ) : CrystalV2::Compiler::Semantic::DefIdentity?
-    record_phase0_body_infer_walk(node, preferred_arena, node_expr_id)
+    record_phase0_body_infer_walk(node, resolved_arena, node_expr_id)
   end
 
   def __test_phase0_body_infer_counts : Hash(CrystalV2::Compiler::Semantic::DefIdentity, Int32)

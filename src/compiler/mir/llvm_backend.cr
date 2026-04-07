@@ -902,17 +902,24 @@ module Crystal::MIR
       declaration_id = register_static_member_declaration(namespace_parts, local_name, display_name, type_ref, location, constant_literal)
       scope_ref = "!#{COMPILE_UNIT_ID}"
       declaration_ref = ""
-      unless declaration_id
-        scope_ref = if namespace_id = register_namespace_chain(namespace_parts)
-                      "!#{namespace_id}"
-                    else
-                      "!#{COMPILE_UNIT_ID}"
-                    end
-      else
+      if declaration_id
+        # Match Clang: the defining DW_TAG_variable lives under the CU; the in-class declaration
+        # carries the composite scope so LLDB can resolve names like Demo::VALUE.
         declaration_ref = ", declaration: !#{declaration_id}"
+      elsif namespace_id = register_namespace_chain(namespace_parts)
+        scope_ref = "!#{namespace_id}"
       end
 
-      @global_debug_definitions[variable_id] ||= "!#{variable_id} = distinct !DIGlobalVariable(name: \"#{escape_metadata_string(local_name)}\", linkageName: \"#{escape_metadata_string(linkage_name)}\", scope: #{scope_ref}, file: !#{file_id}, line: #{positive_line(location.line)}, type: !#{type_id}, isLocal: false, isDefinition: true#{declaration_ref})\n"
+      # LLDB parses `Foo::bar` using C++ name rules; DW_AT_linkage_name must Itanium-demangle to that
+      # spelling so `target variable` can tie the defining DIE to the qualified name. The LLVM global
+      # symbol keeps Crystal's linkage_name; only debug metadata uses the synthetic mangling.
+      meta_linkage_name = if declaration_id && !local_name.starts_with?("@@")
+                            itanium_static_member_linkage_name(namespace_parts, local_name)
+                          else
+                            linkage_name
+                          end
+
+      @global_debug_definitions[variable_id] ||= "!#{variable_id} = distinct !DIGlobalVariable(name: \"#{escape_metadata_string(local_name)}\", linkageName: \"#{escape_metadata_string(meta_linkage_name)}\", scope: #{scope_ref}, file: !#{file_id}, line: #{positive_line(location.line)}, type: !#{type_id}, isLocal: false, isDefinition: true#{declaration_ref})\n"
       @global_debug_definitions[expression_id] ||= "!#{expression_id} = !DIGlobalVariableExpression(var: !#{variable_id}, expr: !#{EXPRESSION_ID})\n"
       @global_expression_ids << expression_id unless @global_expression_ids.includes?(expression_id)
       expression_id
@@ -941,8 +948,9 @@ module Crystal::MIR
       file_id = register_file(location.file)
       member_type_id = static_member_debug_type_id(local_name, type_ref)
       member_flags = static_member_di_flags(@static_owner_tags[owner_id])
-      extra_data_ref = static_member_extra_data(local_name, type_ref, constant_literal)
-      @type_definitions[member_id] ||= "!#{member_id} = !DIDerivedType(tag: DW_TAG_variable, name: \"#{escape_metadata_string(local_name)}\", scope: !#{owner_id}, file: !#{file_id}, line: #{positive_line(location.line)}, baseType: !#{member_type_id}, flags: #{member_flags}#{extra_data_ref})\n"
+      # Do not attach extraData (DW_AT_const_value) here: Clang omits it on the in-class declaration
+      # when a separate CU-level definition provides the address; LLDB then resolves Demo::VALUE.
+      @type_definitions[member_id] ||= "!#{member_id} = !DIDerivedType(tag: DW_TAG_variable, name: \"#{escape_metadata_string(local_name)}\", scope: !#{owner_id}, file: !#{file_id}, line: #{positive_line(location.line)}, baseType: !#{member_type_id}, flags: #{member_flags})\n"
 
       member_ids = @static_owner_member_ids[owner_id]
       unless member_ids.includes?(member_id)
@@ -968,7 +976,22 @@ module Crystal::MIR
       return nil if local_name.starts_with?("@@")
 
       return nil unless register_static_member_declaration(owner_parts, local_name, display_name, type_ref, location, constant_literal)
-      register_global_variable(linkage_name, linkage_name, type_ref, location)
+      register_global_variable(display_name, linkage_name, type_ref, location, constant_literal)
+    end
+
+    # Itanium mangling for a static data member: <encoded name> = N <nested-name> E
+    # Nested-name = repeating <length><identifier> for each qualifier + member.
+    private def itanium_static_member_linkage_name(owner_parts : Array(String), member_name : String) : String
+      String.build do |io|
+        io << "_ZN"
+        owner_parts.each do |part|
+          io << part.bytesize
+          io << part
+        end
+        io << member_name.bytesize
+        io << member_name
+        io << 'E'
+      end
     end
 
     private def register_static_owner(owner_name : String, owner_type : Type, location : SourceLocation) : Int32
@@ -1250,41 +1273,6 @@ module Crystal::MIR
     private def static_member_debug_type_id(local_name : String, type_ref : TypeRef) : Int32
       return debug_type_id(type_ref) if local_name.starts_with?("@@")
       const_debug_type_id(type_ref)
-    end
-
-    private def static_member_extra_data(local_name : String, type_ref : TypeRef, constant_literal : Float64 | Int64 | Nil) : String
-      return "" if local_name.starts_with?("@@")
-      return "" unless literal = constant_literal
-
-      llvm_type = @type_mapper.llvm_type(type_ref)
-      case literal
-      when Int64
-        case llvm_type
-        when "i1", "i8", "i16", "i32", "i64", "i128"
-          ", extraData: #{llvm_type} #{literal}"
-        when "float"
-          ", extraData: float #{format_debug_float_literal(literal.to_f64)}"
-        when "double"
-          ", extraData: double #{format_debug_float_literal(literal.to_f64)}"
-        else
-          ""
-        end
-      when Float64
-        case llvm_type
-        when "float"
-          ", extraData: float #{format_debug_float_literal(literal)}"
-        when "double"
-          ", extraData: double #{format_debug_float_literal(literal)}"
-        else
-          ""
-        end
-      else
-        ""
-      end
-    end
-
-    private def format_debug_float_literal(value : Float64) : String
-      sprintf("%.6e", value)
     end
 
     private def const_debug_type_id(type_ref : TypeRef) : Int32
@@ -1714,6 +1702,10 @@ module Crystal::MIR
     @value_types : Hash(ValueId, TypeRef)     # For tracking operand types
     @void_values : Set(ValueId) = Set(ValueId).new  # Values emitted as void (no LLVM result)
     @emitted_functions : Set(String) = Set(String).new  # Track emitted function names to avoid duplicates
+    # When Dnew$$String stub bundles Dnew$$Int32 IR, skip duplicate define if Dnew$$Int32 is also missing.
+    @no_prelude_string_builder_dnew_int32_stub_emitted : Bool = false
+    # Same for #<<(String): synthesized calls inside Dnew$$String are not in @called_crystal_functions.
+    @no_prelude_string_builder_shl_string_stub_emitted : Bool = false
     @emitted_function_return_types : Hash(String, String) = {} of String => String  # Track emitted function return types for call-site consistency
     @undefined_externs : Hash(String, String) = {} of String => String  # Track undefined extern calls (name => return_type)
     @called_crystal_functions : Hash(String, {String, Int32, Array(String)}) = {} of String => {String, Int32, Array(String)}  # Track called Crystal functions (name => {return_type, arg_count, arg_types}) for missing declaration generation
@@ -2855,6 +2847,406 @@ module Crystal::MIR
       end
     end
 
+    # --no-prelude contract (compiler/runtime vs stdlib surface)
+    #
+    # What we support on purpose (bedrock for oracles and compiler-generated code):
+    # - String literal layout and C-compatible string emission where applicable.
+    # - Runtime helpers declared in emit_runtime (e.g. __crystal_v2_string_bytesize, __crystal_v2_int_to_string,
+    #   __crystal_v2_string_interpolate, __crystal_v2_string_concat).
+    # - String interpolation `"#{expr}"`: lowered in ast_to_hir (lower_string_interpolation) to HIR StringInterpolation,
+    #   then LLVM emit_string_interpolation → __crystal_v2_string_interpolate — not via String::Builder.
+    # - Primitive and compiler-needed coercions wired through those helpers (not “all of stdlib String”).
+    #
+    # Compiler-generated language sugar: same pipeline as normal lowering; must not require hand-written
+    # per-mangled stdlib shims except where the compiler truly emits those calls.
+    #
+    # Non-goal: full String::Builder / String / IO API compatibility. Do not add new String$CCBuilder$… stubs
+    # unless the call is proven to come from compiler lowering or an agreed contract oracle — prefer fixing
+    # lowering to use bedrock helpers instead of growing mangled-name emulation.
+    #
+    # String::Builder stubs below are a narrow quarantine: missing mangled methods RTA did not emit, mostly
+    # for regression oracles (see regression_tests/combined — comments classify contract vs stdlib-surface).
+    #
+    # Constructor ABI (separate concern from “policy”): MIR sometimes types class `.new` as i32; heap refs
+    # must be ptr. We force ptr for mangled names starting with `String$CCBuilder$Dnew` in emit_call /
+    # emit_extern_call. A generic fix for every `$Dnew` belongs in MIR/ABI; this prefix match is a targeted
+    # workaround, not the long-term contract.
+    private def no_prelude_string_builder_dnew_mangled?(mangled : String) : Bool
+      mangled.starts_with?("String$CCBuilder$Dnew")
+    end
+
+    # LLVM IR for String::Builder.new(Int32) — shared so Dnew$$String can bundle it:
+    # only Dnew$$String may be stub-emitted, but its body calls Dnew$$Int32; llc needs that define.
+    # Same pattern for H$SHL$$String: calls inside synthesized LLVM are not in @called_crystal_functions,
+    # so Dnew$$String and H$SHL$$Int32 prepend the #<<(String) IR when missing.
+    private def no_prelude_string_builder_dnew_int32_ir(builder_tid : Int32) : String
+      "; String::Builder.new(Int32 capacity) — synthesized (no-prelude)\n" \
+        "define ptr @String$CCBuilder$Dnew$$Int32(i32 %cap) {\n" \
+        "entry:\n" \
+        "  %bad = icmp slt i32 %cap, 0\n" \
+        "  br i1 %bad, label %badcap, label %ok\n" \
+        "badcap:\n" \
+        "  call void @abort()\n" \
+        "  unreachable\n" \
+        "ok:\n" \
+        "  %total = add i32 %cap, 13\n" \
+        "  %t64 = sext i32 %total to i64\n" \
+        "  %raw = call ptr @calloc(i64 1, i64 88)\n" \
+        "  store i64 1, ptr %raw, align 8\n" \
+        "  %obj = getelementptr i8, ptr %raw, i64 8\n" \
+        "  %tidp = getelementptr i8, ptr %obj, i32 0\n" \
+        "  store i32 #{builder_tid}, ptr %tidp\n" \
+        "  %buf = call ptr @malloc(i64 %t64)\n" \
+        "  %bp = getelementptr i8, ptr %obj, i32 64\n" \
+        "  store ptr %buf, ptr %bp\n" \
+        "  %cp = getelementptr i8, ptr %obj, i32 60\n" \
+        "  store i32 %total, ptr %cp\n" \
+        "  %bsp = getelementptr i8, ptr %obj, i32 56\n" \
+        "  store i32 0, ptr %bsp\n" \
+        "  %fp = getelementptr i8, ptr %obj, i32 72\n" \
+        "  store i1 0, ptr %fp\n" \
+        "  ret ptr %obj\n" \
+        "}\n"
+    end
+
+    private def no_prelude_string_builder_shl_string_ir : String
+      "; String::Builder#<<(String) — synthesized (no-prelude)\n" \
+        "define ptr @String$CCBuilder$H$SHL$$String(ptr %self, ptr %str) {\n" \
+        "entry:\n" \
+        "  %n1 = icmp eq ptr %str, null\n" \
+        "  br i1 %n1, label %done, label %chk0\n" \
+        "chk0:\n" \
+        "  %slen = call i32 @__crystal_v2_string_bytesize(ptr %str)\n" \
+        "  %z = icmp eq i32 %slen, 0\n" \
+        "  br i1 %z, label %done, label %work\n" \
+        "work:\n" \
+        "  %bs_p = getelementptr i8, ptr %self, i32 56\n" \
+        "  %bs = load i32, ptr %bs_p\n" \
+        "  %cap_p = getelementptr i8, ptr %self, i32 60\n" \
+        "  %cap = load i32, ptr %cap_p\n" \
+        "  %buf_p = getelementptr i8, ptr %self, i32 64\n" \
+        "  %buf = load ptr, ptr %buf_p\n" \
+        "  %real = add i32 %bs, 12\n" \
+        "  %need = add i32 %real, %slen\n" \
+        "  %fits = icmp sle i32 %need, %cap\n" \
+        "  br i1 %fits, label %copy, label %grow\n" \
+        "grow:\n" \
+        "  %c2 = mul i32 %cap, 2\n" \
+        "  %gt = icmp sgt i32 %need, %c2\n" \
+        "  %newcap = select i1 %gt, i32 %need, i32 %c2\n" \
+        "  %nc64 = sext i32 %newcap to i64\n" \
+        "  %nb = call ptr @realloc(ptr %buf, i64 %nc64)\n" \
+        "  store ptr %nb, ptr %buf_p\n" \
+        "  store i32 %newcap, ptr %cap_p\n" \
+        "  br label %copy\n" \
+        "copy:\n" \
+        "  %buf2 = load ptr, ptr %buf_p\n" \
+        "  %bs2 = load i32, ptr %bs_p\n" \
+        "  %real2 = add i32 %bs2, 12\n" \
+        "  %dst = getelementptr i8, ptr %buf2, i32 %real2\n" \
+        "  %src = getelementptr i8, ptr %str, i32 12\n" \
+        "  call void @llvm.memcpy.p0.p0.i32(ptr %dst, ptr %src, i32 %slen, i1 false)\n" \
+        "  %nb2 = add i32 %bs2, %slen\n" \
+        "  store i32 %nb2, ptr %bs_p\n" \
+        "  br label %done\n" \
+        "done:\n" \
+        "  ret ptr %self\n" \
+        "}\n"
+    end
+
+    # Synthesized bodies for methods that are called under --no-prelude but never lowered
+    # (RTA/emission gap). Keeps narrow oracles working — do not add new mangled Builder shims here
+    # without proving a compiler-generated bedrock requirement (see --no-prelude contract above).
+    private def try_emit_no_prelude_string_builder_stub(
+      name : String,
+      return_type : String,
+      arg_count : Int32,
+      arg_types : Array(String),
+    ) : String?
+      builder_tid = @module.types.find(&.name.==("String::Builder")).try(&.id.to_i32) || 0
+      stid = @string_type_id != 0 ? @string_type_id : TypeRef::STRING.id.to_i32
+      io_trailer = case return_type
+                   when "void" then "  ret void\n"
+                   when "ptr"  then "  ret ptr null\n"
+                   else           "  ret #{return_type} zeroinitializer\n"
+                   end
+
+      case name
+      when "String$CCBuilder$Dnew"
+        return nil unless return_type == "ptr" && arg_count == 0
+        # Default capacity 64: buffer bytes = 64 + String::HEADER_SIZE + 1 (matches stdlib initializer math).
+        return "; String::Builder.new — synthesized (no-prelude)\n" \
+               "define ptr @#{name}() {\n" \
+               "entry:\n" \
+               "  %raw = call ptr @calloc(i64 1, i64 88)\n" \
+               "  store i64 1, ptr %raw, align 8\n" \
+               "  %obj = getelementptr i8, ptr %raw, i64 8\n" \
+               "  %tidp = getelementptr i8, ptr %obj, i32 0\n" \
+               "  store i32 #{builder_tid}, ptr %tidp\n" \
+               "  %buf = call ptr @malloc(i64 77)\n" \
+               "  %bp = getelementptr i8, ptr %obj, i32 64\n" \
+               "  store ptr %buf, ptr %bp\n" \
+               "  %cp = getelementptr i8, ptr %obj, i32 60\n" \
+               "  store i32 77, ptr %cp\n" \
+               "  %bsp = getelementptr i8, ptr %obj, i32 56\n" \
+               "  store i32 0, ptr %bsp\n" \
+               "  %fp = getelementptr i8, ptr %obj, i32 72\n" \
+               "  store i1 0, ptr %fp\n" \
+               "  ret ptr %obj\n" \
+               "}\n"
+      when "String$CCBuilder$Dnew$$Int32"
+        return nil unless return_type == "ptr" && arg_count == 1
+        return "" if @no_prelude_string_builder_dnew_int32_stub_emitted
+        @no_prelude_string_builder_dnew_int32_stub_emitted = true
+        return no_prelude_string_builder_dnew_int32_ir(builder_tid)
+      when "String$CCBuilder$Dnew$$String"
+        return nil unless return_type == "ptr" && arg_count == 1
+        prefix = ""
+        unless @no_prelude_string_builder_dnew_int32_stub_emitted
+          prefix += no_prelude_string_builder_dnew_int32_ir(builder_tid)
+          @no_prelude_string_builder_dnew_int32_stub_emitted = true
+        end
+        unless @no_prelude_string_builder_shl_string_stub_emitted
+          prefix += no_prelude_string_builder_shl_string_ir
+          @no_prelude_string_builder_shl_string_stub_emitted = true
+        end
+        return prefix + "; String::Builder.new(String) — same as stdlib: new(bytesize) + << string\n" \
+               "define ptr @#{name}(ptr %str) {\n" \
+               "entry:\n" \
+               "  %nu = icmp eq ptr %str, null\n" \
+               "  br i1 %nu, label %nilb, label %have\n" \
+               "nilb:\n" \
+               "  %e = call ptr @String$CCBuilder$Dnew$$Int32(i32 0)\n" \
+               "  ret ptr %e\n" \
+               "have:\n" \
+               "  %bs = call i32 @__crystal_v2_string_bytesize(ptr %str)\n" \
+               "  %io = call ptr @String$CCBuilder$Dnew$$Int32(i32 %bs)\n" \
+               "  call ptr @String$CCBuilder$H$SHL$$String(ptr %io, ptr %str)\n" \
+               "  ret ptr %io\n" \
+               "}\n"
+      when "String$CCBuilder$H$SHL$$String"
+        return nil unless arg_count == 2
+        return "" if @no_prelude_string_builder_shl_string_stub_emitted
+        @no_prelude_string_builder_shl_string_stub_emitted = true
+        return no_prelude_string_builder_shl_string_ir
+      when "String$CCBuilder$Hto_s"
+        return nil unless arg_count == 1
+        return "; String::Builder#to_s — synthesized (no-prelude); @finished matches stdlib single-use rule\n" \
+               "@.str.noprelude_builder_to_s_twice = private constant [52 x i8] c\"no-prelude stub: String::Builder#to_s called twice\\0A\\00\"\n" \
+               "define ptr @#{name}(ptr %self) {\n" \
+               "entry:\n" \
+               "  %fp = getelementptr i8, ptr %self, i32 72\n" \
+               "  %fin = load i1, ptr %fp\n" \
+               "  br i1 %fin, label %reuse, label %first\n" \
+               "reuse:\n" \
+               "  %msg = getelementptr [52 x i8], ptr @.str.noprelude_builder_to_s_twice, i32 0, i32 0\n" \
+               "  call i32 @dprintf(i32 2, ptr %msg)\n" \
+               "  call void @abort()\n" \
+               "  unreachable\n" \
+               "first:\n" \
+               "  store i1 1, ptr %fp\n" \
+               "  %bp = getelementptr i8, ptr %self, i32 64\n" \
+               "  %buf = load ptr, ptr %bp\n" \
+               "  %bsp = getelementptr i8, ptr %self, i32 56\n" \
+               "  %bs = load i32, ptr %bsp\n" \
+               "  %dat = getelementptr i8, ptr %buf, i32 12\n" \
+               "  %res = call ptr @__crystal_v2_create_substring(ptr %dat, i32 %bs, i32 #{stid})\n" \
+               "  ret ptr %res\n" \
+               "}\n"
+      when "String$CCBuilder$H$SHL$$Int32"
+        return nil unless arg_count == 2
+        prefix = ""
+        unless @no_prelude_string_builder_shl_string_stub_emitted
+          prefix += no_prelude_string_builder_shl_string_ir
+          @no_prelude_string_builder_shl_string_stub_emitted = true
+        end
+        ret_line = case return_type
+                   when "i32" then "  ret i32 0\n"
+                   when "ptr" then "  ret ptr null\n"
+                   when "void" then "  ret void\n"
+                   else "  ret #{return_type} zeroinitializer\n"
+                   end
+        return prefix + "; String::Builder#<<(Int32) — synthesized (no-prelude)\n" \
+               "define #{return_type} @#{name}(ptr %self, i32 %v) {\n" \
+               "entry:\n" \
+               "  %tmp = call ptr @__crystal_v2_int_to_string(i32 %v)\n" \
+               "  call ptr @String$CCBuilder$H$SHL$$String(ptr %self, ptr %tmp)\n" \
+               "#{ret_line}" \
+               "}\n"
+      when "String$Hsize"
+        return nil unless return_type == "i32" && arg_count == 1
+        return "; String#size — forward to __crystal_v2_string_bytesize\n" \
+               "define i32 @#{name}(ptr %self) {\n" \
+               "entry:\n" \
+               "  %r = call i32 @__crystal_v2_string_bytesize(ptr %self)\n" \
+               "  ret i32 %r\n" \
+               "}\n"
+      when "String$H$IDX$$Int32"
+        return nil unless return_type == "i32" && arg_count == 2
+        return "; String#[](Int32) — byte with negative index\n" \
+               "define i32 @#{name}(ptr %self, i32 %idx) {\n" \
+               "entry:\n" \
+               "  %bs = call i32 @__crystal_v2_string_bytesize(ptr %self)\n" \
+               "  %neg = icmp slt i32 %idx, 0\n" \
+               "  %adj = add i32 %bs, %idx\n" \
+               "  %real = select i1 %neg, i32 %adj, i32 %idx\n" \
+               "  %r = call i32 @__crystal_v2_string_byte_at(ptr %self, i32 %real)\n" \
+               "  ret i32 %r\n" \
+               "}\n"
+      when "String$Hstarts_with$Q$$String"
+        return nil unless return_type == "i1" && arg_count == 2
+        return "; String#starts_with?(String)\n" \
+               "define i1 @#{name}(ptr %self, ptr %p) {\n" \
+               "entry:\n" \
+               "  %pn = icmp eq ptr %p, null\n" \
+               "  br i1 %pn, label %f, label %k\n" \
+               "k:\n" \
+               "  %pl = call i32 @__crystal_v2_string_bytesize(ptr %p)\n" \
+               "  %sl = call i32 @__crystal_v2_string_bytesize(ptr %self)\n" \
+               "  %bad = icmp sgt i32 %pl, %sl\n" \
+               "  br i1 %bad, label %f, label %cmp\n" \
+               "cmp:\n" \
+               "  %sd = getelementptr i8, ptr %self, i32 12\n" \
+               "  %pd = getelementptr i8, ptr %p, i32 12\n" \
+               "  %mc = call i32 @memcmp(ptr %sd, ptr %pd, i32 %pl)\n" \
+               "  %e = icmp eq i32 %mc, 0\n" \
+               "  ret i1 %e\n" \
+               "f:\n" \
+               "  ret i1 0\n" \
+               "}\n"
+      when "String$Hends_with$Q$$String"
+        return nil unless return_type == "i1" && arg_count == 2
+        return "; String#ends_with?(String)\n" \
+               "define i1 @#{name}(ptr %self, ptr %suf) {\n" \
+               "entry:\n" \
+               "  %sn = icmp eq ptr %suf, null\n" \
+               "  br i1 %sn, label %f, label %k\n" \
+               "k:\n" \
+               "  %sl = call i32 @__crystal_v2_string_bytesize(ptr %self)\n" \
+               "  %tl = call i32 @__crystal_v2_string_bytesize(ptr %suf)\n" \
+               "  %bad = icmp sgt i32 %tl, %sl\n" \
+               "  br i1 %bad, label %f, label %cmp\n" \
+               "cmp:\n" \
+               "  %start = sub i32 %sl, %tl\n" \
+               "  %sd = getelementptr i8, ptr %self, i32 12\n" \
+               "  %sp = getelementptr i8, ptr %sd, i32 %start\n" \
+               "  %td = getelementptr i8, ptr %suf, i32 12\n" \
+               "  %mc = call i32 @memcmp(ptr %sp, ptr %td, i32 %tl)\n" \
+               "  %e = icmp eq i32 %mc, 0\n" \
+               "  ret i1 %e\n" \
+               "f:\n" \
+               "  ret i1 0\n" \
+               "}\n"
+      when "String$Hempty$Q"
+        return nil unless return_type == "i1" && arg_count == 1
+        return "; String#empty?\n" \
+               "define i1 @#{name}(ptr %self) {\n" \
+               "entry:\n" \
+               "  %bs = call i32 @__crystal_v2_string_bytesize(ptr %self)\n" \
+               "  %e = icmp eq i32 %bs, 0\n" \
+               "  ret i1 %e\n" \
+               "}\n"
+      when "String$Hstrip"
+        return nil unless return_type == "ptr" && arg_count == 1
+        return "; String#strip — ASCII whitespace trim\n" \
+               "define ptr @#{name}(ptr %self) {\n" \
+               "entry:\n" \
+               "  %bs = call i32 @__crystal_v2_string_bytesize(ptr %self)\n" \
+               "  br label %l_left\n" \
+               "l_left:\n" \
+               "  %i = phi i32 [0, %entry], [%in, %l_left_next]\n" \
+               "  %ge = icmp sge i32 %i, %bs\n" \
+               "  br i1 %ge, label %ret_empty, label %l_left_test\n" \
+               "l_left_test:\n" \
+               "  %cb = call i32 @__crystal_v2_string_byte_at(ptr %self, i32 %i)\n" \
+               "  %w32 = icmp eq i32 %cb, 32\n" \
+               "  %w9 = icmp eq i32 %cb, 9\n" \
+               "  %w10 = icmp eq i32 %cb, 10\n" \
+               "  %w13 = icmp eq i32 %cb, 13\n" \
+               "  %w1 = or i1 %w32, %w9\n" \
+               "  %w2 = or i1 %w1, %w10\n" \
+               "  %ws = or i1 %w2, %w13\n" \
+               "  br i1 %ws, label %l_left_next, label %left_done\n" \
+               "l_left_next:\n" \
+               "  %in = add i32 %i, 1\n" \
+               "  br label %l_left\n" \
+               "left_done:\n" \
+               "  %istart = phi i32 [%i, %l_left_test]\n" \
+               "  %all_ws = icmp sge i32 %istart, %bs\n" \
+               "  br i1 %all_ws, label %ret_empty, label %r_pre\n" \
+               "r_pre:\n" \
+               "  %j0 = sub i32 %bs, 1\n" \
+               "  br label %r_loop\n" \
+               "r_loop:\n" \
+               "  %j = phi i32 [%j0, %r_pre], [%jdec, %r_dec]\n" \
+               "  %jl = icmp slt i32 %j, %istart\n" \
+               "  br i1 %jl, label %ret_empty, label %r_test\n" \
+               "r_test:\n" \
+               "  %c2 = call i32 @__crystal_v2_string_byte_at(ptr %self, i32 %j)\n" \
+               "  %u32 = icmp eq i32 %c2, 32\n" \
+               "  %u9 = icmp eq i32 %c2, 9\n" \
+               "  %u10 = icmp eq i32 %c2, 10\n" \
+               "  %u13 = icmp eq i32 %c2, 13\n" \
+               "  %u1 = or i1 %u32, %u9\n" \
+               "  %u2 = or i1 %u1, %u10\n" \
+               "  %us = or i1 %u2, %u13\n" \
+               "  br i1 %us, label %r_dec, label %make_sub\n" \
+               "r_dec:\n" \
+               "  %jdec = sub i32 %j, 1\n" \
+               "  br label %r_loop\n" \
+               "ret_empty:\n" \
+               "  %zstk = alloca i8\n" \
+               "  store i8 0, ptr %zstk\n" \
+               "  %em = call ptr @__crystal_v2_create_substring(ptr %zstk, i32 0, i32 #{stid})\n" \
+               "  ret ptr %em\n" \
+               "make_sub:\n" \
+               "  %cnt = sub i32 %j, %istart\n" \
+               "  %cnt1 = add i32 %cnt, 1\n" \
+               "  %base = getelementptr i8, ptr %self, i32 12\n" \
+               "  %src = getelementptr i8, ptr %base, i32 %istart\n" \
+               "  %out = call ptr @__crystal_v2_create_substring(ptr %src, i32 %cnt1, i32 #{stid})\n" \
+               "  ret ptr %out\n" \
+               "}\n"
+      when "IO$Hputs$$Char"
+        return nil unless arg_count == 2
+        return "; IO#puts(Char)\n" \
+               "define #{return_type} @#{name}(ptr %io, i32 %ch) {\n" \
+               "entry:\n" \
+               "  %b = trunc i32 %ch to i8\n" \
+               "  %one = alloca i8\n" \
+               "  store i8 %b, ptr %one\n" \
+               "  call i64 @write(i32 1, ptr %one, i64 1)\n" \
+               "  call i64 @write(i32 1, ptr @.str_newline, i64 1)\n" \
+               "#{io_trailer}" \
+               "}\n"
+      when "IO$Hputs$$Pointer"
+        return nil unless arg_count == 2
+        return "; IO#puts(String-like pointer)\n" \
+               "define #{return_type} @#{name}(ptr %io, ptr %s) {\n" \
+               "entry:\n" \
+               "  %nn = icmp eq ptr %s, null\n" \
+               "  br i1 %nn, label %nl_only, label %pr\n" \
+               "pr:\n" \
+               "  call void @__crystal_v2_print_string(ptr %s)\n" \
+               "  %bs = call i32 @__crystal_v2_string_bytesize(ptr %s)\n" \
+               "  %has = icmp sgt i32 %bs, 0\n" \
+               "  br i1 %has, label %chk, label %nl_only\n" \
+               "chk:\n" \
+               "  %la = sub i32 %bs, 1\n" \
+               "  %lc = call i32 @__crystal_v2_string_byte_at(ptr %s, i32 %la)\n" \
+               "  %isnl = icmp eq i32 %lc, 10\n" \
+               "  br i1 %isnl, label %done, label %nl_only\n" \
+               "nl_only:\n" \
+               "  call i64 @write(i32 1, ptr @.str_newline, i64 1)\n" \
+               "  br label %done\n" \
+               "done:\n" \
+               "#{io_trailer}" \
+               "}\n"
+      else
+        nil
+      end
+    end
+
     # Emit a stub function body for methods called on Nil/Unknown/impossible receivers.
     # Returns the LLVM IR string for the stub, or nil if the name doesn't match.
     private def emit_dead_code_stub(name : String, return_type : String, arg_count : Int32 = 0, arg_types : Array(String) = [] of String) : String?
@@ -2862,6 +3254,14 @@ module Crystal::MIR
       # should forward to the registered real extern name (e.g. llvm.sqrt.f64).
       if (extern = try_resolve_extern_from_mangled(name))
         return emit_extern_forwarding_stub(name, extern, return_type, arg_count, arg_types)
+      end
+
+      if stub = try_emit_no_prelude_string_builder_stub(name, return_type, arg_count, arg_types)
+        return stub
+      end
+
+      if (oracle = try_emit_no_prelude_string_builder_stub(name, return_type, arg_count, arg_types))
+        return oracle
       end
 
       # Methods on Nil (e.g. Nil$Hzero, Nil$Hto_i, Nil$Hadditive_identity)
@@ -3752,10 +4152,12 @@ module Crystal::MIR
         emit_raw "@.str.dbg_open_label = private unnamed_addr constant [5 x i8] c\"open\\00\", align 1\n"
         emit_raw "@.str.dbg_write_label = private unnamed_addr constant [6 x i8] c\"write\\00\", align 1\n"
       else
-        # No-prelude mode: C strings
-        emit_raw "@.str.empty = private unnamed_addr constant [1 x i8] c\"\\00\", align 1\n"
-        emit_raw "@.str.file_open_error = private unnamed_addr constant [26 x i8] c\"Error opening file (open)\\00\", align 1\n"
-        emit_raw "@.str.file_write_error = private unnamed_addr constant [27 x i8] c\"Error writing file (write)\\00\", align 1\n"
+        # No-prelude mode: Crystal-shaped string headers so __crystal_v2_string_* and
+        # synthesized stubs see the same layout as heap-allocated strings (i32 type_id @0, bytesize @4, data @12).
+        np_str_tid = TypeRef::STRING.id.to_i32
+        emit_raw "@.str.empty = private unnamed_addr constant { i32, i32, i32, [1 x i8] } { i32 #{np_str_tid}, i32 0, i32 0, [1 x i8] c\"\\00\" }, align 8\n"
+        emit_raw "@.str.file_open_error = private unnamed_addr constant { i32, i32, i32, [26 x i8] } { i32 #{np_str_tid}, i32 25, i32 25, [26 x i8] c\"Error opening file (open)\\00\" }, align 8\n"
+        emit_raw "@.str.file_write_error = private unnamed_addr constant { i32, i32, i32, [27 x i8] } { i32 #{np_str_tid}, i32 26, i32 26, [27 x i8] c\"Error writing file (write)\\00\" }, align 8\n"
         emit_raw "@.str.dbg_open_label = private unnamed_addr constant [5 x i8] c\"open\\00\", align 1\n"
         emit_raw "@.str.dbg_write_label = private unnamed_addr constant [6 x i8] c\"write\\00\", align 1\n"
       end
@@ -3778,7 +4180,10 @@ module Crystal::MIR
         emit_raw "#{global_name}.data = private unnamed_addr constant { i64, i32, i32, i32, [#{len} x i8] } { i64 9223372036854775807, i32 #{@string_type_id}, i32 #{bytesize}, i32 #{charsize}, [#{len} x i8] c\"#{escaped}\\00\" }, align 8\n"
         emit_raw "#{global_name} = private unnamed_addr alias i8, getelementptr inbounds (i8, ptr #{global_name}.data, i64 8)\n"
       else
-        emit_raw "#{global_name} = private unnamed_addr constant [#{len} x i8] c\"#{escaped}\\00\", align 1\n"
+        bytesize = str.bytesize
+        charsize = str.size
+        lit_tid = TypeRef::STRING.id.to_i32
+        emit_raw "#{global_name} = private unnamed_addr constant { i32, i32, i32, [#{len} x i8] } { i32 #{lit_tid}, i32 #{bytesize}, i32 #{charsize}, [#{len} x i8] c\"#{escaped}\\00\" }, align 8\n"
       end
     end
 
@@ -4622,8 +5027,18 @@ module Crystal::MIR
       emit_raw "  ret void\n"
       emit_raw "}\n\n"
 
+      # Line-print integers via sprintf(stack)+write(1): avoids mixing libc printf
+      # (stdio-buffered stdout) with IO#puts paths that use write(2), which reorders
+      # output when stdout is fully buffered (e.g. piped through run_safe).
+      emit_raw "declare i32 @sprintf(ptr, ptr, ...)\n"
+      emit_raw "declare i64 @strlen(ptr)\n"
+      emit_raw "declare i64 @write(i32, ptr, i64)\n"
       emit_raw "define void @__crystal_v2_print_int32_ln(i32 %val) {\n"
-      emit_raw "  call i32 (ptr, ...) @printf(ptr @.int_fmt, i32 %val)\n"
+      emit_raw "entry:\n"
+      emit_raw "  %tmp = alloca [16 x i8]\n"
+      emit_raw "  call i32 (ptr, ptr, ...) @sprintf(ptr %tmp, ptr @.int_fmt, i32 %val)\n"
+      emit_raw "  %len = call i64 @strlen(ptr %tmp)\n"
+      emit_raw "  call i64 @write(i32 1, ptr %tmp, i64 %len)\n"
       emit_raw "  ret void\n"
       emit_raw "}\n\n"
 
@@ -4633,7 +5048,11 @@ module Crystal::MIR
       emit_raw "}\n\n"
 
       emit_raw "define void @__crystal_v2_print_uint32_ln(i32 %val) {\n"
-      emit_raw "  call i32 (ptr, ...) @printf(ptr @.uint_fmt, i32 %val)\n"
+      emit_raw "entry:\n"
+      emit_raw "  %tmp = alloca [16 x i8]\n"
+      emit_raw "  call i32 (ptr, ptr, ...) @sprintf(ptr %tmp, ptr @.uint_fmt, i32 %val)\n"
+      emit_raw "  %len = call i64 @strlen(ptr %tmp)\n"
+      emit_raw "  call i64 @write(i32 1, ptr %tmp, i64 %len)\n"
       emit_raw "  ret void\n"
       emit_raw "}\n\n"
 
@@ -4643,7 +5062,11 @@ module Crystal::MIR
       emit_raw "}\n\n"
 
       emit_raw "define void @__crystal_v2_print_int64_ln(i64 %val) {\n"
-      emit_raw "  call i32 (ptr, ...) @printf(ptr @.long_fmt, i64 %val)\n"
+      emit_raw "entry:\n"
+      emit_raw "  %tmp = alloca [32 x i8]\n"
+      emit_raw "  call i32 (ptr, ptr, ...) @sprintf(ptr %tmp, ptr @.long_fmt, i64 %val)\n"
+      emit_raw "  %len = call i64 @strlen(ptr %tmp)\n"
+      emit_raw "  call i64 @write(i32 1, ptr %tmp, i64 %len)\n"
       emit_raw "  ret void\n"
       emit_raw "}\n\n"
 
@@ -4653,7 +5076,11 @@ module Crystal::MIR
       emit_raw "}\n\n"
 
       emit_raw "define void @__crystal_v2_print_uint64_ln(i64 %val) {\n"
-      emit_raw "  call i32 (ptr, ...) @printf(ptr @.ulong_fmt, i64 %val)\n"
+      emit_raw "entry:\n"
+      emit_raw "  %tmp = alloca [32 x i8]\n"
+      emit_raw "  call i32 (ptr, ptr, ...) @sprintf(ptr %tmp, ptr @.ulong_fmt, i64 %val)\n"
+      emit_raw "  %len = call i64 @strlen(ptr %tmp)\n"
+      emit_raw "  call i64 @write(i32 1, ptr %tmp, i64 %len)\n"
       emit_raw "  ret void\n"
       emit_raw "}\n\n"
 
@@ -4872,12 +5299,10 @@ module Crystal::MIR
 
 
       # String functions - implemented using C library
-      emit_raw "declare i64 @strlen(ptr)\n"
+      # strlen/sprintf/write already declared above (used by print_*_ln helpers).
       emit_raw "declare ptr @strcpy(ptr, ptr)\n"
       emit_raw "declare ptr @strcat(ptr, ptr)\n"
-      emit_raw "declare i32 @sprintf(ptr, ptr, ...)\n"
       emit_raw "declare ptr @strstr(ptr, ptr)\n"
-      emit_raw "declare i64 @write(i32, ptr, i64)\n"
       emit_raw "declare i32 @open(ptr, i32, ...)\n"
       emit_raw "declare i64 @lseek(i32, i64, i32)\n"
       emit_raw "declare i64 @read(i32, ptr, i64)\n"
@@ -17106,6 +17531,13 @@ module Crystal::MIR
       # actual emitted LLVM type. Mismatches cause opt/verifier failures.
       args = fixup_call_arg_types(args)
 
+      # String::Builder.new*(...) — workaround: MIR sometimes types class constructors as i32 while
+      # heap objects are ptr. Generic fix belongs at MIR/ABI for `.new` calls, not more prefix hacks.
+      # Track: same adjustment exists in emit_extern_call for matching mangled names.
+      if no_prelude_string_builder_dnew_mangled?(callee_name)
+        return_type = "ptr"
+      end
+
       if return_type == "void"
         emit "call void @#{callee_name}(#{args})"
         # Mark as void so value_ref returns a safe default for downstream uses
@@ -17272,12 +17704,20 @@ module Crystal::MIR
           end
         end
       end
+      if no_prelude_string_builder_dnew_mangled?(callee_name)
+        if bt = @module.type_registry.get_by_name("String::Builder")
+          @value_types[inst.id] = TypeRef.new(bt.id)
+        end
+      end
       # Track called function for forward declaration if missing at end of IR gen
       arg_type_strs = inst.args.map do |a|
         at = @value_types[a]?
         at ? @type_mapper.llvm_type(at) : "ptr"
       end.reject { |t| t == "void" }
-      @called_crystal_functions[callee_name] ||= {(return_type == "void" ? "ptr" : return_type), arg_type_strs.size, arg_type_strs}
+      # Overwrite any FuncPointer placeholder ({ptr, 0, []}): real calls must win so
+      # end-of-module stub synthesis (no-prelude String/IO helpers) sees correct
+      # return type and arg_count — otherwise String$Hsize etc. get abort stubs.
+      @called_crystal_functions[callee_name] = {(return_type == "void" ? "ptr" : return_type), arg_type_strs.size, arg_type_strs}
     end
 
     private def emit_indirect_call(inst : IndirectCall, name : String)
@@ -18076,6 +18516,11 @@ module Crystal::MIR
       @extern_call_arg_join_items += arg_entries.size
       @extern_call_arg_join_bytes += args.bytesize
 
+      # Same as emit_call: ptr return for String::Builder.new* (MIR constructor typing workaround).
+      if no_prelude_string_builder_dnew_mangled?(mangled_extern_name)
+        return_type = "ptr"
+      end
+
       if return_type == "void"
         emit "call void @#{mangled_extern_name}(#{args})"
         # Mark as void so value_ref returns a safe default for downstream uses
@@ -18121,6 +18566,12 @@ module Crystal::MIR
         end
       end
 
+      if no_prelude_string_builder_dnew_mangled?(mangled_extern_name)
+        if bt = @module.type_registry.get_by_name("String::Builder")
+          @value_types[inst.id] = TypeRef.new(bt.id)
+        end
+      end
+
       # If prepass detected this ExternCall needs zext/trunc for phi compatibility, emit it now
       if (conversion = @phi_zext_conversions[inst.id]?)
         from_bits, to_bits = conversion
@@ -18137,7 +18588,7 @@ module Crystal::MIR
         at = @value_types[a]?
         at ? @type_mapper.llvm_type(at) : "ptr"
       end.reject { |t| t == "void" }
-      @called_crystal_functions[mangled_extern_name] ||= {(return_type == "void" ? "ptr" : return_type), extern_arg_types.size, extern_arg_types}
+      @called_crystal_functions[mangled_extern_name] = {(return_type == "void" ? "ptr" : return_type), extern_arg_types.size, extern_arg_types}
     end
 
     private def emit_address_of(inst : AddressOf, name : String)
@@ -20135,6 +20586,8 @@ module Crystal::MIR
       end
     end
 
+    # Lowers HIR StringInterpolation to __crystal_v2_string_* helpers (single alloc for 3+ parts).
+    # This is the bedrock interpolation path for --no-prelude; it does not use String::Builder stubs.
     private def emit_string_interpolation(inst : StringInterpolation, name : String)
       base_name = name.lstrip('%')
 

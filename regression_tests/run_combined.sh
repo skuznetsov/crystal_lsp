@@ -2,8 +2,15 @@
 # Run combined regression tests (fewer compilations, more coverage per file)
 # Usage: ./regression_tests/run_combined.sh [path-to-compiler] [parallelism]
 #
-# Each .cr file must have "# EXPECT: <marker>" on any line.
-# The runner checks that marker appears in output.
+# Each .cr file may have "# EXPECT: <substring>" (first matching line wins).
+# Opt-in strict mode: if a sibling file "<name>.out" exists (same directory), program
+# stdout (extracted from run_safe output) must match that file exactly (byte-for-byte).
+# Golden .out files are generated from reference Crystal (e.g. crystal run <file> > <file>.out).
+# For strict checks under --no-prelude, use the test_no_prelude_*.cr prefix so the compile
+# step matches the scenario (same baselines as host; current drift shows up as GOLDEN_MISMATCH).
+# First strict failures to fix: String#each_char, String#size / String#[] / #empty? (see
+# test_no_prelude_edge_string_*.cr + sibling .out files).
+# Files named test_no_prelude_*.cr are compiled with --no-prelude (contract oracles).
 
 COMPILER="${1:-bin/crystal_v2}"
 JOBS="${2:-4}"
@@ -25,8 +32,13 @@ run_one_test() {
   local bin_path="${BIN_DIR}/${name}"
   local result_path="${BIN_DIR}/${name}.result"
 
-  # Compile
-  compile_output=$("$COMPILER" "$src" 2>&1)
+  # Compile (--no-prelude for dedicated contract oracles)
+  local compile_output
+  if [[ "$name" == test_no_prelude_* ]]; then
+    compile_output=$("$COMPILER" --no-prelude "$src" 2>&1)
+  else
+    compile_output=$("$COMPILER" "$src" 2>&1)
+  fi
   local compile_rc=$?
 
   if [ $compile_rc -ne 0 ]; then
@@ -45,13 +57,37 @@ run_one_test() {
     return
   fi
 
-  # Extract expected marker
-  local expect=$(grep -m1 '^# EXPECT:' "$src" | sed 's/^# EXPECT: *//')
-
   # Run with timeout
   local output=$(scripts/run_safe.sh "$bin_path" $TIMEOUT $MAX_MEM 2>/dev/null)
   local exit_code=$?
   rm -f "$bin_path"
+
+  local golden_path="${src%.cr}.out"
+  local actual_tmp
+  actual_tmp=$(mktemp "${TMPDIR:-/tmp}/run_combined_stdout.XXXXXX")
+
+  echo "$output" | awk '/^=== STDOUT ===$/{p=1;next}/^=== STDERR ===$/{p=0}p' > "$actual_tmp"
+
+  if [ -f "$golden_path" ]; then
+    if [ $exit_code -ne 0 ]; then
+      printf 'CRASH\n%s\n' "$(echo "$output" | tail -5)" > "$result_path"
+      rm -f "$actual_tmp"
+      return
+    fi
+    if cmp -s "$actual_tmp" "$golden_path"; then
+      echo "PASS" > "$result_path"
+    else
+      {
+        printf 'GOLDEN_MISMATCH\ngolden: %s\n' "$golden_path"
+        diff -u "$golden_path" "$actual_tmp" || true
+      } > "$result_path"
+    fi
+    rm -f "$actual_tmp"
+    return
+  fi
+  rm -f "$actual_tmp"
+
+  local expect=$(grep -m1 '^# EXPECT:' "$src" | sed 's/^# EXPECT: *//' || true)
 
   if [ -n "$expect" ]; then
     if echo "$output" | grep -qF "$expect"; then
@@ -119,6 +155,11 @@ for src in "${SOURCES[@]}"; do
       ;;
     OUTPUT_MISMATCH)
       printf "  FAIL (output): %s\n" "$name"
+      tail -n +2 "$result_path" | sed 's/^/    /'
+      FAIL=$((FAIL + 1))
+      ;;
+    GOLDEN_MISMATCH)
+      printf "  FAIL (golden): %s\n" "$name"
       tail -n +2 "$result_path" | sed 's/^/    /'
       FAIL=$((FAIL + 1))
       ;;

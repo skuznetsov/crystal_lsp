@@ -1,4 +1,9 @@
-# Edge case: String building patterns (common in compiler code)
+# Integration smoke: full string-builder + string-ops path in one binary.
+# For bisecting semantic gaps vs host Crystal, use the focused oracles:
+#   test_edge_string_builder_manual.cr, test_edge_string_mul_concat.cr, test_no_prelude_edge_string_index.cr,
+#   test_no_prelude_edge_string_each_char.cr, test_edge_string_prefix_suffix.cr, test_edge_string_gsub_strip.cr,
+#   test_no_prelude_edge_string_empty.cr (strict .out baselines under --no-prelude)
+#
 # EXPECT: string_builder_all_ok
 
 # String::Builder basic

@@ -45228,6 +45228,10 @@ module Crystal::HIR
       # 2. For each Text piece: create string literal
       # 3. For each Expression piece: convert to string and concat
       #
+      # Bedrock path (no-prelude contract): emit HIR StringInterpolation → LLVM
+      # __crystal_v2_string_interpolate — not String::Builder. (See llvm_backend contract note
+      # near try_emit_no_prelude_string_builder_stub.)
+      #
       # For now, implement simple version that calls __crystal_v2_string_interpolate
       # with all parts as arguments
 
@@ -67900,6 +67904,17 @@ module Crystal::HIR
       end
       break_info = @loop_break_info_stack.pop
       body_exit_block = ctx.current_block
+      # Snapshot outer locals that participate in loop phis *before* pop_scope: push_scope(Block)
+      # restores a locals snapshot where these names map back to the phi itself, so a naive
+      # lookup_local after pop would miss the SSA value produced inside the block body (e.g.
+      # count after `count += 1 if ...`), producing a self-referential phi [%9, %9].
+      body_exit_outer_vals = {} of String => ValueId
+      assigned_vars.each do |var_name|
+        next unless phi_nodes[var_name]?
+        if v = ctx.lookup_local(var_name)
+          body_exit_outer_vals[var_name] = v
+        end
+      end
       ctx.pop_scope
 
       # Check if the body already terminated (e.g., via `return` from enclosing method).
@@ -67907,15 +67922,8 @@ module Crystal::HIR
       body_already_terminated = !ctx.get_block(body_exit_block).terminator.is_a?(Unreachable)
 
       unless body_already_terminated
-        # Patch phi nodes with updated values from the body
-        assigned_vars.each do |var_name|
-          if phi = phi_nodes[var_name]?
-            if updated_val = ctx.lookup_local(var_name)
-              phi.add_incoming(body_exit_block, updated_val)
-            end
-          end
-        end
-
+        # Loop-carried locals merge only at cond_block via entry + incr (like index_phi).
+        # Do not add_incoming from body_exit_block: body flows to incr, not to cond.
         ctx.terminate(Jump.new(incr_block))
       end
 
@@ -67928,7 +67936,7 @@ module Crystal::HIR
       index_phi.add_incoming(incr_block, new_i.id)
       # Also forward outer variable phis through incr block
       phi_nodes.each do |var_name, phi|
-        if updated_val = ctx.lookup_local(var_name)
+        if updated_val = body_exit_outer_vals[var_name]?
           # Don't re-add if it was already added from body_exit_block
           unless updated_val == phi.id
             phi.add_incoming(incr_block, updated_val)
