@@ -1,6 +1,31 @@
 # Crystal V2 Bootstrap — TODO (Updated 2026-04-02)
 
 ## Current Status
+- **Fresh stage2 HIR inline-owner checkpoint: self-hosted `stage2` no longer aborts the tiny no-prelude smoke in the old `Enumerable::NotFoundError#each_key { ... }` stub family, because `inline_yield_function(...)` now keeps lexical owners for concrete class/struct methods instead of rebinding `@current_class` to the specialized receiver type during inline lowering; the same smoke has moved forward again to a later runtime crash in `LLVMIRGenerator#emit_functions_sequential(Array(Function))` (2026-04-08, current session)**:
+  - trustworthy setup:
+    - `src/compiler/hir/ast_to_hir.cr` `inline_yield_function(...)` now only overrides `@current_class` with the concrete receiver type for module-like owners; concrete class/struct owners keep their lexical owner during inline lowering
+    - this matters for methods like `Set#each`: rebinding `@current_class` to `Set(String)` prevented `lower_instance_var(...)` from finding lexical ivars like `@hash`, which then degraded into getter fallback `self.hash()` and poisoned the inlined HIR body with `Struct#hash() -> ...#each_key$block`
+  - decisive evidence:
+    - host compiler gate is green:
+      - `crystal build src/crystal_v2.cr -o /tmp/cv2_fix_inline_owner --error-trace`
+    - host-emitted HIR no longer shows the old `Struct#hash()` corruption in the verified hot path:
+      - `scripts/run_safe.sh /tmp/cv2_fix_inline_owner 900 12288 src/crystal_v2.cr --emit hir -o /tmp/cv2_fix_inline_owner_emit_hir`
+      - before the fix, `Crystal::MIR::LLVMIRGenerator#emitted_function_name_bytes` lowered `@emitted_functions.each` through `call %4.Struct#hash()` and `...#each_key$block`
+      - after the fix, the same function now starts from `field_get %4.@@hash` and iterates the inner hash state directly instead of calling `Struct#hash()`
+    - self-host rebuild from that host is green:
+      - `scripts/run_safe.sh /tmp/cv2_fix_inline_owner 900 12288 src/crystal_v2.cr -o /tmp/cv2_fix_inline_owner_s2`
+      - result: `[EXIT: 0] after ~283s`
+    - the exact tiny no-prelude smoke moved beyond the old `each_key$block` stub head:
+      - before this fix:
+        - `scripts/run_safe.sh /tmp/cv2_fix_mir_set_size_s2 120 1024 regression_tests/combined/test_no_prelude_interpolation.cr --no-prelude -o /tmp/noprel_fix_mir_set_size.bin`
+        - result: `STUB CALLED: Enumerable$LT$R$CCNotFoundError$Heach_key$$block`, `[EXIT: 134] after ~0s`
+      - after this fix:
+        - `scripts/run_safe.sh /tmp/cv2_fix_inline_owner_s2 120 1024 regression_tests/combined/test_no_prelude_interpolation.cr --no-prelude -o /tmp/noprel_fix_inline_owner.bin`
+        - result: `[CRASH] Segfault (exit 139)` after `lower_main: exprs=8`
+        - fresh `lldb` now lands in `Crystal::MIR::LLVMIRGenerator#emit_functions_sequential(Array(Function))`, not in the old `Enumerable::NotFoundError#each_key$block` / `Struct#hash` path
+  - practical boundary:
+    - this closes the verified stage2 HIR inline-owner / `Set#each` corruption family behind the old `Enumerable::NotFoundError#each_key$$block` smoke head
+    - it does not make the smoke green yet; the next honest frontier is the later `emit_functions_sequential(Array(Function))` runtime crash
 - **Fresh stage2 generic `Crystal::MIR::Set#size` checkpoint: self-hosted `stage2` no longer aborts the tiny no-prelude smoke in the old `Crystal::MIR::Set#size` stub, because the backend now synthesizes the generic `Set#size` body directly from the inner hash layout, and the same smoke has moved forward again to a later `Enumerable::NotFoundError#each_key { ... }` stub head (2026-04-08, current session)**:
   - trustworthy setup:
     - `src/compiler/mir/llvm_backend.cr` now emits an exact dead-code fallback for `Crystal$CCMIR$CCSet$Hsize`, reading the inner `@hash` pointer at offset `0` and then the hash `size` field at offset `24`

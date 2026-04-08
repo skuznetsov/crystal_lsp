@@ -68973,7 +68973,28 @@ module Crystal::HIR
         # with the receiver's actual type (e.g. Array(Int32)). Without this, method
         # lookups for implicit self calls (like `size`) resolve to the module's abstract
         # stubs instead of the concrete implementation on the receiver type.
-        if receiver_id && !parts.is_class
+        #
+        # Do NOT apply this to concrete classes/structs. Their ivar lowering relies on
+        # the lexical owner (for example Set#each needs @current_class = "Set" so @hash
+        # stays an ivar field access instead of degrading into the inherited hash() method
+        # on a specialized receiver like Set(String)).
+        inline_owner_module_like = false
+        if !parts.owner.empty?
+          if owner_ref = type_ref_for_name(parts.owner)
+            if owner_desc = @module.get_type_descriptor(owner_ref)
+              inline_owner_module_like = owner_desc.kind == TypeKind::Module
+              if !inline_owner_module_like && owner_desc.kind == TypeKind::Generic
+                inline_owner_module_like = module_like_type_name?(owner_desc.name) || module_includers_match?(owner_desc.name)
+              end
+            end
+          end
+          if !inline_owner_module_like
+            inline_owner_module_like = @module_defs.has_key?(parts.owner) ||
+                                      module_like_type_name?(parts.owner) ||
+                                      module_includers_match?(parts.owner)
+          end
+        end
+        if receiver_id && !parts.is_class && inline_owner_module_like
           receiver_type_name = get_type_name_from_ref(ctx.type_of(receiver_id))
           # Keep lexical owner when receiver type is unresolved.
           # Overriding @current_class with "Void"/"Unknown" breaks ivar lookup
