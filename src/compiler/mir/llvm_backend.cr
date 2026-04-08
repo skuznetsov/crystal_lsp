@@ -1879,8 +1879,8 @@ module Crystal::MIR
     @emit_regex_runtime : Bool = false
 
     # Dominance info for phi edge definedness checking (Cooper's algorithm)
-    @dominance_in_time : Array(Int32) = [] of Int32
-    @dominance_out_time : Array(Int32) = [] of Int32
+    @dominance_in_time : ::Array(Int32) = [] of Int32
+    @dominance_out_time : ::Array(Int32) = [] of Int32
 
     # Cross-block value tracking for dominance fix
     @value_def_block : Hash(ValueId, BlockId) = {} of ValueId => BlockId  # value → block where defined
@@ -12368,62 +12368,122 @@ module Crystal::MIR
       @dominance_out_time.clear
       return if func.blocks.size <= 1
 
+      dom_trace = (ENV["CRYSTAL_V2_DOM_TRACE"]? || ENV["CRYSTAL2_DOM_TRACE"]?) && func.name == "__crystal_main"
+
+      STDERR.puts "[DOM] compute_predecessors:start" if dom_trace
       func.compute_predecessors
+      STDERR.puts "[DOM] compute_predecessors:done" if dom_trace
       entry_id = func.blocks.first?.try(&.id) || 0_u32
+      max_id = 0_i32
+      block_idx = 0
+      while block_idx < func.blocks.size
+        block_id = func.blocks.unsafe_fetch(block_idx).id.to_i
+        max_id = block_id if block_id > max_id
+        block_idx += 1
+      end
+      size = max_id + 1
+      if dom_trace
+        STDERR.puts "[DOM] blocks:size=#{func.blocks.size} entry=#{entry_id} max_id=#{max_id} array_size=#{size}"
+        trace_idx = 0
+        while trace_idx < func.blocks.size
+          block = func.blocks.unsafe_fetch(trace_idx)
+          STDERR.puts "[DOM] block[idx=#{trace_idx}] id=#{block.id} succs=#{block.terminator.successors.size} preds=#{block.predecessors.size}"
+          trace_idx += 1
+        end
+      end
 
       # Reverse postorder via iterative DFS
-      visited = Set(BlockId).new
-      postorder = [] of BlockId
-      stack = [{entry_id, false}] of Tuple(BlockId, Bool)
-      while frame = stack.pop?
-        block_id, exiting = frame
+      STDERR.puts "[DOM] visited_alloc:start" if dom_trace
+      visited = ::Array(Bool).new(size, false)
+      STDERR.puts "[DOM] visited_alloc:done" if dom_trace
+      postorder = ::Array(UInt32).new
+      stack_blocks = ::Array(UInt32).new
+      stack_exiting = ::Array(Bool).new
+      stack_blocks << entry_id
+      stack_exiting << false
+      entry_idx = entry_id.to_i
+      STDERR.puts "[DOM] entry_idx=#{entry_idx}" if dom_trace
+      visited[entry_idx] = true if entry_idx >= 0 && entry_idx < size
+      STDERR.puts "[DOM] rpo_dfs:start" if dom_trace
+      while stack_blocks.size > 0
+        block_id = stack_blocks.pop
+        exiting = stack_exiting.pop
+        STDERR.puts "[DOM] rpo_dfs:block=#{block_id} exiting=#{exiting}" if dom_trace
         if exiting
           postorder << block_id
           next
         end
-        next if visited.includes?(block_id)
-        visited << block_id
-        stack << {block_id, true}
+        stack_blocks << block_id
+        stack_exiting << true
         if block = func.get_block?(block_id)
           succs = block.terminator.successors
           i = succs.size - 1
           while i >= 0
-            stack << {succs[i], false} unless visited.includes?(succs[i])
+            succ = succs.unsafe_fetch(i)
+            succ_idx = succ.to_i
+            if succ_idx >= 0 && succ_idx < size && !visited[succ_idx]
+              visited[succ_idx] = true
+              stack_blocks << succ
+              stack_exiting << false
+            end
             i -= 1
           end
         end
       end
-      rpo = postorder.reverse!
-
-      max_id = func.blocks.max_of(&.id).to_i
-      size = max_id + 1
-      rpo_index = Array.new(size, -1)
-      rpo.each_with_index { |bid, idx| rpo_index[bid.to_i] = idx }
+      STDERR.puts "[DOM] rpo_dfs:done postorder=#{postorder.size}" if dom_trace
+      postorder.reverse!
+      STDERR.puts "[DOM] rpo_index:start size=#{size}" if dom_trace
+      rpo_index = ::Array(Int32).new(size, -1)
+      rpo_pos = 0
+      while rpo_pos < postorder.size
+        bid = postorder.unsafe_fetch(rpo_pos)
+        STDERR.puts "[DOM] rpo_index:bid=#{bid} idx=#{rpo_pos}" if dom_trace
+        rpo_index[bid.to_i] = rpo_pos
+        rpo_pos += 1
+      end
 
       # Iterative dominator computation
-      idom = Array(Int32?).new(size, nil)
-      entry_idx = entry_id.to_i
+      STDERR.puts "[DOM] idom:start" if dom_trace
+      idom = ::Array(Int32).new(size, -1)
       idom[entry_idx] = entry_idx
       changed = true
       while changed
         changed = false
-        rpo.each_with_index do |block_id, pos|
-          next if pos == 0
+        pos = 0
+        while pos < postorder.size
+          block_id = postorder.unsafe_fetch(pos)
+          if pos == 0
+            pos += 1
+            next
+          end
           block = func.get_block?(block_id)
-          next unless block
-          new_idom : Int32? = nil
-          block.predecessors.each do |pred_id|
+          unless block
+            pos += 1
+            next
+          end
+          STDERR.puts "[DOM] idom:block=#{block_id} preds=#{block.predecessors.size}" if dom_trace
+          new_idom = -1
+          pred_pos = 0
+          while pred_pos < block.predecessors.size
+            pred_id = block.predecessors.unsafe_fetch(pred_pos)
             pred_idx = pred_id.to_i
+            STDERR.puts "[DOM] idom:pred=#{pred_id} pred_idx=#{pred_idx}" if dom_trace
+            pred_pos += 1
             next if pred_idx >= size
-            next unless idom[pred_idx]
-            if existing = new_idom
+            next if idom[pred_idx] < 0
+            if new_idom >= 0
+              existing = new_idom
               f1, f2 = existing, pred_idx
               while f1 != f2
                 while rpo_index[f1] > rpo_index[f2]
-                  p = idom[f1]; break unless p; f1 = p
+                  p = idom[f1]
+                  break if p < 0
+                  f1 = p
                 end
                 while rpo_index[f2] > rpo_index[f1]
-                  p = idom[f2]; break unless p; f2 = p
+                  p = idom[f2]
+                  break if p < 0
+                  f2 = p
                 end
               end
               new_idom = f1
@@ -12431,30 +12491,47 @@ module Crystal::MIR
               new_idom = pred_idx
             end
           end
-          next unless new_idom
+          if new_idom < 0
+            pos += 1
+            next
+          end
           bidx = block_id.to_i
           if idom[bidx] != new_idom
             idom[bidx] = new_idom
             changed = true
           end
+          pos += 1
         end
       end
 
       # Build dominator tree + DFS timestamps
-      children = Array.new(size) { [] of Int32 }
-      rpo.each do |block_id|
+      STDERR.puts "[DOM] dominance_tree:start" if dom_trace
+      first_child = ::Array(Int32).new(size, -1)
+      next_sibling = ::Array(Int32).new(size, -1)
+      rpo_pos = 0
+      while rpo_pos < postorder.size
+        block_id = postorder.unsafe_fetch(rpo_pos)
         bidx = block_id.to_i
+        rpo_pos += 1
         next if bidx == entry_idx
         parent = idom[bidx]
-        next unless parent
-        children[parent] << bidx
+        STDERR.puts "[DOM] dominance_tree:block=#{block_id} parent=#{parent}" if dom_trace
+        next if parent < 0
+        next_sibling[bidx] = first_child[parent]
+        first_child[parent] = bidx
       end
-      @dominance_in_time = Array.new(size, -1)
-      @dominance_out_time = Array.new(size, -1)
+      @dominance_in_time = ::Array(Int32).new(size, -1)
+      @dominance_out_time = ::Array(Int32).new(size, -1)
       time = 0
-      dfs_stack = [{entry_idx, false}] of Tuple(Int32, Bool)
-      while frame = dfs_stack.pop?
-        bidx, exiting = frame
+      dfs_blocks = ::Array(Int32).new
+      dfs_exiting = ::Array(Bool).new
+      dfs_blocks << entry_idx
+      dfs_exiting << false
+      STDERR.puts "[DOM] timestamps:start" if dom_trace
+      while dfs_blocks.size > 0
+        bidx = dfs_blocks.pop
+        exiting = dfs_exiting.pop
+        STDERR.puts "[DOM] timestamps:block=#{bidx} exiting=#{exiting}" if dom_trace
         if exiting
           @dominance_out_time[bidx] = time
           time += 1
@@ -12462,12 +12539,13 @@ module Crystal::MIR
         end
         @dominance_in_time[bidx] = time
         time += 1
-        dfs_stack << {bidx, true}
-        kids = children[bidx]
-        i = kids.size - 1
-        while i >= 0
-          dfs_stack << {kids[i], false}
-          i -= 1
+        dfs_blocks << bidx
+        dfs_exiting << true
+        child = first_child[bidx]
+        while child >= 0
+          dfs_blocks << child
+          dfs_exiting << false
+          child = next_sibling[child]
         end
       end
     end
@@ -12513,16 +12591,26 @@ module Crystal::MIR
       entry_block_id = func.blocks.first?.try(&.id) || 0_u32
 
       # Pass 1: Record which block each value is defined in
-      func.blocks.each do |block|
-        block.instructions.each do |inst|
+      block_idx = 0
+      while block_idx < func.blocks.size
+        block = func.blocks.unsafe_fetch(block_idx)
+        inst_idx = 0
+        while inst_idx < block.instructions.size
+          inst = block.instructions.unsafe_fetch(inst_idx)
           @value_def_block[inst.id] = block.id
+          inst_idx += 1
         end
+        block_idx += 1
       end
 
       # Pass 2: Find uses and check for cross-block references
       # Focus on Load/ArrayGet results which are commonly problematic
-      func.blocks.each do |block|
-        block.instructions.each do |inst|
+      block_idx = 0
+      while block_idx < func.blocks.size
+        block = func.blocks.unsafe_fetch(block_idx)
+        inst_idx = 0
+        while inst_idx < block.instructions.size
+          inst = block.instructions.unsafe_fetch(inst_idx)
           # Check each operand
           operand_ids = case inst
                         when BinaryOp     then [inst.left, inst.right]
@@ -12555,7 +12643,10 @@ module Crystal::MIR
                         else              [] of ValueId
                         end
 
-          operand_ids.each do |op_id|
+          op_idx = 0
+          while op_idx < operand_ids.size
+            op_id = operand_ids.unsafe_fetch(op_idx)
+            op_idx += 1
             def_block = @value_def_block[op_id]?
             next unless def_block
 
@@ -12567,9 +12658,20 @@ module Crystal::MIR
               # Conservative: any non-entry definition used cross-block is suspect
               # Check the instruction type that defines this value
               def_inst = nil
-              func.blocks.each do |b|
-                def_inst = b.instructions.find { |i| i.id == op_id }
+              search_block_idx = 0
+              while search_block_idx < func.blocks.size
+                search_block = func.blocks.unsafe_fetch(search_block_idx)
+                search_inst_idx = 0
+                while search_inst_idx < search_block.instructions.size
+                  candidate = search_block.instructions.unsafe_fetch(search_inst_idx)
+                  if candidate.id == op_id
+                    def_inst = candidate
+                    break
+                  end
+                  search_inst_idx += 1
+                end
                 break if def_inst
+                search_block_idx += 1
               end
 
               # Flag ALL value-producing instructions that are used cross-block
@@ -12587,14 +12689,21 @@ module Crystal::MIR
               end
             end
           end
+          inst_idx += 1
         end
 
         # Also check phi incoming values for pass-through block issues
         # If phi says [%val, %blockX] but %val is defined in %blockY != %blockX,
         # this is a pass-through situation that causes dominance errors
-        block.instructions.each do |inst|
+        inst_idx = 0
+        while inst_idx < block.instructions.size
+          inst = block.instructions.unsafe_fetch(inst_idx)
+          inst_idx += 1
           next unless inst.is_a?(Phi)
-          inst.incoming.each do |(from_block, val_id)|
+          incoming_idx = 0
+          while incoming_idx < inst.incoming.size
+            from_block, val_id = inst.incoming.unsafe_fetch(incoming_idx)
+            incoming_idx += 1
             def_block = @value_def_block[val_id]?
             next unless def_block
 
@@ -12606,9 +12715,20 @@ module Crystal::MIR
 
               # Find the defining instruction to check its type
               def_inst = nil
-              func.blocks.each do |b|
-                def_inst = b.instructions.find { |i| i.id == val_id }
+              search_block_idx = 0
+              while search_block_idx < func.blocks.size
+                search_block = func.blocks.unsafe_fetch(search_block_idx)
+                search_inst_idx = 0
+                while search_inst_idx < search_block.instructions.size
+                  candidate = search_block.instructions.unsafe_fetch(search_inst_idx)
+                  if candidate.id == val_id
+                    def_inst = candidate
+                    break
+                  end
+                  search_inst_idx += 1
+                end
                 break if def_inst
+                search_block_idx += 1
               end
 
               # Add to cross_block_values if it's a value-producing instruction.
@@ -12633,9 +12753,20 @@ module Crystal::MIR
           def_block = @value_def_block[cond_id]?
           if def_block && def_block != block.id && def_block != entry_block_id
             def_inst = nil
-            func.blocks.each do |b|
-              def_inst = b.instructions.find { |i| i.id == cond_id }
+            search_block_idx = 0
+            while search_block_idx < func.blocks.size
+              search_block = func.blocks.unsafe_fetch(search_block_idx)
+              search_inst_idx = 0
+              while search_inst_idx < search_block.instructions.size
+                candidate = search_block.instructions.unsafe_fetch(search_inst_idx)
+                if candidate.id == cond_id
+                  def_inst = candidate
+                  break
+                end
+                search_inst_idx += 1
+              end
               break if def_inst
+              search_block_idx += 1
             end
             is_non_value_inst = def_inst.is_a?(Store) || def_inst.is_a?(Free) ||
                                 def_inst.is_a?(RCIncrement) || def_inst.is_a?(RCDecrement) ||
@@ -12654,6 +12785,7 @@ module Crystal::MIR
             end
           end
         end
+        block_idx += 1
       end
     end
 
@@ -13893,7 +14025,8 @@ module Crystal::MIR
         begin
           emit_function(func)
         rescue ex : IndexError
-          raise "Index error in emit_function for: #{func.name}\n#{ex.message}"
+          bt = ex.backtrace?.try(&.first(20).join("\n")) || "(no backtrace)"
+          raise "Index error in emit_function for: #{func.name}\n#{ex.message}\n#{bt}"
         end
       end
     end

@@ -8407,3 +8407,54 @@ Immediate next steps:
 2. Continue from the fresh bounded frontier:
    `Crystal::MachO::Nlist64#name` inside
    `LLVMIRGenerator#precompute_function_return_types(...)`.
+
+## Checkpoint — 2026-04-08 (stage2 no-prelude dominance and cross-block prepasses flattened)
+
+Verified this turn:
+- The old tiny stage2 no-prelude head `error: Index error in emit_function for:
+  __crystal_main` was not another symbol-stub issue. It was a structural
+  self-host drift inside compiler-internal MIR prepasses that still depended on
+  alias-typed collections (`BlockId`, `Int32?`) and block-based
+  `Enumerable`/`Indexable` helpers.
+- `src/compiler/mir/llvm_backend.cr` now flattens the dominance prepass onto
+  canonical scalar storage and manual loops:
+  - `func.blocks.max_of(&.id)` → explicit `while` max scan
+  - `Set(BlockId)` / tuple DFS stack → `::Array(Bool)` + parallel
+    `::Array(UInt32)` / `::Array(Bool)` stacks
+  - `rpo.each_with_index` → indexed `while`
+  - `Array(Int32?)` idoms → `::Array(Int32)` with `-1` sentinel
+  - dominator-tree `Array(Array(Int32))` children → flat
+    `first_child` / `next_sibling` `::Array(Int32)` links
+- The adjacent `prepass_detect_cross_block_values` no longer relies on
+  block-based `each`/`find` in its hottest paths; block/inst/incoming/operand
+  scans are now index-based `while` loops.
+- Operational proof:
+  - `crystal build src/crystal_v2.cr -o /tmp/cv2_crossblock_host --error-trace`
+    => host build green.
+  - `scripts/run_safe.sh /tmp/cv2_crossblock_host 900 12288 src/crystal_v2.cr -o /tmp/cv2_crossblock_s2`
+    => self-host `stage2` green, `[EXIT: 0] after ~311s`.
+  - `CRYSTAL_V2_DOM_TRACE=1 scripts/run_safe.sh /tmp/cv2_crossblock_s2 120 1024 regression_tests/combined/test_no_prelude_interpolation.cr --no-prelude -o /tmp/noprel_crossblock.bin`
+    => old heads are gone:
+    `Index error in emit_function(__crystal_main)` →
+    `Enumerable::NotFoundError#[]/unsafe_fetch` →
+    `Object#size` in dominance timestamps. Fresh head is now
+    `STUB CALLED: Crystal::MIR::Array(Tuple(ValueId, String, String))#clear`.
+
+Whole-program / behavioral effect:
+- `stage1` host build remains green and fast (`~9.6s` in the timed rebuild for
+  the same branch shape).
+- `stage2` self-host build remains green after the prepass rewrite (`~311-320s`
+  on the latest two runs), so the branch is not just a narrow oracle hack.
+- The tiny stage2 no-prelude smoke is still red, but the failure is now later
+  and narrower: the compiler gets through dominance and into the next
+  compiler-internal collection frontier inside cross-block bookkeeping.
+
+Immediate next steps:
+1. Treat the old dominance-prepass heads as superseded:
+   `Index error in emit_function(__crystal_main)`,
+   `Enumerable::NotFoundError#[]/unsafe_fetch`,
+   `Object#size` in dominance timestamps.
+2. Continue from the fresh bounded frontier:
+   `Crystal::MIR::Array(Tuple(ValueId, String, String))#clear`, likely in the
+   next compiler-internal collection state adjacent to cross-block / phi
+   prepasses.
