@@ -10520,6 +10520,20 @@ module Crystal::MIR
       end
     end
 
+    private def rooted_top_level_delegate_target(mangled : String) : {String, Function?}?
+      return nil unless mangled.starts_with?("$CC")
+      canonical = mangled.byte_slice(3)
+      return nil if canonical.empty?
+
+      if target_func = @func_by_name[canonical]?
+        {canonical, target_func}
+      elsif @emitted_functions.includes?(canonical)
+        {canonical, nil}
+      else
+        nil
+      end
+    end
+
     private def compiler_u32_alias_key_hash?(mangled : String) : Bool
       suffixes = {
         "$Hkey_hash$$HIR$CCValueId",
@@ -17635,6 +17649,13 @@ module Crystal::MIR
         callee_func = delegate[1]
         raw_callee_name = callee_func.name
       end
+      if rooted_delegate = rooted_top_level_delegate_target(callee_name)
+        callee_name = rooted_delegate[0]
+        if target_func = rooted_delegate[1]
+          callee_func = target_func
+          raw_callee_name = target_func.name
+        end
+      end
       # Keep direct self-recursive calls intact. Overload retargeting must be resolved
       # in HIR/MIR; backend-level substitution can silently redirect to wrong overloads.
 
@@ -19498,6 +19519,10 @@ module Crystal::MIR
       )
       if matching_func
         mangled_extern_name = @type_mapper.mangle_name(matching_func.name)
+      end
+      if rooted_delegate = rooted_top_level_delegate_target(mangled_extern_name)
+        mangled_extern_name = rooted_delegate[0]
+        matching_func ||= rooted_delegate[1]
       end
 
       # Type suffix heuristics - apply BEFORE void check since MIR might have wrong ptr type

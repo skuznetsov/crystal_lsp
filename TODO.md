@@ -8796,3 +8796,57 @@ Immediate next steps:
 2. Separately address the no-prelude `Hash(UInt32, Int32)#[]=` stub family.
 3. Keep flattening parser/internal storage shapes toward non-nil, non-by-value
    transient paths where they already have a known-safe analogue.
+
+## Checkpoint — 2026-04-08 (backend canonicalizes rooted top-level callees before emission)
+
+Verified this turn:
+- The old stage2 no-prelude head
+  `STUB CALLED: $CCHash$LUInt32$C$_Int32$R$H$IDXS$$UInt32_Int32`
+  was not a missing runtime body for `Hash(UInt32, Int32)#[]=`, but a backend
+  call-site naming drift: the emitted runtime body exists canonically as
+  `Hash$L...`, while some self-hosted callsites were still recorded/emitted as
+  rooted top-level `$CCHash$L...`.
+- `src/compiler/mir/llvm_backend.cr` now normalizes rooted top-level mangled
+  callees at the call-emission seam, before `@called_crystal_functions`,
+  signature tracking, and stub generation diverge:
+  - new helper: `rooted_top_level_delegate_target(mangled)`
+  - `emit_call(...)` rewrites rooted `$CCFoo...` to canonical `Foo...` when the
+    canonical function body is known
+  - `emit_extern_call(...)` does the same after extern lookup
+- This is a generic backend normalization fix for rooted top-level callsites,
+  not an exact-name `Hash(UInt32, Int32)#[]=` patch.
+
+Operational proof:
+- `crystal build src/crystal_v2.cr -o /tmp/cv2_rootcall_host --error-trace`
+  => host build green.
+- `scripts/run_safe.sh /tmp/cv2_rootcall_host 900 12288 src/crystal_v2.cr -o /tmp/cv2_rootcall_s2`
+  => self-host stage2 build green, `[EXIT: 0] after ~304s`.
+- Before the fix:
+  - `scripts/run_safe.sh /tmp/cv2_noparen_named_fix_s2 120 1024 regression_tests/combined/test_no_prelude_interpolation.cr --no-prelude -o /tmp/noprel_noparen_named_fix_s2.bin`
+  - result: `STUB CALLED: $CCHash$LUInt32$C$_Int32$R$H$IDXS$$UInt32_Int32`, `[EXIT: 134]`
+- After the fix:
+  - `scripts/run_safe.sh /tmp/cv2_rootcall_s2 120 1024 regression_tests/combined/test_no_prelude_interpolation.cr --no-prelude -o /tmp/noprel_rootcall.bin`
+  - result: old rooted-Hash stub is gone; smoke now reaches a later crash,
+    `[CRASH] Segfault (exit 139)`.
+- Fresh LLDB on the new head:
+  - `lldb --batch -o 'run regression_tests/combined/test_no_prelude_interpolation.cr --no-prelude -o /tmp/noprel_rootcall_lldb.bin' -k 'thread backtrace -c 25' -k 'register read' -k 'disassemble --frame' -k 'quit' /tmp/cv2_rootcall_s2`
+  - top frame:
+    `Hash$LCrystal$CCMIR$CCTypeRef$C$_Nil$R$Hfind_entry_with_index$$Crystal$CCMIR$CCTypeRef`
+  - call chain:
+    `Hash(TypeRef, Nil)#find_entry_with_index -> find_entry -> has_key? -> Set(TypeRef)#includes? -> Crystal::MIR::Module#module_type? -> LLVMIRGenerator#collect_module_singleton_globals`
+
+Whole-program / bootstrap effect:
+- This is a real pattern fix: the compiler no longer falls off the rooted
+  top-level callee-name cliff in stage2 no-prelude startup/runtime paths.
+- Stage2 build remains green, and the tiny no-prelude smoke has moved from an
+  early abort-stub to a later runtime crash in MIR module-type bookkeeping.
+- We are still far from `stage5`: stage1 is green, stage2 build is green, but
+  stage2 smoke is still red and now honestly later in `collect_module_singleton_globals`.
+
+Immediate next steps:
+1. Freeze the new `Hash(MIR::TypeRef, Nil)` / `Set(MIR::TypeRef)#includes?`
+   crash family.
+2. Check whether it is another collection alias/runtime-layout bug or a bad
+   `module_type?` receiver/state invariant.
+3. Keep pushing canonical-name and collection-shape fixes at generic seams, not
+   per-symbol stubs.
