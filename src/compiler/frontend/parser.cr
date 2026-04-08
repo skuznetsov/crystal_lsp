@@ -9635,7 +9635,7 @@ module CrystalV2
 
           # Materialize argument arrays from builders once
           args = args_b.to_a
-          named_args = named_b.size > 0 ? named_b.to_a : nil
+          named_args = named_b.to_a
 
           if ENV.has_key?("DEBUG_ARG_FLOW")
             if args.size > 0
@@ -9643,7 +9643,7 @@ module CrystalV2
             else
               STDERR.puts "[DEBUG_ARG_FLOW] materialized args size=0"
             end
-            STDERR.puts "[DEBUG_ARG_FLOW] materialized named_args size=#{named_args ? named_args.not_nil!.size : 0}"
+            STDERR.puts "[DEBUG_ARG_FLOW] materialized named_args size=#{named_args.size}"
           end
 
           # Calculate span including last argument (positional or named) or block
@@ -9651,9 +9651,9 @@ module CrystalV2
                         # Include block in span
                         block_node = @arena[block_expr]
                         callee_span.cover(block_node.span)
-                      elsif named_args
+                      elsif named_args.size > 0
                         # Last named arg
-                        callee_span.cover(named_args.not_nil!.last.span)
+                        callee_span.cover(named_args.last.span)
                       elsif args.size > 0
                         # Positional arguments parsed successfully, so the call span
                         # must cover the last argument as well. Macro block-yield
@@ -9669,7 +9669,7 @@ module CrystalV2
             callee,
             args,
             block_expr, # attach block if present
-            named_args
+            named_args.empty? ? nil : named_args
           ))
 
           # Restore flag

@@ -8741,3 +8741,58 @@ Immediate next steps:
 2. Freeze the next earliest red gate after the unary-slice family is gone.
 3. Keep preferring source/span reconstruction over broader raw-slice trust
    expansion.
+
+## Checkpoint — 2026-04-08 (no-parens named-arg path avoids nilable by-value array branch)
+
+Verified this turn:
+- After the source-based unary operator fix, the next fresh stage2 plain-smoke
+  head moved into the parser:
+  `Parser#try_parse_call_args_without_parens`.
+- LLDB on `/tmp/cv2_stage2_after_unaryfix/cv2_s2` compiling the plain smoke
+  oracle showed the crash inside the no-parens call-arg parser when reading the
+  last named-argument span:
+  - top frame:
+    `CrystalV2::Compiler::Frontend::Parser#try_parse_call_args_without_parens`
+  - crash site read:
+    `ldr x0, [x8, w9, sxtw #3]`
+  - registers at crash:
+    `x8 = 0`, while the code was traversing `named_args.last`
+- The likely root cause matched the existing parser-storage fragility pattern:
+  the no-parens path materialized `named_args` as a nilable
+  `Array(NamedArgument)?` and then immediately used the optional value path to
+  compute `call_span`. The parenthesized-call path already uses the safer shape:
+  always materialize `named_args = named_b.to_a`, then branch on `empty?`.
+- `src/compiler/frontend/parser.cr` now uses the same non-nil materialization
+  shape in `try_parse_call_args_without_parens`:
+  - `named_args = named_b.to_a`
+  - span logic uses `named_args.size > 0`
+  - `new_call_node` receives `named_args.empty? ? nil : named_args`
+
+Operational proof:
+- `crystal build src/crystal_v2.cr -o /tmp/cv2_noparen_named_fix --error-trace`
+  => host build green.
+- `scripts/run_safe.sh /tmp/cv2_noparen_named_fix 60 8192 /tmp/puts42_oracle.cr -o /tmp/puts42_noparen_named_fix.bin`
+  => host plain smoke compile green, `[EXIT: 0] after ~14s`.
+- `scripts/run_safe.sh /tmp/cv2_noparen_named_fix 900 12288 src/crystal_v2.cr -o /tmp/cv2_noparen_named_fix_s2`
+  => self-host stage2 build green, `[EXIT: 0] after ~289s`.
+- `scripts/run_safe.sh /tmp/cv2_noparen_named_fix_s2 60 8192 /tmp/puts42_oracle.cr -o /tmp/puts42_noparen_named_fix_s2.bin`
+  => the old parser crash is gone; plain smoke now gets past
+  `prelude parsed` and fails later with `EXIT: 138` (new head).
+- `scripts/run_safe.sh /tmp/cv2_noparen_named_fix_s2 120 1024 regression_tests/combined/test_no_prelude_interpolation.cr --no-prelude -o /tmp/noprel_noparen_named_fix_s2.bin`
+  => no-prelude stage2 smoke still red, but unchanged:
+  `STUB CALLED: $CCHash$LUInt32$C$_Int32$R$H$IDXS$$UInt32_Int32`
+
+Whole-program / bootstrap effect:
+- This is a structural parser fix, not a new mangled-name patch.
+- Stage2 build remains green and the stage2 plain-smoke frontier moved later
+  than the no-parens parser path, which is the expected signal for a real
+  checkpoint.
+- We are still far from `stage5`: current known live heads are
+  stage2 plain smoke (`BUS 138`, later than parse/prelude load) and stage2
+  no-prelude smoke (`Hash(UInt32, Int32)#[]=` stub).
+
+Immediate next steps:
+1. Freeze the new stage2 plain-smoke `BUS 138` head with LLDB.
+2. Separately address the no-prelude `Hash(UInt32, Int32)#[]=` stub family.
+3. Keep flattening parser/internal storage shapes toward non-nil, non-by-value
+   transient paths where they already have a known-safe analogue.
