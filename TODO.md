@@ -1,6 +1,34 @@
 # Crystal V2 Bootstrap — TODO (Updated 2026-04-02)
 
 ## Current Status
+- **Fresh stage2 direct-lowering idempotency checkpoint: self-hosted `stage2` no longer corrupts `Crystal::Hasher#initialize(UInt64, UInt64)` into a duplicated six-parameter MIR signature when a direct lowering path revisits the same fully-mangled method name; `lower_method(...)` now treats an already-emitted body as authoritative for that exact `full_name` and marks successful direct lowers as `Completed`, so the tiny no-prelude smoke moves past the old null-self `Hasher` crash to a later compiler-side blank `SIGSEGV` after `lower_main: exprs=5` (2026-04-08, current session)**:
+  - trustworthy setup:
+    - `src/compiler/hir/ast_to_hir.cr`
+      - `lower_method(...)` now returns early if `@module.has_function_with_body?(full_name)` is already true for the exact mangled method
+      - successful direct lowers also set `@function_lowering_states[full_name] = Completed`, so later eager/direct passes do not re-append implicit `self` and explicit params onto the same reused HIR `Function`
+    - this is a generic HIR-state/idempotency fix, not a `Crystal::Hasher` special case: the verified pattern was "direct lower_method path emits a body without synchronizing lowering state, then a later direct pass reuses the same HIR function object"
+  - decisive evidence:
+    - host compiler gate is green:
+      - `crystal build src/crystal_v2.cr -o /tmp/cv2_hasher_fix_host --error-trace`
+    - trusted self-host rebuild with MIR emission is green:
+      - `scripts/run_safe.sh /tmp/cv2_hasher_fix_host 900 12288 src/crystal_v2.cr --emit mir -o /tmp/cv2_hasher_fix_emitmir`
+      - result: `[EXIT: 0] after ~301s`
+    - the old corrupted MIR signature is gone:
+      - before this fix, `/tmp/cv2_usemap_emitmir.mir` contained
+        `func @Crystal::Hasher#initialize$UInt64_UInt64(%0, %1, %2, %3, %4, %5) -> Nil`
+      - after this fix, `/tmp/cv2_hasher_fix_emitmir.mir` contains
+        `func @Crystal::Hasher#initialize$UInt64_UInt64(%0, %1, %2) -> void`
+    - the exact tiny no-prelude oracle moved beyond the old `Hasher` crash:
+      - before this fix:
+        - `CRYSTAL_V2_LLVM_WORKERS=1 scripts/run_safe.sh /tmp/cv2_usemap_emitmir 120 1024 regression_tests/combined/test_no_prelude_interpolation.cr --no-prelude -o /tmp/noprel_usemap_emitmir.bin`
+        - result: `[CRASH] Segfault (exit 139)`
+        - fresh `lldb` top frame: `Crystal::Hasher#initialize(UInt64, UInt64)` with null `%self1`
+      - after this fix:
+        - `CRYSTAL_V2_LLVM_WORKERS=1 scripts/run_safe.sh /tmp/cv2_hasher_fix_emitmir 120 1024 regression_tests/combined/test_no_prelude_interpolation.cr --no-prelude -o /tmp/noprel_hasher_fix.bin`
+        - result: `[CRASH] Segfault (exit 139)` after `lower_main: exprs=5`, with the old `Hasher` stack gone
+  - practical boundary:
+    - this closes the verified stage2 direct-lowering / duplicated-param corruption family behind the old `Crystal::Hasher.new/initialize` null-self crash
+    - it does not make the tiny smoke green yet; `stage2` still does not clear the full smoke gate, and `stage1 -> stage5` remains far away because even `stage2` no-prelude smoke is still red on a later compiler-side crash
 - **Fresh stage2 DCE-use-map checkpoint: self-hosted `stage2` no longer aborts the tiny no-prelude smoke in `Object#size` from `Crystal::MIR::DeadCodeEliminationPass#ensure_use_capacity(Array(Int32), UInt32)`, because the pass now carries an explicit logical length and no longer relies on `Array(Int32)#size` in its compiler-internal hot path; the same trusted smoke has moved forward to a later `Crystal::Hasher.new/initialize` null-self crash instead of the old DCE stub family (2026-04-08, current session)**:
   - trustworthy setup:
     - `src/compiler/mir/optimizations.cr`

@@ -25536,6 +25536,25 @@ module Crystal::HIR
       if debug_env_filter_match?("DEBUG_CALL_TRACE", method_name, base_name, full_name)
         STDERR.puts "[LOWER_METHOD] enter class=#{class_name} full=#{full_name}"
       end
+
+      # Direct lowering paths (class/member passes, allocator fallback, super shims)
+      # may revisit the same fully-mangled name after the body was already emitted.
+      # create_function reuses the existing Function object, so blindly re-running
+      # lower_method would append another implicit self + params to the same HIR function.
+      # Treat an already-emitted body as authoritative for this exact full_name.
+      if @module.has_function_with_body?(full_name)
+        @function_lowering_states[full_name] = FunctionLoweringState::Completed
+        @current_typeof_locals = old_typeof_locals
+        @current_typeof_local_names = old_typeof_local_names
+        @enum_value_types = old_enum_value_types
+        @closure_ref_cells = saved_closure_ref_cells_lm
+        @closure_ref_prefer_cell = saved_closure_ref_prefer_lm
+        @current_class = old_class
+        @current_method = old_method
+        @current_method_is_class = old_method_is_class
+        return
+      end
+
       func = @module.create_function(full_name, return_type)
       set_function_definition_location(func, @arena, node.span)
       if debug_env_filter_match?("DEBUG_FROM_CHARS", base_name, full_name)
@@ -25944,6 +25963,7 @@ module Crystal::HIR
       @enum_value_types = old_enum_value_types
       @closure_ref_cells = saved_closure_ref_cells_lm
       @closure_ref_prefer_cell = saved_closure_ref_prefer_lm
+      @function_lowering_states[full_name] = FunctionLoweringState::Completed
 
       # Restore previous method context
       @current_class = old_class
