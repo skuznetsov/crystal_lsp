@@ -8458,3 +8458,44 @@ Immediate next steps:
    `Crystal::MIR::Array(Tuple(ValueId, String, String))#clear`, likely in the
    next compiler-internal collection state adjacent to cross-block / phi
    prepasses.
+
+## Checkpoint — 2026-04-08 (stage2 no-prelude phi deferred-store queue flattened)
+
+Verified this turn:
+- The fresh bounded head after the dominance/cross-block rewrite was not a
+  generic runtime regression. Fresh `lldb` on the tiny stage2 no-prelude smoke
+  stopped in `Crystal::MIR::Array(Tuple(ValueId, String, String))#clear`,
+  called from `LLVMIRGenerator#emit_block` while resetting deferred phi store
+  state.
+- `src/compiler/mir/llvm_backend.cr` now removes that tuple-array queue from
+  the hot path:
+  - `@deferred_phi_store_ops : Array({ValueId, String, String})`
+    became three parallel arrays:
+    `@deferred_phi_store_op_ids`,
+    `@deferred_phi_store_op_values`,
+    `@deferred_phi_store_op_slots`
+  - queue clearing and replay in `emit_block` now use explicit `clear` calls
+    on those arrays plus an indexed `while` replay loop
+  - enqueue in `emit_instruction` now pushes into the three arrays directly
+  - memory telemetry now counts the three arrays instead of the old tuple queue
+- Operational proof:
+  - `crystal build src/crystal_v2.cr -o /tmp/cv2_phiops_host --error-trace`
+    => host build green.
+  - `scripts/run_safe.sh /tmp/cv2_phiops_host 900 12288 src/crystal_v2.cr -o /tmp/cv2_phiops_s2`
+    => self-host `stage2` green, `[EXIT: 0] after ~304s`.
+  - `CRYSTAL_V2_DOM_TRACE=1 scripts/run_safe.sh /tmp/cv2_phiops_s2 120 1024 regression_tests/combined/test_no_prelude_interpolation.cr --no-prelude -o /tmp/noprel_phiops.bin`
+    => old tuple-array stub no longer reproduces; fresh head is now
+    `error: Index error in emit_function for: __crystal_main / Negative capacity`.
+
+Whole-program / behavioral effect:
+- `stage1` host build remains green.
+- `stage2` self-host build remains green and slightly faster again (`~304s` on
+  this run).
+- The tiny stage2 no-prelude smoke is still red, but it moved one step further
+  from a compiler-internal tuple-array helper into a later compiler-side
+  capacity calculation failure.
+
+Immediate next steps:
+1. Treat the old tuple-array `#clear` head as superseded.
+2. Continue from the new bounded frontier:
+   `Index error in emit_function(__crystal_main): Negative capacity`.

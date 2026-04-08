@@ -1891,7 +1891,9 @@ module Crystal::MIR
     @in_phi_mode : Bool = false  # When true, value_ref returns default instead of emitting load
     @in_phi_block : Bool = false  # When true, we're emitting phi instructions (defer cross-block stores)
     @deferred_phi_stores : Array(String) = [] of String  # Stores to emit after all phis
-    @deferred_phi_store_ops : Array({ValueId, String, String}) = [] of {ValueId, String, String}  # {inst_id, value_name, slot_name}
+    @deferred_phi_store_op_ids : Array(ValueId) = [] of ValueId
+    @deferred_phi_store_op_values : Array(String) = [] of String
+    @deferred_phi_store_op_slots : Array(String) = [] of String
     @deferred_phi_debug_values : Array(String) = [] of String
     @deferred_phi_debug_shadow_stores : Array(String) = [] of String
     # Phi-shared slot optimization: when a phi has many incoming cross-block values,
@@ -13032,7 +13034,9 @@ module Crystal::MIR
       # Emit phi nodes first (without cross-block stores - those go after all phis)
       @in_phi_block = true
       @deferred_phi_stores.clear
-      @deferred_phi_store_ops.clear
+      @deferred_phi_store_op_ids.clear
+      @deferred_phi_store_op_values.clear
+      @deferred_phi_store_op_slots.clear
       @deferred_phi_debug_values.clear
       @deferred_phi_debug_shadow_stores.clear
       phi_insts.each do |inst|
@@ -13049,10 +13053,18 @@ module Crystal::MIR
 
       # Emit deferred slot store operations (wrapping + store) that were skipped during PHI emission
       set_default_dwarf_location
-      @deferred_phi_store_ops.each do |(inst_id, val_name, slot_name)|
-        emit_cross_block_slot_store(inst_id, val_name, slot_name)
+      phi_store_op_idx = 0
+      while phi_store_op_idx < @deferred_phi_store_op_ids.size
+        emit_cross_block_slot_store(
+          @deferred_phi_store_op_ids.unsafe_fetch(phi_store_op_idx),
+          @deferred_phi_store_op_values.unsafe_fetch(phi_store_op_idx),
+          @deferred_phi_store_op_slots.unsafe_fetch(phi_store_op_idx)
+        )
+        phi_store_op_idx += 1
       end
-      @deferred_phi_store_ops.clear
+      @deferred_phi_store_op_ids.clear
+      @deferred_phi_store_op_values.clear
+      @deferred_phi_store_op_slots.clear
       flush_deferred_phi_debug_shadow_stores
 
       # TSan: emit function entry after phi nodes (if first block)
@@ -13681,7 +13693,9 @@ module Crystal::MIR
       # This centralizes the logic that was previously only in emit_load
       # When in phi block, defer EVERYTHING (including wrapping) to after all phis
         if @in_phi_block && produces_value && (slot_name = @cross_block_slots[inst.id]?)
-          @deferred_phi_store_ops << {inst.id, name, slot_name}
+          @deferred_phi_store_op_ids << inst.id
+          @deferred_phi_store_op_values << name
+          @deferred_phi_store_op_slots << slot_name
         elsif produces_value && (slot_name = @cross_block_slots[inst.id]?)
           # Nil/Void casts do not materialize an SSA register. They still need
           # an explicit per-edge default store when their value crosses blocks.
@@ -14235,7 +14249,9 @@ module Crystal::MIR
         @phi_union_payload_extracts.crystal_v2_debug_structural_bytes +
         @phi_nil_incoming_blocks.crystal_v2_debug_structural_bytes +
         @deferred_phi_stores.crystal_v2_debug_structural_bytes +
-        @deferred_phi_store_ops.crystal_v2_debug_structural_bytes
+        @deferred_phi_store_op_ids.crystal_v2_debug_structural_bytes +
+        @deferred_phi_store_op_values.crystal_v2_debug_structural_bytes +
+        @deferred_phi_store_op_slots.crystal_v2_debug_structural_bytes
 
       @phi_union_to_union_converts.each_value do |arr|
         phi_struct += arr.crystal_v2_debug_structural_bytes
