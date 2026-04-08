@@ -1,6 +1,37 @@
 # Crystal V2 Bootstrap — TODO (Updated 2026-04-02)
 
 ## Current Status
+- **Fresh stage2 top-level hash-clear checkpoint: self-hosted `stage2` no longer aborts the tiny no-prelude smoke in the old top-level `Hash(UInt32, Tuple(Int32, Int32))#clear` stub family, because the backend now synthesizes the unlowered `Hash#clear` body directly from the verified V2 runtime layout; the same smoke has moved forward again to a later `Crystal::MIR::Hash(UInt32, TypeRef)#has_key?` stub head (2026-04-08, current session)**:
+  - trustworthy setup:
+    - `src/compiler/mir/llvm_backend.cr` now emits a dead-code fallback for any unlowered top-level `Hash(... )#clear`
+      - it clears `@entries` as a pointer-slot buffer using `llvm.memset`
+      - it clears `@indices` using `@indices_bytesize * (1 << @indices_size_pow2)`
+      - it resets `@size`, `@deleted_count`, and `@first`
+    - the field offsets used by this fallback were verified from a working emitted specialization (`Hash(Int32, Channel(Int32))#clear_impl`) in the generated stage2 binary:
+      - `@first` at offset `4`
+      - `@entries` at offset `8`
+      - `@indices` at offset `16`
+      - `@size` at offset `24`
+      - `@deleted_count` at offset `28`
+      - `@indices_bytesize` at offset `32`
+      - `@indices_size_pow2` at offset `33`
+  - decisive evidence:
+    - host compiler gate is green after a clean host-cache rebuild:
+      - `rm -rf /Users/sergey/.cache/crystal/Users-sergey-Projects-Crystal-crystal_v2_repo-src-crystal_v2.cr`
+      - `crystal build src/crystal_v2.cr -o /tmp/cv2_fix_hash_clear_body --error-trace`
+    - self-host rebuild from that host is green:
+      - `scripts/run_safe.sh /tmp/cv2_fix_hash_clear_body 900 12288 src/crystal_v2.cr -o /tmp/cv2_fix_hash_clear_body_s2`
+      - result: `[EXIT: 0] after ~282s`
+    - the exact tiny no-prelude smoke moved beyond the old top-level hash-clear stub:
+      - before this fix:
+        - `scripts/run_safe.sh /tmp/cv2_fix_mir_hash_clear_reg3_s2 120 1024 regression_tests/combined/test_no_prelude_interpolation.cr --no-prelude -o /tmp/noprel_fix_mir_hash_clear_reg3.bin`
+        - result: `STUB CALLED: Hash$LUInt32$C$_Tuple$LInt32$C$_Int32$R$R$Hclear`, `[EXIT: 134] after ~0s`
+      - after this fix:
+        - `scripts/run_safe.sh /tmp/cv2_fix_hash_clear_body_s2 120 1024 regression_tests/combined/test_no_prelude_interpolation.cr --no-prelude -o /tmp/noprel_fix_hash_clear_body.bin`
+        - result: `STUB CALLED: Crystal$CCMIR$CCHash$LUInt32$C$_Crystal$CCMIR$CCTypeRef$R$Hhas_key$Q$$UInt32`, `[EXIT: 134] after ~0s`
+  - practical boundary:
+    - this closes the verified stage2 top-level `Hash(... )#clear` runtime stub frontier
+    - it does not make the smoke green yet; the next honest frontier is the later `Crystal::MIR::Hash(UInt32, TypeRef)#has_key?` stub head
 - **Fresh stage2 MIR-hash-clear delegate checkpoint: self-hosted `stage2` no longer aborts the tiny no-prelude smoke in the old `Crystal::MIR::Hash(UInt32, Tuple(Int32, Int32))#clear` stub family, because backend overrides now delegate MIR-namespace `Hash#clear` directly to the real top-level `::Hash#clear`; the same smoke has moved forward again to a later top-level `Hash(UInt32, Tuple(Int32, Int32))#clear` stub head (2026-04-08, current session)**:
   - trustworthy setup:
     - `src/compiler/mir/llvm_backend.cr` now emits an exact delegate for any `Crystal::MIR::Hash(... )#clear`

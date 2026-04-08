@@ -3569,6 +3569,61 @@ module Crystal::MIR
         end
       end
 
+      if name.starts_with?("Hash$L") && name.ends_with?("$Hclear")
+        # V2 Hash stores heap Entry pointers in @entries and a separate byte-addressed
+        # indices buffer. Some self-host specializations reach codegen only through
+        # synthetic MIR delegates, so `Hash#clear` materializes as an abort stub even
+        # though the runtime layout is known:
+        #   offset 4  = @first (i32)
+        #   offset 8  = @entries (ptr to Entry* slots)
+        #   offset 16 = @indices (ptr to UInt8/UInt16/UInt32 buffer)
+        #   offset 24 = @size (i32)
+        #   offset 28 = @deleted_count (i32)
+        #   offset 32 = @indices_bytesize (i8)
+        #   offset 33 = @indices_size_pow2 (i8)
+        return "; #{name} — fallback Hash#clear using V2 runtime layout\n" \
+               "define ptr @#{name}(ptr %self) {\n" \
+               "entry:\n" \
+               "  %entries_ptr = getelementptr i8, ptr %self, i32 8\n" \
+               "  %entries = load ptr, ptr %entries_ptr\n" \
+               "  %entries_is_null = icmp eq ptr %entries, null\n" \
+               "  br i1 %entries_is_null, label %after_entries, label %clear_entries\n" \
+               "clear_entries:\n" \
+               "  %pow2_ptr.entries = getelementptr i8, ptr %self, i32 33\n" \
+               "  %pow2.entries = load i8, ptr %pow2_ptr.entries\n" \
+               "  %pow2_i64.entries = zext i8 %pow2.entries to i64\n" \
+               "  %indices_size.entries = shl i64 1, %pow2_i64.entries\n" \
+               "  %entries_capacity = lshr i64 %indices_size.entries, 1\n" \
+               "  %entries_bytes = mul i64 %entries_capacity, #{pointer_word_bytes_u64}\n" \
+               "  call void @llvm.memset.p0.i64(ptr %entries, i8 0, i64 %entries_bytes, i1 false)\n" \
+               "  br label %after_entries\n" \
+               "after_entries:\n" \
+               "  %indices_ptr = getelementptr i8, ptr %self, i32 16\n" \
+               "  %indices = load ptr, ptr %indices_ptr\n" \
+               "  %indices_is_null = icmp eq ptr %indices, null\n" \
+               "  br i1 %indices_is_null, label %reset_fields, label %clear_indices\n" \
+               "clear_indices:\n" \
+               "  %pow2_ptr = getelementptr i8, ptr %self, i32 33\n" \
+               "  %pow2 = load i8, ptr %pow2_ptr\n" \
+               "  %pow2_i64 = zext i8 %pow2 to i64\n" \
+               "  %indices_size = shl i64 1, %pow2_i64\n" \
+               "  %ibs_ptr = getelementptr i8, ptr %self, i32 32\n" \
+               "  %ibs = load i8, ptr %ibs_ptr\n" \
+               "  %ibs_i64 = zext i8 %ibs to i64\n" \
+               "  %indices_bytes = mul i64 %indices_size, %ibs_i64\n" \
+               "  call void @llvm.memset.p0.i64(ptr %indices, i8 0, i64 %indices_bytes, i1 false)\n" \
+               "  br label %reset_fields\n" \
+               "reset_fields:\n" \
+               "  %size_ptr = getelementptr i8, ptr %self, i32 24\n" \
+               "  store i32 0, ptr %size_ptr\n" \
+               "  %deleted_ptr = getelementptr i8, ptr %self, i32 28\n" \
+               "  store i32 0, ptr %deleted_ptr\n" \
+               "  %first_ptr = getelementptr i8, ptr %self, i32 4\n" \
+               "  store i32 0, ptr %first_ptr\n" \
+               "  ret ptr %self\n" \
+               "}\n"
+      end
+
       # Crystal::MIR::Hash(K,V) is V2's mangling of `::Hash(K,V)` used from the MIR module.
       # The receiver is the real Hash object (type_id at offset 0), not a {inner: Hash*} wrapper.
       # Older stubs wrongly did `load ptr, ptr %self`, misreading the header as a pointer (stage2 crash).
