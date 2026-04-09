@@ -7,12 +7,6 @@ module Crystal::System::Time
   # nanoseconds}`.
   # def self.monotonic : {Int64, Int32}
 
-  # Returns the current time from the monotonic clock in `{seconds, nanoseconds}`.
-  # This is the backend for `Time.instant`.
-  def self.instant : {Int64, Int32}
-    monotonic
-  end
-
   # Returns the current time from the monotonic clock in nanoseconds.
   # Doesn't raise nor allocates GC HEAP memory.
   # def self.ticks : UInt64
@@ -26,6 +20,11 @@ module Crystal::System::Time
 
   # Returns the system's current local time zone
   # def self.load_localtime : ::Time::Location?
+
+  def self.instant
+    seconds, nanoseconds = Crystal::System::Time.monotonic
+    ::Time::Instant.new(seconds: seconds, nanoseconds: nanoseconds)
+  end
 end
 
 {% if flag?(:unix) %}

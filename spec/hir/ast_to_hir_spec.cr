@@ -12,6 +12,18 @@ class Crystal::HIR::AstToHir
   def __test_safe_slice_to_string(slice : Slice(UInt8)) : String?
     safe_slice_to_string(slice)
   end
+
+  def __test_lower_function_if_needed(name : String) : Nil
+    lower_function_if_needed(name)
+  end
+
+  def __test_get_function_return_type(name : String) : Crystal::HIR::TypeRef
+    get_function_return_type(name)
+  end
+
+  def __test_type_ref_for_name(name : String) : Crystal::HIR::TypeRef
+    type_ref_for_name(name)
+  end
 end
 
 # Helper to parse Crystal code and get AST
@@ -2074,6 +2086,272 @@ describe Crystal::HIR::AstToHir do
       text = hir_text(func.not_nil!)
       text.should_not contain("ItemIterator(Pointer(Void), Pointer(Void))")
       text.should_not contain("Pointer(Void)#size")
+    end
+  end
+
+  describe "named arg block overload resolution" do
+    it "keeps named arg names when selecting block overloads" do
+      converter = lower_program_with_main(<<-CRYSTAL)
+        def foo(name = nil, &block)
+          block.call
+        end
+
+        def foo(*, name = nil, same_thread = false, &block)
+          value = same_thread
+          block.call
+        end
+
+        foo(name: nil, same_thread: false) { 42 }
+      CRYSTAL
+
+      main = converter.module.function_by_name("__crystal_main")
+      main.should_not be_nil
+
+      text = hir_text(main.not_nil!)
+      text.should contain("call foo$Nil_Bool_block")
+      text.should_not contain("call foo$arity1")
+    end
+  end
+
+  describe "allocator lookup recovery" do
+    it "generates a class allocator for generic zero-arg .new calls" do
+      converter = lower_program_with_main(<<-CRYSTAL)
+        class Channel(T)
+          def initialize(@capacity = 0)
+          end
+        end
+
+        ch = Channel(Int32).new
+      CRYSTAL
+
+      converter.__test_lower_function_if_needed("Channel(Int32).new")
+
+      allocator = converter.module.function_by_name("Channel(Int32).new")
+      allocator.should_not be_nil
+      allocator.not_nil!.blocks.any? { |block| !block.instructions.empty? }.should be_true
+
+      allocator_text = hir_text(allocator.not_nil!)
+      allocator_text.should contain("Channel(Int32)#initialize$Int32(%0)")
+    end
+  end
+
+  describe "default arg lexical context" do
+    it "resolves nested constants in class method defaults against the callee owner" do
+      converter = lower_program_with_main(<<-CRYSTAL)
+        class Outer
+          def self.wrap(value : ExecutionContext = ExecutionContext.current)
+            value
+          end
+        end
+
+        class Outer::ExecutionContext
+          def self.current : Outer::ExecutionContext
+            new
+          end
+        end
+
+        Outer.wrap()
+      CRYSTAL
+
+      main = converter.module.function_by_name("__crystal_main")
+      main.should_not be_nil
+
+      text = hir_text(main.not_nil!)
+      text.should contain("call Outer::ExecutionContext.current()")
+      text.should contain("call Outer.wrap$Outer::ExecutionContext")
+      text.should_not contain("NotFoundError#current")
+    end
+  end
+
+  describe "macro literal parameter filtering" do
+    it "drops inactive inline flag-controlled params inside begin-wrapped class bodies" do
+      converter = lower_program_with_sources(<<-CRYSTAL)
+        class Outer
+          {% begin %}
+          def self.wrap(x : Int32{% if flag?(:execution_context) %}, y : String = "bad"{% end %}, &block)
+            block.call
+          end
+          {% end %}
+        end
+
+        Outer.wrap(1) { 42 }
+      CRYSTAL
+
+      main = converter.module.function_by_name("__crystal_main")
+      main.should_not be_nil
+
+      text = hir_text(main.not_nil!)
+      text.should contain("call Outer.wrap$Int32_block")
+      text.should_not contain("Outer.wrap$Int32_String_block")
+      text.should_not contain(%("bad"))
+    end
+  end
+
+  describe "inline block tuple binding" do
+    it "destructures yielded tuples for multi-param blocks without retargeting the first param to the whole tuple" do
+      converter = lower_program_with_sources(<<-CRYSTAL)
+        struct Point
+          property val : Float64
+          property ts : Int64
+
+          def initialize(@val : Float64, @ts : Int64)
+          end
+        end
+
+        def same_point?(expected : Point, actual : Point) : Bool
+          expected.ts == actual.ts
+        end
+
+        def assert_points(expected : Array(Point), actual : Array(Point)) : Bool
+          expected.zip(actual).all? { |e, a| same_point?(e, a) }
+        end
+
+        p1 = Point.new(1.0, 1_i64)
+        p2 = Point.new(2.0, 2_i64)
+        assert_points([p1], [p2])
+      CRYSTAL
+
+      func = converter.module.function_by_name("assert_points$Array(Point)_Array(Point)")
+      func.should_not be_nil
+
+      text = hir_text(func.not_nil!)
+      text.should contain("call same_point?$Point_Point")
+      text.should_not contain("same_point?$Tuple(Point, Point)_Point")
+    end
+  end
+
+  describe "Time.instant lowering" do
+    it "registers Time.instant as a typed Time::Instant call instead of an unresolved void-like call" do
+      converter = lower_program_with_sources(<<-CRYSTAL)
+        class Time
+          struct Instant
+          end
+        end
+
+        def Time.instant : Time::Instant
+          uninitialized Time::Instant
+        end
+
+        Time.instant()
+      CRYSTAL
+
+      converter.module.function_by_name("Time.instant$arity0").should_not be_nil
+
+      main = converter.module.function_by_name("__crystal_main")
+      main.should_not be_nil
+
+      text = hir_text(main.not_nil!)
+      text.should contain("call Time.instant()")
+      text.should_not contain("call Time.instant() : 0")
+    end
+
+    it "keeps top-level path receivers on singleton defs during registration" do
+      converter = lower_program_with_sources(<<-CRYSTAL)
+        class Time
+          class Location
+          end
+        end
+
+        def Time::Location.utc : Int32
+          1
+        end
+
+        Time::Location.utc()
+      CRYSTAL
+
+      converter.module.function_by_name("Time::Location.utc$arity0").should_not be_nil
+
+      main = converter.module.function_by_name("__crystal_main")
+      main.should_not be_nil
+
+      text = hir_text(main.not_nil!)
+      text.should contain("call Time::Location.utc()")
+      text.should_not contain("call utc()")
+    end
+
+    it "keeps overloaded Time::Instant subtraction typed as Time::Span at call sites" do
+      converter = lower_program_with_sources(<<-CRYSTAL)
+        class Time
+          struct Span
+            def total_milliseconds : Int32
+              1
+            end
+          end
+
+          struct Instant
+            def -(other : self) : Time::Span
+              uninitialized Time::Span
+            end
+          end
+        end
+
+        def Time.instant : Time::Instant
+          uninitialized Time::Instant
+        end
+
+        def probe : Int32
+          started = Time.instant
+          elapsed = Time.instant - started
+          elapsed.total_milliseconds
+        end
+
+        probe()
+      CRYSTAL
+
+      converter.__test_get_function_return_type("Time::Instant#-$Time::Instant").should eq(
+        converter.__test_type_ref_for_name("Time::Span")
+      )
+
+      probe = converter.module.function_by_name("probe$arity0")
+      probe.should_not be_nil
+
+      text = hir_text(probe.not_nil!)
+      text.should contain("Time::Span#total_milliseconds")
+      text.should_not contain("Time::Instant#total_milliseconds")
+    end
+  end
+
+  describe "unary wrapping negation lowering" do
+    it "lowers unary &- as a real negation instead of a void-like method call" do
+      converter = lower_program_with_sources(<<-CRYSTAL)
+        def probe(x : UInt64) : UInt64
+          &-x
+        end
+
+        probe(16_u64)
+      CRYSTAL
+
+      probe = converter.module.function_by_name("probe$UInt64")
+      probe.should_not be_nil
+
+      text = hir_text(probe.not_nil!)
+      text.should contain("unop Neg")
+      text.should_not contain("UInt64#&-() : 0")
+    end
+  end
+
+  describe "accessor lowering" do
+    it "materializes setter bodies even when the signature was pre-registered" do
+      converter = lower_program_with_sources(<<-CRYSTAL)
+        class Box
+          property value : Int32
+
+          def initialize
+            @value = 0
+          end
+        end
+
+        box = Box.new
+        box.value = 10
+      CRYSTAL
+
+      setter = converter.module.function_by_name("Box#value=$Int32")
+      setter.should_not be_nil
+      setter.not_nil!.blocks.any? { |block| !block.instructions.empty? }.should be_true
+
+      setter_text = hir_text(setter.not_nil!)
+      setter_text.should contain("field_set")
+      setter_text.should_not contain("unreachable")
     end
   end
 end

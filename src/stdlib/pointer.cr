@@ -502,6 +502,40 @@ struct Pointer(T)
     ptr
   end
 
+  # Returns a pointer with the address of this pointer
+  # aligned downwards to the next given byte *boundary*.
+  #
+  # INFO: This method requires the given parameter to be a power of 2
+  #
+  # INFO: This method aligns on byte boundaries, not sizeof(T) boundaries
+  #
+  # ```
+  # ptr = Pointer(Void).new(0x30_u64)
+  # ptr.align_down(16) # => Pointer(Void)@0x30
+  # ptr.align_down(32) # => Pointer(Void)@0x20
+  # ```
+  @[AlwaysInline]
+  def align_down(boundary : UInt64) : Pointer(T)
+    Pointer(T).new(self.address & (&-boundary))
+  end
+
+  # Returns a pointer with the address of this pointer
+  # aligned upwards to the next given byte *boundary*.
+  #
+  # INFO: This method requires the given parameter to be a power of 2
+  #
+  # INFO: This method aligns on byte boundaries, not sizeof(T) boundaries
+  #
+  # ```
+  # ptr = Pointer(Void).new(0x30_u64)
+  # ptr.align_up(16) # => Pointer(Void)@0x30
+  # ptr.align_up(32) # => Pointer(Void)@0x40
+  # ```
+  @[AlwaysInline]
+  def align_up(boundary : UInt64) : Pointer(T)
+    Pointer(T).new((self.address &+ (boundary &- 1)) & (&-boundary))
+  end
+
   # Returns a `Pointer::Appender` for this pointer.
   def appender : Pointer::Appender
     Pointer::Appender.new(self)
