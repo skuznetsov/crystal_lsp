@@ -4,6 +4,21 @@ require "../../src/compiler/mir/hir_to_mir"
 require "../../src/compiler/mir/optimizations"
 require "../../src/compiler/mir/llvm_backend"
 
+class Crystal::MIR::DwarfDebugContext
+  def __test_stable_metadata_id(key : String, base : Int32, span : Int32) : Int32
+    stable_metadata_id(key, base, span)
+  end
+
+  def __test_unique_stable_metadata_id(
+    assigned_ids : Hash(Int32, String),
+    key : String,
+    base : Int32,
+    span : Int32,
+  ) : Int32
+    unique_stable_metadata_id(assigned_ids, key, base, span)
+  end
+end
+
 describe Crystal::MIR::LLVMTypeMapper do
   describe "#llvm_type" do
     it "maps primitive types correctly" do
@@ -1051,6 +1066,66 @@ describe Crystal::MIR::LLVMIRGenerator do
       output.should contain("@__crystal_field_info = constant")
       output.should contain("%__crystal_field_info_entry = type { i32, i32, i32, i32 }")
     end
+
+    it "emits large homogeneous tuples as DW_TAG_array_type with a DISubrange" do
+      mod = Crystal::MIR::Module.new("test")
+      tuple_type = mod.type_registry.create_type(
+        Crystal::MIR::TypeKind::Tuple,
+        "HugeUInt64Tuple",
+        1301_u64 * 8_u64,
+        8_u32
+      )
+      uint64_type = mod.type_registry.get(Crystal::MIR::TypeRef::UINT64)
+      uint64_type.should_not be_nil
+      1301.times do
+        tuple_type.add_element_type(uint64_type.not_nil!)
+      end
+
+      gen = Crystal::MIR::LLVMIRGenerator.new(mod)
+      gen.emit_type_metadata = false
+      gen.emit_debug_info = true
+      output = gen.generate
+
+      output.should contain("!DICompositeType(tag: DW_TAG_array_type, baseType: !1300000011")
+      output.should contain("!DISubrange(count: 1301)")
+      output.should_not contain("name: \"[1300]\"")
+    end
+
+    it "deduplicates colliding lexical block metadata ids" do
+      mod = Crystal::MIR::Module.new("test")
+      ctx = Crystal::MIR::DwarfDebugContext.new(mod, Crystal::MIR::LLVMTypeMapper.new(mod.type_registry))
+      assigned = {} of Int32 => String
+      first_key = "lexblock:300001524:3"
+      second_key = "lexblock:300002527:9"
+
+      raw_first = ctx.__test_stable_metadata_id(
+        first_key,
+        Crystal::MIR::DwarfDebugContext::LEXICAL_BLOCK_ID_BASE,
+        Crystal::MIR::DwarfDebugContext::LEXICAL_BLOCK_ID_SPAN
+      )
+      raw_second = ctx.__test_stable_metadata_id(
+        second_key,
+        Crystal::MIR::DwarfDebugContext::LEXICAL_BLOCK_ID_BASE,
+        Crystal::MIR::DwarfDebugContext::LEXICAL_BLOCK_ID_SPAN
+      )
+      raw_first.should eq(raw_second)
+
+      unique_first = ctx.__test_unique_stable_metadata_id(
+        assigned,
+        first_key,
+        Crystal::MIR::DwarfDebugContext::LEXICAL_BLOCK_ID_BASE,
+        Crystal::MIR::DwarfDebugContext::LEXICAL_BLOCK_ID_SPAN
+      )
+      unique_second = ctx.__test_unique_stable_metadata_id(
+        assigned,
+        second_key,
+        Crystal::MIR::DwarfDebugContext::LEXICAL_BLOCK_ID_BASE,
+        Crystal::MIR::DwarfDebugContext::LEXICAL_BLOCK_ID_SPAN
+      )
+
+      unique_first.should_not eq(unique_second)
+      assigned.size.should eq(2)
+    end
   end
 
   describe "synchronization primitives" do
@@ -1235,6 +1310,24 @@ describe Crystal::MIR::LLVMIRGenerator do
       # Send releases, receive acquires
       output.should contain("@__tsan_release")
       output.should contain("@__tsan_acquire")
+    end
+
+    it "keeps widened primitive override results consistent with the declared function return type" do
+      mod = Crystal::MIR::Module.new("test")
+      func = mod.create_function("UInt32#+$UInt64", Crystal::MIR::TypeRef::UINT32)
+      func.add_param("self", Crystal::MIR::TypeRef::UINT32)
+      func.add_param("other", Crystal::MIR::TypeRef::UINT64)
+
+      gen = Crystal::MIR::LLVMIRGenerator.new(mod)
+      gen.emit_type_metadata = false
+      output = gen.generate
+
+      output.should contain("define i32 @UInt32$H$ADD$$UInt64(i32 %self, i64 %other)")
+      output.should contain("; UInt32#ADD primitive override")
+      output.should contain("%result = add i64")
+      output.should contain("%result_ret = trunc i64 %result to i32")
+      output.should contain("ret i32 %result_ret")
+      output.should_not contain("ret i64 %result")
     end
   end
 end

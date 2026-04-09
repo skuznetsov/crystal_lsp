@@ -573,6 +573,11 @@ module Crystal::MIR
     COMPOSITE_BODY_ID_BASE = 1_400_000_000
     POINTER_TYPE_ID_BASE  = 1_500_000_000
     MEMBER_ID_BASE        = 1_600_000_000
+    ARRAY_ELEMENTS_ID_BASE = 1_700_000_000
+    ARRAY_ELEMENTS_ID_SPAN = 50_000_000
+    ARRAY_SUBRANGE_ID_BASE = 1_750_000_000
+    ARRAY_SUBRANGE_ID_SPAN = 50_000_000
+    HOMOGENEOUS_TUPLE_ARRAY_THRESHOLD = 64
 
     getter used_files : ::Set(String)
 
@@ -581,6 +586,7 @@ module Crystal::MIR
       @file_ids = {} of String => Int32
       @file_definitions = {} of Int32 => String
       @assigned_location_ids = {} of Int32 => String
+      @assigned_lexical_block_ids = {} of Int32 => String
       @debug_type_ids = {} of TypeRef => Int32
       @type_definitions = {} of Int32 => String
       @namespace_ids = {} of String => Int32
@@ -1221,7 +1227,8 @@ module Crystal::MIR
                       end
                     end
 
-      block_id = stable_metadata_id("lexblock:#{subprogram_id}:#{mir_scope_id}", LEXICAL_BLOCK_ID_BASE, LEXICAL_BLOCK_ID_SPAN)
+      block_key = "lexblock:#{subprogram_id}:#{mir_scope_id}"
+      block_id = unique_stable_metadata_id(@assigned_lexical_block_ids, block_key, LEXICAL_BLOCK_ID_BASE, LEXICAL_BLOCK_ID_SPAN)
       file_id = register_file(opening.file)
       io << "!#{block_id} = !DILexicalBlock(scope: !#{parent_meta}, file: !#{file_id}, line: #{positive_line(opening.line)}, column: #{positive_column(opening.column)})\n"
       lexical_cache[cache_key] = block_id
@@ -1429,6 +1436,25 @@ module Crystal::MIR
       (base.to_u64 + (hash % span.to_u64)).to_i32
     end
 
+    private def unique_stable_metadata_id(
+      assigned_ids : Hash(Int32, String),
+      key : String,
+      base : Int32,
+      span : Int32,
+    ) : Int32
+      attempt = 0
+      loop do
+        candidate_key = attempt == 0 ? key : "#{key}:#{attempt}"
+        candidate_id = stable_metadata_id(candidate_key, base, span)
+        existing_key = assigned_ids[candidate_id]?
+        if existing_key.nil? || existing_key == candidate_key
+          assigned_ids[candidate_id] = candidate_key
+          return candidate_id
+        end
+        attempt += 1
+      end
+    end
+
     private def positive_line(line : Int32) : Int32
       line > 0 ? line : 1
     end
@@ -1509,9 +1535,18 @@ module Crystal::MIR
       return exposed_id if @building_type_ids.includes?(type_ref.id)
       @building_type_ids << type_ref.id
       begin
-        members = composite_member_refs(type_ref, type)
-        tag = type.kind.union? ? "DW_TAG_union_type" : "DW_TAG_structure_type"
-        @type_definitions[body_id] ||= "!#{body_id} = !DICompositeType(tag: #{tag}, name: \"#{escape_metadata_string(type.name)}\", size: #{type.size.to_u64 * 8_u64}, align: #{type.alignment.to_u64 * 8_u64}, elements: !{#{members.join(", ")}})\n"
+        if array_shape = composite_array_debug_shape(type)
+          element_type_id = debug_type_id(array_shape[:element_type_ref])
+          elements_id = stable_metadata_id("array-elements:#{type_ref.id}", ARRAY_ELEMENTS_ID_BASE, ARRAY_ELEMENTS_ID_SPAN)
+          subrange_id = stable_metadata_id("array-subrange:#{type_ref.id}", ARRAY_SUBRANGE_ID_BASE, ARRAY_SUBRANGE_ID_SPAN)
+          @type_definitions[subrange_id] ||= "!#{subrange_id} = !DISubrange(count: #{array_shape[:count]})\n"
+          @type_definitions[elements_id] ||= "!#{elements_id} = !{!#{subrange_id}}\n"
+          @type_definitions[body_id] ||= "!#{body_id} = !DICompositeType(tag: DW_TAG_array_type, baseType: !#{element_type_id}, size: #{type.size.to_u64 * 8_u64}, align: #{type.alignment.to_u64 * 8_u64}, elements: !#{elements_id})\n"
+        else
+          members = composite_member_refs(type_ref, type)
+          tag = type.kind.union? ? "DW_TAG_union_type" : "DW_TAG_structure_type"
+          @type_definitions[body_id] ||= "!#{body_id} = !DICompositeType(tag: #{tag}, name: \"#{escape_metadata_string(type.name)}\", size: #{type.size.to_u64 * 8_u64}, align: #{type.alignment.to_u64 * 8_u64}, elements: !{#{members.join(", ")}})\n"
+        end
 
         if pointer_backed
           @type_definitions[exposed_id] ||= "!#{exposed_id} = !DIDerivedType(tag: DW_TAG_pointer_type, name: \"#{escape_metadata_string(type.name)}\", baseType: !#{body_id}, size: #{pointer_size_bits})\n"
@@ -1595,6 +1630,49 @@ module Crystal::MIR
       end
 
       refs
+    end
+
+    private def composite_array_debug_shape(type : Type) : NamedTuple(element_type_ref: TypeRef, count: UInt64)?
+      if type.name.starts_with?("StaticArray(")
+        return static_array_debug_shape(type)
+      end
+
+      return homogeneous_tuple_debug_shape(type) if type.kind.tuple?
+      nil
+    end
+
+    private def static_array_debug_shape(type : Type) : NamedTuple(element_type_ref: TypeRef, count: UInt64)?
+      count = nil
+      element_type_ref = nil
+
+      if match = type.name.match(/^StaticArray\((.+),\s*(\d+)\)$/)
+        element_name = match[1].strip
+        count = match[2].to_u64
+        if element_type = @module.type_registry.get_by_name(element_name)
+          element_type_ref = TypeRef.new(element_type.id)
+        end
+      end
+
+      if element_type_ref.nil?
+        if element_type = type.element_type
+          element_type_ref = TypeRef.new(element_type.id)
+        end
+      end
+
+      return nil unless count && element_type_ref
+      {element_type_ref: element_type_ref, count: count}
+    end
+
+    private def homogeneous_tuple_debug_shape(type : Type) : NamedTuple(element_type_ref: TypeRef, count: UInt64)?
+      elements = type.element_types
+      return nil unless elements
+      return nil if elements.size <= HOMOGENEOUS_TUPLE_ARRAY_THRESHOLD
+
+      first = elements.first?
+      return nil unless first
+      return nil unless elements.all? { |element| element.id == first.id }
+
+      {element_type_ref: TypeRef.new(first.id), count: elements.size.to_u64}
     end
 
     private def align_to_bits(offset_bits : UInt64, align_bits : UInt64) : UInt64
@@ -11103,8 +11181,10 @@ module Crystal::MIR
           other_is_signed = other_type_ref.id >= TypeRef::INT8.id && other_type_ref.id <= TypeRef::INT128.id
         end
 
+        emitted_ret_type = ret_type
+
         emit_raw "; #{type_name}##{rest.split("$$").first} primitive override\n"
-        emit_raw "define #{ret_type} @#{mangled}(#{self_llvm} %self, #{other_llvm} %other) {\n"
+        emit_raw "define #{emitted_ret_type} @#{mangled}(#{self_llvm} %self, #{other_llvm} %other) {\n"
 
         # Get self value — V2 heap-allocates primitives, so self is a pointer.
         # Load the actual value from the heap instead of truncating the pointer.
@@ -11132,15 +11212,25 @@ module Crystal::MIR
             emit_raw "  %other_ext = #{ext} #{other_llvm} %other to #{actual_self_llvm}\n"
             other_val = "%other_ext"
           end
-          # For arithmetic, result type might need to be the wider type
-          ret_type = op_type unless ret_type == "i1"
         end
 
         emit_raw "  %result = #{ir_op} #{op_type} #{self_val}, #{other_val}\n"
-        emit_raw "  ret #{ret_type} %result\n"
+        if op_type != emitted_ret_type && emitted_ret_type != "i1"
+          op_bits = op_type[1..].to_i? || 32
+          ret_bits = emitted_ret_type[1..].to_i? || 32
+          if op_bits > ret_bits
+            emit_raw "  %result_ret = trunc #{op_type} %result to #{emitted_ret_type}\n"
+          else
+            ext = is_signed ? "sext" : "zext"
+            emit_raw "  %result_ret = #{ext} #{op_type} %result to #{emitted_ret_type}\n"
+          end
+          emit_raw "  ret #{emitted_ret_type} %result_ret\n"
+        else
+          emit_raw "  ret #{emitted_ret_type} %result\n"
+        end
         emit_raw "}\n\n"
         @emitted_functions << mangled
-        @emitted_function_return_types[mangled] = ret_type
+        @emitted_function_return_types[mangled] = emitted_ret_type
         return true
       end
 

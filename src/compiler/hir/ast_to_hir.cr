@@ -14497,7 +14497,27 @@ module Crystal::HIR
       @infer_local_type_cache_scope = nil
       @infer_type_cache_version += 1
       begin
-        infer_concrete_return_type_from_body(node, self_type_name)
+        registered_param_map = nil
+        if self_type_name && !self_type_name.empty?
+          method_name = (safe_slice_to_string(node.name) || "")
+          unless method_name.empty?
+            is_class_method = if recv = node.receiver
+                                (safe_slice_to_string(recv) || "") == "self"
+                              else
+                                false
+                              end
+            base_name = "#{self_type_name}#{is_class_method ? "." : "#"}#{method_name}"
+            registered_param_map = function_type_param_map_for(base_name)
+          end
+        end
+
+        if registered_param_map
+          with_type_param_map(registered_param_map) do
+            infer_concrete_return_type_from_body(node, self_type_name)
+          end
+        else
+          infer_concrete_return_type_from_body(node, self_type_name)
+        end
       ensure
         @current_typeof_locals = old_locals
         @current_typeof_local_names = old_names
@@ -14923,6 +14943,12 @@ module Crystal::HIR
             if inferred = inline_block_return_type_name(outer_block, outer_param_types, self_type_name)
               return type_ref_for_name(inferred)
             end
+          end
+        end
+        if inferred = @type_param_map["__block_return__"]?
+          inferred = inferred.strip
+          if !inferred.empty? && inferred != "Void" && inferred != "Unknown"
+            return type_ref_for_name(inferred)
           end
         end
       when CrystalV2::Compiler::Frontend::PathNode
@@ -16043,13 +16069,22 @@ module Crystal::HIR
         end
       when CrystalV2::Compiler::Frontend::IfNode
         types = [] of TypeRef
-        if inferred = infer_type_from_branch(expr_node.then_body, self_type_name)
+        branch_sensitive_failure = false
+        if inferred = with_inferred_condition_locals(expr_node.condition, self_type_name, truthy: true) do
+             infer_type_from_branch(expr_node.then_body, self_type_name)
+           end
           types << inferred
+        elsif condition_has_assignment_local?(expr_node.condition)
+          branch_sensitive_failure = true
         end
         if elsifs = expr_node.elsifs
           elsifs.each do |branch|
-            if inferred = infer_type_from_branch(branch.body, self_type_name)
+            if inferred = with_inferred_condition_locals(branch.condition, self_type_name, truthy: true) do
+                 infer_type_from_branch(branch.body, self_type_name)
+               end
               types << inferred
+            elsif condition_has_assignment_local?(branch.condition)
+              branch_sensitive_failure = true
             end
           end
         end
@@ -16059,6 +16094,9 @@ module Crystal::HIR
           end
         else
           types << TypeRef::NIL
+        end
+        if branch_sensitive_failure
+          return nil
         end
         if types.any?
           return merge_return_types(types)
@@ -16145,7 +16183,10 @@ module Crystal::HIR
       debug_name = env_get("DEBUG_INFER_BRANCH")
       method_name = @current_method
       debug_infer = debug_name ? (method_name ? method_name.includes?(debug_name) : false) : false
-      @infer_body_context = body
+      # Keep the enclosing body context when present so branch-local inference can
+      # still see assignments that happen in the surrounding condition
+      # (`if x = ...`, `elsif y = ...`) and other dominating locals.
+      @infer_body_context = old_body_context || body
       begin
         expr_id = body.last
         loop do
@@ -16175,6 +16216,133 @@ module Crystal::HIR
         inferred
       ensure
         @infer_body_context = old_body_context
+      end
+    end
+
+    # Return-type body inference does not run the real branch-lowering pipeline,
+    # so locals introduced in conditions (`if x = ...`, `if (q = @queue) && ...`)
+    # would otherwise stay invisible or nilable inside the inferred branch body.
+    # Seed a lightweight local map for this inference-only path so branch-local
+    # assignments can resolve their RHS types without forcing a full lower.
+    private def with_inferred_condition_locals(
+      condition_id : ExprId,
+      self_type_name : String?,
+      *,
+      truthy : Bool,
+      & : -> TypeRef?
+    ) : TypeRef?
+      old_locals = @current_typeof_locals
+      old_names = @current_typeof_local_names
+      local_map = old_locals ? old_locals.dup : {} of String => TypeRef
+      name_map = old_names ? old_names.dup : {} of String => String
+
+      @current_typeof_locals = local_map
+      @current_typeof_local_names = name_map
+      begin
+        seed_inferred_condition_locals(condition_id, self_type_name, truthy: truthy)
+        yield
+      ensure
+        @current_typeof_locals = old_locals
+        @current_typeof_local_names = old_names
+      end
+    end
+
+    private def seed_inferred_condition_locals(
+      condition_id : ExprId,
+      self_type_name : String?,
+      *,
+      truthy : Bool,
+    ) : Nil
+      return if condition_id.invalid?
+
+      node = @arena[condition_id]
+      case node
+      when CrystalV2::Compiler::Frontend::GroupingNode
+        seed_inferred_condition_locals(node.expression, self_type_name, truthy: truthy)
+      when CrystalV2::Compiler::Frontend::UnaryNode
+        op = unary_operator_text(node)
+        if op == "!"
+          seed_inferred_condition_locals(node.operand, self_type_name, truthy: !truthy)
+        end
+      when CrystalV2::Compiler::Frontend::AssignNode
+        seed_inferred_condition_assignment_local(node, self_type_name, truthy: truthy)
+      when CrystalV2::Compiler::Frontend::BinaryNode
+        op = node.operator_string
+        case op
+        when "&&"
+          if truthy
+            seed_inferred_condition_locals(node.left, self_type_name, truthy: true)
+            seed_inferred_condition_locals(node.right, self_type_name, truthy: true)
+          else
+            seed_inferred_condition_locals(node.left, self_type_name, truthy: false)
+          end
+        when "||"
+          if truthy
+            seed_inferred_condition_locals(node.left, self_type_name, truthy: true)
+          else
+            seed_inferred_condition_locals(node.left, self_type_name, truthy: false)
+            seed_inferred_condition_locals(node.right, self_type_name, truthy: false)
+          end
+        end
+      end
+
+      targets = truthy ? truthy_narrowing_targets(condition_id) : falsy_narrowing_targets(condition_id)
+      targets.each do |name|
+        next if name.empty?
+        local_ref = @current_typeof_locals.try(&.[name]?)
+        next unless local_ref
+        narrowed = non_nil_type_for_union(local_ref)
+        next unless narrowed && narrowed != TypeRef::VOID
+        update_typeof_local(name, narrowed)
+        if concrete_name = concrete_type_name_for(narrowed)
+          update_typeof_local_name(name, concrete_name)
+        end
+      end
+    end
+
+    private def seed_inferred_condition_assignment_local(
+      node : CrystalV2::Compiler::Frontend::AssignNode,
+      self_type_name : String?,
+      *,
+      truthy : Bool,
+    ) : Nil
+      target = node_for_expr(node.target)
+      return unless target.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode)
+
+      name = (safe_slice_to_string(target.name) || "")
+      return if name.empty?
+
+      value_type = infer_type_from_expr(node.value, self_type_name)
+      return unless value_type && value_type != TypeRef::VOID
+
+      effective_type = value_type
+      if truthy
+        effective_type = non_nil_type_for_union(value_type) || value_type
+      end
+
+      update_typeof_local(name, effective_type)
+      if concrete_name = concrete_type_name_for(effective_type)
+        update_typeof_local_name(name, concrete_name)
+      end
+    end
+
+    private def condition_has_assignment_local?(condition_id : ExprId) : Bool
+      return false if condition_id.invalid?
+
+      node = @arena[condition_id]
+      case node
+      when CrystalV2::Compiler::Frontend::GroupingNode
+        condition_has_assignment_local?(node.expression)
+      when CrystalV2::Compiler::Frontend::UnaryNode
+        op = unary_operator_text(node)
+        op == "!" && condition_has_assignment_local?(node.operand)
+      when CrystalV2::Compiler::Frontend::AssignNode
+        target = node_for_expr(node.target)
+        target.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode)
+      when CrystalV2::Compiler::Frontend::BinaryNode
+        condition_has_assignment_local?(node.left) || condition_has_assignment_local?(node.right)
+      else
+        false
       end
     end
 
@@ -16421,20 +16589,39 @@ module Crystal::HIR
           body.each { |child| collect_local_assignment_types(child, name, self_type_name, output, body, visited) }
         end
       when CrystalV2::Compiler::Frontend::IfNode
+        collect_local_assignment_types(expr_node.condition, name, self_type_name, output, body, visited)
         expr_node.then_body.each { |child| collect_local_assignment_types(child, name, self_type_name, output, body, visited) }
         if elsifs = expr_node.elsifs
-          elsifs.each { |branch| branch.body.each { |child| collect_local_assignment_types(child, name, self_type_name, output, body, visited) } }
+          elsifs.each do |branch|
+            collect_local_assignment_types(branch.condition, name, self_type_name, output, body, visited)
+            branch.body.each { |child| collect_local_assignment_types(child, name, self_type_name, output, body, visited) }
+          end
         end
         if else_body = expr_node.else_body
           else_body.each { |child| collect_local_assignment_types(child, name, self_type_name, output, body, visited) }
         end
+      when CrystalV2::Compiler::Frontend::UnlessNode
+        collect_local_assignment_types(expr_node.condition, name, self_type_name, output, body, visited)
+        expr_node.then_branch.each { |child| collect_local_assignment_types(child, name, self_type_name, output, body, visited) }
+        if else_branch = expr_node.else_branch
+          else_branch.each { |child| collect_local_assignment_types(child, name, self_type_name, output, body, visited) }
+        end
       when CrystalV2::Compiler::Frontend::CaseNode
-        expr_node.when_branches.each { |branch| branch.body.each { |child| collect_local_assignment_types(child, name, self_type_name, output, body, visited) } }
+        if value = expr_node.value
+          collect_local_assignment_types(value, name, self_type_name, output, body, visited)
+        end
+        expr_node.when_branches.each do |branch|
+          branch.conditions.each { |cond| collect_local_assignment_types(cond, name, self_type_name, output, body, visited) }
+          branch.body.each { |child| collect_local_assignment_types(child, name, self_type_name, output, body, visited) }
+        end
         if else_branch = expr_node.else_branch
           else_branch.each { |child| collect_local_assignment_types(child, name, self_type_name, output, body, visited) }
         end
         if in_branches = expr_node.in_branches
-          in_branches.each { |branch| branch.body.each { |child| collect_local_assignment_types(child, name, self_type_name, output, body, visited) } }
+          in_branches.each do |branch|
+            branch.conditions.each { |cond| collect_local_assignment_types(cond, name, self_type_name, output, body, visited) }
+            branch.body.each { |child| collect_local_assignment_types(child, name, self_type_name, output, body, visited) }
+          end
         end
       when CrystalV2::Compiler::Frontend::BeginNode
         expr_node.body.each { |child| collect_local_assignment_types(child, name, self_type_name, output, body, visited) }
@@ -16448,8 +16635,10 @@ module Crystal::HIR
           ensure_body.each { |child| collect_local_assignment_types(child, name, self_type_name, output, body, visited) }
         end
       when CrystalV2::Compiler::Frontend::WhileNode
+        collect_local_assignment_types(expr_node.condition, name, self_type_name, output, body, visited)
         expr_node.body.each { |child| collect_local_assignment_types(child, name, self_type_name, output, body, visited) }
       when CrystalV2::Compiler::Frontend::UntilNode
+        collect_local_assignment_types(expr_node.condition, name, self_type_name, output, body, visited)
         expr_node.body.each { |child| collect_local_assignment_types(child, name, self_type_name, output, body, visited) }
       when CrystalV2::Compiler::Frontend::LoopNode
         expr_node.body.each { |child| collect_local_assignment_types(child, name, self_type_name, output, body, visited) }
@@ -27035,7 +27224,7 @@ module Crystal::HIR
                      else
                        pointer_element_type(mangled_name)
                      end
-      element_type = TypeRef::POINTER if element_type == TypeRef::VOID
+      element_type = TypeRef::UINT8 if element_type == TypeRef::VOID
       result_type = receiver_type == TypeRef::VOID ? TypeRef::POINTER : receiver_type
       add_node = PointerAdd.new(ctx.next_id, result_type, receiver_id, offset_id, element_type)
       ctx.emit(add_node)
@@ -33516,6 +33705,7 @@ module Crystal::HIR
     # Look up return type of a function by name
     private def get_function_return_type(name : String) : TypeRef
       base_name = strip_type_suffix(name)
+      has_block_return_override = function_type_param_map_for(name, base_name).try(&.has_key?("__block_return__")) || false
       if debug_name = env_get("DEBUG_GET_RETURN")
         if name.includes?(debug_name) || base_name.includes?(debug_name)
           func_type = @function_types[name]?
@@ -33526,6 +33716,14 @@ module Crystal::HIR
       end
       existing_type = @function_types[name]?
       if existing_type && existing_type != TypeRef::VOID
+        if func = @module.function_by_name(name)
+          func_rt = func.return_type
+          if func_rt != TypeRef::VOID && func_rt != existing_type
+            set_function_type_entry(name, func_rt)
+            @function_base_return_types[base_name] = func_rt if name == base_name
+            existing_type = func_rt
+          end
+        end
         if def_node = lookup_function_def_for_return(name, base_name)
           if def_node.return_type
             if resolved = resolve_return_type_from_def(name, base_name, nil)
@@ -33535,7 +33733,7 @@ module Crystal::HIR
                 existing_type = resolved
               end
             end
-          elsif !existing_type.primitive?
+          elsif !existing_type.primitive? || has_block_return_override
             owner_name = function_context_from_name(base_name)
             if inferred = infer_return_type_from_body_without_callsite(def_node, owner_name)
               if inferred != TypeRef::VOID && inferred != existing_type
@@ -33721,20 +33919,15 @@ module Crystal::HIR
         if func = @module.function_by_name(name)
           func_rt = func.return_type
           if func_rt != TypeRef::VOID
-            if unresolved_generic_return_type?(type) && !unresolved_generic_return_type?(func_rt)
-              set_function_type_entry(name, func_rt)
-              type = func_rt
-            end
-            # Prefer concrete lowered return types over overly broad unions.
-            # This fixes cases where early inference polluted @function_types
-            # (e.g., Hash#key_hash returning a union at call sites).
             if type != func_rt
-              if type_desc = @module.get_type_descriptor(type)
-                if type_desc.kind == TypeKind::Union
-                  set_function_type_entry(name, func_rt)
-                  type = func_rt
-                end
-              end
+              # Once a function is lowered, its module return type is the
+              # canonical instantiated answer. Cached pre-lowering signatures can
+              # drift for branchy tuple returns (for example receive_internal
+              # narrowing to Tuple(State, UseDefault) while the lowered body
+              # returns Union Tuple(State, UseDefault) | Tuple(State, T)).
+              set_function_type_entry(name, func_rt)
+              @function_base_return_types[base_name] = func_rt if name == base_name
+              type = func_rt
             end
           end
         end
@@ -35449,9 +35642,25 @@ module Crystal::HIR
       if name.starts_with?("::")
         name = name.size > 2 ? name[2..] : ""
       end
-      return normalize_missing_generic_parens(name) if name.includes?("::")
+      if name.includes?("::")
+        if idx = name.rindex("::")
+          owner = name[0, idx]
+          leaf = name[(idx + 2)..]
+          if leaf && !owner.empty?
+            owner = strip_generic_args(owner)
+            return normalize_missing_generic_parens("#{owner}::#{leaf}")
+          end
+        end
+        return normalize_missing_generic_parens(name)
+      end
       if current = @current_class
-        return normalize_missing_generic_parens("#{current}::#{name}")
+        # Nested type definitions inside generic owners are lexical children of
+        # the generic template namespace, not per-instantiation specializations.
+        # Using the concrete owner here (e.g. Box(Int32)::Inner) strands
+        # macro-generated nested types like `record` behind specialization-only
+        # names and later bare `Inner.new` can miss the canonical Box::Inner path.
+        owner = strip_generic_args(current)
+        return normalize_missing_generic_parens("#{owner}::#{name}")
       end
       normalize_missing_generic_parens(name)
     end
@@ -37341,6 +37550,29 @@ module Crystal::HIR
       end
 
       nil
+    end
+
+    private def record_block_return_type_for_call(
+      mangled_method_name : String,
+      base_method_name : String,
+      block_return_name : String,
+    ) : Nil
+      if type_param_name = block_return_type_param_name(mangled_method_name, base_method_name)
+        record_pending_type_param_map(mangled_method_name, {type_param_name => block_return_name})
+      end
+
+      # Always record block return type for typeof(yield ...) resolution.
+      # Use @function_type_param_maps (persistent) instead of pending
+      # (consumed-once), since the function may be lowered before this
+      # callsite records the params. Merge to preserve existing params.
+      {mangled_method_name, base_method_name}.each do |fn|
+        next if fn.empty?
+        if existing = @function_type_param_maps[fn]?
+          @function_type_param_maps[fn] = existing.merge({"__block_return__" => block_return_name})
+        else
+          @function_type_param_maps[fn] = {"__block_return__" => block_return_name}
+        end
+      end
     end
 
     private def resolve_block_dependent_return_type(
@@ -47362,7 +47594,7 @@ module Crystal::HIR
                        else
                          TypeRef::INT32
                        end
-        element_type = TypeRef::INT32 if element_type == TypeRef::VOID
+        element_type = TypeRef::UINT8 if element_type == TypeRef::VOID
         result_type = left_desc && left_desc.kind == TypeKind::Pointer ? left_type : TypeRef::POINTER
         add_node = PointerAdd.new(ctx.next_id, result_type, left_id, offset_id, element_type)
         ctx.emit(add_node)
@@ -53951,6 +54183,19 @@ module Crystal::HIR
 
     private def lower_function_if_needed(name : String) : Nil
       lower_function_if_needed_impl(name)
+    end
+
+    private def force_pending_call_targets_for_return_type(*names : String?) : Bool
+      forced = false
+      names.each do |name|
+        next unless name
+        next if name.empty?
+        next if @module.has_function_with_body?(name)
+        if force_lower_function_for_return_type(name)
+          forced = true
+        end
+      end
+      forced
     end
 
     # Force-lower a function immediately even if we're inside lowering.
@@ -61021,6 +61266,28 @@ module Crystal::HIR
         remember_callsite_arg_types(mangled_method_name, callsite_arg_types, callsite_arg_literals, callsite_arg_enum_names, has_block_call, has_named_args, call_named_arg_names)
       end
 
+      block_return_name = nil
+      if block_id
+        block_return_name = block_return_type_name(ctx, block_id)
+      elsif block_for_inline
+        block_return_name = inline_block_return_type_name(block_for_inline, block_param_types_inline, @current_class)
+      end
+      if block_return_name.nil? && block_for_inline
+        block_return_name = inline_block_return_type_name(block_for_inline, block_param_types_inline, @current_class)
+      end
+      if block_return_name
+        record_block_return_type_for_call(mangled_method_name, base_method_name, block_return_name)
+      end
+
+      # Canonicalize the instantiated callee signature before we snapshot the
+      # return type. Otherwise a caller can freeze an early body-inferred cache
+      # entry (for example Tuple(State, UseDefault)) before the callee is lowered
+      # and discovers its real specialized return type.
+      lower_function_if_needed(mangled_method_name)
+      if mangled_method_name != base_method_name
+        lower_function_if_needed(base_method_name)
+      end
+
       # Try to infer return type using mangled name first, fallback to base name
       # For non-overloaded functions, prefer base name since that's how they're registered in HIR module
       return_type = get_function_return_type(mangled_method_name)
@@ -61184,31 +61451,7 @@ module Crystal::HIR
         end
       end
 
-      block_return_name = nil
-      if block_id
-        block_return_name = block_return_type_name(ctx, block_id)
-      elsif block_for_inline
-        block_return_name = inline_block_return_type_name(block_for_inline, block_param_types_inline, @current_class)
-      end
-      if block_return_name.nil? && block_for_inline
-        block_return_name = inline_block_return_type_name(block_for_inline, block_param_types_inline, @current_class)
-      end
       if block_return_name
-        if type_param_name = block_return_type_param_name(mangled_method_name, base_method_name)
-          record_pending_type_param_map(mangled_method_name, {type_param_name => block_return_name})
-        end
-        # Always record block return type for typeof(yield ...) resolution.
-        # Use @function_type_param_maps (persistent) instead of pending
-        # (consumed-once), since the function may be lowered before this
-        # callsite records the params.  Merge to preserve existing params.
-        {mangled_method_name, base_method_name}.each do |fn|
-          next if fn.empty?
-          if existing = @function_type_param_maps[fn]?
-            @function_type_param_maps[fn] = existing.merge({"__block_return__" => block_return_name})
-          else
-            @function_type_param_maps[fn] = {"__block_return__" => block_return_name}
-          end
-        end
         if inferred = resolve_block_dependent_return_type(mangled_method_name, base_method_name, block_return_name)
           return_type = inferred
         end
@@ -62224,6 +62467,7 @@ module Crystal::HIR
                          else
                            TypeRef::INT32
                          end
+          element_type = TypeRef::UINT8 if element_type == TypeRef::VOID
           result_type = receiver_type == TypeRef::VOID ? TypeRef::POINTER : receiver_type
           add_node = PointerAdd.new(ctx.next_id, result_type, receiver_id, offset_id, element_type)
           ctx.emit(add_node)
@@ -62862,6 +63106,12 @@ module Crystal::HIR
         end
       end
       # Lazily lower target function bodies (avoid full stdlib lowering).
+      if block_return_name
+        record_block_return_type_for_call(primary_mangled_name, base_method_name, block_return_name)
+        if mangled_method_name != primary_mangled_name
+          record_block_return_type_for_call(mangled_method_name, base_method_name, block_return_name)
+        end
+      end
       remember_callsite_arg_types(primary_mangled_name, callsite_arg_types, callsite_arg_literals, callsite_arg_enum_names, has_block_call, has_named_args, call_named_arg_names)
       if mangled_method_name != primary_mangled_name
         remember_callsite_arg_types(mangled_method_name, callsite_arg_types, callsite_arg_literals, callsite_arg_enum_names, has_block_call, has_named_args, call_named_arg_names)
@@ -62930,6 +63180,22 @@ module Crystal::HIR
       end
       if debug_env_filter_match?("DEBUG_CALL_TRACE", method_name, base_method_name, mangled_method_name)
         STDERR.puts "[CALL_TRACE] stage=after_lower_function method=#{method_name} mangled=#{mangled_method_name} primary=#{primary_mangled_name}"
+      end
+
+      # Lazy lowering can defer the callee body while still leaving an early
+      # pre-lowering return type in the cache. If the target is still pending,
+      # force it now before we freeze the call instruction type.
+      if force_pending_call_targets_for_return_type(primary_mangled_name, mangled_method_name, base_method_name)
+        refreshed = get_function_return_type(mangled_method_name)
+        if refreshed == TypeRef::VOID && mangled_method_name != base_method_name
+          refreshed = get_function_return_type(base_method_name)
+        end
+        if refreshed == TypeRef::VOID && primary_mangled_name != mangled_method_name
+          refreshed = get_function_return_type(primary_mangled_name)
+        end
+        if refreshed != TypeRef::VOID
+          return_type = refreshed
+        end
       end
 
       # After lowering, re-check return type if it was VOID
@@ -63063,16 +63329,35 @@ module Crystal::HIR
         end
       end
       # Prefer the actual lowered function return type when available.
-      if func = @module.function_by_name(mangled_method_name)
+      [mangled_method_name, primary_mangled_name, base_method_name].uniq.each do |name|
+        next if name.empty?
+        func = @module.function_by_name(name)
+        next unless func
+
         func_rt = func.return_type
-        if func_rt != TypeRef::VOID && func_rt != TypeRef::NIL && func_rt != return_type
-          func_rt_name = get_type_name_from_ref(func_rt)
-          func_placeholder = unresolved_generic_return_type?(func_rt) || type_param_like?(func_rt_name)
-          unless func_placeholder
-            # Don't downgrade nilable union to non-union for nilable query methods
-            unless is_nilable_query && is_union_or_nilable_type?(return_type) &&
-                   !is_union_or_nilable_type?(func_rt)
-              return_type = func_rt
+        next if func_rt == TypeRef::VOID || func_rt == TypeRef::NIL || func_rt == return_type
+
+        func_rt_name = get_type_name_from_ref(func_rt)
+        func_placeholder = unresolved_generic_return_type?(func_rt) || type_param_like?(func_rt_name)
+        next if func_placeholder
+
+        # Don't downgrade nilable union to non-union for nilable query methods
+        next if is_nilable_query && is_union_or_nilable_type?(return_type) &&
+                !is_union_or_nilable_type?(func_rt)
+
+        return_type = func_rt
+        break
+      end
+
+      if block_return_name
+        if def_node = lookup_function_def_for_return(mangled_method_name, base_method_name)
+          block_param = def_node.params.try { |ps| find_param(ps) { |_p| _p.is_block } }
+          if block_param && def_node.return_type.nil?
+            owner_name = function_context_from_name(base_method_name)
+            if inferred = infer_return_type_from_body_without_callsite(def_node, owner_name)
+              if inferred != TypeRef::VOID && inferred != TypeRef::NIL && inferred != return_type
+                return_type = inferred
+              end
             end
           end
         end
@@ -73363,6 +73648,16 @@ module Crystal::HIR
       lower_function_if_needed(primary_name)
       if actual_name != primary_name
         lower_function_if_needed(actual_name)
+      end
+
+      if force_pending_call_targets_for_return_type(actual_name, primary_name, base_method_name)
+        refreshed = get_function_return_type(actual_name)
+        if refreshed == TypeRef::VOID && actual_name != primary_name
+          refreshed = get_function_return_type(primary_name)
+        end
+        if refreshed != TypeRef::VOID
+          return_type = refreshed
+        end
       end
 
       if return_type == TypeRef::VOID

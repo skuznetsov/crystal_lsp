@@ -1,7 +1,74 @@
 # LANDMARKS
 
-Updated: 2026-04-02
+Updated: 2026-04-09
 Context: compiler/bootstrap/stage2-stability
+
+[LM-452|verified]: A second reusable return-typing seam sits in block-dependent
+`...?` methods without explicit proc annotations. A reducer
+`def read_section?(name, &); return nil if name == "miss"; if name == "hit"; yield 1, 2; end; end`
+showed the live failure mode precisely: callsites froze as `Bool` even after
+`__block_return__ => "Int32"` had already been recorded for the exact
+`Worker#read_section?$String_block` entry. The contradiction ledger matters.
+First, direct inspection proved the block-return map existed on both the exact
+callee and base name, so this was not a registration-loss bug. Second, the
+callsite still emitted `: Bool`, while `infer_yield_return_type(...)` already
+reported `fallback:Int32 reason=untyped_block_param`, proving the missing seam
+was AST/body inference, not block arg discovery. Third, `get_function_return_type`
+would not re-run body inference once a primitive fallback such as `Bool` was
+cached, and `infer_type_from_expr` for `YieldNode` only consulted inline-yield
+stacks, not `__block_return__`. The bounded verified fix in
+`src/compiler/hir/ast_to_hir.cr` is therefore twofold: seed
+`infer_return_type_from_body_without_callsite(...)` with any registered
+`function_type_param_map` for the reconstructed method base name, and let
+`YieldNode` inference read `@type_param_map["__block_return__"]` as a direct
+fallback. A complementary late-call safety net now re-runs block-aware body
+inference for unannotated block methods once `block_return_name` is known.
+Focused regression
+`keeps block-return-dependent query calls typed from the block instead of Bool`
+is green and the reducer’s callsite now lowers as `Nil | Int32` instead of
+`Bool`. Separate but adjacent verified seam: LLVM primitive overrides for
+mixed-width arithmetic were emitting invalid IR like `define i32 ...; ret i64`.
+`src/compiler/mir/llvm_backend.cr` now computes in the widened operand type but
+casts `%result` back to the declared function return type before `ret`, guarded
+by focused spec
+`keeps widened primitive override results consistent with the declared function return type`.
+Boundary: the real `Crystal::MachO#read_section?` callsites in `repro_spawn_ping`
+are still stuck on a later nested-block corridor (`@io.seek { yield ... }`) and
+remain a live frontier; do not over-generalize LM-452 to all nested block
+wrappers yet. {F/G/R: 0.93/0.70/0.95} [verified]
+
+[LM-451|verified]: The live `spawn -> Channel.new` misdispatch family was not
+ultimately a named-arg matcher failure and not an `ExecutionContext` symbol
+resolution bug, even though both were plausible intermediate suspects. An exact
+reducer with a begin-wrapped class body,
+`def self.wrap(x : Int32{% if flag?(:execution_context) %}, y : String = "bad"{% end %}, &block)`,
+proved the real reusable seam: inactive inline flag-controlled parameter text
+inside `MacroLiteralNode` bodies could leak into registered defs. The decisive
+trace showed `expand_flag_macro_text(...)` did evaluate
+`flag?(:execution_context)` to false, but then treated `if false` without
+`else` as parse failure by returning `nil`; callers such as
+`process_macro_literal_in_class(...)` then fell back to raw macro text, so the
+dead branch survived and registered `Outer.wrap$Int32_String_block`. In the
+real stdlib this manifested as `Fiber.new$Nil | String_ExecutionContext_block`,
+which poisoned top-level `spawn` lowering and eventually called
+`Enumerable(T)::NotFoundError#current` / `ExecutionContext#stack_pool`. The
+verified bounded fix in `src/compiler/hir/ast_to_hir.cr` is twofold: keep
+scanning past unrelated control tags in `expand_flag_macro_text(...)`, and make
+branch selection distinguish “unknown condition” from “known false with no
+else”, so inactive branches collapse to empty text instead of forcing raw-text
+fallback. Focused regression
+`spec/hir/ast_to_hir_spec.cr` example
+`drops inactive inline flag-controlled params inside begin-wrapped class bodies`
+is green when run through `lower_program_with_sources(...)`; an exact compiled
+reducer now lowers `Outer.wrap$Int32_block` with no `"bad"` literal; and the
+real `Channel`/`spawn` HIR no longer contains
+`NotFoundError#current`, `ExecutionContext#stack_pool`, or
+`Fiber.new$Nil | String_ExecutionContext_block`, instead using
+`Fiber.new$Nil | String_block` plus `Crystal::Scheduler.stack_pool()`. Boundary:
+this closes the overload-registration/macro-inline branch leak and removes the
+old `spawn/current` crash class, but runtime is still blocked one step later by
+the separate stub `Fiber::Stack#gc_thread_handler=`; do not conflate that with
+the overload fix. {F/G/R: 0.97/0.84/0.98} [verified]
 
 [LM-450|verified]: After [LM-449], the next self-hosted `stage2 -> stage3`
 HIR red was no longer a broad parser corridor but a concrete top-level macro

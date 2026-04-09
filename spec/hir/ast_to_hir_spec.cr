@@ -24,6 +24,10 @@ class Crystal::HIR::AstToHir
   def __test_type_ref_for_name(name : String) : Crystal::HIR::TypeRef
     type_ref_for_name(name)
   end
+
+  def __test_get_type_name_from_ref(type_ref : Crystal::HIR::TypeRef) : String
+    get_type_name_from_ref(type_ref)
+  end
 end
 
 # Helper to parse Crystal code and get AST
@@ -2187,6 +2191,99 @@ describe Crystal::HIR::AstToHir do
     end
   end
 
+  describe "branch condition return inference" do
+    it "keeps callsites union-typed when branch locals come from condition assignments" do
+      converter = lower_program_with_main(<<-CRYSTAL)
+        class Worker
+          def initialize(@queue : Array(Int32)?, @fallback : Int32?)
+          end
+
+          def pick
+            if (q = @queue) && !q.empty?
+              value = q.first
+              {1, value}
+            elsif other = @fallback
+              value = other
+              {1, value}
+            else
+              {0, nil}
+            end
+          end
+
+          def use
+            state, value = pick
+            {state, value}
+          end
+        end
+
+        Worker.new([1], 2).use
+      CRYSTAL
+
+      use_func = converter.module.functions.find { |func| func.name.starts_with?("Worker#use") }
+      use_func.should_not be_nil
+
+      pick_call = use_func.not_nil!.blocks.flat_map(&.instructions).find do |inst|
+        inst.is_a?(Crystal::HIR::Call) && inst.as(Crystal::HIR::Call).method_name.starts_with?("Worker#pick")
+      end
+      pick_call.should_not be_nil
+
+      call_type = pick_call.not_nil!.as(Crystal::HIR::Call).type
+      call_desc = converter.module.get_type_descriptor(call_type)
+      call_desc.should_not be_nil
+      call_desc.not_nil!.kind.should eq(Crystal::HIR::TypeKind::Union)
+      call_desc.not_nil!.name.should contain("Tuple(Int32, Int32)")
+      call_desc.not_nil!.name.should contain("Tuple(Int32, Nil)")
+    end
+  end
+
+  describe "block-dependent query return inference" do
+    it "keeps block-return-dependent query calls typed from the block instead of Bool" do
+      previous = ENV["CRYSTAL_V2_DISABLE_INLINE_YIELD"]?
+      ENV["CRYSTAL_V2_DISABLE_INLINE_YIELD"] = "1"
+      begin
+        converter = lower_program_with_main(<<-CRYSTAL)
+          class Worker
+            def read_section?(name, &)
+              return nil if name == "miss"
+
+              if name == "hit"
+                yield 1, 2
+              end
+            end
+
+            def use
+              read_section?("hit") { |sh, io| sh + io }
+            end
+          end
+
+          Worker.new.use
+        CRYSTAL
+
+        use_func = converter.module.functions.find { |func| func.name.starts_with?("Worker#use") }
+        use_func.should_not be_nil
+
+        section_call = use_func.not_nil!.blocks.flat_map(&.instructions).find do |inst|
+          inst.is_a?(Crystal::HIR::Call) && inst.as(Crystal::HIR::Call).method_name.starts_with?("Worker#read_section?")
+        end
+        section_call.should_not be_nil
+
+        call_type = section_call.not_nil!.as(Crystal::HIR::Call).type
+        type_name = converter.__test_get_type_name_from_ref(call_type)
+        call_desc = converter.module.get_type_descriptor(call_type)
+        call_desc.try(&.kind).should eq(Crystal::HIR::TypeKind::Union)
+        type_name.should contain("Int32")
+        type_name.should contain("Nil")
+        type_name.should_not eq("Bool")
+      ensure
+        if previous
+          ENV["CRYSTAL_V2_DISABLE_INLINE_YIELD"] = previous
+        else
+          ENV.delete("CRYSTAL_V2_DISABLE_INLINE_YIELD")
+        end
+      end
+    end
+  end
+
   describe "inline block tuple binding" do
     it "destructures yielded tuples for multi-param blocks without retargeting the first param to the whole tuple" do
       converter = lower_program_with_sources(<<-CRYSTAL)
@@ -2327,6 +2424,25 @@ describe Crystal::HIR::AstToHir do
       text = hir_text(probe.not_nil!)
       text.should contain("unop Neg")
       text.should_not contain("UInt64#&-() : 0")
+    end
+  end
+
+  describe "Pointer(Void) arithmetic" do
+    it "keeps Pointer(Void) addition byte-strided inside struct initializers" do
+      converter = lower_program_with_sources(<<-CRYSTAL)
+        class StackBox
+          def initialize(@pointer : Pointer(Void), @size : Int32)
+            @bottom = @pointer + @size
+          end
+        end
+      CRYSTAL
+
+      init = converter.module.function_by_name("StackBox#initialize$Pointer(Void)_Int32")
+      init.should_not be_nil
+
+      pointer_add = init.not_nil!.blocks.flat_map(&.instructions).find(&.is_a?(Crystal::HIR::PointerAdd))
+      pointer_add.should_not be_nil
+      pointer_add.not_nil!.as(Crystal::HIR::PointerAdd).element_type.should eq(Crystal::HIR::TypeRef::UINT8)
     end
   end
 
