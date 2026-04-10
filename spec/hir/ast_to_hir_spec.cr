@@ -2295,6 +2295,179 @@ describe Crystal::HIR::AstToHir do
     end
   end
 
+  describe "implicit zero-arg member receivers" do
+    it "keeps included zero-arg receiver calls bound to the inferred owner type" do
+      converter = lower_program_with_main(<<-CRYSTAL)
+        class WrongType
+          def type
+            99
+          end
+        end
+
+        struct InfoType
+          def pipe?
+            true
+          end
+        end
+
+        struct Info
+          def type
+            InfoType.new
+          end
+        end
+
+        module HasInfo
+          def system_info
+            Info.new
+          end
+        end
+
+        class Box
+          include HasInfo
+
+          def foo
+            case system_info.type
+            when .pipe?
+              1
+            else
+              2
+            end
+          end
+        end
+
+        Box.new.foo
+      CRYSTAL
+
+      converter.__test_lower_function_if_needed("Box#foo")
+
+      func = converter.module.function_by_name("Box#foo")
+      func.should_not be_nil
+
+      text = hir_text(func.not_nil!)
+      text.should contain("Box#system_info")
+      text.should contain("Info#type")
+      text.should_not contain("WrongType#type")
+    end
+
+    it "materializes repaired nested zero-arg receiver callees from included modules" do
+      converter = lower_program_with_main(<<-CRYSTAL)
+        module HasSystemType
+          def system_type
+            7
+          end
+        end
+
+        struct Info
+          include HasSystemType
+
+          def type
+            system_type
+          end
+        end
+
+        class Box
+          def foo
+            Info.new.type
+          end
+        end
+
+        Box.new.foo
+      CRYSTAL
+
+      converter.__test_lower_function_if_needed("Box#foo")
+
+      type_func = converter.module.function_by_name("Info#type")
+      type_func.should_not be_nil
+      hir_text(type_func.not_nil!).should contain("Info#system_type")
+
+      system_type_func = converter.module.function_by_name("Info#system_type")
+      system_type_func.should_not be_nil
+      system_type_func.not_nil!.blocks.any? { |block| !block.instructions.empty? }.should be_true
+    end
+
+    it "materializes nested namespaced zero-arg receiver callees from included modules" do
+      converter = lower_program_with_main(<<-CRYSTAL)
+        module Crystal::System::FileInfo
+          def system_type
+            7
+          end
+        end
+
+        class File
+          struct Info
+            include Crystal::System::FileInfo
+
+            def type
+              system_type
+            end
+          end
+        end
+
+        class Box
+          def foo
+            File::Info.new.type
+          end
+        end
+
+        Box.new.foo
+      CRYSTAL
+
+      converter.__test_lower_function_if_needed("Box#foo")
+
+      type_func = converter.module.function_by_name("File::Info#type")
+      type_func.should_not be_nil
+      hir_text(type_func.not_nil!).should contain("File::Info#system_type")
+
+      system_type_func = converter.module.function_by_name("File::Info#system_type")
+      system_type_func.should_not be_nil
+      system_type_func.not_nil!.blocks.any? { |block| !block.instructions.empty? }.should be_true
+    end
+
+    it "drains pending nested receiver callees after late included-call repair" do
+      converter = lower_program_with_main(<<-CRYSTAL)
+        module Crystal::System::FileInfo
+          def system_type
+            7
+          end
+        end
+
+        class File
+          struct Info
+            include Crystal::System::FileInfo
+
+            def type
+              system_type
+            end
+          end
+        end
+
+        module HasInfo
+          def system_info
+            File::Info.new
+          end
+        end
+
+        class Box
+          include HasInfo
+
+          def foo
+            system_info.type
+          end
+        end
+
+        Box.new.foo
+      CRYSTAL
+
+      type_func = converter.module.function_by_name("File::Info#type")
+      type_func.should_not be_nil
+      hir_text(type_func.not_nil!).should contain("File::Info#system_type")
+
+      system_type_func = converter.module.function_by_name("File::Info#system_type")
+      system_type_func.should_not be_nil
+      system_type_func.not_nil!.blocks.any? { |block| !block.instructions.empty? }.should be_true
+    end
+  end
+
   describe "macro literal parameter filtering" do
     it "drops inactive inline flag-controlled params inside begin-wrapped class bodies" do
       converter = lower_program_with_sources(<<-CRYSTAL)

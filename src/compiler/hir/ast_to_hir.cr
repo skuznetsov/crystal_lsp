@@ -30417,6 +30417,103 @@ module Crystal::HIR
       end
     end
 
+    private def repair_receiver_bound_call_targets : Nil
+      repaired = 0
+      targets_to_lower = Set(String).new
+
+      @module.functions.each do |func|
+        value_types = collect_function_value_types(func)
+        func.blocks.each do |block|
+          block.instructions.each_with_index do |inst, idx|
+            next unless inst.is_a?(Call)
+            next if inst.virtual
+            recv = inst.receiver
+            next unless recv
+
+            receiver_type = value_types[recv]? || TypeRef::VOID
+            next if receiver_type == TypeRef::VOID || receiver_type == TypeRef::POINTER
+
+            base_name = strip_type_suffix(inst.method_name)
+            method_name = method_short_from_name(base_name) || demangle_type_fragment(base_name)
+            next if method_name.empty?
+
+            receiver_name = normalize_method_owner_name(get_type_name_from_ref(receiver_type))
+            next if receiver_name.empty? || receiver_name == "Void" || receiver_name == "Unknown"
+
+            current_owner = if has_method_separator?(base_name)
+                              normalize_method_owner_name(method_owner(base_name))
+                            else
+                              ""
+                            end
+            current_owner_base = strip_generic_args(current_owner)
+            receiver_base = strip_generic_args(receiver_name)
+            if !current_owner.empty? && current_owner_base == receiver_base
+              unless @module.has_function_with_body?(inst.method_name) || @module.has_function_with_body?(base_name)
+                targets_to_lower << inst.method_name
+                targets_to_lower << base_name unless inst.method_name == base_name
+              end
+              next
+            end
+
+            resolved_base = resolve_method_with_inheritance(receiver_name, method_name)
+            if resolved_base.nil? && receiver_base != receiver_name
+              resolved_base = resolve_method_with_inheritance(receiver_base, method_name)
+            end
+            next unless resolved_base
+
+            arg_types = inst.args.map { |arg| value_types[arg]? || TypeRef::VOID }
+            has_block_call = !inst.block.nil?
+            corrected_name = resolved_base
+            if entry = lookup_function_def_for_call(resolved_base, arg_types.size, has_block_call, arg_types)
+              corrected_name = entry[0]
+            else
+              candidate = mangle_function_name(resolved_base, arg_types, has_block_call)
+              if @function_types.has_key?(candidate) || @module.has_function?(candidate) || @function_defs.has_key?(candidate)
+                corrected_name = candidate
+              end
+            end
+            corrected_base = strip_type_suffix(corrected_name)
+            needs_materialization = !@module.has_function_with_body?(corrected_name) &&
+              !@module.has_function_with_body?(corrected_base)
+            if corrected_name == inst.method_name
+              if needs_materialization
+                targets_to_lower << corrected_name
+                targets_to_lower << resolved_base unless corrected_name == resolved_base
+              end
+              next
+            end
+
+            return_type = get_function_return_type(corrected_name)
+            if return_type == TypeRef::VOID
+              if inferred = resolve_return_type_from_def(corrected_name, resolved_base, receiver_type)
+                return_type = inferred if inferred != TypeRef::VOID
+              end
+            end
+            return_type = inst.type if return_type == TypeRef::VOID
+
+            block.instructions[idx] = Call.new(inst.id, return_type, recv, corrected_name, inst.args, inst.block, inst.virtual)
+            value_types[inst.id] = return_type
+            targets_to_lower << corrected_name
+            targets_to_lower << resolved_base unless corrected_name == resolved_base
+            repaired += 1
+          end
+        end
+      end
+
+      targets_to_lower.each do |name|
+        unless @module.has_function_with_body?(name)
+          @function_lowering_states.delete(name)
+          base_name = strip_type_suffix(name)
+          @function_lowering_states.delete(base_name) unless base_name == name
+        end
+        lower_function_if_needed(name)
+      end
+
+      if repaired > 0 && env_has?("DEBUG_CALL_REPAIR")
+        STDERR.puts "[CALL_REPAIR] receiver_targets=#{repaired}"
+      end
+    end
+
     private def collect_function_value_types(func : Function) : Hash(ValueId, TypeRef)
       value_types = {} of ValueId => TypeRef
 
@@ -33993,6 +34090,64 @@ module Crystal::HIR
       end
       if normalized_stripped_base != stripped_base && normalized_stripped_base != normalized_base
         if overload = lookup_return_def_from_overloads(normalized_stripped_base)
+          return overload
+        end
+      end
+
+      if inherited = lookup_inherited_function_def_for_return(base_name)
+        return inherited
+      end
+      if normalized_base != base_name
+        if inherited = lookup_inherited_function_def_for_return(normalized_base)
+          return inherited
+        end
+      end
+      if stripped_base != base_name
+        if inherited = lookup_inherited_function_def_for_return(stripped_base)
+          return inherited
+        end
+      end
+      if normalized_stripped_base != stripped_base && normalized_stripped_base != normalized_base
+        if inherited = lookup_inherited_function_def_for_return(normalized_stripped_base)
+          return inherited
+        end
+      end
+
+      nil
+    end
+
+    private def lookup_inherited_function_def_for_return(
+      base_name : String,
+    ) : CrystalV2::Compiler::Frontend::DefNode?
+      return nil if base_name.empty?
+      return nil if base_name.includes?('$')
+
+      parts = parse_method_name_compact(base_name)
+      return nil unless parts.separator == '#' && parts.method
+
+      owner_name = normalize_method_owner_name(parts.owner)
+      owner_base = strip_generic_args(owner_name)
+      method_name = parts.method.not_nil!
+
+      modules = @class_included_modules[owner_name]? || @class_included_modules[owner_base]?
+      if modules
+        visited = Set(String).new
+        modules.each do |mod_name|
+          base_module = strip_generic_args(mod_name)
+          if found = find_module_def_recursive(base_module, method_name, 0, visited)
+            return found[0]
+          end
+        end
+      end
+
+      chain = get_ancestor_chain(owner_name)
+      chain.each_with_index do |ancestor, idx|
+        next if idx == 0
+        inherited_base = "#{ancestor}##{method_name}"
+        if direct = @function_defs[inherited_base]?
+          return direct
+        end
+        if overload = lookup_return_def_from_overloads(inherited_base)
           return overload
         end
       end
@@ -41252,6 +41407,8 @@ module Crystal::HIR
       # return type. Repair those direct call instructions now that the work
       # queue and safety nets have finished.
       repair_stale_call_return_types
+      repair_receiver_bound_call_targets
+      process_pending_lower_functions
 
       if phase_stats
         after3 = @module.function_count
@@ -41617,6 +41774,10 @@ module Crystal::HIR
 
     @[AlwaysInline]
     private def ast_filter_allows_safety_net_name?(name : String, method_names : Set(String)?, owner_types : Set(String)?, method_bases : Set(String)?) : Bool
+      # Safety-net callers are already present in emitted HIR, so explicitly-owned
+      # method targets are reachable by construction and must not be filtered out.
+      return true if has_method_separator?(name)
+
       auto_generated = is_auto_generated_function?(name) ||
                        name.starts_with?("__crystal") ||
                        name.starts_with?("main")
@@ -54798,8 +54959,10 @@ module Crystal::HIR
                             else
                               false
                             end
+      lookup_callsite = @pending_arg_types[name]? || @pending_arg_types[target_name]? || @pending_arg_types[base_name]?
+      lookup_arg_types = lookup_callsite.try(&.types)
       if lookup_expected_param_count == 0
-        if callsite = @pending_arg_types[name]? || @pending_arg_types[target_name]? || @pending_arg_types[base_name]?
+        if callsite = lookup_callsite
           lookup_expected_param_count = callsite.types.size
         end
       end
@@ -54851,6 +55014,31 @@ module Crystal::HIR
                 break
               end
             end
+          end
+        end
+      end
+      unless func_def
+        if has_method_separator?(base_name)
+          if lookup_arg_types.nil? && (suffix = lookup_suffix)
+            stripped_suffix = strip_mangled_suffix_flags(suffix)
+            parsed_suffix_types = parse_types_from_suffix(stripped_suffix)
+            lookup_arg_types = parsed_suffix_types unless parsed_suffix_types.empty?
+          end
+          exact_arg_types = lookup_arg_types || [] of TypeRef
+          if entry = lookup_function_def_for_call(
+               base_name,
+               lookup_expected_param_count,
+               lookup_expect_block,
+               exact_arg_types,
+               false,
+               lookup_callsite.try(&.has_named_args) || false,
+               lookup_callsite.try(&.named_arg_names)
+             )
+            resolved_entry_name, resolved_entry_def = entry
+            func_def = resolved_entry_def
+            arena = @function_def_arenas[resolved_entry_name]?
+            target_name = resolved_entry_name
+            lookup_branch = "exact_lookup"
           end
         end
       end
@@ -63514,6 +63702,36 @@ module Crystal::HIR
           end
         end
       end
+
+      if receiver_id &&
+         !mangled_method_name.includes?('#') &&
+         !mangled_method_name.includes?('.')
+        receiver_type = ctx.type_of(receiver_id)
+        if receiver_type != TypeRef::VOID && receiver_type != TypeRef::POINTER
+          receiver_name = normalize_method_owner_name(get_type_name_from_ref(receiver_type))
+          receiver_base = strip_generic_args(receiver_name)
+          if !receiver_name.empty? && receiver_name != "Void" && receiver_name != "Unknown"
+            resolved_base = resolve_method_with_inheritance(receiver_name, method_name)
+            if resolved_base.nil? && receiver_base != receiver_name
+              resolved_base = resolve_method_with_inheritance(receiver_base, method_name)
+            end
+            if resolved_base
+              resolved_name = resolved_base
+              if entry = lookup_function_def_for_call(resolved_base, arg_types.size, has_block_call, arg_types, has_splat, has_named_args, call_named_arg_names)
+                resolved_name = entry[0]
+              elsif arg_types.any? { |t| t != TypeRef::VOID }
+                resolved_name = mangle_function_name(resolved_base, arg_types, has_block_call)
+              end
+
+              mangled_method_name = resolved_name
+              primary_mangled_name = resolved_name
+              base_method_name = strip_type_suffix(resolved_name)
+              full_method_name = resolved_base
+            end
+          end
+        end
+      end
+
       # Lazily lower target function bodies (avoid full stdlib lowering).
       if block_return_name
         record_block_return_type_for_call(primary_mangled_name, base_method_name, block_return_name)
