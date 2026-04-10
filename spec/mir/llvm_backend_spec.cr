@@ -605,6 +605,44 @@ describe Crystal::MIR::LLVMIRGenerator do
       body.should_not contain("inttoptr i64 %self")
     end
 
+    it "evaluates bare Tuple#size directly for concrete tuple receivers" do
+      mod = Crystal::MIR::Module.new("test")
+
+      tuple_type = mod.type_registry.create_type(
+        Crystal::MIR::TypeKind::Tuple,
+        "Tuple(Float64)",
+        8_u64,
+        8_u32
+      )
+      float64_type = mod.type_registry.get(Crystal::MIR::TypeRef::FLOAT64)
+      float64_type.should_not be_nil
+      tuple_type.add_element_type(float64_type.not_nil!)
+      tuple_ref = Crystal::MIR::TypeRef.new(tuple_type.id)
+
+      callee = mod.create_function("Tuple#size", Crystal::MIR::TypeRef::INT32)
+      callee.add_param("self", tuple_ref)
+      callee_builder = Crystal::MIR::Builder.new(callee)
+      zero = callee_builder.const_int(0, Crystal::MIR::TypeRef::INT32)
+      callee_builder.ret(zero)
+
+      caller = mod.create_function("call_tuple_size", Crystal::MIR::TypeRef::INT32)
+      caller.add_param("self", tuple_ref)
+      caller_builder = Crystal::MIR::Builder.new(caller)
+      call = caller_builder.call(callee.id, [0_u32], Crystal::MIR::TypeRef::INT32)
+      caller_builder.ret(call)
+
+      gen = Crystal::MIR::LLVMIRGenerator.new(mod)
+      gen.emit_type_metadata = false
+      output = gen.generate
+
+      func_ir = output[/define i32 @call_tuple_size\([^)]*\)\s*\{.*?\n\}/m]
+      func_ir.should_not be_nil
+      body = func_ir.not_nil!
+
+      body.should contain("add i32 0, 1")
+      body.should_not contain("call i32 @Tuple$Hsize")
+    end
+
     it "evaluates abstract Int#tdiv(Int32) directly for scalar receivers" do
       mod = Crystal::MIR::Module.new("test")
 
@@ -1501,6 +1539,34 @@ describe Crystal::MIR::LLVMIRGenerator do
       output.should contain("%result_ret = trunc i64 %result to i32")
       output.should contain("ret i32 %result_ret")
       output.should_not contain("ret i64 %result")
+    end
+
+    it "inlines zeroed Crystal::Hasher allocation in key_hash overrides" do
+      mod = Crystal::MIR::Module.new("test")
+      mod.type_registry.create_type(
+        Crystal::MIR::TypeKind::Struct,
+        "Crystal::Hasher",
+        16_u64,
+        8_u32
+      )
+
+      func = mod.create_function("Hash(Int32, Int32)#key_hash$Int32", Crystal::MIR::TypeRef::INT32)
+      func.add_param("self", Crystal::MIR::TypeRef::POINTER)
+      func.add_param("key", Crystal::MIR::TypeRef::INT32)
+
+      builder = Crystal::MIR::Builder.new(func)
+      zero = builder.const_int(0_i64, Crystal::MIR::TypeRef::INT32)
+      builder.ret(zero)
+
+      gen = Crystal::MIR::LLVMIRGenerator.new(mod)
+      gen.emit_type_metadata = false
+      output = gen.generate
+
+      output.should contain("define i32 @Hash$LInt32$C$_Int32$R$Hkey_hash$$Int32")
+      output.should contain("call ptr @__crystal_v2_malloc64(i64 24)")
+      output.should contain("call void @llvm.memset.p0.i64(ptr %hasher, i8 0, i64 16, i1 false)")
+      output.should_not contain("call ptr @Crystal$CCHasher$Dnew(i64 0, i64 0)")
+      output.should_not contain("call i64 @Crystal$CCHasher$Hresult(ptr %hasher2)")
     end
   end
 end

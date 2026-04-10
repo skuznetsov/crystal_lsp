@@ -2167,6 +2167,79 @@ module Crystal::MIR
       end
     end
 
+    private def tuple_arity_from_type_name(type_name : String) : Int32?
+      return nil unless type_name.starts_with?("Tuple(") && type_name.ends_with?(')')
+
+      inner = type_name[6...-1]
+      return 0 if inner.empty?
+
+      depth = 0
+      count = 1
+      inner.each_char do |char|
+        case char
+        when '(' then depth += 1
+        when ')' then depth -= 1
+        when ',' then count += 1 if depth == 0
+        end
+      end
+      count
+    end
+
+    private def tuple_element_count_for_type_ref(type_ref : TypeRef?) : Int32?
+      return nil unless type_ref
+      return nil if type_ref == TypeRef::POINTER
+
+      concrete_type = type_ref
+      if union_desc = @module.get_union_descriptor(concrete_type)
+        best_variant_ref = nil
+        best_variant_size = 0_u64
+        union_desc.variants.each do |variant|
+          if tuple_type = @module.type_registry.get(variant.type_ref)
+            if tuple_type.kind.tuple? && tuple_type.size >= best_variant_size
+              best_variant_size = tuple_type.size
+              best_variant_ref = variant.type_ref
+            end
+          end
+        end
+        concrete_type = best_variant_ref if best_variant_ref
+      end
+
+      if tuple_type = @module.type_registry.get(concrete_type)
+        if tuple_type.kind.tuple?
+          return tuple_type.element_types.try(&.size).try(&.to_i32)
+        end
+      end
+
+      if type_desc = @module.type_registry.get(concrete_type)
+        return type_desc.element_types.try(&.size).try(&.to_i32) if type_desc.kind.tuple?
+        return tuple_arity_from_type_name(type_desc.name)
+      end
+
+      nil
+    end
+
+    private def tuple_element_count_for_value(id : ValueId) : Int32?
+      if count = tuple_element_count_for_type_ref(@value_types[id]?)
+        return count
+      end
+
+      if alloc_elem = @alloc_element_types[id]?
+        if count = tuple_element_count_for_type_ref(alloc_elem)
+          return count
+        end
+      end
+
+      if def_inst = find_def_inst(id)
+        if def_inst.type != TypeRef::VOID
+          if count = tuple_element_count_for_type_ref(def_inst.type)
+            return count
+          end
+        end
+      end
+
+      nil
+    end
+
     # String type_id for runtime helpers and string literals
     @string_type_id : Int32 = 16  # TypeRef::STRING.id default, updated during prelude emission
     @dtor_type_ids : ::Set(UInt32) = ::Set(UInt32).new  # Type IDs that have ARC destructors
@@ -9621,7 +9694,7 @@ module Crystal::MIR
               emit_raw "; #{mangled} — direct enum hash override (bypass vdispatch)\n"
               emit_raw "define i32 @#{mangled}(ptr %self, #{key_llvm_type} %key) {\n"
               emit_raw "entry:\n"
-              emit_raw "  %hasher = call ptr @Crystal$CCHasher$Dnew(i64 0, i64 0)\n"
+              emit_inline_zeroed_hasher_allocation("hasher")
               if key_llvm_type == "i64"
                 emit_raw "  %key64 = add i64 %key, 0\n"
               else
@@ -9635,7 +9708,7 @@ module Crystal::MIR
                 end
               end
               emit_raw "  %hasher2 = call ptr @Crystal$CCHasher$Hpermute$$UInt64(ptr %hasher, i64 %key64)\n"
-              emit_raw "  %hash64 = call i64 @Crystal$CCHasher$Hresult(ptr %hasher2)\n"
+              emit_inline_hasher_result("hasher2", "hash64")
               emit_raw "  %hash32 = trunc i64 %hash64 to i32\n"
               emit_raw "  %is_zero = icmp eq i32 %hash32, 0\n"
               emit_raw "  br i1 %is_zero, label %ret_max, label %ret_hash\n"
@@ -9654,10 +9727,10 @@ module Crystal::MIR
         emit_raw "; #{mangled} — direct Int32 hash override (bypass vdispatch)\n"
         emit_raw "define i32 @#{mangled}(ptr %self, i32 %key) {\n"
         emit_raw "entry:\n"
-        emit_raw "  %hasher = call ptr @Crystal$CCHasher$Dnew(i64 0, i64 0)\n"
+        emit_inline_zeroed_hasher_allocation("hasher")
         emit_raw "  %key64 = sext i32 %key to i64\n"
         emit_raw "  %hasher2 = call ptr @Crystal$CCHasher$Hpermute$$UInt64(ptr %hasher, i64 %key64)\n"
-        emit_raw "  %hash64 = call i64 @Crystal$CCHasher$Hresult(ptr %hasher2)\n"
+        emit_inline_hasher_result("hasher2", "hash64")
         emit_raw "  %hash32 = trunc i64 %hash64 to i32\n"
         emit_raw "  %is_zero = icmp eq i32 %hash32, 0\n"
         emit_raw "  br i1 %is_zero, label %ret_max, label %ret_hash\n"
@@ -9675,9 +9748,9 @@ module Crystal::MIR
         emit_raw "; #{mangled} — direct UInt64 hash override (bypass vdispatch)\n"
         emit_raw "define i32 @#{mangled}(ptr %self, i64 %key) {\n"
         emit_raw "entry:\n"
-        emit_raw "  %hasher = call ptr @Crystal$CCHasher$Dnew(i64 0, i64 0)\n"
+        emit_inline_zeroed_hasher_allocation("hasher")
         emit_raw "  %hasher2 = call ptr @Crystal$CCHasher$Hpermute$$UInt64(ptr %hasher, i64 %key)\n"
-        emit_raw "  %hash64 = call i64 @Crystal$CCHasher$Hresult(ptr %hasher2)\n"
+        emit_inline_hasher_result("hasher2", "hash64")
         emit_raw "  %hash32 = trunc i64 %hash64 to i32\n"
         emit_raw "  %is_zero = icmp eq i32 %hash32, 0\n"
         emit_raw "  br i1 %is_zero, label %ret_max, label %ret_hash\n"
@@ -9694,9 +9767,9 @@ module Crystal::MIR
         emit_raw "; #{mangled} — direct Int64 hash override (bypass vdispatch)\n"
         emit_raw "define i32 @#{mangled}(ptr %self, i64 %key) {\n"
         emit_raw "entry:\n"
-        emit_raw "  %hasher = call ptr @Crystal$CCHasher$Dnew(i64 0, i64 0)\n"
+        emit_inline_zeroed_hasher_allocation("hasher")
         emit_raw "  %hasher2 = call ptr @Crystal$CCHasher$Hpermute$$UInt64(ptr %hasher, i64 %key)\n"
-        emit_raw "  %hash64 = call i64 @Crystal$CCHasher$Hresult(ptr %hasher2)\n"
+        emit_inline_hasher_result("hasher2", "hash64")
         emit_raw "  %hash32 = trunc i64 %hash64 to i32\n"
         emit_raw "  %is_zero = icmp eq i32 %hash32, 0\n"
         emit_raw "  br i1 %is_zero, label %ret_max, label %ret_hash\n"
@@ -9713,10 +9786,10 @@ module Crystal::MIR
         emit_raw "; #{mangled} — direct UInt32 hash override (bypass vdispatch)\n"
         emit_raw "define i32 @#{mangled}(ptr %self, i32 %key) {\n"
         emit_raw "entry:\n"
-        emit_raw "  %hasher = call ptr @Crystal$CCHasher$Dnew(i64 0, i64 0)\n"
+        emit_inline_zeroed_hasher_allocation("hasher")
         emit_raw "  %key64 = zext i32 %key to i64\n"
         emit_raw "  %hasher2 = call ptr @Crystal$CCHasher$Hpermute$$UInt64(ptr %hasher, i64 %key64)\n"
-        emit_raw "  %hash64 = call i64 @Crystal$CCHasher$Hresult(ptr %hasher2)\n"
+        emit_inline_hasher_result("hasher2", "hash64")
         emit_raw "  %hash32 = trunc i64 %hash64 to i32\n"
         emit_raw "  %is_zero = icmp eq i32 %hash32, 0\n"
         emit_raw "  br i1 %is_zero, label %ret_max, label %ret_hash\n"
@@ -9733,10 +9806,10 @@ module Crystal::MIR
         emit_raw "; #{mangled} — direct Symbol hash override (bypass vdispatch)\n"
         emit_raw "define i32 @#{mangled}(ptr %self, i32 %key) {\n"
         emit_raw "entry:\n"
-        emit_raw "  %hasher = call ptr @Crystal$CCHasher$Dnew(i64 0, i64 0)\n"
+        emit_inline_zeroed_hasher_allocation("hasher")
         emit_raw "  %key64 = sext i32 %key to i64\n"
         emit_raw "  %hasher2 = call ptr @Crystal$CCHasher$Hpermute$$UInt64(ptr %hasher, i64 %key64)\n"
-        emit_raw "  %hash64 = call i64 @Crystal$CCHasher$Hresult(ptr %hasher2)\n"
+        emit_inline_hasher_result("hasher2", "hash64")
         emit_raw "  %hash32 = trunc i64 %hash64 to i32\n"
         emit_raw "  %is_zero = icmp eq i32 %hash32, 0\n"
         emit_raw "  br i1 %is_zero, label %ret_max, label %ret_hash\n"
@@ -9762,7 +9835,7 @@ module Crystal::MIR
         emit_raw "ret_null_hash:\n"
         emit_raw "  ret i32 0\n"
         emit_raw "do_hash:\n"
-        emit_raw "  %hasher = call ptr @Crystal$CCHasher$Dnew(i64 0, i64 0)\n"
+        emit_inline_zeroed_hasher_allocation("hasher")
         emit_raw "  %bs_ptr = getelementptr i8, ptr %key, i32 4\n"
         emit_raw "  %bytesize = load i32, ptr %bs_ptr\n"
         emit_raw "  %data = getelementptr i8, ptr %key, i32 12\n"
@@ -9795,7 +9868,7 @@ module Crystal::MIR
         emit_raw "  br label %hash_loop\n"
         emit_raw "hash_finish:\n"
         emit_raw "  %h_len = call ptr @Crystal$CCHasher$Hpermute$$UInt64(ptr %h, i64 %bs64)\n"
-        emit_raw "  %hash64 = call i64 @Crystal$CCHasher$Hresult(ptr %h_len)\n"
+        emit_inline_hasher_result("h_len", "hash64")
         emit_raw "  %hash32 = trunc i64 %hash64 to i32\n"
         emit_raw "  %is_zero = icmp eq i32 %hash32, 0\n"
         emit_raw "  br i1 %is_zero, label %ret_max, label %ret_hash\n"
@@ -9820,9 +9893,9 @@ module Crystal::MIR
         emit_raw "ret_null_hash:\n"
         emit_raw "  ret i32 0\n"
         emit_raw "do_hash:\n"
-        emit_raw "  %hasher = call ptr @Crystal$CCHasher$Dnew(i64 0, i64 0)\n"
+        emit_inline_zeroed_hasher_allocation("hasher")
         emit_raw "  %hasher2 = call ptr @Crystal$CCHasher$Hbytes$$Slice$LUInt8$R(ptr %hasher, ptr %key)\n"
-        emit_raw "  %hash64 = call i64 @Crystal$CCHasher$Hresult(ptr %hasher2)\n"
+        emit_inline_hasher_result("hasher2", "hash64")
         emit_raw "  %hash32 = trunc i64 %hash64 to i32\n"
         emit_raw "  %is_zero = icmp eq i32 %hash32, 0\n"
         emit_raw "  br i1 %is_zero, label %ret_max, label %ret_hash\n"
@@ -9846,11 +9919,11 @@ module Crystal::MIR
         emit_raw "ret_null_hash:\n"
         emit_raw "  ret i32 0\n"
         emit_raw "do_hash:\n"
-        emit_raw "  %hasher = call ptr @Crystal$CCHasher$Dnew(i64 0, i64 0)\n"
+        emit_inline_zeroed_hasher_allocation("hasher")
         emit_raw "  %id = load i32, ptr %key\n"
         emit_raw "  %id64 = zext i32 %id to i64\n"
         emit_raw "  %hasher2 = call ptr @Crystal$CCHasher$Hpermute$$UInt64(ptr %hasher, i64 %id64)\n"
-        emit_raw "  %hash64 = call i64 @Crystal$CCHasher$Hresult(ptr %hasher2)\n"
+        emit_inline_hasher_result("hasher2", "hash64")
         emit_raw "  %hash32 = trunc i64 %hash64 to i32\n"
         emit_raw "  %is_zero = icmp eq i32 %hash32, 0\n"
         emit_raw "  br i1 %is_zero, label %ret_max, label %ret_hash\n"
@@ -9872,11 +9945,11 @@ module Crystal::MIR
         emit_raw "ret_null_hash:\n"
         emit_raw "  ret i32 0\n"
         emit_raw "do_hash:\n"
-        emit_raw "  %hasher = call ptr @Crystal$CCHasher$Dnew(i64 0, i64 0)\n"
+        emit_inline_zeroed_hasher_allocation("hasher")
         emit_raw "  %id = load i32, ptr %key\n"
         emit_raw "  %id64 = zext i32 %id to i64\n"
         emit_raw "  %hasher2 = call ptr @Crystal$CCHasher$Hpermute$$UInt64(ptr %hasher, i64 %id64)\n"
-        emit_raw "  %hash64 = call i64 @Crystal$CCHasher$Hresult(ptr %hasher2)\n"
+        emit_inline_hasher_result("hasher2", "hash64")
         emit_raw "  %hash32 = trunc i64 %hash64 to i32\n"
         emit_raw "  %is_zero = icmp eq i32 %hash32, 0\n"
         emit_raw "  br i1 %is_zero, label %ret_max, label %ret_hash\n"
@@ -10641,7 +10714,7 @@ module Crystal::MIR
         emit_raw "  %h_null = icmp eq ptr %hasher, null\n"
         emit_raw "  br i1 %h_null, label %create_hasher, label %read_bs\n"
         emit_raw "create_hasher:\n"
-        emit_raw "  %new_hasher = call ptr @Crystal$CCHasher$Dnew(i64 0, i64 0)\n"
+        emit_inline_zeroed_hasher_allocation("new_hasher")
         emit_raw "  br label %read_bs\n"
         emit_raw "read_bs:\n"
         emit_raw "  %real_hasher = phi ptr [%hasher, %check_hasher], [%new_hasher, %create_hasher]\n"
@@ -10977,11 +11050,42 @@ module Crystal::MIR
       nil
     end
 
+    private def emit_inline_zeroed_hasher_allocation(result_name : String) : Nil
+      payload_size = @module.type_registry.get_by_name("Crystal::Hasher").try(&.size.to_i64) || 16_i64
+      alloc_size = payload_size + 8_i64
+      emit_raw "  %#{result_name}.raw = call ptr @__crystal_v2_malloc64(i64 #{alloc_size})\n"
+      emit_raw "  store i64 9223372036854775807, ptr %#{result_name}.raw, align 8\n"
+      emit_raw "  %#{result_name} = getelementptr i8, ptr %#{result_name}.raw, i64 8\n"
+      emit_raw "  call void @llvm.memset.p0.i64(ptr %#{result_name}, i8 0, i64 #{payload_size}, i1 false)\n"
+    end
+
+    private def emit_inline_hasher_result(hasher_name : String, result_name : String) : Nil
+      emit_raw "  %#{result_name}.a_ptr = getelementptr i8, ptr %#{hasher_name}, i32 0\n"
+      emit_raw "  %#{result_name}.a0 = load i64, ptr %#{result_name}.a_ptr\n"
+      emit_raw "  %#{result_name}.b_ptr = getelementptr i8, ptr %#{hasher_name}, i32 8\n"
+      emit_raw "  %#{result_name}.b0 = load i64, ptr %#{result_name}.b_ptr\n"
+      emit_raw "  %#{result_name}.a23 = lshr i64 %#{result_name}.a0, 23\n"
+      emit_raw "  %#{result_name}.a40 = lshr i64 %#{result_name}.a0, 40\n"
+      emit_raw "  %#{result_name}.a_mix = xor i64 %#{result_name}.a23, %#{result_name}.a40\n"
+      emit_raw "  %#{result_name}.a1 = xor i64 %#{result_name}.a0, %#{result_name}.a_mix\n"
+      emit_raw "  %#{result_name}.b23 = lshr i64 %#{result_name}.b0, 23\n"
+      emit_raw "  %#{result_name}.b40 = lshr i64 %#{result_name}.b0, 40\n"
+      emit_raw "  %#{result_name}.b_mix = xor i64 %#{result_name}.b23, %#{result_name}.b40\n"
+      emit_raw "  %#{result_name}.b1 = xor i64 %#{result_name}.b0, %#{result_name}.b_mix\n"
+      emit_raw "  %#{result_name}.a2 = mul i64 %#{result_name}.a1, 12454050848496260025\n"
+      emit_raw "  %#{result_name}.b2 = mul i64 %#{result_name}.b1, 7590443161569626685\n"
+      emit_raw "  %#{result_name}.a32 = lshr i64 %#{result_name}.a2, 32\n"
+      emit_raw "  %#{result_name}.a3 = xor i64 %#{result_name}.a2, %#{result_name}.a32\n"
+      emit_raw "  %#{result_name}.b32 = lshr i64 %#{result_name}.b2, 32\n"
+      emit_raw "  %#{result_name}.b3 = xor i64 %#{result_name}.b2, %#{result_name}.b32\n"
+      emit_raw "  %#{result_name} = add i64 %#{result_name}.a3, %#{result_name}.b3\n"
+    end
+
     private def emit_direct_integer_key_hash_override(mangled : String, key_llvm_type : String, *, signed : Bool, note : String) : Nil
       emit_raw "; #{mangled} — #{note}\n"
       emit_raw "define i32 @#{mangled}(ptr %self, #{key_llvm_type} %key) {\n"
       emit_raw "entry:\n"
-      emit_raw "  %hasher = call ptr @Crystal$CCHasher$Dnew(i64 0, i64 0)\n"
+      emit_inline_zeroed_hasher_allocation("hasher")
       key_bits = key_llvm_type[1..].to_i? || 32
       if key_bits < 64
         cast_op = signed ? "sext" : "zext"
@@ -10992,7 +11096,7 @@ module Crystal::MIR
         emit_raw "  %key64 = add i64 %key, 0\n"
       end
       emit_raw "  %hasher2 = call ptr @Crystal$CCHasher$Hpermute$$UInt64(ptr %hasher, i64 %key64)\n"
-      emit_raw "  %hash64 = call i64 @Crystal$CCHasher$Hresult(ptr %hasher2)\n"
+      emit_inline_hasher_result("hasher2", "hash64")
       emit_raw "  %hash32 = trunc i64 %hash64 to i32\n"
       emit_raw "  %is_zero = icmp eq i32 %hash32, 0\n"
       emit_raw "  br i1 %is_zero, label %ret_max, label %ret_hash\n"
@@ -11007,11 +11111,11 @@ module Crystal::MIR
       emit_raw "; #{mangled} — #{note}\n"
       emit_raw "define i32 @#{mangled}(ptr %self, #{key_llvm_type} %key) {\n"
       emit_raw "entry:\n"
-      emit_raw "  %hasher = call ptr @Crystal$CCHasher$Dnew(i64 0, i64 0)\n"
+      emit_inline_zeroed_hasher_allocation("hasher")
       key_i32 = emit_struct_i32_field0_cast(key_llvm_type)
       emit_raw "  %key64 = sext i32 #{key_i32} to i64\n"
       emit_raw "  %hasher2 = call ptr @Crystal$CCHasher$Hpermute$$UInt64(ptr %hasher, i64 %key64)\n"
-      emit_raw "  %hash64 = call i64 @Crystal$CCHasher$Hresult(ptr %hasher2)\n"
+      emit_inline_hasher_result("hasher2", "hash64")
       emit_raw "  %hash32 = trunc i64 %hash64 to i32\n"
       emit_raw "  %is_zero = icmp eq i32 %hash32, 0\n"
       emit_raw "  br i1 %is_zero, label %ret_max, label %ret_hash\n"
@@ -11026,9 +11130,9 @@ module Crystal::MIR
       emit_raw "; #{mangled} — #{note}\n"
       emit_raw "define i32 @#{mangled}(ptr %self, #{key_llvm_type} %key) {\n"
       emit_raw "entry:\n"
-      emit_raw "  %hasher = call ptr @Crystal$CCHasher$Dnew(i64 0, i64 0)\n"
+      emit_inline_zeroed_hasher_allocation("hasher")
       emit_raw "  %hasher2 = call ptr @#{target}(#{key_llvm_type} %key, ptr %hasher)\n"
-      emit_raw "  %hash64 = call i64 @Crystal$CCHasher$Hresult(ptr %hasher2)\n"
+      emit_inline_hasher_result("hasher2", "hash64")
       emit_raw "  %hash32 = trunc i64 %hash64 to i32\n"
       emit_raw "  %is_zero = icmp eq i32 %hash32, 0\n"
       emit_raw "  br i1 %is_zero, label %ret_max, label %ret_hash\n"
@@ -11037,6 +11141,16 @@ module Crystal::MIR
       emit_raw "ret_hash:\n"
       emit_raw "  ret i32 %hash32\n"
       emit_raw "}\n\n"
+    end
+
+    private def concrete_integer_to_s_target(type_name : String, param_count : Int32) : String?
+      @module.functions.each do |func|
+        next unless func.params.size == param_count
+        mangled = mangle_function_name(func.name)
+        next unless mangled.starts_with?("#{type_name}$Hto_s")
+        return mangled
+      end
+      nil
     end
 
     private def emit_compiler_u32_alias_hash_call_override(mangled : String, key_llvm_type : String, ret_llvm_type : String, target : String) : Nil
@@ -18084,6 +18198,17 @@ module Crystal::MIR
         end
       end
 
+      # Generic Tuple#size bodies can still lower with T.size == 0. When the
+      # receiver is a concrete MIR tuple value, evaluate the size directly
+      # from its tuple type instead of calling the poisoned generic body.
+      if callee_name == "Tuple$Hsize" && inst.args.size == 1
+        if element_count = tuple_element_count_for_value(inst.args[0])
+          emit "#{name} = add i32 0, #{element_count}"
+          @value_types[inst.id] = TypeRef::INT32
+          return
+        end
+      end
+
       # Intercept Int#abs / Number#abs when self is a primitive integer.
       # The generic abs function takes ptr self, but for primitive ints we inline:
       #   abs(x) = x < 0 ? -x : x
@@ -18153,14 +18278,16 @@ module Crystal::MIR
           self_id = inst.args[0]
           if integer_scalar_llvm_type?(lookup_value_llvm_type(self_id))
             if type_name = concrete_integer_type_name(@value_types[self_id]?)
-              self_val = value_ref(self_id)
-              base_val = value_ref(inst.args[1])
-              precision_val = value_ref(inst.args[2])
-              upcase_val = value_ref(inst.args[3])
-              emit "#{name} = call ptr @#{type_name}$Hto_s(#{lookup_value_llvm_type(self_id)} #{self_val}, i32 #{base_val}, i32 #{precision_val}, i1 #{upcase_val})"
-              record_emitted_type(name, "ptr")
-              @value_types[inst.id] = TypeRef::POINTER
-              return
+              if target = concrete_integer_to_s_target(type_name, 4)
+                self_val = value_ref(self_id)
+                base_val = value_ref(inst.args[1])
+                precision_val = value_ref(inst.args[2])
+                upcase_val = value_ref(inst.args[3])
+                emit "#{name} = call ptr @#{target}(#{lookup_value_llvm_type(self_id)} #{self_val}, i32 #{base_val}, i32 #{precision_val}, i1 #{upcase_val})"
+                record_emitted_type(name, "ptr")
+                @value_types[inst.id] = TypeRef::POINTER
+                return
+              end
             end
           end
         end
@@ -18171,19 +18298,21 @@ module Crystal::MIR
           self_id = inst.args[0]
           if integer_scalar_llvm_type?(lookup_value_llvm_type(self_id))
             if type_name = concrete_integer_type_name(@value_types[self_id]?)
-              self_val = value_ref(self_id)
-              io_val = value_ref(inst.args[1])
-              base_val = value_ref(inst.args[2])
-              precision_val = value_ref(inst.args[3])
-              upcase_val = value_ref(inst.args[4])
-              c = @cond_counter
-              @cond_counter += 1
-              str_val = "%int_to_s_io.#{c}.str"
-              emit "#{str_val} = call ptr @#{type_name}$Hto_s(#{lookup_value_llvm_type(self_id)} #{self_val}, i32 #{base_val}, i32 #{precision_val}, i1 #{upcase_val})"
-              emit "%int_to_s_io.#{c}.io = call ptr @IO$H$SHL$$String(ptr #{io_val}, ptr #{str_val})"
-              @void_values << inst.id
-              @value_types[inst.id] = TypeRef::VOID
-              return
+              if target = concrete_integer_to_s_target(type_name, 4)
+                self_val = value_ref(self_id)
+                io_val = value_ref(inst.args[1])
+                base_val = value_ref(inst.args[2])
+                precision_val = value_ref(inst.args[3])
+                upcase_val = value_ref(inst.args[4])
+                c = @cond_counter
+                @cond_counter += 1
+                str_val = "%int_to_s_io.#{c}.str"
+                emit "#{str_val} = call ptr @#{target}(#{lookup_value_llvm_type(self_id)} #{self_val}, i32 #{base_val}, i32 #{precision_val}, i1 #{upcase_val})"
+                emit "%int_to_s_io.#{c}.io = call ptr @String$Hto_s$$IO(ptr #{str_val}, ptr #{io_val})"
+                @void_values << inst.id
+                @value_types[inst.id] = TypeRef::VOID
+                return
+              end
             end
           end
         end
