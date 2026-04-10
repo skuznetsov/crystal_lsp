@@ -28125,6 +28125,145 @@ module Crystal::HIR
       result.id
     end
 
+    # Operator string -> HIR BinaryOp for primitive arithmetic / comparison ops
+    # that we can lower inline (without going through method dispatch).
+    private def primitive_binary_op_for(op_str : String) : BinaryOp?
+      case op_str
+      when "+", "&+"  then BinaryOp::Add
+      when "-", "&-"  then BinaryOp::Sub
+      when "*", "&*"  then BinaryOp::Mul
+      when "/", "//"  then BinaryOp::Div
+      when "%"        then BinaryOp::Mod
+      when "&"        then BinaryOp::BitAnd
+      when "|"        then BinaryOp::BitOr
+      when "^"        then BinaryOp::BitXor
+      when "<<"       then BinaryOp::Shl
+      when ">>"       then BinaryOp::Shr
+      when "==", "===" then BinaryOp::Eq
+      when "!="       then BinaryOp::Ne
+      when "<"        then BinaryOp::Lt
+      when "<="       then BinaryOp::Le
+      when ">"        then BinaryOp::Gt
+      when ">="       then BinaryOp::Ge
+      else                 nil
+      end
+    end
+
+    # Dispatch a primitive binary op per variant when the left receiver is a
+    # union whose non-Nil variants are all numeric primitives. Each variant is
+    # unwrapped and the op is lowered inline via BinaryOperation; arithmetic
+    # results are wrapped back into the original union type so the downstream
+    # type matches source semantics (T|U op => T|U). Returns nil if not
+    # applicable so the caller can fall through to the existing handling.
+    private def try_lower_binary_primitive_union(
+      ctx : LoweringContext,
+      left_id : ValueId,
+      left_type : TypeRef,
+      left_desc : TypeDescriptor?,
+      op_str : String,
+      right_id : ValueId,
+      right_type : TypeRef,
+    ) : ValueId?
+      return nil unless left_desc
+      return nil unless left_desc.kind == TypeKind::Union
+      bin_op = primitive_binary_op_for(op_str)
+      return nil unless bin_op
+      return nil unless numeric_primitive?(right_type)
+
+      variant_names = split_union_type_name(left_desc.name).reject { |v| v == "Nil" }
+      return nil if variant_names.size < 2
+
+      variant_info = [] of {TypeRef, Int32}
+      variant_names.each do |vn|
+        vr = type_ref_for_name(vn)
+        return nil if vr == TypeRef::VOID
+        return nil unless numeric_primitive?(vr)
+        vid = get_union_variant_id(left_type, vr)
+        return nil if vid < 0
+        variant_info << {vr, vid}
+      end
+
+      is_comparison = case op_str
+                      when "==", "===", "!=", "<", "<=", ">", ">=" then true
+                      else                                              false
+                      end
+      result_type = is_comparison ? TypeRef::BOOL : left_type
+
+      pre_branch = ctx.save_locals
+      merge_block = ctx.create_block
+      incoming = [] of {BlockId, ValueId}
+
+      variant_info.each_with_index do |(variant_type, variant_id), idx|
+        is_last = idx == variant_info.size - 1
+
+        active_block = if is_last
+                         ctx.current_block
+                       else
+                         is_check = UnionIs.new(ctx.next_id, left_id, variant_id)
+                         ctx.emit(is_check)
+                         ctx.register_type(is_check.id, TypeRef::BOOL)
+                         tb = ctx.create_block
+                         nb = ctx.create_block
+                         ctx.terminate(Branch.new(is_check.id, tb, nb))
+                         ctx.current_block = tb
+                         ctx.restore_locals(pre_branch)
+                         {nb, tb}
+                       end
+
+        unwrap = UnionUnwrap.new(ctx.next_id, variant_type, left_id, variant_id, false)
+        ctx.emit(unwrap)
+        ctx.register_type(unwrap.id, variant_type)
+
+        # Coerce right-hand operand to the variant's type when they differ.
+        # BinaryOperation assumes matching operand widths in the LLVM backend.
+        rhs_id = right_id
+        if right_type != variant_type
+          rhs_id = coerce_value_to_type(ctx, right_id, variant_type)
+        end
+
+        # For signed integer `%` / `//`, use the floor-mod/floor-div helper so
+        # semantics match Crystal's signed remainder (LLVM srem has truncating
+        # semantics; source expects flooring).
+        branch_result : ValueId
+        if signed_integer_primitive?(variant_type) && (op_str == "//" || op_str == "%")
+          branch_result = op_str == "//" ? lower_signed_floor_div_primitive(ctx, unwrap.id, rhs_id, variant_type) : lower_signed_floor_mod_primitive(ctx, unwrap.id, rhs_id, variant_type)
+        else
+          per_variant_result_type = is_comparison ? TypeRef::BOOL : variant_type
+          op = BinaryOperation.new(ctx.next_id, per_variant_result_type, bin_op, unwrap.id, rhs_id)
+          ctx.emit(op)
+          ctx.register_type(op.id, per_variant_result_type)
+          branch_result = op.id
+        end
+
+        branch_value : ValueId
+        if is_comparison
+          branch_value = branch_result
+        else
+          # Wrap the primitive result back into the union type so the phi stays
+          # consistent and downstream code sees a value of the original union.
+          wrap = UnionWrap.new(ctx.next_id, left_type, branch_result, variant_id)
+          ctx.emit(wrap)
+          ctx.register_type(wrap.id, left_type)
+          branch_value = wrap.id
+        end
+
+        incoming << {ctx.current_block, branch_value}
+        ctx.terminate(Jump.new(merge_block))
+
+        unless is_last
+          next_block, _tb = active_block.as({BlockId, BlockId})
+          ctx.current_block = next_block
+          ctx.restore_locals(pre_branch)
+        end
+      end
+
+      ctx.current_block = merge_block
+      phi = Phi.new(ctx.next_id, result_type, incoming)
+      ctx.emit(phi)
+      ctx.register_type(phi.id, result_type)
+      phi.id
+    end
+
     private def common_numeric_type(types : Array(TypeRef)) : TypeRef?
       return nil if types.empty?
       return nil unless types.all? { |t| numeric_primitive?(t) }
@@ -49259,6 +49398,19 @@ module Crystal::HIR
         ctx.emit(ext_call)
         ctx.register_type(ext_call.id, TypeRef::STRING)
         return ext_call.id
+      end
+
+      # Primitive-union receiver binary op: when the left type is a union whose
+      # non-Nil variants are all numeric primitives (e.g. Int32 | UInt32), we
+      # must dispatch the binary op per variant using BinaryOperation inline.
+      # Otherwise the call would fall through to the << non-integer branch or
+      # emit_binary_call, produce a `Int32 | UInt32#<<$Int32`-style name, fail
+      # to resolve in hir_to_mir, and trip the extern-call stub at runtime.
+      # Must run BEFORE the `<<` non-integer branch because union left types
+      # are not in the Int8..Int128 range and would otherwise be treated as
+      # non-integer and routed to method dispatch.
+      if (urd = try_lower_binary_primitive_union(ctx, left_id, left_type, left_desc, op_str, right_id, right_type))
+        return urd
       end
 
       # Check for shovel operator << on non-integer types (IO, Array, etc.)
