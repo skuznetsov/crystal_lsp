@@ -15553,6 +15553,12 @@ module Crystal::HIR
             end
             # Fallback for to_unsafe on array-like types when return type isn't registered yet.
             if member_name == "to_unsafe"
+              # String#to_unsafe always returns Pointer(UInt8) — element_type_for_type_name
+              # returns "Char" for String (iteration element), but raw bytes are UInt8.
+              if class_name == "String"
+                ptr_ref = type_ref_for_name("Pointer(UInt8)")
+                return ptr_ref if ptr_ref != TypeRef::VOID
+              end
               if elem_name = element_type_for_type_name(class_name)
                 ptr_ref = type_ref_for_name("Pointer(#{elem_name})")
                 return ptr_ref if ptr_ref != TypeRef::VOID
