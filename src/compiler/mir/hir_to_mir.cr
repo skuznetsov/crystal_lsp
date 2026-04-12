@@ -2471,6 +2471,16 @@ module Crystal
         0_u64
       end
 
+      # C lib struct layout must be present in the MIR type registry before pointer ops.
+      # A size of 0 means layout was not computed — do not emit malloc(0) or GEP with stride 0.
+      private def require_lib_struct_byte_size(type : HIR::TypeRef) : UInt64
+        sz = hir_type_lib_struct_size(type)
+        return sz if sz > 0
+        desc = @hir_module.get_type_descriptor(type)
+        name = desc.try(&.name) || "(hir type id=#{type.id})"
+        raise "Crystal V2 MIR: C lib struct has no layout size in the type registry: #{name}"
+      end
+
       # Get the inline size of a struct type (from class_info via MIR type registry).
       private def hir_type_inline_size(type : HIR::TypeRef) : Int32
         mir_ref = convert_type(type)
@@ -2497,6 +2507,15 @@ module Crystal
         end
 
         nil
+      end
+
+      # HIR element type T for Pointer(T) — used for lib-struct stride and memcpy paths.
+      private def pointer_element_hir_type(pointer_hir_type : HIR::TypeRef?) : HIR::TypeRef?
+        return nil unless pointer_hir_type
+        desc = @hir_module.get_type_descriptor(pointer_hir_type)
+        return nil unless desc
+        return nil unless desc.name.starts_with?("Pointer(")
+        desc.type_params.first?
       end
 
       # ─────────────────────────────────────────────────────────────────────────
@@ -5555,7 +5574,11 @@ module Crystal
         builder = @builder.not_nil!
 
         count = get_value(malloc.count)
-        elem_size = type_size(malloc.element_type)
+        elem_size = if hir_type_is_lib_struct?(malloc.element_type)
+                       require_lib_struct_byte_size(malloc.element_type).to_i32
+                     else
+                       type_size(malloc.element_type)
+                     end
 
         # Compute total size = count * element_size
         size_const = builder.const_int(elem_size.to_i64, TypeRef::INT64)
@@ -5575,19 +5598,32 @@ module Crystal
         result_type = convert_type(load.type)
 
         if idx = load.index
-          # ptr[idx] - need GEP then load
+          # ptr[idx] - GEP then load (or pass address for C lib struct elements)
           index = get_value(idx)
-          # Element stride must follow container storage ABI:
-          # non-inline values (including tuples/structs) occupy pointer-sized slots.
-          elem_type = pointer_element_mir_type(@hir_value_types[load.pointer]?) || convert_type(load.type)
-          elem_size = container_elem_storage_size_u64(@mir_module.type_registry.get(elem_type))
-          gep = builder.gep_dynamic(ptr, index, elem_type, elem_size)
+          elem_mir = pointer_element_mir_type(@hir_value_types[load.pointer]?) || convert_type(load.type)
+          elem_hir = pointer_element_hir_type(@hir_value_types[load.pointer]?) || load.type
+          elem_size = if hir_type_is_lib_struct?(elem_hir)
+                        require_lib_struct_byte_size(elem_hir)
+                      else
+                        container_elem_storage_size_u64(@mir_module.type_registry.get(elem_mir))
+                      end
+          gep = builder.gep_dynamic(ptr, index, elem_mir, elem_size)
+          if hir_type_is_lib_struct?(elem_hir)
+            # Same ABI as ptr.value: inline C struct at gep; opaque ptr handle, no heap slot load.
+            return gep
+          end
           # Our compiler heap-allocates structs, so Pointer(Struct) buffers
           # store heap pointers (not inline data). Always load the pointer
           # from the buffer slot, then FieldGet dereferences it.
           builder.load(gep, result_type)
         else
           # ptr.value - direct access
+          if hir_type_is_lib_struct?(load.type)
+            # C lib structs are stored inline at *ptr. Unlike heap-backed Crystal structs,
+            # there is no pointer-sized indirection — *ptr is the struct bytes. The V2 ABI
+            # still represents struct "values" as opaque ptr handles; pass the address through.
+            return ptr
+          end
           # Our compiler heap-allocates structs, so *ptr contains a heap pointer.
           # Load it so that subsequent FieldGet can dereference it correctly.
           builder.load(ptr, result_type)
@@ -5604,13 +5640,22 @@ module Crystal
         # Value type can be alias/wrapper (e.g. Hash::Entry vs Entry) and produce
         # wrong GEP scaling.
         elem_type = pointer_element_mir_type(@hir_value_types[store.pointer]?) || get_arg_type(store.value)
+        lib_struct_indexed_memcpy = false
 
         if idx = store.index
-          # ptr[idx] = val - need GEP then store
+          # ptr[idx] = val - GEP then store or memcpy for inline C lib structs
           index = get_value(idx)
-          elem_size = container_elem_storage_size_u64(@mir_module.type_registry.get(elem_type))
-          gep = builder.gep_dynamic(ptr, index, elem_type, elem_size)
-          builder.store(gep, val)
+          elem_hir = pointer_element_hir_type(@hir_value_types[store.pointer]?) || @hir_value_types[store.value]?
+          if elem_hir && hir_type_is_lib_struct?(elem_hir)
+            sz = require_lib_struct_byte_size(elem_hir)
+            gep = builder.gep_dynamic(ptr, index, elem_type, sz)
+            builder.memcopy(gep, val, sz)
+            lib_struct_indexed_memcpy = true
+          else
+            elem_size = container_elem_storage_size_u64(@mir_module.type_registry.get(elem_type))
+            gep = builder.gep_dynamic(ptr, index, elem_type, elem_size)
+            builder.store(gep, val)
+          end
         else
           # ptr.value = val - direct store
           builder.store(ptr, val)
@@ -5619,7 +5664,8 @@ module Crystal
         # rc_inc for reference-typed values: the buffer now holds a reference.
         # Covers reference types, arrays, and all-ref unions (e.g. Node? = Nil | Node).
         # Skip constants (string literals, globals) — they have INT64_MAX sentinel.
-        unless @hir_constant_values.includes?(store.value)
+        # Skip after lib-struct memcpy: value bytes were copied, not a stored object ref slot.
+        unless lib_struct_indexed_memcpy || @hir_constant_values.includes?(store.value)
           if value_hir_type = @hir_value_types[store.value]?
             if type_needs_rc?(convert_type(value_hir_type))
               builder.rc_inc(val)
@@ -5638,7 +5684,11 @@ module Crystal
         elem_type = convert_type(add.element_type)
         elem_size = add.element_byte_size
         if elem_size == 0_u64
-          elem_size = container_elem_storage_size_u64(@mir_module.type_registry.get(elem_type))
+          if hir_type_is_lib_struct?(add.element_type)
+            elem_size = require_lib_struct_byte_size(add.element_type)
+          else
+            elem_size = container_elem_storage_size_u64(@mir_module.type_registry.get(elem_type))
+          end
         end
 
         # GEP with dynamic offset computes ptr + offset * sizeof(elem)

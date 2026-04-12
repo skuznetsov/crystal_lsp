@@ -64358,6 +64358,15 @@ module Crystal::HIR
             end
           end
         end
+        # type_ref_for_name("Pointer(T)") can return VOID when generic param resolution treats nested
+        # names like LibX::S as unresolved (short suffix tokens). If we already resolved T, intern
+        # Pointer(T) so locals keep a typed Pointer descriptor and ptr[i] lowers to PointerLoad.
+        if pointer_type_ref == TypeRef::VOID && element_type != TypeRef::VOID
+          if (elem_name = get_type_name_from_ref(element_type)) && !elem_name.empty?
+            ptr_name = "Pointer(#{elem_name})"
+            pointer_type_ref = @module.intern_type(TypeDescriptor.new(TypeKind::Pointer, ptr_name, [element_type]))
+          end
+        end
         if element_type == TypeRef::VOID
           if desc = @module.get_type_descriptor(pointer_type_ref)
             if desc.kind == TypeKind::Pointer
