@@ -36830,6 +36830,43 @@ module Crystal::HIR
       parts.owner
     end
 
+    # Forked stdlib `System::` is shorthand for `Crystal::System::` only under nested `Crystal::*`
+    # (e.g. `Crystal::EventLoop`), not the top-level `module Crystal` program wrapper.
+    # Strip generic args so `Crystal::Foo(T)` still counts.
+    private def type_name_in_crystal_namespace?(ctx : String?) : Bool
+      return false unless c = ctx
+      base = if info = split_generic_base_and_args(c)
+               info.base
+             else
+               c
+             end
+      return false if base == "Crystal"
+      base.starts_with?("Crystal::")
+    end
+
+    private def crystal_stdlib_system_shorthand_context?(function_name : String? = nil) : Bool
+      return true if type_name_in_crystal_namespace?(@current_namespace_override)
+      return true if type_name_in_crystal_namespace?(@current_class)
+      return true if function_name && type_name_in_crystal_namespace?(function_context_from_name(function_name))
+      false
+    end
+
+    # `System::<tail>` where the real module/class is `Crystal::System::<tail>` (forked stdlib
+    # shorthand) and there is no separate top-level definition at `path`.
+    private def system_path_is_crystal_system_shorthand?(path : String) : Bool
+      return false unless idx = namespace_separator_index(path)
+      return false unless path.byte_slice(0, idx) == "System"
+      tail = path.byte_slice(idx + 2, path.bytesize - idx - 2)
+      return false if tail.empty?
+      crystal_path = "Crystal::System::#{tail}"
+      return false unless type_name_exists?(crystal_path)
+      !@module_defs.has_key?(path) &&
+        !@class_info.has_key?(path) &&
+        !@generic_templates.has_key?(path) &&
+        !@type_aliases.has_key?(path) &&
+        !@enum_info.try(&.has_key?(path))
+    end
+
     # Resolve method name with inheritance: look in class and all parent classes
     # Resolve a short class name to its fully qualified name using current context
     # E.g., if @current_class is "CrystalV2::Compiler::Frontend::Span" and name is "Span",
@@ -36851,6 +36888,11 @@ module Crystal::HIR
         if fast = resolve_class_name_in_signature_context(name)
           return fast
         end
+      end
+      # Before short_type_index / signature fast paths: bare `System` must not become
+      # `Crystal::System` unless forked stdlib shorthand applies (nested `Crystal::*`).
+      if name == "System" && !crystal_stdlib_system_shorthand_context?
+        return "System"
       end
       if mapped = @type_param_map[name]?
         return mapped
@@ -36926,8 +36968,8 @@ module Crystal::HIR
            !BUILTIN_TYPE_NAMES.includes?(name)
           # Forked stdlib uses `System::Time` as shorthand for `Crystal::System::Time` inside
           # `Crystal::*` namespaces. The fast-path would return bare "System" and block
-          # `resolve_path_string_in_context` from rewriting `System::Time` → `Crystal::System::Time`.
-          unless name == "System" && type_name_exists?("Crystal::System")
+          # `resolve_path_string_in_context` from rewriting `System::Time` to `Crystal::System::Time`.
+          unless name == "System" && type_name_exists?("Crystal::System") && crystal_stdlib_system_shorthand_context?
             return name
           end
         end
@@ -37406,6 +37448,15 @@ module Crystal::HIR
       end
       if type_param_like?(name) && short_type_param_name?(name) && !@type_param_map.has_key?(name)
         return name
+      end
+
+      # Forked stdlib: `System::` is shorthand for `Crystal::System::` only under nested `Crystal::*`.
+      # Otherwise `short_type_index` can map bare `System` to `Crystal::System`, rewriting
+      # `System::Time` to `Crystal::System::Time` even at top level (see `resolve_path_string_in_context`).
+      # Do not gate on `type_name_exists?("Crystal::System")` — the index can still pick
+      # `Crystal::System` before that name is visible to `type_name_exists?`.
+      if name == "System" && !crystal_stdlib_system_shorthand_context?
+        return "System"
       end
 
       if name.ends_with?(')') || name.includes?('(') || name.includes?(',')
@@ -59170,11 +59221,16 @@ module Crystal::HIR
         if method_name.includes?('.')
           full_method_name = method_name
           if owner = method_owner(method_name)
-            static_class_name = owner
+            resolved_owner = owner.includes?("::") ? resolve_path_string_in_context(owner) : owner
+            if system_path_is_crystal_system_shorthand?(owner) && !crystal_stdlib_system_shorthand_context?(ctx.function.name)
+              raise LoweringError.new("undefined constant #{owner}", callee_node)
+            end
+            static_class_name = resolved_owner
             method_name = method_short_from_name(method_name) || method_name
+            full_method_name = "#{resolved_owner}.#{method_name}"
             if method_name == "new"
               prefer_allocator_new_call = true
-              constructor_arg_binding_name = resolve_method_with_inheritance(owner, "initialize") || "#{owner}#initialize"
+              constructor_arg_binding_name = resolve_method_with_inheritance(resolved_owner, "initialize") || "#{resolved_owner}#initialize"
             end
           end
         end
@@ -74856,8 +74912,14 @@ module Crystal::HIR
         # Path like Crystal::EventLoop for nested module/class method calls
         raw_path = collect_path_string(obj_node)
         absolute_path = path_is_absolute?(obj_node)
+        normalized_path = raw_path.starts_with?("::") ? (raw_path.size > 2 ? raw_path[2..] : "") : raw_path
         full_path = if absolute_path
-                      raw_path.starts_with?("::") ? raw_path[2..] : raw_path
+                      normalized_path
+                    elsif system_path_is_crystal_system_shorthand?(normalized_path)
+                      unless crystal_stdlib_system_shorthand_context?(ctx.function.name)
+                        raise LoweringError.new("undefined constant #{normalized_path}", node)
+                      end
+                      "Crystal::#{normalized_path}"
                     else
                       resolve_path_string_in_context(raw_path)
                     end
