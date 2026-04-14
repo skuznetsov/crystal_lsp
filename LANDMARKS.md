@@ -3,6 +3,32 @@
 Updated: 2026-04-11
 Context: compiler/bootstrap/stage2-stability
 
+[LM-455|verified]: The `bench_crystal.cr` `Indexable(Tuple(Float64))#size`
+frontier was a two-stage static value receiver bug, not a missing stdlib
+method. The decisive reducer was `t = {1.25_f64}; v = t.fetch(0) { 0.0 };
+puts v`. HIR initially resolved the receiver correctly to
+`Tuple#fetch$Int32_block`, but late block canonicalization could still choose
+the inherited `Indexable(T)#fetch` owner for a concrete value receiver. After
+retargeting to `Tuple#fetch$Int32_block`, two later type/ABI seams remained:
+the exact call return `Float64` was overwritten by unspecialized base/body
+return inference (`Tuple`), and LLVM tuple helpers treated a concrete tuple
+with empty `element_types` as arity `0` and single-element runtime indexing as
+stride `0`. The bounded fix in `src/compiler/hir/ast_to_hir.cr` preserves
+static value receiver owners for tuple/named-tuple/struct/primitive block
+calls and prevents concrete exact/mangled returns from being downgraded by
+base/body inference. The paired backend fix in
+`src/compiler/mir/llvm_backend.cr` falls back to tuple arity from the type name
+when `element_types` is empty and uses element storage size for one-element
+runtime tuple index stride. Regression
+`regression_tests/tuple_fetch_static_value_receiver_repro.cr` is green; the
+reducer prints `1.25`; `examples/bench_comprehensive.cr` compiles and runs to
+`Done.`; and `/Users/sergey/Projects/Python/Grafana/python/bench_crystal.cr`
+compiles and exits `0` under LLDB without the old
+`Indexable$LTuple$LFloat64$R$R$Hsize` stub. Boundary: `sprintf("%.3f",
+1.25_f64)` still prints `0.250`, and `bench_crystal` under `run_safe` currently
+hits a separate stdout-redirection `SIGTRAP`; neither is part of the
+`Indexable(Tuple)#size` stub family. {F/G/R: 0.93/0.78/0.94} [verified]
+
 [LM-454|verified]: `case subject; when .op(arg)` shortcut lowering has a
 narrow but important invariant: the shortcut means `subject.op(arg)`, but
 lowering it to a raw HIR `BinaryOperation` is only semantics-preserving for

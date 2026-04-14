@@ -2206,12 +2206,17 @@ module Crystal::MIR
 
       if tuple_type = @module.type_registry.get(concrete_type)
         if tuple_type.kind.tuple?
-          return tuple_type.element_types.try(&.size).try(&.to_i32)
+          count = tuple_type.element_types.try(&.size) || 0
+          return count.to_i32 if count > 0
+          return tuple_arity_from_type_name(tuple_type.name)
         end
       end
 
       if type_desc = @module.type_registry.get(concrete_type)
-        return type_desc.element_types.try(&.size).try(&.to_i32) if type_desc.kind.tuple?
+        if type_desc.kind.tuple?
+          count = type_desc.element_types.try(&.size) || 0
+          return count.to_i32 if count > 0
+        end
         return tuple_arity_from_type_name(type_desc.name)
       end
 
@@ -22132,7 +22137,19 @@ module Crystal::MIR
 
                 # Check if all offsets are uniformly spaced (homogeneous elements).
                 # If so, use a simple multiply instead of a switch.
-                stride = offsets.size >= 2 ? offsets[1] - offsets[0] : (offsets.first? || 8_u64)
+                stride = if offsets.size >= 2
+                           offsets[1] - offsets[0]
+                         else
+                           elem = elements[0]
+                           is_inline = elem.kind.primitive? || elem.kind.enum?
+                           if is_inline && elem.size > 0
+                             elem.size.to_u64
+                           elsif elem.kind.union? && elem.size > 8
+                             elem.size.to_u64
+                           else
+                             8_u64
+                           end
+                         end
                 uniform = offsets.each_with_index.all? { |(off, i)| off == i.to_u64 * stride }
 
                 # Ensure index is i32

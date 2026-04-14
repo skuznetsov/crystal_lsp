@@ -30911,6 +30911,55 @@ module Crystal::HIR
       resolved_method_name
     end
 
+    private def static_value_receiver_owner_candidates(receiver_type : TypeRef) : Array(String)
+      desc = @module.get_type_descriptor(receiver_type)
+      return [] of String unless desc
+      return [] of String unless desc.kind == TypeKind::Tuple ||
+                              desc.kind == TypeKind::NamedTuple ||
+                              desc.kind == TypeKind::Struct ||
+                              desc.kind == TypeKind::Primitive
+
+      owners = [] of String
+      name = desc.name
+      owners << name unless name.empty?
+      stripped = strip_generic_args(name)
+      owners << stripped unless stripped.empty? || stripped == name
+      owners.uniq!
+      owners
+    end
+
+    private def value_receiver_static_dispatch_target(
+      requested_base : String,
+      resolved_name : String,
+      arg_types : Array(TypeRef),
+      has_block_call : Bool,
+    ) : String
+      resolved_base = strip_type_suffix(resolved_name)
+      return resolved_name if requested_base.empty? || resolved_base == requested_base
+
+      requested_owner = method_owner(requested_base)
+      resolved_owner = method_owner(resolved_base)
+      return resolved_name if requested_owner.empty? || resolved_owner.empty?
+      return resolved_name if requested_owner == resolved_owner
+
+      if has_block_call || arg_types.any? { |t| t != TypeRef::VOID }
+        mangle_function_name(requested_base, arg_types, has_block_call)
+      else
+        requested_base
+      end
+    end
+
+    private def preserve_static_value_receiver_target(
+      receiver_type : TypeRef,
+      requested_base : String,
+      resolved_name : String,
+      arg_types : Array(TypeRef),
+      has_block_call : Bool,
+    ) : String
+      return resolved_name if static_value_receiver_owner_candidates(receiver_type).empty?
+      value_receiver_static_dispatch_target(requested_base, resolved_name, arg_types, has_block_call)
+    end
+
     private def resolve_ancestor_overload_typed(
       owner : String,
       method_name : String,
@@ -63726,7 +63775,17 @@ module Crystal::HIR
                                    arg_types
                                  end
         if block_entry = lookup_block_function_def_for_call(base_method_name, call_args.size, block_target_arg_types, receiver_base_for_block_target)
-          mangled_method_name = block_entry[0]
+          mangled_method_name = if receiver_id
+                                  preserve_static_value_receiver_target(
+                                    ctx.type_of(receiver_id),
+                                    base_method_name,
+                                    block_entry[0],
+                                    block_target_arg_types,
+                                    true
+                                  )
+                                else
+                                  block_entry[0]
+                                end
           primary_mangled_name = mangled_method_name
         end
         if callsite_arg_types.any? { |t| t != TypeRef::VOID }
@@ -63905,11 +63964,31 @@ module Crystal::HIR
         end
         typed_canon = lookup_block_function_def_for_call(base_method_name, call_args.size, arg_types, receiver_base_for_canon)
         if typed_canon
-          mangled_method_name = typed_canon[0]
+          mangled_method_name = if receiver_id
+                                  preserve_static_value_receiver_target(
+                                    ctx.type_of(receiver_id),
+                                    base_method_name,
+                                    typed_canon[0],
+                                    arg_types,
+                                    true
+                                  )
+                                else
+                                  typed_canon[0]
+                                end
           primary_mangled_name = mangled_method_name
         elsif count_distinct_block_overloads_arity_only(base_method_name, call_args.size, receiver_base_for_canon) == 1
           if fallback_canon = lookup_block_function_def_for_call(base_method_name, call_args.size, nil, receiver_base_for_canon)
-            mangled_method_name = fallback_canon[0]
+            mangled_method_name = if receiver_id
+                                    preserve_static_value_receiver_target(
+                                      ctx.type_of(receiver_id),
+                                      base_method_name,
+                                      fallback_canon[0],
+                                      arg_types,
+                                      true
+                                    )
+                                  else
+                                    fallback_canon[0]
+                                  end
             primary_mangled_name = mangled_method_name
           end
         end
@@ -65379,18 +65458,23 @@ module Crystal::HIR
           # header, so module vdispatch on them is invalid. Prefer direct static
           # resolution for these concrete receivers.
           if recv_desc.kind == TypeKind::Tuple ||
+             recv_desc.kind == TypeKind::NamedTuple ||
              recv_desc.kind == TypeKind::Struct ||
              recv_desc.kind == TypeKind::Primitive
-            concrete_base = "#{recv_desc.name}##{method_name}"
-            if resolved = lookup_function_def_for_call(concrete_base, arg_types.size, has_block_call, arg_types, has_splat, has_named_args, call_named_arg_names)
-              resolved_name = resolved[0]
-              base_method_name = strip_type_suffix(resolved_name)
-              if resolved_name.includes?('$')
-                mangled_method_name = resolved_name
-              elsif arg_types.any? { |t| t != TypeRef::VOID }
-                mangled_method_name = mangle_function_name(resolved_name, arg_types, has_block_call)
-              else
-                mangled_method_name = resolved_name
+            static_value_receiver_owner_candidates(ctx.type_of(receiver_id)).each do |owner_name|
+              concrete_base = "#{owner_name}##{method_name}"
+              if resolved = lookup_function_def_for_call(concrete_base, arg_types.size, has_block_call, arg_types, has_splat, has_named_args, call_named_arg_names)
+                resolved_name = value_receiver_static_dispatch_target(concrete_base, resolved[0], arg_types, has_block_call)
+                base_method_name = strip_type_suffix(resolved_name)
+                if resolved_name.includes?('$')
+                  mangled_method_name = resolved_name
+                elsif arg_types.any? { |t| t != TypeRef::VOID } || has_block_call
+                  mangled_method_name = mangle_function_name(resolved_name, arg_types, has_block_call)
+                else
+                  mangled_method_name = resolved_name
+                end
+                primary_mangled_name = mangled_method_name
+                break
               end
             end
             # Even if we didn't find a concrete owner overload, value receivers
@@ -65889,10 +65973,10 @@ module Crystal::HIR
         end
       end
       # Prefer the actual lowered function return type when available.
-      preserve_specialized_return_type = has_typed_args &&
-                                         mangled_method_name != base_method_name &&
+      preserve_specialized_return_type = mangled_method_name != base_method_name &&
                                          return_type != TypeRef::VOID &&
-                                         return_type != TypeRef::NIL
+                                         return_type != TypeRef::NIL &&
+                                         !unresolved_generic_return_type?(return_type)
       [mangled_method_name, primary_mangled_name, base_method_name].uniq.each do |name|
         next if name.empty?
         next if preserve_specialized_return_type && name == base_method_name
@@ -65920,7 +66004,8 @@ module Crystal::HIR
           if block_param && def_node.return_type.nil?
             owner_name = function_context_from_name(base_method_name)
             if inferred = infer_return_type_from_body_without_callsite(def_node, owner_name)
-              if inferred != TypeRef::VOID && inferred != TypeRef::NIL && inferred != return_type
+              if inferred != TypeRef::VOID && inferred != TypeRef::NIL && inferred != return_type &&
+                 !preserve_specialized_return_type
                 return_type = inferred
               end
             end
@@ -66155,10 +66240,22 @@ module Crystal::HIR
                            end
         resolved_emit = emit_method_name
         if block_entry = lookup_block_function_def_for_call(base_method_name, call_args.size, lookup_arg_types, recv_base_for_emit)
-          resolved_emit = block_entry[0]
+          resolved_emit = preserve_static_value_receiver_target(
+            ctx.type_of(receiver_id),
+            base_method_name,
+            block_entry[0],
+            lookup_arg_types,
+            true
+          )
         elsif count_distinct_block_overloads_arity_only(base_method_name, call_args.size, recv_base_for_emit) == 1
           if block_entry = lookup_block_function_def_for_call(base_method_name, call_args.size, nil, recv_base_for_emit)
-            resolved_emit = block_entry[0]
+            resolved_emit = preserve_static_value_receiver_target(
+              ctx.type_of(receiver_id),
+              base_method_name,
+              block_entry[0],
+              lookup_arg_types,
+              true
+            )
           end
         end
         if resolved_emit == emit_method_name

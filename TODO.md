@@ -1,6 +1,31 @@
 # Crystal V2 Bootstrap — TODO (Updated 2026-04-14)
 
 ## Current Status
+- **Fresh tuple/static-value receiver checkpoint: `/Users/sergey/Projects/Python/Grafana/python/bench_crystal.cr` no longer falls into the old `Indexable(Tuple(Float64))#size` stub after tuple `fetch`/`sprintf` paths (2026-04-14, current session)**:
+  - trustworthy setup:
+    - `src/compiler/hir/ast_to_hir.cr`
+      - block-call canonicalization now preserves concrete static value receiver owners for tuple/named-tuple/struct/primitive receivers instead of late-aliasing them back to inherited module/base owners
+      - exact/mangled concrete call returns are no longer downgraded by unspecialized base/body return inference after the right overload has already been found
+    - `src/compiler/mir/llvm_backend.cr`
+      - tuple arity falls back to parsing the concrete tuple type name when `element_types` is empty
+      - one-element runtime tuple indexing uses the element storage size instead of a zero stride
+    - `regression_tests/tuple_fetch_static_value_receiver_repro.cr`
+      - covers `Tuple(Float64)#fetch(Int32) { Float64 }` and direct tuple indexing
+  - decisive evidence:
+    - `crystal build src/crystal_v2.cr -o /tmp/cv2_tuple_fetch_fix --error-trace`
+      - result: success with only the known host stdlib `Random::DEFAULT` warning
+    - `scripts/run_safe.sh /tmp/tuple_fetch_static_value_receiver_repro 5 512`
+      - result: prints `tuple_fetch_static_value_receiver_ok`, `[EXIT: 0]`
+    - focused HIR trace for `/tmp/repro_tuple_fetch.cr`
+      - `Tuple#fetch$Int32_block` stays `return=Float64` at `before_emit`
+      - assignment `v` is typed as `Float64`, not `Tuple`
+    - `scripts/run_safe.sh /tmp/bench_comprehensive_tuple_fix 30 512`
+      - result: prints through `Done.`, `[EXIT: 0]`
+    - `/tmp/cv2_tuple_fetch_fix /Users/sergey/Projects/Python/Grafana/python/bench_crystal.cr -o /tmp/bench_crystal_tuple_fix`
+      - result: compile success; under LLDB the binary prints all four benchmark lines and exits `0`
+  - practical boundary:
+    - `sprintf("%.3f", 1.25_f64)` still prints `0.250`, so float formatting precision/value extraction remains a separate correctness frontier
+    - `scripts/run_safe.sh /tmp/bench_crystal_tuple_fix 60 4096` currently gets `SIGTRAP` with redirected stdout while LLDB execution exits `0`; treat that as a separate runtime/runner frontier
 - **Fresh HIR allocator-state checkpoint: `examples/bench_comprehensive.cr` now compiles and runs through the channel/fiber benchmark instead of crashing after the primes phase (2026-04-14, current session)**:
   - trustworthy setup:
     - `src/compiler/hir/ast_to_hir.cr`
@@ -24,8 +49,7 @@
       - `regression_tests/system_time_shorthand_top_level_negative_repro.sh`
   - practical boundary:
     - `/Users/sergey/Projects/Python/Grafana/python/bench_crystal.cr` now compiles with the same compiler build
-    - runtime with `scripts/run_safe.sh /tmp/bench_crystal_state 30 4096` reaches a new separate frontier: `STUB CALLED: Indexable$LTuple$LFloat64$R$R$Hsize`
-    - this checkpoint closes the `Channel(Int32)` allocator/null-`@receivers` family, not the remaining `Indexable(Tuple(Float64))#size` runtime stub
+    - this checkpoint closes the `Channel(Int32)` allocator/null-`@receivers` family; the later `Indexable(Tuple(Float64))#size` runtime stub is now closed by the tuple/static-value receiver checkpoint above
 - **Fresh HIR `System::Time` shorthand checkpoint: forked stdlib shorthand now resolves only inside nested `Crystal::*` contexts, while top-level `System::Time.instant` is rejected instead of lowering to a void static call (2026-04-14, current session)**:
   - trustworthy setup:
     - `src/compiler/hir/ast_to_hir.cr`
