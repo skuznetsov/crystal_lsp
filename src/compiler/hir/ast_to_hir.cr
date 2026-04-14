@@ -2798,6 +2798,7 @@ module Crystal::HIR
     # Track which allocators have been generated (to avoid duplicates for reopened classes)
     @generated_allocators : Set(String)
     @stale_empty_allocators : Set(String)  # Classes whose allocator was generated with empty ivars
+    @allocator_layout_prelower_in_progress : Set(String)
     @deferred_allocators : Set(String)
 
     # Type cache to prevent infinite recursion in type_ref_for_name/create_union_type
@@ -3207,6 +3208,7 @@ module Crystal::HIR
       @type_alias_keys_by_suffix = {} of String => Array(String)
       @generated_allocators = Set(String).new
       @stale_empty_allocators = Set(String).new
+      @allocator_layout_prelower_in_progress = Set(String).new
       @deferred_allocators = Set(String).new
       @type_ref_depth = 0
       @type_cache = {} of String => TypeRef
@@ -23580,7 +23582,27 @@ module Crystal::HIR
     end
 
     private def invalidate_generated_allocator_state(class_name : String, owner_base : String) : Nil
-      [class_name, owner_base].uniq.each do |owner|
+      owners = Set(String).new
+      owners << class_name unless class_name.empty?
+      owners << owner_base unless owner_base.empty?
+      # invalidate_lowered_layout_functions removes bodies for concrete generic
+      # specializations when their stripped owner matches the changed generic
+      # template (e.g. Channel(Int32) for Channel). Keep allocator bookkeeping in
+      # sync with that broader body invalidation.
+      @generated_allocators.each do |owner|
+        stripped = strip_generic_args(owner)
+        if owner == class_name || owner == owner_base || stripped == class_name || stripped == owner_base
+          owners << owner
+        end
+      end
+      @deferred_allocators.each do |owner|
+        stripped = strip_generic_args(owner)
+        if owner == class_name || owner == owner_base || stripped == class_name || stripped == owner_base
+          owners << owner
+        end
+      end
+
+      owners.each do |owner|
         next if owner.empty?
         was_generated = @generated_allocators.delete(owner)
         was_deferred = @deferred_allocators.includes?(owner)
@@ -24491,6 +24513,39 @@ module Crystal::HIR
       found
     end
 
+    private def lower_allocator_initializer_body(
+      class_name : String,
+      class_info : ClassInfo,
+      init_base_name : String,
+      init_name : String,
+      callsite_init_types : Array(TypeRef),
+    ) : Nil
+      remember_callsite_arg_types(init_name, callsite_init_types) unless callsite_init_types.empty?
+      lower_function_if_needed(init_name)
+      # If the init def wasn't lowered (e.g., pending callsite got consumed),
+      # force a direct lower so allocator layout discovery sees ivars assigned
+      # only inside initialize before Class.new is emitted.
+      if !@module.has_function?(init_name) &&
+         !function_state(init_name).in_progress? &&
+         !function_state(init_name).completed?
+        init_def = @function_defs[init_name]? || @function_defs[init_base_name]?
+        if init_def
+          init_arena = @function_def_arenas[init_name]? || @function_def_arenas[init_base_name]?
+          init_arena ||= resolve_arena_for_def(init_def, @arena)
+          callsite_types = callsite_init_types.empty? ? nil : callsite_init_types
+          # Use the defining class (from init_base_name) for super resolution context.
+          # Without this, a subclass inheriting a parent constructor would set @current_class
+          # to the subclass, causing super() inside the parent's init to resolve back to
+          # itself (infinite recursion) instead of the grandparent.
+          init_defining_class = init_base_name.split('#').first
+          init_class_info = @class_info[init_defining_class]? || class_info
+          with_arena(init_arena) do
+            lower_method(init_defining_class, init_class_info, init_def, callsite_types, nil, nil, init_name)
+          end
+        end
+      end
+    end
+
     # Generate allocator: ClassName.new(...) -> allocates and returns instance
     private def generate_allocator(
       class_name : String,
@@ -24545,11 +24600,17 @@ module Crystal::HIR
       # deferred flush should replace it with a proper version that initializes
       # instance variables.  This is a one-shot upgrade tracked by
       # @stale_empty_allocators so the remove+regenerate happens at most once.
+      func_name = allocator_new_name_for(class_name)
       if @generated_allocators.includes?(class_name)
-        if @stale_empty_allocators.includes?(class_name) && !class_info.ivars.empty?
+        if !@module.has_function_with_body?(func_name)
+          # Layout invalidation can remove a concrete generic allocator body
+          # through the stripped generic owner. If the state set survives that
+          # removal, regenerate instead of returning a missing/stub allocator.
+          @generated_allocators.delete(class_name)
+          @stale_empty_allocators.delete(class_name)
+        elsif @stale_empty_allocators.includes?(class_name) && !class_info.ivars.empty?
           # One-shot upgrade: stale allocator was generated with empty ivars.
           # Remove and fall through to regenerate with proper ivar initialization.
-          func_name = allocator_new_name_for(class_name)
           @module.remove_function(func_name)
           @generated_allocators.delete(class_name)
           @stale_empty_allocators.delete(class_name)
@@ -24573,6 +24634,45 @@ module Crystal::HIR
         return
       end
 
+      # Get initialize parameters for this class before allocator body emission.
+      init_params = @init_params[class_name]? || [] of {String, TypeRef}
+      allocator_params = init_params.map { |param| {param[0], param[1]} }
+      if call_arg_types && call_arg_types.any? { |t| t != TypeRef::VOID }
+        allocator_params.each_with_index do |(param_name, param_type), idx|
+          next if idx >= call_arg_types.size
+          call_type = call_arg_types[idx]
+          next if call_type == TypeRef::VOID
+          if param_type == TypeRef::VOID
+            allocator_params[idx] = {param_name, call_type}
+          end
+        end
+      end
+
+      # Some classes discover ivars only while lowering initialize assignments.
+      # Pre-lower the matching initialize body before freezing the allocator
+      # layout, otherwise Class.new can miss fields such as Channel#receivers.
+      allocator_init_base_name = resolve_method_with_inheritance(class_name, "initialize")
+      if init_base_name = allocator_init_base_name
+        unless @allocator_layout_prelower_in_progress.includes?(class_name)
+          @allocator_layout_prelower_in_progress << class_name
+          begin
+            init_param_types = allocator_params.map { |_, t| t }
+            init_name = mangle_function_name(init_base_name, init_param_types)
+            callsite_init_types = if call_arg_types && call_arg_types.any? { |t| t != TypeRef::VOID }
+                                    call_arg_types
+                                  else
+                                    init_param_types
+                                  end
+            lower_allocator_initializer_body(class_name, class_info, init_base_name, init_name, callsite_init_types)
+            if latest = @class_info[class_name]?
+              class_info = latest
+            end
+          ensure
+            @allocator_layout_prelower_in_progress.delete(class_name)
+          end
+        end
+      end
+
       # Track classes generated with empty ivars so the deferred flush can
       # replace them later (one-shot upgrade, not repeated regeneration).
       if class_info.ivars.empty? && !class_info.is_struct
@@ -24585,7 +24685,6 @@ module Crystal::HIR
       end
 
       @generated_allocators.add(class_name)
-      func_name = allocator_new_name_for(class_name)
 
       # Also check if function already exists in HIR module (belt and suspenders)
       if @module.has_function_with_body?(func_name)
@@ -24596,8 +24695,6 @@ module Crystal::HIR
       # does NOT remove this function from the module mid-generation.
       @function_lowering_states[func_name] = FunctionLoweringState::InProgress
 
-      # Get initialize parameters for this class
-      init_params = @init_params[class_name]? || [] of {String, TypeRef}
       if debug_filter = env_get("DEBUG_INIT_PARAMS")
         if debug_filter == "*" || class_name.includes?(debug_filter)
           params_dump = init_params.map { |n, t| "#{n}:#{get_type_name_from_ref(t)}(#{t.id})" }.join(", ")
@@ -24606,17 +24703,6 @@ module Crystal::HIR
       end
       if class_name == "File" && env_get("DBG_FILE_NEW")
         STDERR.puts "[FILE_ALLOC] class=File init_params=#{init_params.map { |n, t| "#{n}:#{t.id}" }.join(", ")} func=#{func_name}"
-      end
-      allocator_params = init_params.map { |param| {param[0], param[1]} }
-      if call_arg_types && call_arg_types.any? { |t| t != TypeRef::VOID }
-        allocator_params.each_with_index do |(param_name, param_type), idx|
-          next if idx >= call_arg_types.size
-          call_type = call_arg_types[idx]
-          next if call_type == TypeRef::VOID
-          if param_type == TypeRef::VOID
-            allocator_params[idx] = {param_name, call_type}
-          end
-        end
       end
       if DebugHooks::ENABLED
         debug_hook("allocator.generate", "class=#{class_name} init_params=#{init_params.size}")
@@ -42722,6 +42808,16 @@ module Crystal::HIR
       repair_stale_call_return_types
       repair_receiver_bound_call_targets
       process_pending_lower_functions
+      # Late lowering can discover new ivars and invalidate allocators after
+      # fixup_inherited_ivars already ran its early deferred flush. Regenerate
+      # those allocators before handing the HIR module to MIR/LLVM, otherwise
+      # calls such as Channel(T).new can point at a removed allocator body.
+      deferred_allocator_passes = 0
+      while !@deferred_allocators.empty? && deferred_allocator_passes < 3
+        flush_deferred_allocators
+        process_pending_lower_functions
+        deferred_allocator_passes += 1
+      end
 
       if phase_stats
         after3 = @module.function_count
@@ -77071,8 +77167,9 @@ module Crystal::HIR
           end
         end
 
-        # Detect ptr.value.field = val pattern: use pointer directly
-        # instead of dereferencing (which would load garbage for struct pointers)
+        # Detect ptr.value.field = val. Pointer(T) stores inline bytes only for C/lib structs.
+        # User structs/classes are heap-backed in V2, so field writes must first load
+        # the heap object pointer from the pointer slot before applying ivar offsets.
         inner_node = @arena[target_member.object]
         if inner_node.is_a?(CrystalV2::Compiler::Frontend::MemberAccessNode) &&
            (safe_slice_to_string(inner_node.member) || "") == "value"
@@ -77116,7 +77213,15 @@ module Crystal::HIR
                       store_val = unwrap.id
                     end
                   end
-                  field_set = FieldSet.new(ctx.next_id, ivar_info.type, ptr_id, ivar_info.name, store_val, ivar_info.offset)
+                  field_target = ptr_id
+                  heap_slot_element = (!ci.is_struct) || (ci.is_struct && !@lib_structs.includes?(element_class_name))
+                  if heap_slot_element
+                    load_node = PointerLoad.new(ctx.next_id, element_type_ref, ptr_id, nil)
+                    ctx.emit(load_node)
+                    ctx.register_type(load_node.id, element_type_ref)
+                    field_target = load_node.id
+                  end
+                  field_set = FieldSet.new(ctx.next_id, ivar_info.type, field_target, ivar_info.name, store_val, ivar_info.offset)
                   ctx.emit(field_set)
                   return field_set.id
                 end

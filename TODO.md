@@ -1,6 +1,31 @@
 # Crystal V2 Bootstrap — TODO (Updated 2026-04-14)
 
 ## Current Status
+- **Fresh HIR allocator-state checkpoint: `examples/bench_comprehensive.cr` now compiles and runs through the channel/fiber benchmark instead of crashing after the primes phase (2026-04-14, current session)**:
+  - trustworthy setup:
+    - `src/compiler/hir/ast_to_hir.cr`
+      - `ptr.value.field = value` now distinguishes C/lib structs from V2 heap-backed structs/classes; heap-backed pointer slots are loaded before writing ivar offsets
+      - allocator generation pre-lowers the selected `initialize` body before freezing `Class.new` layout, so ivars discovered only inside `initialize` are visible to allocator defaults
+      - allocator invalidation now mirrors generic-specialization body invalidation: if `Channel` layout invalidation removes `Channel(Int32).new`, allocator bookkeeping also invalidates/deferred-regenerates `Channel(Int32)`
+      - `generate_allocator` no longer trusts `@generated_allocators` when the corresponding HIR function body has already been removed
+      - a final bounded deferred-allocator flush runs after late pending/safety-net lowering, because allocator invalidations can be scheduled after the early `fixup_inherited_ivars` flush
+  - decisive evidence:
+    - `crystal build src/crystal_v2.cr -o /tmp/cv2_allocator_state_fix --error-trace`
+      - result: success with only the known host stdlib `Random::DEFAULT` warning
+    - LLVM oracle for `examples/bench_comprehensive.cr`:
+      - `Channel(Int32).new` is now `define ptr @Channel$LInt32$R$Dnew(i32 %capacity)` and stores initialized `@senders` / `@receivers`
+      - callsites pass `i32 0` instead of targeting a missing no-arg allocator that LLVM replaced with `calloc(4096); ret`
+    - `scripts/run_safe.sh /tmp/bench_comprehensive_state_fix 30 512`
+      - result: prints `Sort`, `Tree`, `Fib`, `Primes`, `Ping-pong`, `Fibers`, `Done.`, `[EXIT: 0]`
+    - adjacent regressions are green:
+      - `regression_tests/complex/test_channel_receive_state.cr`
+      - `regression_tests/ptr_value_field_heap_struct_repro.cr`
+      - `regression_tests/system_time_shorthand_unpack_repro.cr`
+      - `regression_tests/system_time_shorthand_top_level_negative_repro.sh`
+  - practical boundary:
+    - `/Users/sergey/Projects/Python/Grafana/python/bench_crystal.cr` now compiles with the same compiler build
+    - runtime with `scripts/run_safe.sh /tmp/bench_crystal_state 30 4096` reaches a new separate frontier: `STUB CALLED: Indexable$LTuple$LFloat64$R$R$Hsize`
+    - this checkpoint closes the `Channel(Int32)` allocator/null-`@receivers` family, not the remaining `Indexable(Tuple(Float64))#size` runtime stub
 - **Fresh HIR `System::Time` shorthand checkpoint: forked stdlib shorthand now resolves only inside nested `Crystal::*` contexts, while top-level `System::Time.instant` is rejected instead of lowering to a void static call (2026-04-14, current session)**:
   - trustworthy setup:
     - `src/compiler/hir/ast_to_hir.cr`
