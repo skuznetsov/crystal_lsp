@@ -50905,6 +50905,41 @@ module Crystal::HIR
       create_union_type("#{left_name} | #{right_name}")
     end
 
+    # When every variant in `variant_names` is a Tuple(...) of the same arity,
+    # fold element-wise into a single Tuple(...) with union elements. Returns
+    # nil otherwise. Called by create_union_type so textual union construction
+    # funnels through the same canonicalization as branch-type inference.
+    private def try_unify_tuple_variant_names(variant_names : Array(String)) : TypeRef?
+      return nil if variant_names.size < 2
+      parsed = [] of Array(String)
+      arity : Int32? = nil
+      variant_names.each do |tuple_name|
+        return nil unless tuple_name.starts_with?("Tuple(") && tuple_name.ends_with?(')')
+        inner = tuple_name[6...-1]
+        elements = inner.empty? ? [] of String : split_generic_type_args(inner)
+        if current = arity
+          return nil unless elements.size == current
+        else
+          arity = elements.size
+        end
+        parsed << elements
+      end
+      return nil unless existing = arity
+      return nil if existing == 0
+
+      merged = Array(String).new(existing)
+      (0...existing).each do |i|
+        column = parsed.map(&.[i]).uniq
+        if column.size == 1
+          merged << column.first
+        else
+          union_ref = type_ref_for_name(column.join(" | "))
+          merged << get_type_name_from_ref(union_ref)
+        end
+      end
+      type_ref_for_name("Tuple(#{merged.join(", ")})")
+    end
+
     private def merge_union_variant_names(variant_names : Array(String)) : Array(String)
       seen = Set(TypeRef).new
       merged = [] of String
@@ -51515,7 +51550,12 @@ module Crystal::HIR
             ctx.emit_to_block(blk, cast)
             phi.add_incoming(blk, cast.id)
           else
-            phi.add_incoming(blk, val)
+            # Tuple shape coercion: Tuple(A, B) → Tuple(A, B | C) when branches
+            # produce narrower tuples than the unified phi tuple. Element-wise
+            # FieldGet + UnionWrap + Allocate must land in the branch exit
+            # block so the coerced tuple is available at the phi boundary.
+            coerced = coerce_tuple_into_block(ctx, blk, val, val_type, phi_type)
+            phi.add_incoming(blk, coerced || val)
           end
         end
         ctx.emit(phi)
@@ -67368,6 +67408,25 @@ module Crystal::HIR
       value_id
     end
 
+    # Route try_coerce_tuple_to_tuple emission into a specific block. Used by
+    # phi merging where the coerced tuple must be available in the branch exit
+    # block rather than the current (merge) block.
+    private def coerce_tuple_into_block(
+      ctx : LoweringContext,
+      block_id : BlockId,
+      value_id : ValueId,
+      value_type : TypeRef,
+      target_type : TypeRef,
+    ) : ValueId?
+      saved_block = ctx.current_block
+      ctx.current_block = block_id
+      begin
+        try_coerce_tuple_to_tuple(ctx, value_id, value_type, target_type)
+      ensure
+        ctx.current_block = saved_block
+      end
+    end
+
     # Attempt to coerce one tuple type to another by wrapping individual elements.
     # Returns nil if the types are not compatible tuples.
     private def try_coerce_tuple_to_tuple(
@@ -67431,17 +67490,17 @@ module Crystal::HIR
     # Compute the byte size of an element in a tuple at the HIR level.
     # Must match the MIR tuple layout logic in register_tuple_types.
     private def hir_element_byte_size(type_ref : TypeRef) : Int32
+      # Primitives have no HIR TypeDescriptor — resolve by TypeRef id directly.
+      case type_ref
+      when TypeRef::BOOL, TypeRef::INT8, TypeRef::UINT8 then return 1
+      when TypeRef::INT16, TypeRef::UINT16              then return 2
+      when TypeRef::INT32, TypeRef::UINT32,
+           TypeRef::FLOAT32, TypeRef::CHAR              then return 4
+      when TypeRef::INT64, TypeRef::UINT64,
+           TypeRef::FLOAT64                             then return 8
+      end
       desc = @module.get_type_descriptor(type_ref)
       if desc
-        if desc.kind == TypeKind::Primitive
-          case desc.name
-          when "Bool", "Int8", "UInt8"              then return 1
-          when "Int16", "UInt16"                    then return 2
-          when "Int32", "UInt32", "Float32", "Char" then return 4
-          when "Int64", "UInt64", "Float64"         then return 8
-          end
-        end
-        # Union types may be larger than pointer size
         if desc.kind == TypeKind::Union
           # The union layout is { i32 tag, [N x i32] payload }.
           # Parse element types to compute max payload size.
@@ -82626,6 +82685,11 @@ module Crystal::HIR
         normalized_name = resolved_variant_names.join(" | ")
         if resolved_variant_names.size == 1
           return variant_refs.first
+        end
+        if tuple_ref = try_unify_tuple_variant_names(resolved_variant_names)
+          store_type_cache(type_cache_key(normalized_name), tuple_ref)
+          store_type_cache(input_cache_key, tuple_ref) if input_cache_key != type_cache_key(normalized_name)
+          return tuple_ref
         end
         cache_key = type_cache_key(normalized_name)
 
