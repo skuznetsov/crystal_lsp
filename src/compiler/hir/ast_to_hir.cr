@@ -2110,6 +2110,13 @@ module Crystal::HIR
     # Temporarily disables force-lowering return types in fragile call paths
     # (for example, inline-yield fallback), where eager forcing can recurse.
     @suppress_force_lower_return_type_depth : Int32 = 0
+    # While > 0, every force_lower_function_for_return_type call must have a
+    # yield-free callee. Set when we enter bypass_inline_yield mode from an
+    # inline-yield context: the parent reset the inline-yield state for body
+    # lowering, so nested force_lowers would otherwise silently drop the
+    # callee_is_yield_free? guard and could recurse through yield-bearing
+    # callees. This flag keeps the guard active for the whole subtree.
+    @force_lower_yield_free_only_depth : Int32 = 0
     # When true, skip expensive infer_concrete_return_type_from_body during
     # monomorphization triggered by ensure_monomorphized_type (lowering path).
     # Return types will be inferred lazily when the method is actually called.
@@ -3463,6 +3470,7 @@ module Crystal::HIR
       @lowering_depth_limit = 0
       @force_lower_return_type_depth = 0
       @suppress_force_lower_return_type_depth = 0
+      @force_lower_yield_free_only_depth = 0
       @defer_body_return_inference = false
       # Phase 1: identity dry-run tracker
       if ::CrystalV2::Compiler::BootstrapEnv.get?("CRYSTAL_V2_IDENTITY_DRY_RUN") == "1"
@@ -31425,6 +31433,21 @@ module Crystal::HIR
       end
     end
 
+    private def collect_int_literal_values(func : Function) : Hash(ValueId, Int64)
+      literals = {} of ValueId => Int64
+      func.blocks.each do |block|
+        block.instructions.each do |inst|
+          next unless inst.is_a?(Literal)
+          case inst.type
+          when TypeRef::INT8, TypeRef::INT16, TypeRef::INT32, TypeRef::INT64,
+               TypeRef::UINT8, TypeRef::UINT16, TypeRef::UINT32, TypeRef::UINT64
+            literals[inst.id] = inst.int_value
+          end
+        end
+      end
+      literals
+    end
+
     private def repair_receiver_bound_call_targets : Nil
       repaired = 0
       targets_to_lower = Set(String).new
@@ -56640,23 +56663,47 @@ module Crystal::HIR
     # Force-lower a function immediately even if we're inside lowering.
     # Used when we need the return type of a callee that was deferred.
     # Returns true if the function was lowered, false if it couldn't be.
-    private def force_lower_function_for_return_type(name : String) : Bool
+    #
+    # `bypass_inline_yield` allows force-lowering from inline-yield contexts,
+    # but only when the callee is provably yield-free (no &-param, no implicit
+    # yield in its body). That invariant means lowering the callee cannot
+    # re-enter inline-yield processing, which is the reason the suppression
+    # exists in the first place. The inline-yield state is temporarily reset
+    # during body lowering so transitive force-lowers for other yield-free
+    # callees proceed normally.
+    #
+    # Once we enter bypass mode, @force_lower_yield_free_only_depth keeps the
+    # yield-free guard active for every transitive force_lower inside the
+    # subtree. Without that guard, a nested force_lower would see
+    # in_inline_yield=false (because the parent reset the state) and could
+    # recurse through a yield-bearing callee unchecked.
+    private def force_lower_function_for_return_type(name : String, bypass_inline_yield : Bool = false) : Bool
       return false if @suppress_force_lower_return_type_depth > 0
-      # Note: @function_types check was considered here but can't be used alone —
-      # the type is registered before body lowering. Only has_function_with_body?
-      # (checked below) reliably indicates the function was already lowered.
-      # During inline-yield/proc lowering, force-lowering return types can recurse
-      # through nested call chains and blow the stack in release builds.
-      return false if @inline_yield_function_depth > 0
-      return false if @inline_yield_block_body_depth > 0
-      return false if @inline_yield_proc_depth > 0
-      return false unless @inline_yield_name_stack.empty?
+
+      in_inline_yield = @inline_yield_function_depth > 0 ||
+                        @inline_yield_block_body_depth > 0 ||
+                        @inline_yield_proc_depth > 0 ||
+                        !@inline_yield_name_stack.empty?
+
+      in_yield_free_only = @force_lower_yield_free_only_depth > 0
+
+      if in_inline_yield
+        return false unless bypass_inline_yield
+        return false unless callee_is_yield_free?(name)
+      elsif in_yield_free_only
+        # Parent force_lower entered bypass mode and reset inline-yield state.
+        # Enforce the same guard transitively so the subtree cannot re-enter
+        # yield-bearing callees without explicit approval.
+        return false unless callee_is_yield_free?(name)
+      end
+
       # Don't force if it would cause infinite recursion
       return false if function_state(name).in_progress?
       return false if @module.has_function_with_body?(name)
       return false if function_state(name).completed?
       # Prevent deep chaining: A needs ret type of B, B needs C, C needs D...
-      max_force_depth = 4
+      # Use a tighter limit in bypass/yield-free-only mode to cap stack usage.
+      max_force_depth = (bypass_inline_yield || in_yield_free_only) ? 2 : 4
       if @force_lower_return_type_depth >= max_force_depth
         STDERR.puts "[FORCE_LOWER_DEPTH_LIMIT] depth=#{@force_lower_return_type_depth} name=#{name}" if env_has?("DEBUG_FORCE_LOWER_DEPTH")
         return false
@@ -56675,14 +56722,51 @@ module Crystal::HIR
         @pending_function_queue.delete(name)
       end
 
-      # Temporarily disable inside_lowering to allow immediate processing
       saved_depth = @lowering_depth
       @lowering_depth = 0
       @force_lower_return_type_depth += 1
-      lower_function_if_needed_impl(name)
-      @lowering_depth = saved_depth
-      @force_lower_return_type_depth -= 1
+
+      need_iy_reset = bypass_inline_yield && in_inline_yield
+      if need_iy_reset
+        saved_iy_fn = @inline_yield_function_depth
+        saved_iy_bb = @inline_yield_block_body_depth
+        saved_iy_pr = @inline_yield_proc_depth
+        saved_iy_stack = @inline_yield_name_stack
+        @inline_yield_function_depth = 0
+        @inline_yield_block_body_depth = 0
+        @inline_yield_proc_depth = 0
+        @inline_yield_name_stack = [] of String
+        @force_lower_yield_free_only_depth += 1
+      end
+
+      begin
+        lower_function_if_needed_impl(name)
+      ensure
+        if need_iy_reset
+          @inline_yield_function_depth = saved_iy_fn.not_nil!
+          @inline_yield_block_body_depth = saved_iy_bb.not_nil!
+          @inline_yield_proc_depth = saved_iy_pr.not_nil!
+          @inline_yield_name_stack = saved_iy_stack.not_nil!
+          @force_lower_yield_free_only_depth -= 1
+        end
+        @lowering_depth = saved_depth
+        @force_lower_return_type_depth -= 1
+      end
+
       true
+    end
+
+    # Returns true if the function is provably yield-free: no explicit &-param
+    # and no implicit yield in its body. Safe to force-lower from inline-yield
+    # contexts — lowering its body cannot re-enter inline-yield processing.
+    private def callee_is_yield_free?(name : String) : Bool
+      base = strip_type_suffix(name)
+      def_node = @function_defs[name]? || @function_defs[base]?
+      return false unless def_node
+      stats = function_param_stats(name, def_node)
+      # has_block includes both explicit &block and implicit yield (via
+      # def_contains_yield? check inside function_param_stats).
+      !stats.has_block
     end
 
     private def lower_function_if_needed_impl(name : String) : Nil
@@ -77829,6 +77913,54 @@ module Crystal::HIR
 
       rhs_id = lower_expr(ctx, node.value)
       rhs_type = ctx.type_of(rhs_id)
+
+      # When the RHS is a non-virtual Call with no trailing block and its return
+      # type is still pending (common inside inline-yield bodies where
+      # force_lower is suppressed), the per-target IndexGet element types fall
+      # to VOID and cascade into wrong downstream HIR (e.g. incorrect union_wrap
+      # variant_type_id). A late type-patching pass can fix the IndexGet types
+      # but not the already-emitted downstream instructions. Narrowly force-lower
+      # the callee so tuple element types are available here.
+      if rhs_type == TypeRef::VOID
+        block = ctx.get_block(ctx.current_block_id)
+        call_inst = nil
+        block.instructions.reverse_each do |inst|
+          if inst.is_a?(Call) && inst.id == rhs_id
+            call_inst = inst
+            break
+          end
+        end
+        if env_get("DBG_MA_RETRY")
+          if call_inst
+            STDERR.puts "[MA_RETRY] found call_inst method=#{call_inst.method_name} block=#{call_inst.block} virtual=#{call_inst.virtual}"
+          else
+            STDERR.puts "[MA_RETRY] no call_inst for rhs_id=#{rhs_id}"
+          end
+        end
+        if call_inst && call_inst.block.nil? && !call_inst.virtual
+          callee = call_inst.method_name
+          unless callee.empty?
+            forced = force_lower_function_for_return_type(callee, bypass_inline_yield: true)
+            if env_get("DBG_MA_RETRY")
+              STDERR.puts "[MA_RETRY] callee=#{callee} forced=#{forced} ft=#{@function_types[callee]?.try(&.id)}"
+            end
+            if forced
+              if repaired = @function_types[callee]?
+                if repaired != TypeRef::VOID
+                  rhs_type = repaired
+                  block.instructions.each_with_index do |inst, i|
+                    if inst.is_a?(Call) && inst.id == rhs_id && inst.type == TypeRef::VOID
+                      block.instructions[i] = Call.new(rhs_id, repaired, inst.receiver, inst.method_name, inst.args,
+                                                       inst.block, inst.virtual)
+                      ctx.register_type(rhs_id, repaired)
+                    end
+                  end
+                end
+              end
+            end
+          end
+        end
+      end
 
       if env_get("DBG_MULTI_ASSIGN")
         rhs_name = get_type_name_from_ref(rhs_type)
