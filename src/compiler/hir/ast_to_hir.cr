@@ -41368,10 +41368,31 @@ module Crystal::HIR
       end
     end
 
+    # Lazily registers a union descriptor for `union_type` when the type
+    # descriptor is known but @union_descriptors has no matching entry yet.
+    # Returns true when a descriptor for the MIR-equivalent type_ref exists
+    # after the call. Used to keep variant id lookups descriptor-backed
+    # rather than falling back to textual positional indices.
+    private def ensure_union_descriptor_for_type_ref(union_type : TypeRef) : Bool
+      mir_union_ref = hir_to_mir_type_ref(union_type)
+      return true if @union_descriptors.has_key?(mir_union_ref)
+
+      type_desc = @module.get_type_descriptor(union_type)
+      return false unless type_desc && type_desc.kind == TypeKind::Union
+
+      normalized_name = normalize_union_type_name(type_desc.name)
+      variant_names = split_union_type_name(normalized_name)
+      return false if variant_names.empty?
+
+      ensure_union_descriptor(union_type, normalized_name, variant_names)
+      @union_descriptors.has_key?(mir_union_ref)
+    end
+
     # Get variant type_id for a value being assigned to union
     # Returns the declared variant.type_id of the matching variant, or -1 if not found.
     # IMPORTANT: variant array index is not guaranteed to match runtime type_id.
     private def get_union_variant_id(union_type : TypeRef, value_type : TypeRef) : Int32
+      ensure_union_descriptor_for_type_ref(union_type)
       mir_union_ref = hir_to_mir_type_ref(union_type)
       if descriptor = @union_descriptors[mir_union_ref]?
         mir_value_ref = hir_to_mir_type_ref(value_type)
@@ -41457,6 +41478,7 @@ module Crystal::HIR
     # pointer-like/base-name fallback because type-checks like `x : Base?; x.is_a?(Sub)`
     # need runtime subclass checks, not "single non-nil union member" shortcuts.
     private def get_union_member_variant_id(union_type : TypeRef, value_type : TypeRef) : Int32
+      ensure_union_descriptor_for_type_ref(union_type)
       mir_union_ref = hir_to_mir_type_ref(union_type)
       if descriptor = @union_descriptors[mir_union_ref]?
         mir_value_ref = hir_to_mir_type_ref(value_type)
