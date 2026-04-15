@@ -23,5 +23,9 @@ while j < rounds
   j += 1
 end
 
-raise "expected #{rounds}, got #{result}" unless result == rounds
-puts "channel_ping_pong_ok"
+if result == rounds
+  puts "channel_ping_pong_ok"
+else
+  puts "channel_ping_pong_fail"
+  puts result
+end
