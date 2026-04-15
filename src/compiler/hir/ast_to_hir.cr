@@ -61849,9 +61849,21 @@ module Crystal::HIR
       # Handle .times { |i| body } intrinsic BEFORE lowering block
       if method_name == "times" && receiver_id
         if blk_expr = block_expr
-          blk_node = @arena[blk_expr]
+          blk_node = node_for_call_expr(call_arena, blk_expr)
           if blk_node.is_a?(CrystalV2::Compiler::Frontend::BlockNode)
             return lower_times_intrinsic(ctx, receiver_id, blk_node)
+          end
+        end
+      end
+
+      # Handle .upto(to) { |i| body } and .downto(to) { |i| body } before block
+      # lowering falls back to a materialized Proc. These stdlib iterators yield and
+      # then return, which intentionally disables generic inline-yield lowering.
+      if (method_name == "upto" || method_name == "downto") && receiver_id && args.size == 1
+        if blk_expr = block_expr
+          blk_node = node_for_call_expr(call_arena, blk_expr)
+          if blk_node.is_a?(CrystalV2::Compiler::Frontend::BlockNode)
+            return lower_int_upto_downto_intrinsic(ctx, receiver_id, args[0], method_name, blk_node)
           end
         end
       end
@@ -69107,6 +69119,172 @@ module Crystal::HIR
           ctx.emit(exit_phi)
           ctx.register_local(var_name, exit_phi.id)
         end
+      end
+
+      nil_lit = Literal.new(ctx.next_id, TypeRef::NIL, nil)
+      ctx.emit(nil_lit)
+      nil_lit.id
+    end
+
+    # Intrinsic: n.upto(to) { |i| body } / n.downto(to) { |i| body }.
+    # This keeps the block in the caller frame instead of materializing a Proc.
+    private def lower_int_upto_downto_intrinsic(
+      ctx : LoweringContext,
+      start_id : ValueId,
+      limit_id : ValueId,
+      method_name : String,
+      block : CrystalV2::Compiler::Frontend::BlockNode,
+    ) : ValueId
+      param_name = block.params.try(&.first?).try(&.name).try { |n| String.new(n) } || "__int_iter_i"
+
+      assigned_vars = collect_assigned_vars(block.body)
+      assigned_vars = assigned_vars.reject { |v| v == param_name }
+      inline_vars = Set(String).new
+
+      entry_block = ctx.current_block
+      initial_values = {} of String => ValueId
+      assigned_vars.each do |var_name|
+        if val = lookup_local_for_phi(ctx, var_name, inline_vars)
+          initial_values[var_name] = val
+        end
+      end
+
+      iter_type = ctx.type_of(start_id)
+      iter_type = TypeRef::INT32 if iter_type == TypeRef::VOID
+      limit_value = limit_id
+      if numeric_primitive?(iter_type) && ctx.type_of(limit_value) != iter_type
+        limit_type = ctx.type_of(limit_value)
+        if numeric_primitive?(limit_type)
+          limit_value = coerce_value_to_type(ctx, limit_value, iter_type)
+        end
+      end
+
+      cond_block = ctx.create_block
+      body_block = ctx.create_block
+      incr_block = ctx.create_block
+      step_block = ctx.create_block
+      exit_block = ctx.create_block
+
+      ctx.terminate(Jump.new(cond_block))
+
+      ctx.current_block = cond_block
+      iter_phi = Phi.new(ctx.next_id, iter_type)
+      iter_phi.add_incoming(entry_block, start_id)
+      ctx.emit(iter_phi)
+      ctx.register_type(iter_phi.id, iter_type)
+
+      phi_nodes = {} of String => Phi
+      assigned_vars.each do |var_name|
+        if initial_val = initial_values[var_name]?
+          var_type = ctx.type_of(initial_val)
+          phi = Phi.new(ctx.next_id, var_type)
+          phi.add_incoming(entry_block, initial_val)
+          ctx.emit(phi)
+          phi_nodes[var_name] = phi
+          ctx.register_local(var_name, phi.id)
+          if inline_vars.includes?(var_name) && !@inline_caller_locals_stack.empty?
+            @inline_caller_locals_stack[-1][var_name] = phi.id
+          end
+        end
+      end
+      incr_phi_nodes = {} of String => Phi
+      phi_nodes.each do |var_name, phi|
+        incr_phi_nodes[var_name] = Phi.new(ctx.next_id, phi.type)
+      end
+
+      ctx.register_local(param_name, iter_phi.id)
+      ctx.register_type(iter_phi.id, iter_type)
+
+      cmp_op = method_name == "upto" ? BinaryOp::Le : BinaryOp::Ge
+      step_op = method_name == "upto" ? BinaryOp::Add : BinaryOp::Sub
+      cmp = BinaryOperation.new(ctx.next_id, TypeRef::BOOL, cmp_op, iter_phi.id, limit_value)
+      ctx.emit(cmp)
+      ctx.register_type(cmp.id, TypeRef::BOOL)
+      ctx.terminate(Branch.new(cmp.id, body_block, exit_block))
+
+      ctx.current_block = body_block
+      ctx.push_scope(ScopeKind::Block)
+      pushed_inline = false
+      if !inline_vars.empty?
+        @inline_loop_vars_stack << inline_vars
+        pushed_inline = true
+        inline_vars.each { |name| @inline_loop_var_backedge_values.delete(name) }
+      end
+      @loop_exit_stack << exit_block
+      @loop_cond_stack << incr_block
+      @loop_phi_stack << incr_phi_nodes
+      @loop_break_info_stack << [] of {BlockId, Hash(String, ValueId)}
+      begin
+        lower_body(ctx, block.body)
+      ensure
+        @inline_loop_vars_stack.pop? if pushed_inline
+        @loop_exit_stack.pop?
+        @loop_cond_stack.pop?
+        @loop_phi_stack.pop?
+      end
+      break_info = @loop_break_info_stack.pop
+      body_exit_outer_vals = snapshot_block_scope_phi_values(ctx, assigned_vars, phi_nodes)
+      body_exit_block = ctx.current_block
+      ctx.pop_scope
+      ctx.terminate(Jump.new(incr_block))
+
+      ctx.current_block = incr_block
+      incr_phi_nodes.each_value do |phi|
+        ctx.emit(phi)
+      end
+      continue_op = method_name == "upto" ? BinaryOp::Lt : BinaryOp::Gt
+      continue_cmp = BinaryOperation.new(ctx.next_id, TypeRef::BOOL, continue_op, iter_phi.id, limit_value)
+      ctx.emit(continue_cmp)
+      ctx.register_type(continue_cmp.id, TypeRef::BOOL)
+
+      assigned_vars.each do |var_name|
+        if incr_phi = incr_phi_nodes[var_name]?
+          if updated_val = body_exit_outer_vals[var_name]?
+            incr_phi.add_incoming(body_exit_block, updated_val)
+          end
+        end
+      end
+
+      ctx.terminate(Branch.new(continue_cmp.id, step_block, exit_block))
+
+      ctx.current_block = step_block
+      one = Literal.new(ctx.next_id, iter_type, 1_i64)
+      ctx.emit(one)
+      ctx.register_type(one.id, iter_type)
+      next_iter = BinaryOperation.new(ctx.next_id, iter_type, step_op, iter_phi.id, one.id)
+      ctx.emit(next_iter)
+      ctx.register_type(next_iter.id, iter_type)
+
+      iter_phi.add_incoming(step_block, next_iter.id)
+
+      assigned_vars.each do |var_name|
+        if phi = phi_nodes[var_name]?
+          if incr_phi = incr_phi_nodes[var_name]?
+            phi.add_incoming(step_block, incr_phi.id)
+          end
+        end
+      end
+
+      ctx.terminate(Jump.new(cond_block))
+
+      ctx.current_block = exit_block
+      phi_nodes.each do |var_name, cond_phi|
+        exit_phi = Phi.new(ctx.next_id, cond_phi.type)
+        exit_phi.add_incoming(cond_block, cond_phi.id)
+        if updated_val = body_exit_outer_vals[var_name]?
+          exit_phi.add_incoming(incr_block, updated_val)
+        else
+          exit_phi.add_incoming(incr_block, cond_phi.id)
+        end
+        break_info.each do |break_block, break_locals|
+          if break_val = break_locals[var_name]?
+            exit_phi.add_incoming(break_block, break_val)
+          else
+            exit_phi.add_incoming(break_block, cond_phi.id)
+          end
+        end
+        ctx.emit(exit_phi)
+        ctx.register_local(var_name, exit_phi.id)
       end
 
       nil_lit = Literal.new(ctx.next_id, TypeRef::NIL, nil)

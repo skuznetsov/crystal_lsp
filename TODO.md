@@ -1,6 +1,28 @@
 # Crystal V2 Bootstrap — TODO (Updated 2026-04-14)
 
 ## Current Status
+- **Fresh HIR int-iterator checkpoint: fixed-format float printing now emits the integer prefix for Ryu `d2fixed_buffered_n` instead of skipping the `Int#downto` block body (2026-04-14, current session)**:
+  - trustworthy setup:
+    - `src/compiler/hir/ast_to_hir.cr`
+      - `.upto(to) { ... }` / `.downto(to) { ... }` block calls are lowered as caller-frame integer loops before block lowering materializes a Proc
+      - the loop mirrors stdlib's post-yield `x < to` / `x > to` guard, avoiding an extra overflowing step for single-value integer edge cases
+      - `.times` block lookup now uses `node_for_call_expr(...)`, matching reparsed arena handling used by the new iterator path
+    - `regression_tests/int_downto_block_overload_repro.cr`
+      - covers the skipped-block regression and single-value `Int8` edge cases
+    - `regression_tests/sprintf_float_fixed_prefix_repro.cr`
+      - covers both `sprintf("%.3f", 1.25_f64)` and direct `Float::Printer::RyuPrintf.d2fixed_buffered_n`
+  - decisive evidence:
+    - `crystal build src/crystal_v2.cr -o /tmp/cv2_int_iter_review --error-trace`
+      - result: success with only the known host stdlib `Random::DEFAULT` warning
+    - `scripts/run_safe.sh /tmp/int_downto_block_overload_review 5 512`
+      - result: prints `int_downto_block_overload_ok`, `[EXIT: 0]`
+    - `scripts/run_safe.sh /tmp/sprintf_float_fixed_prefix_review 5 512`
+      - result: prints `sprintf_float_fixed_prefix_ok`, `[EXIT: 0]`
+    - `scripts/run_safe.sh /tmp/bench_comprehensive_review 60 2048`
+      - result: prints through `Done.`, `[EXIT: 0]`
+  - practical boundary:
+    - `examples/bench_comprehensive.cr` still reports wrong channel/fiber aggregate values (`Ping-pong final=0`, huge `Fibers total`), so this checkpoint proves no crash regression but not channel/fiber correctness
+    - `/Users/sergey/Projects/Python/Grafana/python/bench_crystal.cr` compiles, but its binary still exits `133` under `scripts/run_safe.sh` with no stdout; that remains a separate runtime/frontier check
 - **Fresh tuple/static-value receiver checkpoint: `/Users/sergey/Projects/Python/Grafana/python/bench_crystal.cr` no longer falls into the old `Indexable(Tuple(Float64))#size` stub after tuple `fetch`/`sprintf` paths (2026-04-14, current session)**:
   - trustworthy setup:
     - `src/compiler/hir/ast_to_hir.cr`
