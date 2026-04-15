@@ -5050,6 +5050,13 @@ module Crystal
               loaded_type_id = builder.load(type_id_ptr, TypeRef::INT32)
               return builder.bit_and(not_nil, type_id_matches.call(loaded_type_id), TypeRef::BOOL)
             end
+
+            # Tagged union `{ i32 type_id, payload }` (primitive variants or
+            # mixed primitive/struct). UnionTypeIdGet extracts the tag from
+            # the struct layout; a plain GEP on the union value would incorrectly
+            # deref the payload as a ref pointer.
+            union_type_id = builder.emit(MIR::UnionTypeIdGet.new(builder.next_id, obj))
+            return type_id_matches.call(union_type_id)
           end
         end
 
