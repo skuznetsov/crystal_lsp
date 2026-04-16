@@ -1464,6 +1464,18 @@ module Crystal::HIR
     @unique_def_arenas_by_path : Hash(String, Array(CrystalV2::Compiler::Frontend::ArenaLike)) = {} of String => Array(CrystalV2::Compiler::Frontend::ArenaLike)
     # Cache for max body index per DefNode to avoid repeated scans.
     @def_body_max_index_cache : Hash(UInt64, Int32) = {} of UInt64 => Int32
+    # Cache for arena_fits_def? results: {arena_oid, def_oid} → Bool.
+    # Both arena content and def body are immutable after parse, so this is safe to keep.
+    @arena_fits_def_cache : Hash({UInt64, UInt64}, Bool) = {} of {UInt64, UInt64} => Bool
+    # Arena resolution stats (only active when DEBUG_ARENA_RESOLVE_STATS is set).
+    @debug_arena_stats : Bool = false
+    @arena_stats_resolve_calls : Int32 = 0
+    @arena_stats_cache_hits : Int32 = 0
+    @arena_stats_uncached_calls : Int32 = 0
+    @arena_stats_fits_def_calls : Int32 = 0
+    @arena_stats_fits_def_cache_hits : Int32 = 0
+    @arena_stats_cache_clears : Int32 = 0
+    @arena_stats_set_skipped : Int32 = 0
     # Full-file lib reparse cache for repairing corrupted self-hosted lib struct/class nodes.
     @reparsed_lib_programs_by_path : Hash(String, CrystalV2::Compiler::Frontend::Program) = {} of String => CrystalV2::Compiler::Frontend::Program
 
@@ -10319,12 +10331,21 @@ module Crystal::HIR
       fallback : CrystalV2::Compiler::Frontend::ArenaLike,
     ) : CrystalV2::Compiler::Frontend::ArenaLike
       if arena_fits_def?(fallback, func_def)
+        @arena_stats_resolve_calls += 1 if @debug_arena_stats
         return fallback
       end
       inline_arenas_id = @inline_arenas ? @inline_arenas.not_nil!.object_id : 0_u64
       cache_key = {func_def.object_id, fallback.object_id, inline_arenas_id}
       if cached = @arena_for_def_cache[cache_key]?
+        if @debug_arena_stats
+          @arena_stats_resolve_calls += 1
+          @arena_stats_cache_hits += 1
+        end
         return cached
+      end
+      if @debug_arena_stats
+        @arena_stats_resolve_calls += 1
+        @arena_stats_uncached_calls += 1
       end
       resolved = resolve_arena_for_def_uncached(func_def, fallback)
       @arena_for_def_cache[cache_key] = resolved
@@ -10374,38 +10395,21 @@ module Crystal::HIR
     end
 
     private def set_function_def_arena(name : String, arena : CrystalV2::Compiler::Frontend::ArenaLike) : Nil
-      if env_has?("DEBUG_SET_FARENA")
-        if filter = env_get("DEBUG_SET_FDEF")
-          if name.includes?(filter)
-            STDERR.puts "[SET_FARENA_STEP] name=#{name} phase=before_map arena_id=#{arena.object_id.to_u64} size=#{arena.size}"
-          end
-        end
+      existing = @function_def_arenas[name]?
+      if existing && existing.object_id == arena.object_id
+        @arena_stats_set_skipped += 1 if @debug_arena_stats
+        return
       end
       @function_def_arenas[name] = arena
-      if env_has?("DEBUG_SET_FARENA")
-        if filter = env_get("DEBUG_SET_FDEF")
-          if name.includes?(filter)
-            STDERR.puts "[SET_FARENA_STEP] name=#{name} phase=after_map"
-          end
-        end
-      end
-      @arena_for_def_cache.clear
-      @canonical_arena_for_def_cache.clear
-      if env_has?("DEBUG_SET_FARENA")
-        if filter = env_get("DEBUG_SET_FDEF")
-          if name.includes?(filter)
-            STDERR.puts "[SET_FARENA_STEP] name=#{name} phase=after_clear"
-          end
-        end
+      arena_is_new_candidate = !@unique_def_arenas.has_key?(arena.object_id)
+      if arena_is_new_candidate
+        # Resolve caches depend on the candidate arena set; invalidate when
+        # a genuinely new arena appears (not when remapping to an existing one).
+        @arena_for_def_cache.clear
+        @canonical_arena_for_def_cache.clear
+        @arena_stats_cache_clears += 1 if @debug_arena_stats
       end
       add_unique_def_arena(arena)
-      if env_has?("DEBUG_SET_FARENA")
-        if filter = env_get("DEBUG_SET_FDEF")
-          if name.includes?(filter)
-            STDERR.puts "[SET_FARENA_STEP] name=#{name} phase=after_unique"
-          end
-        end
-      end
       @function_def_arenas_last_refresh_size = @function_def_arenas.size
     end
 
@@ -10560,10 +10564,27 @@ module Crystal::HIR
       arena : CrystalV2::Compiler::Frontend::ArenaLike,
       func_def : CrystalV2::Compiler::Frontend::DefNode,
     ) : Bool
+      fits_key = {arena.object_id, func_def.object_id}
+      if cached = @arena_fits_def_cache[fits_key]?
+        if @debug_arena_stats
+          @arena_stats_fits_def_calls += 1
+          @arena_stats_fits_def_cache_hits += 1
+        end
+        return cached
+      end
+      @arena_stats_fits_def_calls += 1 if @debug_arena_stats
       max_index = body_max_index_for_def(func_def)
-      return false if max_index >= 0 && max_index >= arena.size
-      return false unless def_body_nodes_match_arena?(arena, func_def)
-      span_fits_source?(arena, func_def.span)
+      if max_index >= 0 && max_index >= arena.size
+        @arena_fits_def_cache[fits_key] = false
+        return false
+      end
+      unless def_body_nodes_match_arena?(arena, func_def)
+        @arena_fits_def_cache[fits_key] = false
+        return false
+      end
+      result = span_fits_source?(arena, func_def.span)
+      @arena_fits_def_cache[fits_key] = result
+      result
     end
 
     private def def_matches_phase0_body_infer_identity?(
@@ -42825,6 +42846,7 @@ module Crystal::HIR
     # Public method to flush pending functions from external callers (e.g., CLI after lower_def)
     def flush_pending_functions
       phase_stats = env_has?("CRYSTAL_V2_PHASE_STATS")
+      @debug_arena_stats = env_has?("DEBUG_ARENA_RESOLVE_STATS")
 
       # Before activating the filter, seed method names from the initial pending queue.
       # These functions were deferred during lower_main (prelude initialization) and are
@@ -42976,6 +42998,18 @@ module Crystal::HIR
             end
         end
         @mono_sources_reported = true
+      end
+
+      if env_has?("DEBUG_ARENA_RESOLVE_STATS")
+        STDERR.puts "[ARENA_STATS] resolve_arena_for_def calls: #{@arena_stats_resolve_calls}"
+        STDERR.puts "[ARENA_STATS] cache hits: #{@arena_stats_cache_hits}"
+        STDERR.puts "[ARENA_STATS] uncached calls: #{@arena_stats_uncached_calls}"
+        STDERR.puts "[ARENA_STATS] arena_fits_def? calls: #{@arena_stats_fits_def_calls}"
+        STDERR.puts "[ARENA_STATS] arena_fits_def? cache hits: #{@arena_stats_fits_def_cache_hits}"
+        STDERR.puts "[ARENA_STATS] set_function_def_arena cache clears: #{@arena_stats_cache_clears}"
+        STDERR.puts "[ARENA_STATS] set_function_def_arena skipped (same arena): #{@arena_stats_set_skipped}"
+        STDERR.puts "[ARENA_STATS] unique arenas: #{@unique_def_arenas.size}"
+        STDERR.puts "[ARENA_STATS] arena_fits_def_cache size: #{@arena_fits_def_cache.size}"
       end
     end
 
