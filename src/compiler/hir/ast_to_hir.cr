@@ -10078,28 +10078,30 @@ module Crystal::HIR
     end
 
     private def safe_unary_operator_string(node : CrystalV2::Compiler::Frontend::UnaryNode) : String
-      if op = safe_slice_to_string(node.operator)
-        return op
-      end
-
-      source = source_for_arena(@arena)
-      return "" unless source
-
-      start = node.span.start_offset
-      return "" if start < 0 || start >= source.bytesize
-
-      finish = node.span.end_offset
-      if operand = node.operand
-        if operand.index >= 0 && operand.index < @arena.size
-          operand_start = @arena[operand].span.start_offset
-          if operand_start > start && operand_start <= finish
-            finish = operand_start
+      # Prefer source-span extraction over reading node.operator fields.
+      # node.operator is a Slice(UInt8) whose heap-struct pointer can be
+      # corrupted under deep force_lower recursion; .to_unsafe/.size then
+      # dereference junk even after pointerof(slice) range guards.
+      if source = source_for_arena(@arena)
+        start = node.span.start_offset
+        if start >= 0 && start < source.bytesize
+          finish = node.span.end_offset
+          if operand = node.operand
+            if operand.index >= 0 && operand.index < @arena.size
+              operand_start = @arena[operand].span.start_offset
+              if operand_start > start && operand_start <= finish
+                finish = operand_start
+              end
+            end
+          end
+          if finish > start && finish <= source.bytesize
+            extracted = source.byte_slice(start, finish - start).strip
+            return extracted unless extracted.empty?
           end
         end
       end
-      return "" if finish <= start || finish > source.bytesize
 
-      source.byte_slice(start, finish - start).strip
+      safe_slice_to_string(node.operator) || ""
     end
 
     private def unary_operator_matches?(node : CrystalV2::Compiler::Frontend::UnaryNode, op : Char) : Bool
