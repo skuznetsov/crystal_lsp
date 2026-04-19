@@ -65651,6 +65651,7 @@ module Crystal::HIR
 
       # For allocator calls (ClassName.new), enforce return type as the class type.
       # Prefer fully-qualified owners to avoid short-name collisions (e.g. multiple `Parser` classes).
+      constructor_return_type_pinned = false
       if method_name == "new"
         owner_candidates = [] of String
         if full_method_name
@@ -65674,10 +65675,16 @@ module Crystal::HIR
               class_type = class_info.type_ref
             end
           end
-          return_type = class_type unless class_type == TypeRef::VOID
+          unless class_type == TypeRef::VOID
+            return_type = class_type
+            constructor_return_type_pinned = true
+          end
         elsif resolved_owner = owner_candidates.find { |owner| type_ref_for_name(owner) != TypeRef::VOID }
           class_type = type_ref_for_name(resolved_owner)
-          return_type = class_type unless class_type == TypeRef::VOID
+          unless class_type == TypeRef::VOID
+            return_type = class_type
+            constructor_return_type_pinned = true
+          end
         elsif return_type == TypeRef::VOID && full_method_name
           # Legacy fallback for unresolved owners.
           class_name = full_method_name.rchop(".new")
@@ -65690,12 +65697,16 @@ module Crystal::HIR
               candidate_type = type_ref_for_name(candidate)
               if candidate_type != TypeRef::VOID
                 return_type = candidate_type
+                constructor_return_type_pinned = true
                 found_via_short = true
                 break
               end
               if ci = @class_info[candidate]?
                 class_type = ci.type_ref
-                return_type = class_type unless class_type == TypeRef::VOID
+                unless class_type == TypeRef::VOID
+                  return_type = class_type
+                  constructor_return_type_pinned = true
+                end
                 found_via_short = true
                 break
               end
@@ -65707,7 +65718,10 @@ module Crystal::HIR
                   if class_type == TypeRef::VOID
                     class_type = @class_info[k].type_ref
                   end
-                  return_type = class_type unless class_type == TypeRef::VOID
+                  unless class_type == TypeRef::VOID
+                    return_type = class_type
+                    constructor_return_type_pinned = true
+                  end
                   found_via_short = true
                   break
                 end
@@ -66475,7 +66489,8 @@ module Crystal::HIR
       if resolved_return_type == TypeRef::VOID && mangled_method_name != base_method_name
         resolved_return_type = get_function_return_type(base_method_name)
       end
-      if resolved_return_type != TypeRef::VOID && resolved_return_type != TypeRef::NIL && resolved_return_type != return_type
+      if !constructor_return_type_pinned &&
+         resolved_return_type != TypeRef::VOID && resolved_return_type != TypeRef::NIL && resolved_return_type != return_type
         resolved_name = get_type_name_from_ref(resolved_return_type)
         resolved_placeholder = unresolved_generic_return_type?(resolved_return_type) || type_param_like?(resolved_name)
         if !resolved_placeholder &&
@@ -66492,25 +66507,27 @@ module Crystal::HIR
                                          return_type != TypeRef::VOID &&
                                          return_type != TypeRef::NIL &&
                                          !unresolved_generic_return_type?(return_type)
-      [mangled_method_name, primary_mangled_name, base_method_name].uniq.each do |name|
-        next if name.empty?
-        next if preserve_specialized_return_type && name == base_method_name
-        func = @module.function_by_name(name)
-        next unless func
+      unless constructor_return_type_pinned
+        [mangled_method_name, primary_mangled_name, base_method_name].uniq.each do |name|
+          next if name.empty?
+          next if preserve_specialized_return_type && name == base_method_name
+          func = @module.function_by_name(name)
+          next unless func
 
-        func_rt = func.return_type
-        next if func_rt == TypeRef::VOID || func_rt == TypeRef::NIL || func_rt == return_type
+          func_rt = func.return_type
+          next if func_rt == TypeRef::VOID || func_rt == TypeRef::NIL || func_rt == return_type
 
-        func_rt_name = get_type_name_from_ref(func_rt)
-        func_placeholder = unresolved_generic_return_type?(func_rt) || type_param_like?(func_rt_name)
-        next if func_placeholder
+          func_rt_name = get_type_name_from_ref(func_rt)
+          func_placeholder = unresolved_generic_return_type?(func_rt) || type_param_like?(func_rt_name)
+          next if func_placeholder
 
-        # Don't downgrade nilable union to non-union for nilable query methods
-        next if is_nilable_query && is_union_or_nilable_type?(return_type) &&
-                !is_union_or_nilable_type?(func_rt)
+          # Don't downgrade nilable union to non-union for nilable query methods
+          next if is_nilable_query && is_union_or_nilable_type?(return_type) &&
+                  !is_union_or_nilable_type?(func_rt)
 
-        return_type = func_rt
-        break
+          return_type = func_rt
+          break
+        end
       end
 
       if block_return_name

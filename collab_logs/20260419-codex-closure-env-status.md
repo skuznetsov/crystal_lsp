@@ -226,3 +226,49 @@ Remaining frontier:
 - `combined/test_edge_hash_complex.cr` now fails after the corrected total, at
   the following `Hash(String, Int32).new(0)` counting section. Treat this as a
   distinct hash/default-value or post-iteration corruption defect.
+
+## 2026-04-19 Codex post-Hash#each constructor type checkpoint
+
+Status: the next `test_edge_hash_complex` frontier is fixed as a separate HIR
+call-type repair.
+
+Key finding:
+
+- The segfault after the corrected `Hash#each` total was already present in
+  HIR: after the `h.each` intrinsic, the following
+  `Hash(String, Int32).new(0)` call was emitted with return type
+  `Hash(String, Void)`.
+- That happened because `Hash#each` had forced constructor helper bodies to be
+  available. A later generic "prefer actual lowered function return type" pass
+  then replaced the constructor's concrete owner type with the helper body's
+  lowered return type.
+
+Implementation:
+
+- `src/compiler/hir/ast_to_hir.cr` now pins concrete class `new` return types
+  once the owner has been resolved, so late function-body return repair cannot
+  downgrade constructor call-sites.
+- `regression_tests/hash_each_then_hash_new_type_repro.sh` covers the reduced
+  sequence: `Hash#each`, then `Hash(String, Int32).new(0)`, then `[]=` and
+  `[]`.
+
+Verification:
+
+- `crystal build src/crystal_v2.cr -o bin/crystal_v2 --error-trace` — green,
+  only the known `Random::DEFAULT` warning.
+- `regression_tests/hash_each_then_hash_new_type_repro.sh bin/crystal_v2` —
+  green, prints `hash_each_then_hash_new_type_ok`.
+- Focused HIR for `/tmp/hash_after_each_empty_counts.cr` now types the
+  post-`Hash#each` constructor as `Hash(String, Int32)` and follows with
+  `Hash(String, Int32)#[]=` / `Hash(String, Int32)#[]`.
+- `regression_tests/combined/test_edge_hash_complex.cr` now prints
+  `hash_complex_all_ok` and exits `0`.
+- `regression_tests/run_combined.sh bin/crystal_v2 4` now reports
+  `28 passed, 3 failed out of 31`; `test_edge_hash_complex` is green.
+
+Remaining frontier:
+
+- The hash frontiers covered by `test_collections` and
+  `test_edge_hash_complex` are now closed. The remaining combined failures are
+  expected to be in separate generic dispatch, generics/unions, and strings/join
+  families.

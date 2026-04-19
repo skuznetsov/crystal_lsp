@@ -1,6 +1,43 @@
 # Crystal V2 Bootstrap — TODO (Updated 2026-04-14)
 
 ## Current Status
+- **Fresh post-Hash#each constructor return-type checkpoint (2026-04-19,
+  current session)**:
+  - trustworthy setup:
+    - `src/compiler/hir/ast_to_hir.cr`
+      - class `new` calls now pin the already-resolved concrete owner type
+        against late replacement by the callee body's actual lowered return
+        type
+      - this prevents a pre-lowered helper such as
+        `Hash(String, Int32).new$block$arity1` from degrading a later
+        `Hash(String, Int32).new(0)` call-site to `Hash(String, Void)`
+    - `regression_tests/hash_each_then_hash_new_type_repro.sh`
+      - covers `Hash#each` followed by a fresh `Hash(String, Int32).new(0)`
+        and subsequent `[]=` / `[]` dispatch
+  - decisive evidence:
+    - `crystal build src/crystal_v2.cr -o bin/crystal_v2 --error-trace`
+      - result: success with only the known host stdlib `Random::DEFAULT`
+        warning
+    - `regression_tests/hash_each_then_hash_new_type_repro.sh bin/crystal_v2`
+      - result: fixed marker `hash_each_then_hash_new_type_ok`
+    - focused HIR for `/tmp/hash_after_each_empty_counts.cr`
+      - result: the post-`Hash#each` constructor call is now
+        `Hash(String, Int32).new$Int32_Nil(...) : Hash(String, Int32)` and
+        the following `[]=` / `[]` calls dispatch through `Hash(String, Int32)`
+    - `regression_tests/combined/test_edge_hash_complex.cr`
+      - result: now prints `hash_complex_all_ok` and exits `0`
+    - `regression_tests/run_combined.sh bin/crystal_v2 4`
+      - result: `28 passed, 3 failed out of 31`; `test_edge_hash_complex`
+        is now green
+    - adjacent hash/proc guards remain green or fixed-state:
+      - `hash_each_block_writeback_repro.sh`
+      - `hash_small_linear_scan_repro.sh`
+      - `spawn_capture_block_param_repro.sh`
+  - practical boundary:
+    - this fixes the `test_edge_hash_complex` segfault frontier exposed after
+      the Hash#each writeback fix
+    - remaining combined-suite frontiers are separate generic dispatch,
+      generics/unions, and strings/join issues
 - **Fresh Hash#each block-writeback checkpoint (2026-04-19, current session)**:
   - trustworthy setup:
     - `src/compiler/hir/ast_to_hir.cr`
