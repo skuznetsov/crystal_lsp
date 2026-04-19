@@ -716,10 +716,17 @@ module Crystal::HIR
   # (direct-yield path at ast_to_hir.cr compute_block_captures) whose
   # consumer ignores these fields.
   #
-  # Invariants (enforced at construction when boxed/slot/payload are
-  # explicitly supplied):
+  # Structural invariants enforced at construction (every caller,
+  # including the legacy 3-arg path whose defaults satisfy them):
   #   boxed  ⇒ env_slot_type == TypeRef::POINTER
   #   !boxed ⇒ env_slot_type == payload_type
+  #
+  # Policy relation `boxed == (by_reference || written_captures(name))`
+  # is a *policy* applied by the P1 emission sites (lower_proc_literal,
+  # lower_block_to_proc) — NOT a struct-level invariant. The legacy
+  # caller at compute_block_captures passes `by_reference=true` with
+  # `boxed=false` by default, and its consumer (direct-yield
+  # MakeClosure with VOID type) never reads either field.
   struct CapturedVar
     getter value_id      : ValueId
     getter name          : String
@@ -736,6 +743,12 @@ module Crystal::HIR
       @payload_type  : TypeRef = TypeRef::POINTER,
       @boxed         : Bool    = false,
     )
+      if @boxed && @env_slot_type != TypeRef::POINTER
+        raise "CapturedVar invariant violated: boxed capture #{@name.inspect} must have env_slot_type == POINTER (got #{@env_slot_type.id})"
+      end
+      if !@boxed && @env_slot_type != @payload_type
+        raise "CapturedVar invariant violated: by-value capture #{@name.inspect} must have env_slot_type == payload_type (got slot=#{@env_slot_type.id}, payload=#{@payload_type.id})"
+      end
     end
   end
 
@@ -756,6 +769,9 @@ module Crystal::HIR
         io << ", captures=["
         @captures.join(io, ", ") do |cap, o|
           o << "%" << cap.value_id
+          o << ' ' << (cap.boxed ? "boxed" : "by_val")
+          o << " slot=" << cap.env_slot_type.id
+          o << " payload=" << cap.payload_type.id
           o << " by_ref" if cap.by_reference
         end
         io << "]"
