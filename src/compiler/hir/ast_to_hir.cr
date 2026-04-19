@@ -70776,6 +70776,7 @@ module Crystal::HIR
       end
       break_info = @loop_break_info_stack.pop
       # Capture post-body block (may differ from exec_block if body has control flow)
+      post_exec_values = snapshot_loop_updated_values(ctx, assigned_vars, inline_vars)
       post_exec_block = ctx.current_block
       ctx.pop_scope
       ctx.terminate(Jump.new(incr_block))
@@ -70791,7 +70792,7 @@ module Crystal::HIR
       incr_merged = {} of String => ValueId
       assigned_vars.each do |var_name|
         if phi = phi_nodes[var_name]?
-          updated_val = resolve_loop_updated_value(ctx, var_name, inline_vars)
+          updated_val = post_exec_values[var_name]?
           if updated_val && updated_val != phi.id
             # Variable was modified in block body — need merge PHI
             var_type = ctx.type_of(phi.id)

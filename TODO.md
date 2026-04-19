@@ -1,6 +1,35 @@
 # Crystal V2 Bootstrap — TODO (Updated 2026-04-14)
 
 ## Current Status
+- **Fresh Hash#each block-writeback checkpoint (2026-04-19, current session)**:
+  - trustworthy setup:
+    - `src/compiler/hir/ast_to_hir.cr`
+      - `lower_hash_each_dynamic` now snapshots block-updated caller locals before
+        popping the block scope, matching the existing loop-intrinsic pattern
+        used by `times`/array iteration
+      - the merge PHI for the exec/skip paths uses that pre-pop snapshot, so
+        `h.each { |k, v| total += v }` feeds the loop backedge instead of
+        reverting to the pre-block `total`
+    - `regression_tests/hash_each_block_writeback_repro.sh`
+      - covers String-key Hash iteration with a caller-local `total += v`
+  - decisive evidence:
+    - `crystal build src/crystal_v2.cr -o bin/crystal_v2 --error-trace`
+      - result: success with only the known host stdlib `Random::DEFAULT` warning
+    - `regression_tests/hash_each_block_writeback_repro.sh bin/crystal_v2`
+      - result: fixed marker `hash_each_block_writeback_ok`
+    - `regression_tests/hash_small_linear_scan_repro.sh bin/crystal_v2`
+      - result: fixed marker `hash_small_linear_scan_ok`
+    - `regression_tests/spawn_capture_block_param_repro.sh bin/crystal_v2`
+      - result: fixed-state exit `1`, both Proc capture probes print `_ok`
+    - `regression_tests/run_combined.sh bin/crystal_v2 4`
+      - result: still `27 passed, 4 failed out of 31`, but
+        `test_edge_hash_complex` now prints the expected iteration total `26`
+        before hitting the next segfault frontier
+  - practical boundary:
+    - `combined/test_edge_hash_complex.cr` still fails after the corrected
+      `Hash#each` total, at the following `Hash(String, Int32).new(0)` counting
+      section; treat that as a separate hash/default-value or post-iteration
+      corruption frontier
 - **Fresh small-Hash linear-scan checkpoint (2026-04-19, current session)**:
   - trustworthy setup:
     - `src/compiler/mir/llvm_backend.cr`

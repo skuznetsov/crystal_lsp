@@ -3,6 +3,20 @@
 Updated: 2026-04-11
 Context: compiler/bootstrap/stage2-stability
 
+[LM-458|verified]: `Hash#each` caller-local writes in the dynamic hash intrinsic
+were being lost because `lower_hash_each_dynamic` captured updated mutable
+locals after `ctx.pop_scope`, when block-local assignment state had already
+been restored. The fix snapshots `post_exec_values` before popping the block
+scope and uses that snapshot when building the exec/skip merge PHIs. Regression
+`regression_tests/hash_each_block_writeback_repro.sh` is green and
+`combined/test_edge_hash_complex.cr` now prints the expected iteration total
+`26` instead of `0`. Boundary: the same combined test still segfaults in the
+subsequent default-value/counting hash section, so this landmark covers only
+the block writeback/backedge defect. Verification: compiler build green with
+only the known `Random::DEFAULT` warning, hash linear-scan guard green, Proc
+capture guard remains in fixed-state exit `1`, and combined remains 27/31.
+{F/G/R: 0.88/0.55/0.90} [verified]
+
 [LM-457|verified]: Small `Hash(String, V)` / `Hash(Int32, V)` tables exposed a
 stdlib block non-local return gap rather than a storage corruption bug. The
 decisive reducer inserted one `Hash(String, Int32)` entry and showed `keys`

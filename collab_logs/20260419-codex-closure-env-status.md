@@ -184,3 +184,45 @@ Remaining frontier:
   `test_edge_hash_complex` (block-write/iteration segfault),
   `test_generics_unions` (segfault), and
   `test_strings_join` (`Reference#join(String)_super` stub).
+
+## 2026-04-19 Codex Hash#each writeback checkpoint
+
+Status: second small hash frontier fixed as a separate HIR intrinsic change.
+
+Key finding:
+
+- `Hash#each` for dynamic hashes was not using the generic Proc ABI path here.
+  It was lowered by `lower_hash_each_dynamic`.
+- That intrinsic lowered the user block inside a pushed block scope, then called
+  `ctx.pop_scope` before reading the updated caller-local values for merge PHIs.
+  As a result, `h.each { |k, v| total += v }` executed but the `total` backedge
+  used the pre-block value and printed `0`.
+
+Implementation:
+
+- `src/compiler/hir/ast_to_hir.cr` now snapshots `post_exec_values` before
+  popping the hash-each block scope.
+- The exec/skip merge PHI uses the saved post-exec value instead of reading
+  locals after the scope restore.
+- `regression_tests/hash_each_block_writeback_repro.sh` covers the reduced
+  `Hash(String, Int32)#each` caller-local sum case.
+
+Verification:
+
+- `crystal build src/crystal_v2.cr -o bin/crystal_v2 --error-trace` — green,
+  only the known `Random::DEFAULT` warning.
+- `regression_tests/hash_each_block_writeback_repro.sh bin/crystal_v2` —
+  green, prints `hash_each_block_writeback_ok`.
+- `regression_tests/hash_small_linear_scan_repro.sh bin/crystal_v2` — still
+  green.
+- `regression_tests/spawn_capture_block_param_repro.sh bin/crystal_v2` —
+  fixed-state exit `1`, both probes print `_ok`.
+- `regression_tests/run_combined.sh bin/crystal_v2 4` — still `27 passed, 4
+  failed out of 31`; `test_edge_hash_complex` now reaches the expected
+  iteration total `26` before the next segfault.
+
+Remaining frontier:
+
+- `combined/test_edge_hash_complex.cr` now fails after the corrected total, at
+  the following `Hash(String, Int32).new(0)` counting section. Treat this as a
+  distinct hash/default-value or post-iteration corruption defect.
