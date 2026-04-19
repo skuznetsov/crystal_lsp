@@ -32783,6 +32783,63 @@ module Crystal::HIR
       pointer_word_bytes_i32.to_i64
     end
 
+    # ─────────────────────────────────────────────────────────────────────────
+    # Proc ABI helpers (A1.ii — heap-backed Proc object)
+    # See docs/closure_env_abi_design.md §10 (invariants I1–I9).
+    #
+    # Proc VALUE (variable, param, return, ivar, tuple element) is a
+    # pointer-sized pointer to a Proc OBJECT on the heap.
+    # Proc OBJECT layout is { fn_ptr @0, env_ptr @proc_env_offset }.
+    #
+    # These helpers are additive and currently unused; they will be wired
+    # in Commit P1.
+    # ─────────────────────────────────────────────────────────────────────────
+
+    @[AlwaysInline]
+    private def proc_value_storage_size : Int32
+      pointer_word_bytes_i32
+    end
+
+    @[AlwaysInline]
+    private def proc_value_alignment : Int32
+      pointer_word_bytes_i32
+    end
+
+    @[AlwaysInline]
+    private def proc_object_size : Int32
+      pointer_word_bytes_i32 * 2
+    end
+
+    @[AlwaysInline]
+    private def proc_object_alignment : Int32
+      pointer_word_bytes_i32
+    end
+
+    @[AlwaysInline]
+    private def proc_fn_offset : Int32
+      0
+    end
+
+    @[AlwaysInline]
+    private def proc_env_offset : Int32
+      pointer_word_bytes_i32
+    end
+
+    # Capture env object layout: fields packed with natural alignment,
+    # mirroring hir_tuple_element_offsets for consistency.
+    private def closure_env_offsets(capture_types : Array(TypeRef)) : Array(Int32)
+      hir_tuple_element_offsets(capture_types)
+    end
+
+    private def closure_env_size(capture_types : Array(TypeRef)) : Int32
+      return 0 if capture_types.empty?
+      offsets = closure_env_offsets(capture_types)
+      last_idx = capture_types.size - 1
+      last_off = offsets[last_idx]
+      last_size = hir_element_byte_size(capture_types[last_idx])
+      last_off + last_size
+    end
+
     # Helper to get type size in bytes
     private def type_size(type : TypeRef, c_context : Bool = false) : Int32
       case type

@@ -698,6 +698,60 @@ module Crystal
         {% end %}
       end
 
+      # ─────────────────────────────────────────────────────────────────────
+      # Proc ABI helpers (A1.ii — heap-backed Proc object)
+      # See docs/closure_env_abi_design.md §10 (invariants I1–I9).
+      #
+      # Proc VALUE (variable, param, return, ivar, tuple element) is a
+      # pointer-sized pointer to a Proc OBJECT on the heap.
+      # Proc OBJECT layout is { fn_ptr @0, env_ptr @proc_env_offset }.
+      #
+      # These helpers are additive and currently unused; they will be wired
+      # in Commit P1.
+      # ─────────────────────────────────────────────────────────────────────
+
+      @[AlwaysInline]
+      private def proc_value_storage_size : Int32
+        pointer_word_bytes_i32
+      end
+
+      @[AlwaysInline]
+      private def proc_value_alignment : Int32
+        pointer_word_bytes_i32
+      end
+
+      @[AlwaysInline]
+      private def proc_object_size : Int32
+        pointer_word_bytes_i32 * 2
+      end
+
+      @[AlwaysInline]
+      private def proc_object_alignment : Int32
+        pointer_word_bytes_i32
+      end
+
+      @[AlwaysInline]
+      private def proc_fn_offset : Int32
+        0
+      end
+
+      @[AlwaysInline]
+      private def proc_env_offset : Int32
+        pointer_word_bytes_i32
+      end
+
+      # Skeleton helper for Commit P1: allocate a 16-byte Proc OBJECT on the
+      # heap and initialise its two fields. Currently unused.
+      #
+      # Intent (P1 wiring):
+      #   ptr = alloc(proc_object_size, proc_object_alignment)
+      #   store fn_ptr  at ptr + proc_fn_offset
+      #   store env_ptr at ptr + proc_env_offset
+      #   return ptr
+      private def allocate_proc_object(fn_ptr : ValueId, env_ptr : ValueId) : ValueId
+        raise "allocate_proc_object: not wired yet (see docs/closure_env_abi_design.md §10)"
+      end
+
       private def all_ref_union_descriptor?(descriptor : UnionDescriptor) : Bool
         descriptor.variants.all? do |variant|
           next true if variant.type_ref == TypeRef::NIL || variant.type_ref == TypeRef::VOID

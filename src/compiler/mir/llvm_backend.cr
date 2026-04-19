@@ -308,7 +308,7 @@ module Crystal::MIR
         else
           "%#{mangle_name(type.name)}.union"
         end
-      when .proc?                       then "%__crystal_proc"  # { ptr, ptr }
+      when .proc?                       then "ptr"  # V2 ABI: Proc value is ptr to heap { fn, env }
       when .tuple?                      then "ptr"  # V2 ABI: tuples as pointers (to be refactored to inline)
       when .array?
         # Runtime Array(T) values are heap objects passed/stored by pointer.
