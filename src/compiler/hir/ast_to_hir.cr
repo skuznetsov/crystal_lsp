@@ -78262,8 +78262,10 @@ module Crystal::HIR
 
         if is_pointer_type && index_ids.size == 1
           # Pointer store: ptr[i] = val -> PointerStore with index
-          store_type = ctx.type_of(value_id)
-          store_node = PointerStore.new(ctx.next_id, store_type, object_id, value_id, index_ids.first)
+          store_type = type_desc.try(&.type_params.first?) || ctx.type_of(value_id)
+          store_type = TypeRef::INT32 if store_type == TypeRef::VOID
+          store_value = coerce_value_to_type(ctx, value_id, store_type)
+          store_node = PointerStore.new(ctx.next_id, store_type, object_id, store_value, index_ids.first)
           ctx.emit(store_node)
           return value_id
         end
@@ -79205,8 +79207,10 @@ module Crystal::HIR
                           (type_desc && type_desc.kind == TypeKind::Pointer)
 
         if is_pointer_type && index_ids.size == 1
-          store_type = ctx.type_of(value_id)
-          store_node = PointerStore.new(ctx.next_id, store_type, object_id, value_id, index_ids.first)
+          store_type = type_desc.try(&.type_params.first?) || ctx.type_of(value_id)
+          store_type = TypeRef::INT32 if store_type == TypeRef::VOID
+          store_value = coerce_value_to_type(ctx, value_id, store_type)
+          store_node = PointerStore.new(ctx.next_id, store_type, object_id, store_value, index_ids.first)
           ctx.emit(store_node)
           return value_id
         end

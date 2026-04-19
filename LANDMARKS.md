@@ -3,6 +3,27 @@
 Updated: 2026-04-19
 Context: compiler/bootstrap/stage2-stability
 
+[LM-461|verified]: `combined/test_generics_unions.cr` split into two union ABI
+defects. First, `Array(Int32 | String)#push$Int32/String` wrote bare variant
+values into `Pointer(Int32 | String)` storage, so later `index_get` returned
+union-shaped bytes without a valid discriminator and `describe_value(v)` fell
+through to `unknown`. The HIR fix makes indexed `Pointer(T)#[]=` assignment use
+the pointer element type as the store contract and `coerce_value_to_type` before
+`PointerStore`; focused HIR now shows `union_wrap ... : Int32 | String` before
+the array-buffer `ptr_store`. Second, `get_config : Config?` returned an
+all-ref raw-pointer union but MIR block cleanup still `rc_dec`-ed the freshly
+allocated `Config` immediately after `UnionWrap`, so `puts cfg.name` read a
+freed object. The MIR fix marks owned reference temporaries as moved when
+wrapped into all-ref unions, analogous to the existing `FieldSet` move rule.
+Regression `regression_tests/generics_unions_union_array_nilable_repro.sh` is
+green, focused `combined/test_generics_unions.cr` prints
+`generics_unions_all_ok`, and focused LLVM for `get_config` has no
+`__crystal_v2_rc_dec` of the `Config.new` result before `ret ptr`. Full
+combined with `LIBRARY_PATH=/opt/homebrew/lib` is now 31/31. Boundary: this
+covers pointer-buffer union stores and owned all-ref union wrapping; it is not
+a complete audit of every mixed union RC path. {F/G/R: 0.92/0.62/0.94}
+[verified]
+
 [LM-460|verified]: `combined/test_complex_generic_dispatch.cr` exposed an
 `Array#sum { }` lowering/type-preservation bug, not a virtual dispatch table
 bug. In `Container#width`, the stdlib `Enumerable#sum` route lowered through

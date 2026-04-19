@@ -1,6 +1,41 @@
 # Crystal V2 Bootstrap — TODO (Updated 2026-04-14)
 
 ## Current Status
+- **Fresh generics/unions combined checkpoint (2026-04-19, current session)**:
+  - trustworthy setup:
+    - `src/compiler/hir/ast_to_hir.cr`
+      - indexed `Pointer(T)#[]=` assignment now uses the pointer element type
+        as the store contract and coerces the assigned value into that type
+      - this wraps bare `Int32` / `String` values before writing into
+        `Pointer(Int32 | String)`, fixing `Array(Int32 | String)` buffer
+        contents and downstream `case` dispatch
+    - `src/compiler/mir/hir_to_mir.cr`
+      - `UnionWrap` of an owned ARC temporary into an all-ref union now marks
+        the source as moved, matching the existing `FieldSet` move rule
+      - this prevents block-end cleanup from `rc_dec`-ing a freshly allocated
+        object before returning it through a raw-pointer union such as `Config?`
+    - `regression_tests/generics_unions_union_array_nilable_repro.sh`
+      - covers both reduced failure corridors: array-of-union element stores
+        and nilable reference returns
+  - decisive evidence:
+    - `crystal build src/crystal_v2.cr -o bin/crystal_v2 --error-trace`
+      - result: success with only the known host stdlib `Random::DEFAULT`
+        warning
+    - `LIBRARY_PATH=/opt/homebrew/lib regression_tests/generics_unions_union_array_nilable_repro.sh bin/crystal_v2`
+      - result: fixed marker `generics_unions_union_array_nilable_ok`
+    - `regression_tests/combined/test_generics_unions.cr`
+      - result: prints `generics_unions_all_ok` and exits `0`
+    - `LIBRARY_PATH=/opt/homebrew/lib regression_tests/run_combined.sh bin/crystal_v2 4`
+      - result: `31 passed, 0 failed out of 31`
+    - focused HIR for `Array(Int32 | String)#push$Int32/String`
+      - result: emits `union_wrap ... : Int32 | String` before `ptr_store`
+    - focused LLVM for `get_config : Config?`
+      - result: no `__crystal_v2_rc_dec` of the returned `Config.new` result
+        before `ret ptr`
+  - practical boundary:
+    - this closes the last known combined-suite failure at this checkpoint
+    - next verification frontier is outside the combined bundle: broader
+      `run_all.sh`, no-prelude/bootstrap, and closure-env ABI follow-up work
 - **Fresh Array#sum abstract-element checkpoint (2026-04-19, current
   session)**:
   - trustworthy setup:

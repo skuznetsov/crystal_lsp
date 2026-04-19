@@ -5530,6 +5530,24 @@ module Crystal
           union_type # union_type parameter
         )
         builder.emit(mir_wrap)
+
+        # OWNERSHIP TRANSFER: wrapping an owned reference into an all-ref union
+        # moves the owned value into the union carrier. Without this, block-end
+        # ARC cleanup can rc_dec a freshly allocated object before the raw-ptr
+        # union value is returned or stored (for example `Config?`).
+        unless @hir_constant_values.includes?(wrap.value)
+          if value_hir_type = @hir_value_types[wrap.value]?
+            if type_needs_rc?(convert_type(value_hir_type)) && type_needs_rc?(union_type)
+              is_last_use = (@remaining_uses[wrap.value]? || 0) <= 0
+              is_owned_temp = @block_arc_temps.any? { |(hid, _)| hid == wrap.value }
+              if is_last_use && is_owned_temp && !@cross_block_values.includes?(wrap.value)
+                @moved_values << wrap.value
+              end
+            end
+          end
+        end
+
+        mir_wrap.id
       end
 
       private def lower_union_unwrap(unwrap : HIR::UnionUnwrap) : ValueId

@@ -351,3 +351,45 @@ Verification:
 Remaining combined frontier:
 
 - `test_generics_unions` — still segfaults after several `unknown` outputs.
+
+## 2026-04-19 Codex checkpoint: generics/unions combined frontier closed
+
+Status: `test_generics_unions` is green after two union ABI fixes.
+
+Root causes:
+
+- Array-of-union storage: `Array(Int32 | String)#push$Int32/String` wrote bare
+  variant values into a `Pointer(Int32 | String)` buffer. Later `index_get`
+  produced union-shaped values with invalid discriminators, so
+  `describe_value(v)` fell through to `unknown` for every mixed-array element.
+- Nilable reference return: `get_config : Config?` returned an all-ref
+  raw-pointer union, but MIR block cleanup still `rc_dec`-ed the fresh
+  `Config.new` result immediately after `UnionWrap`. The caller then read a
+  freed object at `cfg.name`.
+
+Fixes:
+
+- `src/compiler/hir/ast_to_hir.cr`: indexed `Pointer(T)#[]=` assignment now uses
+  the pointer element type as the store contract and coerces the value before
+  `PointerStore`, so union element stores emit `UnionWrap` first.
+- `src/compiler/mir/hir_to_mir.cr`: `UnionWrap` of an owned ARC temporary into
+  an all-ref union marks the source value as moved, matching the existing
+  `FieldSet` ownership-transfer pattern.
+- Added `regression_tests/generics_unions_union_array_nilable_repro.sh` covering
+  both reduced corridors.
+
+Verification:
+
+- `crystal build src/crystal_v2.cr -o bin/crystal_v2 --error-trace` — green,
+  only the known `Random::DEFAULT` warning.
+- `LIBRARY_PATH=/opt/homebrew/lib regression_tests/generics_unions_union_array_nilable_repro.sh bin/crystal_v2` — green, prints `generics_unions_union_array_nilable_ok`.
+- `regression_tests/combined/test_generics_unions.cr` — green, prints
+  `generics_unions_all_ok` under `scripts/run_safe.sh`.
+- HIR shape: `Array(Int32 | String)#push$Int32/String` now has
+  `union_wrap ... : Int32 | String` before `ptr_store`.
+- LLVM shape: `get_config` no longer emits `__crystal_v2_rc_dec` of the returned
+  `Config.new` result before `ret ptr`.
+
+Remaining combined frontier:
+
+- None observed. `LIBRARY_PATH=/opt/homebrew/lib regression_tests/run_combined.sh bin/crystal_v2 4` reports `31 passed, 0 failed out of 31`.
