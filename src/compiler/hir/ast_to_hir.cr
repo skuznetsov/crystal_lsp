@@ -48400,6 +48400,17 @@ module Crystal::HIR
       # Check local variables first, unless this name is explicitly marked as
       # by-ref capture and must be read via closure cell.
       if local_id = ctx.lookup_local(name)
+        # P1: boxed locals are read via PointerLoad through the box ptr.
+        # This path is dormant until ensure_box_for_local / parent-scope
+        # hoisting populates @boxed_locals in the atomic final commit
+        # (step 8+). @boxed_locals is currently empty → no behavior change.
+        if box_info = ctx.lookup_boxed_local(name)
+          load = PointerLoad.new(ctx.next_id, box_info.payload_type, box_info.box_ptr)
+          ctx.emit(load)
+          ctx.register_type(load.id, box_info.payload_type)
+          return load.id
+        end
+
         if prefer_closure_cell
           if ref_cell = @closure_ref_cells[name]?
             cell_class, cell_name, cell_type = ref_cell
@@ -77445,6 +77456,15 @@ module Crystal::HIR
         target_ident = target_node.unsafe_as(CrystalV2::Compiler::Frontend::IdentifierNode)
         name = (safe_slice_to_string(target_ident.name) || "")
         value_type = assignment_value_type(ctx, value_id, name)
+        # P1: boxed locals write through PointerStore to the box ptr.
+        # Dormant until @boxed_locals is populated in the atomic final
+        # commit (step 8+). Lookup is empty currently → no behavior change.
+        if box_info = ctx.lookup_boxed_local(name)
+          store = PointerStore.new(ctx.next_id, box_info.payload_type, box_info.box_ptr, value_id)
+          ctx.emit(store)
+          ctx.register_type(store.id, box_info.payload_type)
+          return store.id
+        end
         # Check if this variable is stored in a closure cell (by-reference capture)
         if ref_cell = @closure_ref_cells[name]?
           cell_class, cell_name, cell_type = ref_cell
