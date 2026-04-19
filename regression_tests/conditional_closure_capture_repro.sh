@@ -15,13 +15,17 @@
 # scope calls the proc and reads `counter` through the parent scope.
 #
 # This exercises:
-#   1. Proc literal lowered inside a branch (hoist_box_for_local
-#      called with ctx.current_block != entry).
+#   1. Proc literal lowered inside a branch. Correct P1 must have
+#      predeclared/seeded the `counter` box before this branch; invoking
+#      hoist_box_for_local from the branch is a compiler bug.
 #   2. Re-hoisting: second branch's proc literal triggers another
 #      hoist call for the same name — MUST be idempotent and return
 #      the same box_ptr.
-#   3. Outer read after the if: `puts counter` reads through the box.
-#      The box alloc must dominate this read.
+#   3. Non-zero initial value (`counter = 5`) catches the unsafe
+#      "entry allocation + zero-init is enough" shortcut. The box must
+#      be seeded from the local's current value before branch lowering.
+#   4. Outer read after the if: `puts counter` reads through the box.
+#      The box alloc+seed must dominate this read.
 #
 # Proc|Nil union and Array(Proc) are avoided: both have separate
 # pre-P1 codegen issues that would conflate unrelated failures. The
@@ -29,8 +33,8 @@
 # the branch reassignments do not introduce a union.
 #
 # Exit semantics:
-#   exit 1 — CORRECT: output is "7\n7" (proc mutated counter to 7,
-#            outer read sees 7).
+#   exit 1 — CORRECT: output is "12\n12" (proc mutated counter from
+#            5 to 12, outer read sees 12).
 #   exit 0 — REPRODUCED: dominance bug (wrong output, verifier fail,
 #            runtime crash on the compiled binary).
 #   exit 2 — INCONCLUSIVE: compile failure, runner error. Does NOT
@@ -55,7 +59,7 @@ SRC="$TMPDIR/conditional_closure_capture.cr"
 BIN="$TMPDIR/conditional_closure_capture"
 
 cat > "$SRC" <<'EOF'
-counter = 0
+counter = 5
 p = ->(x : Int32) { counter += x; counter }
 
 if ARGV.size == 0
@@ -82,10 +86,10 @@ if [[ $RC -ne 0 ]]; then
   exit 0
 fi
 
-if [[ "$OUT" == "7"$'\n'"7" ]]; then
-  echo "correct: proc.call(7) -> result=7, counter=7"
+if [[ "$OUT" == "12"$'\n'"12" ]]; then
+  echo "correct: proc.call(7) -> result=12, counter=12"
   exit 1
 fi
 
-echo "reproduced: expected '7\\n7', got: $(printf '%q' "$OUT")"
+echo "reproduced: expected '12\\n12', got: $(printf '%q' "$OUT")"
 exit 0

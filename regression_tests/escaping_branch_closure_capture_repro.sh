@@ -14,14 +14,18 @@
 # code calls the proc and reads the local.
 #
 # What this exercises:
-#   1. Proc literal in ONE branch only — the box hoist happens with
-#      ctx.current_block inside the then-block.
+#   1. Proc literal in ONE branch only. Correct P1 must have
+#      predeclared/seeded the `counter` box before this branch; invoking
+#      hoist_box_for_local from the branch is a compiler bug.
 #   2. Proc escapes the branch via SSA assignment to outer `p`.
-#   3. Outer call site `p.call(7)` and outer read `puts counter` are
+#   3. Non-zero initial value (`counter = 5`) catches the unsafe
+#      "entry allocation + zero-init is enough" shortcut. The box must
+#      be seeded from the local's current value before branch lowering.
+#   4. Outer call site `p.call(7)` and outer read `puts counter` are
 #      after the branch merge. Under I14-monotonic, `counter` is
-#      boxed from the hoist point onward; the box MUST be emitted in
-#      a block that dominates the outer call/read.
-#   4. Re-entrance: the second `if` (checking ARGV.size again) is a
+#      boxed from the hoist point onward; the box alloc+seed MUST be
+#      emitted in blocks that dominate the outer call/read.
+#   5. Re-entrance: the second `if` (checking ARGV.size again) is a
 #      guard that prevents compile-time constant folding from
 #      eliminating the branch.
 #
@@ -29,7 +33,7 @@
 # codegen issues that would conflate unrelated failures).
 #
 # Exit semantics: mirrors conditional_closure_capture_repro.sh.
-#   exit 1 — CORRECT: "7\n7" (ARGV.size == 0 → capture proc ran).
+#   exit 1 — CORRECT: "12\n12" (ARGV.size == 0 → capture proc ran).
 #   exit 0 — REPRODUCED: wrong output, runtime crash, verifier fail.
 #   exit 2 — INCONCLUSIVE: compile failure.
 #
@@ -51,7 +55,7 @@ SRC="$TMPDIR/escaping_branch_closure_capture.cr"
 BIN="$TMPDIR/escaping_branch_closure_capture"
 
 cat > "$SRC" <<'EOF'
-counter = 0
+counter = 5
 default_proc = ->(x : Int32) { x }
 p = default_proc
 
@@ -78,11 +82,11 @@ if [[ $RC -ne 0 ]]; then
 fi
 
 # ARGV.size == 0 at the runner-level invocation, so capture proc runs
-# and mutates counter. Expected "7\n7".
-if [[ "$OUT" == "7"$'\n'"7" ]]; then
+# and mutates counter. Expected "12\n12".
+if [[ "$OUT" == "12"$'\n'"12" ]]; then
   echo "correct: branch-local proc escaped and mutated boxed counter"
   exit 1
 fi
 
-echo "reproduced: expected '7\\n7', got: $(printf '%q' "$OUT")"
+echo "reproduced: expected '12\\n12', got: $(printf '%q' "$OUT")"
 exit 0

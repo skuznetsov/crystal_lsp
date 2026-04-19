@@ -76,19 +76,20 @@ module Crystal::HIR
     # `lookup_boxed_local`.
     #
     # INVARIANT I14-monotonic: `@boxed_locals` is MONOTONIC within a
-    # LoweringContext's function scope. Boxes are hoisted to the
-    # function entry block (before any branch split) by
-    # `hoist_box_for_local` — the helper enforces this by always
-    # emitting into `ctx.function.entry_block` regardless of the
-    # caller's `current_block`. `@boxed_locals` only GROWS during a
-    # function's lowering — it is never shrunk by branch/case/inline
-    # merge.  Consequently:
+    # LoweringContext's function scope. Boxes are allocated in the
+    # function entry block before any branch split, and the current
+    # local value is seeded into the box at the original binding site.
+    # The helper enforces the conservative scaffold rule: it may only be
+    # invoked while `current_block == function.entry_block`; invoking it
+    # from a branch is a P1 implementation bug that must stop the flip.
+    # `@boxed_locals` only GROWS during a function's lowering — it is
+    # never shrunk by branch/case/inline merge.  Consequently:
     #   - `.locals` truncation into a bare `Hash(String, ValueId)` at
     #     merge sites is SAFE: boxed state is invariant across branch
     #     boundaries and needs no phi/merge policy.
     #   - `restore_locals(LocalsSnapshot)` and `restore_locals(Hash)`
     #     DO NOT rewind `@boxed_locals` — doing so would re-hide a box
-    #     that still dominates the current block.
+    #     whose allocation and seed dominate the current block.
     #   - Cross-function scope transitions (nested proc literal body,
     #     block-to-proc body) push/pop `@boxed_locals` via
     #     `push_scope` / `pop_scope`; see scope mgmt below.
@@ -79601,20 +79602,9 @@ module Crystal::HIR
     # registered as POINTER in the LoweringContext.
     #
     # DOMINANCE ENFORCEMENT (I14-monotonic): emits both the count literal
-    # and the PointerMalloc into the function's ENTRY block, regardless
-    # of where `ctx.current_block` currently points. The entry block
-    # dominates every other block in the function, so `box_ptr` is
-    # guaranteed to dominate every subsequent use — including uses in
-    # branch-only paths that never flow through the call site that
-    # triggered the hoist.
-    #
-    # No initial-value seeding: `PointerMalloc` lowers through
-    # `GC_malloc` / `PointerMalloc` builder path which zero-initializes
-    # the allocation, matching LLVM `alloca` + zero-fill semantics. The
-    # first user assignment (e.g. `counter = 0`) emits a PointerStore
-    # through the box at its original source site; subsequent reads
-    # PointerLoad. This avoids the seed-dominance problem (an initial
-    # store at a branch-local site would not dominate the other branch).
+    # and the PointerMalloc into the function's ENTRY block. The entry
+    # block dominates every other block in the function, so `box_ptr`
+    # dominates every subsequent use.
     #
     # Currently UNUSED — `hoist_box_for_local` wires it in the atomic
     # final P1 commit (step 8+ of closure_env_abi_p1_state.md).
@@ -79637,17 +79627,19 @@ module Crystal::HIR
     # branches, plan §5.1.1.b).
     #
     # Idempotent: returns the existing box_ptr if `name` is already
-    # boxed, otherwise allocates a fresh box via `emit_capture_box` and
-    # registers the binding. Box allocation is emitted into the function
-    # entry block (see `emit_capture_box`); no initial-value seeding.
+    # boxed, otherwise allocates a fresh box via `emit_capture_box`,
+    # seeds it from `initial_value`, and registers the binding. Box
+    # allocation is emitted into the function entry block (see
+    # `emit_capture_box`); the seed store is emitted at the original
+    # local binding site, which must still be in the entry block.
     #
-    # INVARIANT ENFORCEMENT (I14-monotonic): dominance is enforced by
-    # the helper itself, not by the caller — `box_ptr` is always
-    # emitted in the entry block regardless of `ctx.current_block` at
-    # call time. This means the helper is SAFE to invoke from inside a
-    # branch (e.g., a proc literal lowered inside an `if` body). Values
-    # in the box before any user-level assignment are zeroed by
-    # GC_malloc.
+    # INVARIANT ENFORCEMENT (I14-monotonic): allocation dominance is
+    # enforced by emitting `box_ptr` in the entry block. Value
+    # dominance is enforced by rejecting late branch-local hoists:
+    # callers must invoke this at the captured local's declaration /
+    # first assignment site before branch lowering. A proc literal
+    # lowered inside a branch must not discover and hoist an already
+    # initialized parent local at that point.
     #
     # Currently UNUSED — wired in the atomic final P1 commit by the
     # rewrite of lower_proc_literal / lower_block_to_proc (steps 8-9 of
@@ -79658,12 +79650,21 @@ module Crystal::HIR
       ctx : LoweringContext,
       name : String,
       payload_type : TypeRef,
+      initial_value : ValueId,
     ) : ValueId
       if existing = ctx.lookup_boxed_local(name)
         return existing.box_ptr
       end
 
+      unless ctx.current_block == ctx.function.entry_block
+        raise "hoist_box_for_local for #{name} must run in the function entry block; " \
+              "P1 must predeclare captured boxes before branch/case/loop lowering"
+      end
+
       box_ptr = emit_capture_box(ctx, payload_type)
+      seed = PointerStore.new(ctx.next_id, payload_type, box_ptr, initial_value)
+      ctx.emit(seed)
+      ctx.register_type(seed.id, payload_type)
       ctx.register_boxed_local(name, box_ptr, payload_type)
       box_ptr
     end
