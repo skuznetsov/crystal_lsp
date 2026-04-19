@@ -1,6 +1,42 @@
 # Crystal V2 Bootstrap — TODO (Updated 2026-04-14)
 
 ## Current Status
+- **Fresh closure-env Proc ABI checkpoint: spawn/fiber fanout captures now use
+  per-instance heap Proc envs instead of shared/global closure cells (2026-04-19,
+  current session)**:
+  - trustworthy setup:
+    - `src/compiler/hir/ast_to_hir.cr`
+      - proc literals now emit `HIR::MakeProc(fn_ptr, env_ptr)`
+      - captureful proc bodies receive hidden `__closure_env`
+      - zero-capture proc bodies keep raw signatures for `Proc#pointer` runtime callbacks
+      - mutable captures are boxed per activation; loop/block params allocate boxes in the current block
+      - generic runtime-yield block callbacks remain raw; heap block-proc is targeted to `spawn`/`Fiber`
+    - `src/compiler/mir/hir_to_mir.cr`
+      - `Proc#call` loads `{fn, env}` from the heap Proc object
+      - dispatch is `env == null ? fn(args...) : fn(env, args...)`
+      - Proc accessors load `pointer`, `closure_data`, and `closure?` from object fields
+      - call return type is inferred from receiver `Proc(...)` `type_params.last`, not generic placeholder `R`
+  - decisive evidence:
+    - `crystal build src/crystal_v2.cr -o bin/crystal_v2 --error-trace`
+      - result: success with only the known host stdlib `Random::DEFAULT` warning
+    - `regression_tests/spawn_capture_block_param_repro.sh bin/crystal_v2`
+      - result: fixed-state exit `1`; prints `probe_block_param_ok` and `probe_helper_arg_ok`
+    - `regression_tests/conditional_closure_capture_repro.sh bin/crystal_v2`
+      - result: fixed-state exit `1`; reports `result=12, counter=12`
+    - `regression_tests/escaping_branch_closure_capture_repro.sh bin/crystal_v2`
+      - result: fixed-state exit `1`; reports branch-local proc escaped and mutated boxed counter
+    - `scripts/run_safe.sh` checks are green for:
+      - `regression_tests/test_proc_basic.cr`
+      - `regression_tests/test_blocks.cr`
+      - `regression_tests/channel_ping_pong_repro.cr`
+      - `regression_tests/tuple_int32_int64_layout.cr`
+      - `regression_tests/combined/test_complex_closures_capture.cr`
+    - `regression_tests/run_combined.sh bin/crystal_v2 4`
+      - result: `26 passed, 5 failed out of 31`
+      - all five failures reproduce on pre-fix `ede53ed8`, so they are baseline issues, not regressions from this Proc ABI change
+  - practical boundary:
+    - this is not yet a universal heap-backed block callback ABI; raw runtime-yield callbacks are intentionally preserved
+    - remaining combined failures are separate hash/generic/join frontiers
 - **Fresh HIR int-iterator checkpoint: fixed-format float printing now emits the integer prefix for Ryu `d2fixed_buffered_n` instead of skipping the `Int#downto` block body (2026-04-14, current session)**:
   - trustworthy setup:
     - `src/compiler/hir/ast_to_hir.cr`

@@ -3,6 +3,34 @@
 Updated: 2026-04-11
 Context: compiler/bootstrap/stage2-stability
 
+[LM-456|verified]: The spawn/fiber fanout capture bug was a real Proc ABI
+carrier issue in V2, but the verified bounded fix is heap-backed Proc values
+rather than by-value `%__crystal_proc` storage or a Fiber side channel. Proc
+values stay pointer-sized; `HIR::MakeProc(fn_ptr, env_ptr)` materializes a
+heap object `{fn_ptr, env_ptr}`; MIR `Proc#call` loads both fields and dispatches
+as `env == null ? fn(args...) : fn(env, args...)`. Zero-capture proc literals
+keep raw function signatures so `Proc#pointer` still works for runtime
+callbacks such as `Fiber#makecontext`; captureful proc literals receive hidden
+`__closure_env`. Mutable lexical captures are boxed per activation: parent
+locals predeclared by the owner-body scan use an entry-dominating box, while
+loop/block-parameter captures allocate in the current block to avoid sharing one
+box across all iterations. The canonical known-red
+`regression_tests/spawn_capture_block_param_repro.sh` now reaches its fixed
+state (`probe_block_param_ok`, `probe_helper_arg_ok`, script exit 1), and the
+conditional/escaping branch capture reducers both report `12/12` fixed states.
+The important adversary was `regression_tests/combined/test_complex_closures_capture.cr`:
+it initially crashed because generic `Proc#call` returned placeholder `R`; MIR
+now infers concrete call return type from receiver `Proc(...)` `type_params.last`.
+Verification: compiler build green with only the known `Random::DEFAULT` warning;
+`test_proc_basic`, `test_blocks`, `channel_ping_pong_repro`,
+`tuple_int32_int64_layout`, and `combined/test_complex_closures_capture` pass
+under `scripts/run_safe.sh`; `run_combined.sh` is 26/31 with all five failures
+reproduced on pre-fix `ede53ed8`, so they are baseline issues. Boundary:
+generic runtime-yield block callbacks remain raw function pointers; heap
+block-proc materialization is targeted to proc literals and spawn/Fiber
+block arguments, not a universal block callback ABI. {F/G/R: 0.92/0.72/0.94}
+[verified]
+
 [LM-455|verified]: The `bench_crystal.cr` `Indexable(Tuple(Float64))#size`
 frontier was a two-stage static value receiver bug, not a missing stdlib
 method. The decisive reducer was `t = {1.25_f64}; v = t.fetch(0) { 0.0 };

@@ -118,11 +118,13 @@ Verification so far:
   /tmp/test_complex_closures_capture 5 512` — prints `closures_capture_all_ok`
   after the `Proc#call` return-type fix.
 - `regression_tests/run_combined.sh bin/crystal_v2 4` was attempted after
-  cleaning old result files. The runner/session did not return a usable final
-  aggregate in Codex tooling; generated partial results showed existing
-  non-Proc mismatches in `test_collections`, `test_edge_hash_complex`, and
-  `test_complex_generic_dispatch`. The Proc/capture combined file above was
-  rerun directly and passes.
+  cleaning old result files. Final result: 26 passed, 5 failed out of 31.
+  Failures: `test_collections`, `test_edge_hash_complex`,
+  `test_complex_generic_dispatch`, `test_generics_unions`, `test_strings_join`.
+  A temporary `ede53ed8` worktree with a freshly built `/tmp/cv2_ede53ed8`
+  reproduced all five failures with the same signatures, so they are baseline
+  issues rather than regressions from `5696b6de`. The Proc/capture combined
+  file above was rerun directly and passes.
 
 Important caveat for Claude/Codex continuation:
 
