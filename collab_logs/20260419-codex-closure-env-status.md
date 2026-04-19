@@ -643,3 +643,61 @@ Note for Claude/Codex continuation:
 - The closure-env ABI branch remains untouched by this checkpoint.
 - The next deterministic full-suite frontier is now exactly
   `test_closure_ref`.
+
+## 2026-04-19 Codex checkpoint: closure_ref full-suite red closed
+
+Status: `test_closure_ref` is green, and the current branch reaches a full
+`run_all.sh` green baseline.
+
+Root cause:
+
+- The caller passed a raw block function pointer into `call_block(&block)`.
+- The callee-side `Proc#call` path already used the heap-backed Proc shape and
+  loaded `fn` and `env` from offsets `0` and `8`.
+- That mismatch made `call_block` treat `@__crystal_block_proc_1` code bytes as
+  Proc object storage, causing the previous bus error.
+- After heap materialization, the first attempt still printed `10`: inline
+  block-argument binding created the capture box, but `pop_scope` restored
+  `@boxed_locals` and hid the box from the parent read after the call.
+
+Fix:
+
+- `src/compiler/hir/ast_to_hir.cr` now decides block-argument carrier shape via
+  `block_arg_requires_heap_proc?`.
+- The predicate keeps the existing spawn/Fiber heap path and also detects defs
+  that call their block parameter, using the existing AST scan plus a bounded
+  source-span fallback for direct `block.call` bodies.
+- Late call lowering, inline-yield fallback, and inline block-param binding all
+  use the same predicate.
+- `LoweringContext#pop_scope` keeps `@boxed_locals` monotonic across
+  same-function scopes; nested proc/block bodies already use separate
+  `LoweringContext` instances.
+
+Verification:
+
+- `LIBRARY_PATH=/opt/homebrew/lib bin/crystal_v2 regression_tests/test_closure_ref.cr -o /tmp/test_closure_ref && scripts/run_safe.sh /tmp/test_closure_ref 5 512`
+  — prints `42`.
+- Adjacent smokes `test_proc_basic`, `test_blocks`, and `test_blocks_closures`
+  compile and run under `scripts/run_safe.sh`.
+- `LIBRARY_PATH=/opt/homebrew/lib regression_tests/run_mini_oracles.sh bin/crystal_v2`
+  — `Mini-oracles: 6 passed, 0 failed out of 6 tests`.
+- `LIBRARY_PATH=/opt/homebrew/lib regression_tests/run_combined.sh bin/crystal_v2 4`
+  — `31 passed, 0 failed out of 31`.
+- `LIBRARY_PATH=/opt/homebrew/lib regression_tests/run_all.sh bin/crystal_v2`
+  — `146 passed, 0 failed out of 146 tests`.
+
+Adversary note:
+
+- One earlier parallel `run_combined.sh` attempt reported
+  `test_control_flow` compile failure with `ExprId out of bounds`.
+- Focused compile of `regression_tests/combined/test_control_flow.cr` passed,
+  and a clean repeated combined run passed `31/31`.
+- Treat that as a non-reproduced transient unless it appears again.
+
+Boundary:
+
+- This is a bounded full-suite closure-ref fix, not the broader closure-env ABI
+  P1 atomic flip.
+- Next shared frontier is to resume the tracked closure-env ABI/P1 work from
+  the current green baseline, preserving the known-red guards outside
+  `run_all.sh`.

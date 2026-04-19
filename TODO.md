@@ -1,6 +1,38 @@
 # Crystal V2 Bootstrap — TODO (Updated 2026-04-19)
 
 ## Current Status
+- **Fresh closure-ref heap Proc checkpoint (2026-04-19, current session)**:
+  - trustworthy setup:
+    - `src/compiler/hir/ast_to_hir.cr`
+      - block arguments are now materialized as heap-backed Proc objects when
+        the target def actually calls the block parameter
+      - `def_contains_block_call?` keeps its AST scan and adds a bounded
+        source-span fallback for direct `block.call` bodies that the current
+        AST traversal can miss
+      - boxed locals remain monotonic across same-function scopes, so a box
+        created while materializing a block Proc is still visible to parent
+        reads after inline block-argument binding restores locals
+    - no stdlib edits and no broad Proc ABI flip
+  - decisive evidence:
+    - `LIBRARY_PATH=/opt/homebrew/lib bin/crystal_v2 regression_tests/test_closure_ref.cr -o /tmp/test_closure_ref && scripts/run_safe.sh /tmp/test_closure_ref 5 512`
+      - result: prints `42`
+    - adjacent Proc/block smokes:
+      - `test_proc_basic`, `test_blocks`, and `test_blocks_closures` all
+        compile and run under `scripts/run_safe.sh`
+    - `LIBRARY_PATH=/opt/homebrew/lib regression_tests/run_mini_oracles.sh bin/crystal_v2`
+      - result: `Mini-oracles: 6 passed, 0 failed out of 6 tests`
+    - `LIBRARY_PATH=/opt/homebrew/lib regression_tests/run_combined.sh bin/crystal_v2 4`
+      - result: `31 passed, 0 failed out of 31`
+      - note: one earlier parallel run reported a transient
+        `test_control_flow` `ExprId out of bounds`; focused compile and a
+        clean repeated combined run both passed
+    - `LIBRARY_PATH=/opt/homebrew/lib regression_tests/run_all.sh bin/crystal_v2`
+      - result: `146 passed, 0 failed out of 146`
+  - practical boundary:
+    - this closes the current full-suite red `test_closure_ref` without
+      claiming the broader closure-env ABI is complete
+    - next frontier returns to the tracked closure-env ABI/P1 work and the
+      known-red guards outside `run_all.sh`
 - **Fresh abstract module self-dispatch checkpoint (2026-04-19, current
   session)**:
   - trustworthy setup:

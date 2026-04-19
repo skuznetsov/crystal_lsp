@@ -91,9 +91,8 @@ module Crystal::HIR
     #   - `restore_locals(LocalsSnapshot)` and `restore_locals(Hash)`
     #     DO NOT rewind `@boxed_locals` — doing so would re-hide a box
     #     whose allocation and seed dominate the current block.
-    #   - Cross-function scope transitions (nested proc literal body,
-    #     block-to-proc body) push/pop `@boxed_locals` via
-    #     `push_scope` / `pop_scope`; see scope mgmt below.
+    #   - Nested proc/block bodies use separate LoweringContext instances,
+    #     so boxed-local state does not cross function boundaries.
     record BoxedLocal,
       box_ptr      : ValueId,
       payload_type : TypeRef
@@ -228,9 +227,7 @@ module Crystal::HIR
       if debug_snapshot = @debug_local_snapshots.pop?
         @debug_local_ids = debug_snapshot
       end
-      if boxed_snapshot = @boxed_locals_snapshots.pop?
-        @boxed_locals = boxed_snapshot
-      end
+      @boxed_locals_snapshots.pop?
       if self_id = @locals["self"]?
         @self_id = self_id
       else
@@ -33884,7 +33881,48 @@ module Crystal::HIR
       block_name = (safe_slice_to_string(name_slice) || "")
       return false if block_name.empty?
       return false unless body = node.body
-      with_arena(resolved_arena) { contains_block_call?(body, block_name) }
+      return true if with_arena(resolved_arena) { contains_block_call?(body, block_name) }
+
+      if source = source_for_arena(resolved_arena)
+        if snippet = slice_source_for_span(node.span, source)
+          stripped = strip_single_line_comments(snippet)
+          return true if stripped.includes?("#{block_name}.call")
+        end
+      end
+
+      false
+    end
+
+    private def block_arg_requires_heap_proc?(
+      target_name : String,
+      base_name : String? = nil,
+      method_name : String? = nil,
+    ) : Bool
+      return true if target_name.includes?("Fiber") ||
+                     base_name.try(&.includes?("Fiber")) ||
+                     method_name == "spawn" ||
+                     base_name.try(&.starts_with?("spawn")) ||
+                     target_name.starts_with?("spawn")
+
+      candidates = [] of String
+      candidates << target_name unless target_name.empty?
+      stripped = strip_type_suffix(target_name)
+      candidates << stripped if stripped != target_name
+      if base_name && !base_name.empty?
+        candidates << base_name
+        base_stripped = strip_type_suffix(base_name)
+        candidates << base_stripped if base_stripped != base_name
+      end
+
+      candidates.each do |candidate|
+        next unless def_node = @function_defs[candidate]?
+        arena = @function_def_arenas[candidate]? ||
+                @function_def_arenas[strip_type_suffix(candidate)]? ||
+                @arena
+        return true if def_contains_block_call?(def_node, arena)
+      end
+
+      false
     end
 
     private def def_accepts_block_param?(node : CrystalV2::Compiler::Frontend::DefNode) : Bool
@@ -67066,11 +67104,7 @@ module Crystal::HIR
           if block_id
             owner_arena = call_arena
             block_arena_for_proc = @block_node_arenas[blk_node.object_id]? || resolve_arena_for_block(blk_node, owner_arena) || owner_arena
-            heap_block_proc = mangled_method_name.includes?("Fiber") ||
-                              base_method_name.includes?("Fiber") ||
-                              method_name == "spawn" ||
-                              base_method_name.starts_with?("spawn") ||
-                              mangled_method_name.starts_with?("spawn")
+            heap_block_proc = block_arg_requires_heap_proc?(mangled_method_name, base_method_name, method_name)
             proc_id = lower_block_to_proc(ctx, blk_node, block_param_types_for_proc, block_arena_for_proc, heap_block_proc)
             args << proc_id
             if env_get("DEBUG_WITH_BRACE_CALL") && (method_name == "with_brace_newlines_skipped" || base_method_name.includes?("with_brace_newlines_skipped") || mangled_method_name.includes?("with_brace_newlines_skipped"))
@@ -73824,7 +73858,7 @@ module Crystal::HIR
         # Heuristic param-count checks are insufficient because hidden block-callback plumbing
         # is not reliably represented in lowered function params for all yield paths.
         block_arena_for_proc = @block_node_arenas[block.object_id]? || resolve_arena_for_block(block, caller_arena) || caller_arena
-        heap_block_proc = inline_key.includes?("Fiber") || base_inline_name.includes?("Fiber")
+        heap_block_proc = block_arg_requires_heap_proc?(inline_key, base_inline_name)
         proc_id = lower_block_to_proc(ctx, block, block_param_types, block_arena_for_proc, heap_block_proc)
         fallback_args << proc_id
         # `inline_key` can still be a bare `Owner#m` when the yield inline path bails out early.
@@ -74249,7 +74283,7 @@ module Crystal::HIR
                   # while materializing the Proc so capture detection sees outer writes.
                   saved_inline_locals = ctx.save_locals
                   ctx.restore_locals(caller_locals)
-                  heap_block_proc = (inline_key.includes?("Fiber") || base_inline_name.includes?("Fiber")) && param_name == "proc"
+                  heap_block_proc = block_arg_requires_heap_proc?(inline_key, base_inline_name, method_name)
                   proc_id = lower_block_to_proc(ctx, block, block_param_types, block_arena_for_proc, heap_block_proc)
                   ctx.restore_locals(saved_inline_locals)
                   ctx.register_local(param_name, proc_id)
