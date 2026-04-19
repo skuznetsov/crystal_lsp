@@ -740,16 +740,42 @@ module Crystal
         pointer_word_bytes_i32
       end
 
-      # Skeleton helper for Commit P1: allocate a 16-byte Proc OBJECT on the
-      # heap and initialise its two fields. Currently unused.
+      # P1: allocate a 16-byte Proc OBJECT on the heap and initialise its
+      # two fields { fn_ptr @0, env_ptr @proc_env_offset }.
       #
-      # Intent (P1 wiring):
-      #   ptr = alloc(proc_object_size, proc_object_alignment)
+      # Wiring order:
+      #   ptr = alloc(ARC, TypeRef::POINTER, proc_object_size, proc_object_alignment)
       #   store fn_ptr  at ptr + proc_fn_offset
       #   store env_ptr at ptr + proc_env_offset
       #   return ptr
+      #
+      # Called by lower_make_proc (HIR::MakeProc) and any future site that
+      # needs to materialise a user-visible Proc value. See invariant I2.
       private def allocate_proc_object(fn_ptr : ValueId, env_ptr : ValueId) : ValueId
-        raise "allocate_proc_object: not wired yet (see docs/closure_env_abi_design.md §10)"
+        builder = @builder.not_nil!
+        obj_ptr = builder.alloc(
+          MemoryStrategy::ARC,
+          TypeRef::POINTER,
+          proc_object_size.to_u64,
+          proc_object_alignment.to_u32
+        )
+        fn_slot  = builder.gep(obj_ptr, [proc_fn_offset.to_u32],  TypeRef::POINTER)
+        env_slot = builder.gep(obj_ptr, [proc_env_offset.to_u32], TypeRef::POINTER)
+        builder.store(fn_slot, fn_ptr)
+        builder.store(env_slot, env_ptr)
+        builder.rc_inc(obj_ptr)
+        obj_ptr
+      end
+
+      # P1 — lower HIR::MakeProc to a 16-byte heap Proc object via
+      # allocate_proc_object. Dispatched from the main lower_instruction
+      # case. Currently only emitted by HIR after P1 lower_proc_literal /
+      # lower_block_to_proc rewrite; while additive it stays dead code,
+      # which is safe — no HIR site creates MakeProc yet.
+      private def lower_make_proc(mp : HIR::MakeProc) : ValueId
+        fn_ptr_val  = get_value(mp.fn_ptr)
+        env_ptr_val = get_value(mp.env_ptr)
+        allocate_proc_object(fn_ptr_val, env_ptr_val)
       end
 
       # Capture-env layout helpers (P1) — mirror HIR closure_env_offsets/
@@ -1573,6 +1599,8 @@ module Crystal
             lower_copy(hir_value)
           when HIR::MakeClosure
             lower_closure(hir_value)
+          when HIR::MakeProc
+            lower_make_proc(hir_value)
           when HIR::FuncPointer
             lower_func_pointer(hir_value)
           when HIR::Yield
@@ -1951,6 +1979,7 @@ module Crystal
         when HIR::ClassVarSet         then [inst.value]
         when HIR::Raise               then inst.exception ? [inst.exception.not_nil!] : [] of HIR::ValueId
         when HIR::MakeClosure         then inst.captures.map(&.value_id)
+        when HIR::MakeProc            then [inst.fn_ptr, inst.env_ptr]
         when HIR::Yield               then inst.args.dup
         when HIR::StringInterpolation then inst.parts.dup
         else                               [] of HIR::ValueId
