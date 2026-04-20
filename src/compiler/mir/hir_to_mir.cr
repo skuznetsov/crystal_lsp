@@ -5468,6 +5468,12 @@ module Crystal
       end
 
       private def infer_block_param_id(hir_func : HIR::Function) : HIR::ValueId?
+        # HIR lowering preserves the AST `&block` marker. Prefer that explicit
+        # carrier metadata before falling back to type-shape heuristics.
+        hir_func.params.each do |param|
+          return param.id if param.is_block
+        end
+
         # Prefer explicit Proc-typed param if present.
         hir_func.params.reverse_each do |param|
           if desc = @hir_module.get_type_descriptor(param.type)
