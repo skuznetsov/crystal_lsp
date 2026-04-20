@@ -398,6 +398,9 @@
       - result: `p1_ir_shape_ok`; HIR/LLVM shape still matches the current
         hybrid boundary (`make_closure` metadata, `make_proc`, pointer-shaped
         Proc values, env-first captured block body)
+    - `regression_tests/p1_hybrid_boundary_guard.sh`
+      - result: `p1_hybrid_boundary_ok`; source-level guard confirms the
+        intentional pre-cleanup anchors are still present and documented
     - `scripts/run_safe.sh` checks are green for:
       - `regression_tests/test_proc_basic.cr`
       - `regression_tests/test_blocks.cr`

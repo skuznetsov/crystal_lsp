@@ -858,3 +858,37 @@ Boundary:
 - `@proc_captures_by_value`, `@closure_ref_cells`, and the dual-mode
   `lower_block_to_proc` legacy path remain live and should not be removed
   outside a coupled ABI cleanup.
+
+## 2026-04-19 Codex checkpoint: hybrid boundary source guard added
+
+Status: additive source-level regression guard only. No compiler behavior
+changed.
+
+Applied:
+
+- Added `regression_tests/p1_hybrid_boundary_guard.sh`.
+- The guard intentionally checks for the current mixed state:
+  - `@proc_captures_by_value` declaration and hidden capture append paths.
+  - `@closure_ref_cells` / `@closure_ref_prefer_cell` read/write fallback
+    anchors.
+  - `lower_block_to_proc` dual-mode split: heap path through `MakeProc`, legacy
+    raw callback path through closure cells and `FuncPointer`.
+  - Plan/TODO/collab docs still mark these as intentional pre-cleanup anchors.
+
+Verification:
+
+- `bash -n regression_tests/p1_hybrid_boundary_guard.sh`
+  — clean.
+- `regression_tests/p1_hybrid_boundary_guard.sh; echo HYBRID_RC:$?`
+  — `p1_hybrid_boundary_ok`, `HYBRID_RC:0`.
+- `regression_tests/p1_ir_shape_check.sh bin/crystal_v2; echo P1_SHAPE_RC:$?`
+  — `p1_ir_shape_ok captured_fn=__crystal_block_proc_1`, `P1_SHAPE_RC:0`.
+- `git diff --check`
+  — clean.
+
+Boundary:
+
+- This guard is presence-based by design. It is not semantic proof that legacy
+  paths are correct.
+- When the coupled closure-env ABI cleanup intentionally removes these anchors,
+  this guard and the status docs must be updated in the same commit.
