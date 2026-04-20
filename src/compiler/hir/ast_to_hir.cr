@@ -21335,7 +21335,7 @@ module Crystal::HIR
       return_type = TypeRef::VOID
 
       # Collect parameter types for name mangling
-      param_infos = [] of Tuple(String, TypeRef)
+      param_infos = [] of Tuple(String, TypeRef, Bool)
       param_default_literals = [] of String?
       param_type_names = [] of String? # Track type annotation names for enum detection
       param_literal_flags = [] of Bool
@@ -21464,7 +21464,7 @@ module Crystal::HIR
                                      end
           local_inference_type = exact_runtime_param_type
           param_type_map[param_name] = local_inference_type
-          param_infos << {param_name, exact_runtime_param_type}
+          param_infos << {param_name, exact_runtime_param_type, param.is_block}
           param_default_literals << extract_param_default_literal(param)
           enum_name = call_index < call_enum_names.size ? call_enum_names[call_index] : nil
           param_type_names << (type_ann_str || enum_name)
@@ -21591,7 +21591,7 @@ module Crystal::HIR
         if splat_type != TypeRef::VOID
           param_type_map[splat_param_name.not_nil!] = splat_type
           if idx = splat_param_info_index
-            param_infos[idx] = {splat_param_name.not_nil!, splat_type}
+            param_infos[idx] = {splat_param_name.not_nil!, splat_type, false}
           end
           if idx = splat_param_types_index
             param_types[idx] = splat_type
@@ -21702,8 +21702,8 @@ module Crystal::HIR
       end
 
       # Lower explicit parameters.
-      param_infos.each_with_index do |(param_name, param_type), idx|
-        hir_param = func.add_param(param_name, param_type)
+      param_infos.each_with_index do |(param_name, param_type, is_block), idx|
+        hir_param = func.add_param(param_name, param_type, is_block: is_block)
         if default_lit = param_default_literals[idx]?
           hir_param.default_literal = default_lit
           func.set_param_default_literal(hir_param.index, default_lit)
@@ -42336,7 +42336,7 @@ module Crystal::HIR
       end
 
       # Lower parameters
-      param_infos = [] of Tuple(String, TypeRef)
+      param_infos = [] of Tuple(String, TypeRef, Bool)
       param_default_literals = [] of String?
       param_types = [] of TypeRef
       param_type_names = [] of String? # Track type annotation names for enum detection
@@ -42444,7 +42444,7 @@ module Crystal::HIR
                                        end
             local_inference_type = exact_runtime_param_type
             param_type_map[param_name] = local_inference_type
-            param_infos << {param_name, exact_runtime_param_type}
+            param_infos << {param_name, exact_runtime_param_type, param.is_block}
             param_default_literals << extract_param_default_literal(param)
             # Track type annotation name for enum detection
             enum_name = call_index < call_enum_names.size ? call_enum_names[call_index] : nil
@@ -42554,7 +42554,7 @@ module Crystal::HIR
         if splat_type != TypeRef::VOID
           param_type_map[splat_param_name.not_nil!] = splat_type
           if idx = splat_param_info_index
-          param_infos[idx] = {splat_param_name.not_nil!, splat_type}
+            param_infos[idx] = {splat_param_name.not_nil!, splat_type, false}
           end
           if idx = splat_param_types_index
             param_types[idx] = splat_type
@@ -42699,8 +42699,8 @@ module Crystal::HIR
       set_function_definition_location(func, @arena, node.span)
       ctx = LoweringContext.new(func, @module, @arena)
 
-      param_infos.each_with_index do |(param_name, param_type), idx|
-        hir_param = func.add_param(param_name, param_type)
+      param_infos.each_with_index do |(param_name, param_type, is_block), idx|
+        hir_param = func.add_param(param_name, param_type, is_block: is_block)
         if default_lit = param_default_literals[idx]?
           hir_param.default_literal = default_lit
           func.set_param_default_literal(hir_param.index, default_lit)

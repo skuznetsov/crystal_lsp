@@ -42,6 +42,12 @@ if ! grep -Eq '%[0-9]+ = yield' "$OUT.hir"; then
   exit 1
 fi
 
+if ! grep -Eq 'func @reducer\(%[0-9]+: [0-9]+ \[block\]\)' "$OUT.hir"; then
+  echo "p1 no-prelude yield carrier regression: HIR block parameter metadata missing" >&2
+  grep -n 'func @reducer' "$OUT.hir" >&2 || true
+  exit 1
+fi
+
 if ! grep -Eq 'func_pointer @__crystal_block_proc_' "$OUT.hir"; then
   echo "p1 no-prelude yield carrier regression: raw block FuncPointer was not emitted" >&2
   exit 1

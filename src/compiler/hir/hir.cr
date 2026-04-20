@@ -333,10 +333,11 @@ module Crystal::HIR
   class Parameter < Value
     getter index : Int32
     getter name : String
+    getter is_block : Bool
     # Default literal value for optional params (e.g., "10" for base : Int = 10)
     property default_literal : String? = nil
 
-    def initialize(id : ValueId, type : TypeRef, @index : Int32, @name : String)
+    def initialize(id : ValueId, type : TypeRef, @index : Int32, @name : String, @is_block : Bool = false)
       super(id, type)
       # Parameters come from outside, conservative lifetime
       @lifetime = LifetimeTag::HeapEscape
@@ -344,6 +345,7 @@ module Crystal::HIR
 
     def to_s(io : IO) : Nil
       io << "%" << @id << " = param " << @index << " \"" << @name << "\" : " << @type.id
+      io << " [block]" if @is_block
     end
   end
 
@@ -1309,6 +1311,7 @@ module Crystal::HIR
     @param_type_ids : Array(TypeId)
     @param_names : Array(String)
     @param_default_literals : Array(String?)
+    @param_is_blocks : Array(Bool)
 
     def initialize(id : FunctionId, name : String, return_type : TypeRef)
       @id = id
@@ -1324,6 +1327,7 @@ module Crystal::HIR
       @param_type_ids = [] of TypeId
       @param_names = [] of String
       @param_default_literals = [] of String?
+      @param_is_blocks = [] of Bool
       @definition_location = nil
 
       # Create entry block and function scope
@@ -1368,7 +1372,8 @@ module Crystal::HIR
           @param_ids.unsafe_fetch(i),
           TypeRef.new(@param_type_ids.unsafe_fetch(i)),
           i,
-          @param_names.unsafe_fetch(i)
+          @param_names.unsafe_fetch(i),
+          @param_is_blocks[i]? || false
         )
         if default_literal = @param_default_literals.unsafe_fetch(i)
           param.default_literal = default_literal
@@ -1379,12 +1384,13 @@ module Crystal::HIR
       result
     end
 
-    def add_param(name : String, type : TypeRef) : Parameter
-      param = Parameter.new(next_value_id, type, @param_ids.size, name)
+    def add_param(name : String, type : TypeRef, is_block : Bool = false) : Parameter
+      param = Parameter.new(next_value_id, type, @param_ids.size, name, is_block)
       @param_ids << param.id
       @param_type_ids << param.type.id
       @param_names << param.name
       @param_default_literals << param.default_literal
+      @param_is_blocks << param.is_block
       param
     end
 
@@ -1430,6 +1436,7 @@ module Crystal::HIR
       params.each do |param|
         io << ", " unless first_param
         io << "%" << param.id << ": " << param.type.id
+        io << " [block]" if param.is_block
         first_param = false
       end
       io << ") -> " << @return_type.id << " {\n"
