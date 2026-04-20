@@ -33863,6 +33863,18 @@ module Crystal::HIR
       {node.object_id, arena.object_id}
     end
 
+    private def trace_implicit_block_call_diagnostic(
+      node : CrystalV2::Compiler::Frontend::DefNode,
+      block_param : CrystalV2::Compiler::Frontend::Parameter,
+      block_name : String,
+    ) : Nil
+      return unless env_has?("CRYSTAL_V2_BLOCK_CALL_DIAGNOSTIC")
+      return unless block_param.type_annotation.nil?
+
+      def_name = node.name ? (safe_slice_to_string(node.name) || "<anonymous>") : "<anonymous>"
+      STDERR.puts "[CLOSURE_ABI] implicit &#{block_name} with .call in #{def_name}: raw fnptr and heap Proc carriers are not unified; alias tracking is not implemented."
+    end
+
     private def def_contains_block_call?(node : CrystalV2::Compiler::Frontend::DefNode, arena : CrystalV2::Compiler::Frontend::ArenaLike) : Bool
       resolved_arena = arena_fits_def?(arena, node) ? arena : resolve_arena_for_def(node, arena)
       cache_key = def_contains_block_call_cache_key(node, resolved_arena)
@@ -33883,12 +33895,18 @@ module Crystal::HIR
       block_name = (safe_slice_to_string(name_slice) || "")
       return false if block_name.empty?
       return false unless body = node.body
-      return true if with_arena(resolved_arena) { contains_block_call?(body, block_name) }
+      if with_arena(resolved_arena) { contains_block_call?(body, block_name) }
+        trace_implicit_block_call_diagnostic(node, block_param, block_name)
+        return true
+      end
 
       if source = source_for_arena(resolved_arena)
         if snippet = slice_source_for_span(node.span, source)
           stripped = strip_single_line_comments(snippet)
-          return true if stripped.includes?("#{block_name}.call")
+          if stripped.includes?("#{block_name}.call")
+            trace_implicit_block_call_diagnostic(node, block_param, block_name)
+            return true
+          end
         end
       end
 
