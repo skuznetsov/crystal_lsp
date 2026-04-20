@@ -3,6 +3,27 @@
 Updated: 2026-04-20
 Context: compiler/bootstrap/stage2-stability
 
+[LM-464|verified]: The stage2 `lower_main: exprs=30` timeout has been refined
+to a HIR pending-lowering queue explosion, not a stuck top-level expression.
+Command:
+`DEBUG_MAIN=1 DEBUG_MAIN_PROGRESS_EVERY=1 BOOTSTRAP_STAGE_OUT=/tmp/cv2_bs_s2_dbg
+BOOTSTRAP_CHAIN_STAGES=2 BOOTSTRAP_TIMEOUT_SEC=300 BOOTSTRAP_MEM_MB=4096
+scripts/build_bootstrap_stages.sh --stages 2 --out /tmp/cv2_bs_s2_dbg` showed
+all 30 main expressions start and return; expr 29 took about `9.3s`, expr 30
+took about `80.9s`, and stage2 still timed out. A focused rerun with
+`CRYSTAL_V2_STOP_AFTER_HIR=1 CRYSTAL_V2_PHASE_STATS=1
+CRYSTAL_V2_LOWER_PROGRESS=1 DEBUG_MAIN=1 DEBUG_MAIN_PROGRESS_EVERY=1
+scripts/run_safe.sh /tmp/cv2_bs_s2_dbg/cv2_s1 300 4096 src/crystal_v2.cr -o
+/tmp/cv2_s2_stop_hir_progress` timed out before the STOP_AFTER_HIR gate but
+entered `process_pending_lower_functions`: the queue reached about `78k`
+entries (`idx=9877/78012`, `idx=12022/76438`) and the last visible line was
+`[LOWER] p0 #15800 idx=16137/74341
+name=Array(Array(Array(Array(Array(Array::Frontend::RelatedSpan)))))#inspect$IO`.
+Many visible entries are broad compiler container `#inspect`, `#to_s`, and
+`#object_id` instantiations. Boundary: stop chasing `lower_main` expr 30; next
+work should localize which safety-net/lazy-RTA path admits the pending queue
+explosion before any `s3b+` attempt. {F/G/R: 0.94/0.55/0.96} [verified]
+
 [LM-463|verified]: The first real use of the bootstrap semantic gate stops at
 `s1 -> s2b`, before any HIR/MIR/LLVM comparison is possible. Command:
 `BOOTSTRAP_STAGE_OUT=/tmp/cv2_bs_s2 BOOTSTRAP_CHAIN_STAGES=2

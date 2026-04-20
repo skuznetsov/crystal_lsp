@@ -12,11 +12,37 @@
       - `[KILL] Timeout after 300s (FDs: 12, RSS: 2281984KB)`
       - `/tmp/cv2_bs_s2/cv2_s2` was not produced
       - last stage2 trace reached `lower_main: exprs=30`
+  - refined diagnostic:
+    - rerun with `DEBUG_MAIN=1 DEBUG_MAIN_PROGRESS_EVERY=1` proved
+      `lower_main` reaches and returns from all 30 top-level expressions:
+      - expr 29 (`trace_bootstrap = ...`) returned in about `9.3-9.6s`
+      - expr 30 (`begin STDERR.puts ... cli = ...`) returned in about
+        `80.9-82.5s`
+    - focused no-edit rerun with
+      `CRYSTAL_V2_STOP_AFTER_HIR=1 CRYSTAL_V2_PHASE_STATS=1 CRYSTAL_V2_LOWER_PROGRESS=1`
+      still timed out before the STOP_AFTER_HIR gate, but the log entered
+      `process_pending_lower_functions`:
+      - `/tmp/cv2_s2_stop_hir_progress.log`
+      - timeout: `[KILL] Timeout after 300s (FDs: 12, RSS: 2491424KB)`
+      - pending queue grew to about `78k` entries, then drained slowly:
+        `idx=9877/78012`, `idx=12022/76438`, last visible
+        `idx=16137/74341`
+      - last visible function:
+        `Array(Array(Array(Array(Array(Array::Frontend::RelatedSpan)))))#inspect$IO`
+      - many visible pending entries are broad `#inspect`, `#to_s`, and
+        `#object_id` instantiations over compiler/frontend/HIR/MIR container
+        types
   - practical boundary:
     - this is a timeout/no-progress blocker, not an OOM or crash signature
+    - the current root corridor is no longer `lower_main` expr 30; it is the
+      HIR pending-lowering queue explosion before `STOP_AFTER_HIR`, around
+      `flush_pending_functions` / `process_pending_lower_functions`
     - do not run `s3b+` until the stage2 full-compiler build gets past this
       point or a smaller focused no-prelude/full-prelude reducer explains the
-      `lower_main` stall
+      pending queue explosion
+    - next no-edit diagnostics should inspect why safety-net/lazy-RTA
+      lowering admits so many `#inspect/#to_s/#object_id` instantiations under
+      self-hosted stage1
 - **Bootstrap semantic-equivalence scaffold (2026-04-20, current session)**:
   - trustworthy setup:
     - `scripts/build_bootstrap_stages.sh`
