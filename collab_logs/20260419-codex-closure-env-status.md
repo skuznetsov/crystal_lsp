@@ -1037,3 +1037,52 @@ Conclusion:
 - Process note: after reverting source from a candidate, rebuild
   `bin/crystal_v2` before rerunning suites; otherwise the runner tests a stale
   candidate binary.
+
+## 2026-04-19 Codex checkpoint: MIR Yield carrier guard landed
+
+Status: additive regression guard; no ABI behavior changed.
+
+Applied:
+
+- `src/compiler/mir/hir_to_mir.cr` now marks `lower_yield` with
+  `MIR_YIELD_DISPATCH_MODE: raw_fnptr_only`.
+- `regression_tests/p1_hybrid_boundary_guard.sh` now checks the MIR
+  `lower_yield` window for:
+  - the raw `builder.call_indirect(block_val, args, convert_type(yield_type))`
+    dispatch;
+  - the `raw_fnptr_only` mode marker;
+  - absence of `call_heap_proc` in that window.
+- The guard also checks the plan/TODO/collab text that records the rejected
+  type-only `TypeKind::Proc` heuristic.
+
+Verification:
+
+- `git diff --check` — clean before commit.
+- `bash -n regression_tests/p1_hybrid_boundary_guard.sh` — clean.
+- `LIBRARY_PATH=/opt/homebrew/lib regression_tests/p1_hybrid_boundary_guard.sh`
+  — `p1_hybrid_boundary_ok`.
+- `crystal build src/crystal_v2.cr -o bin/crystal_v2 --error-trace` — green,
+  known `Random::DEFAULT` warning only.
+- `LIBRARY_PATH=/opt/homebrew/lib regression_tests/p1_raw_callback_shape_check.sh bin/crystal_v2`
+  — `p1_raw_callback_shape_ok ...`.
+- `LIBRARY_PATH=/opt/homebrew/lib regression_tests/p1_ir_shape_check.sh bin/crystal_v2`
+  — `p1_ir_shape_ok ...`.
+- `LIBRARY_PATH=/opt/homebrew/lib regression_tests/run_mini_oracles.sh bin/crystal_v2`
+  — `6 passed, 0 failed out of 6 tests`.
+
+Broad baseline:
+
+- `LIBRARY_PATH=/opt/homebrew/lib regression_tests/run_all.sh bin/crystal_v2 4`
+  — `145 passed, 1 failed out of 146 tests`; sole failure was compile-phase
+  `test_generics_stack` with truncated stderr in the suite summary.
+- Focused falsifier:
+  `LIBRARY_PATH=/opt/homebrew/lib bin/crystal_v2 regression_tests/test_generics_stack.cr -o /tmp/test_generics_stack && scripts/run_safe.sh /tmp/test_generics_stack 5 512`
+  compiled, linked, ran, and printed the expected stack outputs ending in
+  `done`.
+
+Conclusion:
+
+- The guard commit is behavior-neutral.
+- The current actionable closure-env boundary remains unchanged: do not rewrite
+  MIR `Yield` based on Proc type alone; future raw callback ABI work needs an
+  explicit carrier/provenance marker.
