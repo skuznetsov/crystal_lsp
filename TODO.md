@@ -65,6 +65,12 @@ Do not retry without new evidence:
 - `rta_method_part_matches_owner?` broad-root helper ancestor filter.
   - No movement on `p2_root_self_replay_no_prelude.sh`: `process_delta=20`,
     `object_replays=28`, `reference_replays=21` unchanged.
+- Combined broad-root immediate-replay gate plus broad-root helper RTA filter.
+  - Synthetic oracle reduced replay counts (`Object 28->16`, `Reference 21->16`)
+    but not `process_delta` or `total`.
+  - 120s `STOP_AFTER_HIR` diagnostic still timed out, with queue reaching `40k`
+    and the same helper families (`Array#to_json`, `Array#inspect`,
+    `Array#to_s`, `Array#exec_recursive`, `Array#hash`, `Hash#...`).
 
 Common lesson: name-family containment can remove individual symptoms but has
 not yet removed the underlying broad fallback demand leak.

@@ -196,6 +196,17 @@ names / replay-generated wrappers are enough to keep the synthetic corridor
 alive even without broad ancestor matching.
 {F/G/R: 0.92/0.45/0.94} [verified]
 
+[LM-478|refuted]: Combining broad-root immediate replay gating with the
+broad-root helper RTA filter is still not enough. Synthetic root oracle replay
+counts moved (`Object 28->16`, `Reference 21->16`) but `process_delta=20` and
+`total=47` did not move. A 120s full `STOP_AFTER_HIR` diagnostic still timed
+out; queue reached `40k`, first deep explosion moved to the deep
+`Array#inspect` owner itself, and top producers remained universal helper
+families (`Array#to_json`, `Array#inspect`, `Array#to_s`,
+`Array#exec_recursive`, `Array#hash`, `Hash#...`). The source patch was
+reverted. Boundary: partial replay reduction is still symptomatic.
+{F/G/R: 0.91/0.55/0.93} [verified]
+
 ## Active Strategy
 
 - Main fast loop: `--no-prelude` oracles and focused STOP_AFTER_HIR budget
