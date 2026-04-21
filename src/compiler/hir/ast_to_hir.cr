@@ -30807,8 +30807,9 @@ module Crystal::HIR
 
     private def function_def_has_splat?(base_name : String) : Bool
       rebuild_function_def_overloads if @function_defs_cache_size != @function_defs.size
-      if @function_def_has_splat.has_key?(base_name)
-        return @function_def_has_splat[base_name]
+      cached = @function_def_has_splat[base_name]?
+      unless cached.nil?
+        return cached
       end
       if base_name.includes?('#') || base_name.includes?('.')
         parts = parse_method_name_compact(base_name)
@@ -30826,8 +30827,8 @@ module Crystal::HIR
       end
       stripped = @function_def_overloads_stripped_by_base[base_name]? || strip_generic_receiver_from_base_name(base_name)
       if stripped != base_name
-        if @function_def_has_splat.has_key?(stripped)
-          value = @function_def_has_splat[stripped]
+        value = @function_def_has_splat[stripped]?
+        unless value.nil?
           @function_def_has_splat[base_name] = value
           return value
         end
@@ -30838,8 +30839,9 @@ module Crystal::HIR
 
     private def function_def_has_double_splat?(base_name : String) : Bool
       rebuild_function_def_overloads if @function_defs_cache_size != @function_defs.size
-      if @function_def_has_double_splat.has_key?(base_name)
-        return @function_def_has_double_splat[base_name]
+      cached = @function_def_has_double_splat[base_name]?
+      unless cached.nil?
+        return cached
       end
       if base_name.includes?('#') || base_name.includes?('.')
         parts = parse_method_name_compact(base_name)
@@ -30857,8 +30859,8 @@ module Crystal::HIR
       end
       stripped = @function_def_overloads_stripped_by_base[base_name]? || strip_generic_receiver_from_base_name(base_name)
       if stripped != base_name
-        if @function_def_has_double_splat.has_key?(stripped)
-          value = @function_def_has_double_splat[stripped]
+        value = @function_def_has_double_splat[stripped]?
+        unless value.nil?
           @function_def_has_double_splat[base_name] = value
           return value
         end
