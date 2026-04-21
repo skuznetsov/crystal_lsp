@@ -186,6 +186,16 @@ exercised without full-prelude bootstrap and gives future fixes a fast movement
 signal before `s1 -> s2b`.
 {F/G/R: 0.93/0.55/0.94} [verified]
 
+[LM-477|refuted]: Filtering `rta_method_part_matches_owner?` so broad
+`Object` / `Reference` receivers do not ancestor-match universal helper method
+parts is not sufficient. The uncommitted experiment built successfully and kept
+fast p2 guards green, but `p2_root_self_replay_no_prelude.sh` was unchanged:
+`process_delta=20`, `total=47`, `object_replays=28`,
+`reference_replays=21`. The patch was reverted. Boundary: exact queued method
+names / replay-generated wrappers are enough to keep the synthetic corridor
+alive even without broad ancestor matching.
+{F/G/R: 0.92/0.45/0.94} [verified]
+
 ## Active Strategy
 
 - Main fast loop: `--no-prelude` oracles and focused STOP_AFTER_HIR budget

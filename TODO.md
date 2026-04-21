@@ -62,6 +62,9 @@ Do not retry without new evidence:
 - Defer/enqueue guard for universal helpers on deep generic owners.
 - RTA replay-depth guard that prevents speculative replay enqueues from marking
   exact `@rta_called_methods`.
+- `rta_method_part_matches_owner?` broad-root helper ancestor filter.
+  - No movement on `p2_root_self_replay_no_prelude.sh`: `process_delta=20`,
+    `object_replays=28`, `reference_replays=21` unchanged.
 
 Common lesson: name-family containment can remove individual symptoms but has
 not yet removed the underlying broad fallback demand leak.
