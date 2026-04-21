@@ -49,6 +49,13 @@ Current diagnosis:
   - `Object#inspect` enqueues `Array#inspect` / `Hash#inspect`
   - `Reference#same?` enqueues `Array#object_id`
   - `Dir::Globber#glob` enqueues some `Hash#each`
+- `DEBUG_RTA_KEEP_REASONS=1` shows the active `process_pending` frontier is
+  dominated by `keep:exact_called`, not by owner/method-part fallback:
+  `Array#to_s`, `Array#object_id`, `Hash#to_s`, `Hash#object_id`,
+  `Hash::Entry#to_s`.
+- `scripts/timeout_sample_lldb.sh` confirms the time is spent in HIR lowering /
+  type-name lookup / string hashing, consistent with excessive admitted wrapper
+  volume rather than a single tight runtime loop.
 
 See `LANDMARKS.md` LM-463..LM-475 for detailed evidence and refutations.
 
@@ -99,11 +106,11 @@ pending-budget oracle.
 
 ## Next Work
 
-1. Verify whether calls on `self` inside root fallback methods should be
-   constrained to the current owner instead of replaying every subclass/generic
-   instantiation.
-2. Attempt a bounded behavior fix only after the root self-replay oracle and
-   existing p2 guards define the expected movement.
+1. Add/inspect exact-called provenance for `record_pending_callee_for_rta` so
+   the source of `keep:exact_called Array#to_s` / `Hash#to_s` is explicit.
+2. Verify whether broad fallback self-calls should mark exact concrete wrapper
+   names as demanded, or whether they should remain virtual/demand-local until a
+   real callsite asks for that concrete owner.
 3. After fast oracles pass, run the `s1 -> s2b` integration gate.
 4. If `s2b` is produced, compare `s1_bootstrap` and `s2b` on the fixed corpus
    before trying `s3b+`.

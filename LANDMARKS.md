@@ -207,6 +207,24 @@ families (`Array#to_json`, `Array#inspect`, `Array#to_s`,
 reverted. Boundary: partial replay reduction is still symptomatic.
 {F/G/R: 0.91/0.55/0.93} [verified]
 
+[LM-479|verified]: RTA keep-reason diagnostics identify the active admission
+mechanism. Env-gated `DEBUG_RTA_KEEP_REASONS=1` reports top keep/defer buckets
+inside `process_pending_lower_functions`. In a 120s STOP_AFTER_HIR diagnostic,
+the first snapshot at `idx=5000 queue=34512` was dominated by
+`keep:exact_called`: `Array#to_s: 1469`, `Array#object_id: 738`,
+`Hash#to_s: 650`, `Hash#object_id: 341`, `Hash::Entry#to_s: 314`.
+Boundary: the next fix must explain why these concrete wrapper names are marked
+exact-called; owner/method-part fallback is not the primary keeper at this
+frontier. {F/G/R: 0.94/0.62/0.94} [verified]
+
+[LM-480|verified]: `scripts/timeout_sample_lldb.sh` is useful on this
+compiler. A 90s sampled STOP_AFTER_HIR run showed hotspots in string hashing,
+`type_ref_for_name_inner`, `type_name_cache_depends_on_context?`, and
+`lower_node/lower_expr`; LLDB backtrace caught nested
+`force_lower_function_for_return_type -> lower_call -> lower_method` activity.
+Boundary: current cost is HIR/type/name work from excessive admitted wrappers,
+not LLVM or a single runtime tight loop. {F/G/R: 0.86/0.55/0.88} [verified]
+
 ## Active Strategy
 
 - Main fast loop: `--no-prelude` oracles and focused STOP_AFTER_HIR budget

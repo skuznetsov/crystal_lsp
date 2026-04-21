@@ -2025,6 +2025,29 @@ module Crystal::HIR
       @live_types.includes?(owner_base)
     end
 
+    private def rta_reason_key(reason : String, name : String) : String
+      base = strip_type_suffix(name)
+      stripped = strip_generic_receiver_from_base_name(base)
+      stripped.empty? ? reason : "#{reason} #{stripped}"
+    end
+
+    private def report_rta_reason_counts(
+      reason : String,
+      idx : Int32,
+      qsize : Int32,
+      counts : Hash(String, Int32),
+      top_n : Int32,
+    ) : Nil
+      return if counts.empty?
+      STDERR.puts "[RTA_REASONS] reason=#{reason} idx=#{idx} queue=#{qsize} top=#{top_n}"
+      counts.to_a
+        .sort_by { |entry| -entry[1] }
+        .first(top_n)
+        .each do |key, count|
+          STDERR.puts "  #{key}: #{count}"
+        end
+    end
+
     # Extract owner base type from function name for RTA filtering.
     # Returns nil for functions that should NEVER be deferred (class methods, top-level, constructors).
     # Returns an exact owner key for instance/class methods that CAN be deferred.
@@ -43814,6 +43837,11 @@ module Crystal::HIR
       pass = 0
       total_lowered = 0
       total_deferred = 0
+      rta_reason_log = env_has?("DEBUG_RTA_KEEP_REASONS")
+      rta_reason_every = env_get("DEBUG_RTA_KEEP_REASONS_EVERY").try(&.to_i?) || 5000
+      rta_reason_top = env_get("DEBUG_RTA_KEEP_REASONS_TOP").try(&.to_i?) || 16
+      rta_reason_next = rta_reason_every
+      rta_reason_counts = Hash(String, Int32).new(0)
       attempt_counts = Hash(String, Int32).new(0)
       # Track which names we've already attempted in this overall run
       # to avoid re-processing the same name when it reappears in the queue.
@@ -43843,19 +43871,37 @@ module Crystal::HIR
           # Lazy RTA: check if this function should be deferred
           if lazy_rta
             owner_base = extract_owner_base_for_rta(name)
+            rta_reason = ""
             should_keep = if owner_base.nil?
+                            rta_reason = "keep:no_owner"
                             true
                           elsif @rta_called_methods.includes?(name)
+                            rta_reason = "keep:exact_called"
                             true
                           elsif rta_live_owner?(owner_base)
                             if mpart = extract_method_part_for_rta(name)
-                              rta_method_part_matches_owner?(mpart, owner_base)
+                              if rta_method_part_matches_owner?(mpart, owner_base)
+                                rta_reason = "keep:live_owner_method_part"
+                                true
+                              else
+                                rta_reason = "defer:method_part"
+                                false
+                              end
                             else
+                              rta_reason = "keep:live_owner_no_method_part"
                               true
                             end
                           else
+                            rta_reason = "defer:owner_not_live"
                             false
                           end
+            if rta_reason_log
+              rta_reason_counts[rta_reason_key(rta_reason, name)] += 1
+              if rta_reason_every > 0 && idx >= rta_reason_next
+                report_rta_reason_counts("process_pending", idx, @pending_function_queue.size, rta_reason_counts, rta_reason_top)
+                rta_reason_next = idx + rta_reason_every
+              end
+            end
             unless should_keep
               unless @rta_deferred_set.includes?(name)
                 @rta_deferred_functions << name
