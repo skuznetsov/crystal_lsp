@@ -301,6 +301,31 @@ Samples identify the next root area rather than the fixed roots:
 Boundary: do not run `s3b+`; next work is a minimal no-prelude oracle for this
 string/range primitive hang. {F/G/R: 0.88/0.42/0.90} [verified]
 
+[LM-486|verified]: Three additional generated-stage2 no-prelude blockers were
+moved forward. First, nilable query calls on concrete containers must preserve
+receiver-owned specializations even when the implementation lives in an
+included module; `Array(Nil | Array(ExprId))#[]?$Int32` now materializes through
+`Indexable#[]?` instead of falling back to `#[]?$Range`. Second, semantic cache
+key hashes must avoid `.hash` on immediate primitive fields while self-hosting;
+`MethodLookupKey` and related keys now combine object ids and booleans with
+integer arithmetic, removing the generated-stage2 `Object#hash` vdispatch
+blocker. Third, `TypeInferenceEngine#primitive_metaclass?` must not rely on
+flow narrowing across `type.is_a?(PrimitiveType) && type.name...`; explicit
+`PrimitiveType` casting makes HIR emit `PrimitiveType#name -> String` followed
+by `String#ends_with?`, not stale `Hash(...HIR::Value)#ends_with?`. Evidence:
+`crystal build src/crystal_v2.cr -o /tmp/cv2_primitive_metaclass_narrow
+--error-trace` exited 0; `CRYSTAL_V2_STOP_AFTER_HIR=1 ... --emit hir --no-link`
+showed the explicit cast and `String#ends_with?$String`;
+`CRYSTAL_V2_STOP_AFTER_MIR=1 ... --emit mir --no-link` exited 0 and showed
+`PrimitiveType#name` plus `call @... : Bool`; full stage2 build produced
+`/tmp/cv2_s2_primitive_metaclass_narrow`; and
+`regression_tests/p2_selfhost_stage2_shape_guard.sh
+/tmp/cv2_primitive_metaclass_narrow` printed
+`p2_selfhost_stage2_shape_guard_ok`. Boundary: generated stage2 still times out
+after parse on minimal no-prelude; latest sample is hot in
+`__crystal_v2_string_eq`, which is the next root target. {F/G/R:
+0.92/0.55/0.93} [verified]
+
 ## Active Strategy
 
 - Main fast loop: `--no-prelude` oracles and focused STOP_AFTER_HIR budget

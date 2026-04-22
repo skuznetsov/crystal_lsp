@@ -93,7 +93,7 @@ module CrystalV2
           end
 
           def hash : UInt64
-            receiver_id.hash ^ name.hash
+            receiver_id ^ name.hash
           end
 
           def ==(other : MethodCandidatesKey) : Bool
@@ -109,15 +109,16 @@ module CrystalV2
 
           def initialize(receiver : Type, @name : String, arg_types : Array(Type), @has_block : Bool)
             @receiver_id = receiver.object_id
-            sig = arg_types.size.hash
+            sig = arg_types.size.to_u64
             arg_types.each do |arg|
-              sig ^= arg.object_id.hash
+              sig = (sig &* 131_u64) ^ arg.object_id
             end
             @arg_sig = sig
           end
 
           def hash : UInt64
-            receiver_id.hash ^ name.hash ^ arg_sig.hash ^ has_block.hash
+            block_bit = has_block ? 0x9e3779b97f4a7c15_u64 : 0_u64
+            receiver_id ^ name.hash ^ arg_sig ^ block_bit
           end
 
           def ==(other : MethodLookupKey) : Bool
@@ -135,7 +136,7 @@ module CrystalV2
           end
 
           def hash : UInt64
-            method_id.hash ^ receiver_id.hash
+            method_id ^ receiver_id
           end
 
           def ==(other : MethodBodyCacheKey) : Bool
@@ -152,7 +153,7 @@ module CrystalV2
           end
 
           def hash : UInt64
-            receiver_id.hash ^ name.hash
+            receiver_id ^ name.hash
           end
 
           def ==(other : RespondsToNarrowingKey) : Bool
@@ -1938,7 +1939,10 @@ module CrystalV2
         end
 
         private def primitive_metaclass?(type : Type) : Bool
-          type.is_a?(PrimitiveType) && type.name.ends_with?(".class")
+          return false unless type.is_a?(PrimitiveType)
+
+          primitive = type.as(PrimitiveType)
+          primitive.name.ends_with?(".class")
         end
 
         private def primitive_metaclass_value_type(type : PrimitiveType) : Type?

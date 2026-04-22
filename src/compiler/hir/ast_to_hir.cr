@@ -31837,6 +31837,48 @@ module Crystal::HIR
       nil
     end
 
+    private def included_module_has_matching_def_for_owner?(
+      owner : String,
+      method_name : String,
+      arg_types : Array(TypeRef),
+      has_block_call : Bool,
+    ) : Bool
+      return false if owner.empty?
+      return false if arg_types.empty? || arg_types.all? { |t| t == TypeRef::VOID }
+
+      included = Set(String).new
+      visited_classes = Set(String).new
+      current_class = owner
+
+      while !current_class.empty? && !visited_classes.includes?(current_class)
+        visited_classes << current_class
+        if direct = @class_included_modules[current_class]?
+          direct.each { |mod_name| included << mod_name }
+        end
+
+        current_base = strip_generic_args(current_class)
+        if current_base != current_class
+          if base_modules = @class_included_modules[current_base]?
+            base_modules.each { |mod_name| included << mod_name }
+          end
+        end
+
+        parent = @class_info[current_class]?.try(&.parent_name) || @module.class_parents[current_class]?
+        break unless parent
+        current_class = parent
+      end
+
+      included.each do |module_name|
+        visited = Set(String).new
+        base_module = strip_generic_args(module_name)
+        if find_module_def_recursive(base_module, method_name, arg_types.size, visited, arg_types, has_block_call)
+          return true
+        end
+      end
+
+      false
+    end
+
     private def resolve_nilable_function_type_overload(
       base_method_name : String,
       arg_types : Array(TypeRef),
@@ -65129,6 +65171,13 @@ module Crystal::HIR
         if desired_mangled != mangled_method_name &&
            (@function_types.has_key?(desired_mangled) || @function_defs.has_key?(desired_mangled) || @module.has_function?(desired_mangled))
           mangled_method_name = desired_mangled
+        elsif desired_mangled != mangled_method_name && receiver_id
+          owner = method_owner(base_method_name)
+          if included_module_has_matching_def_for_owner?(owner, method_name, arg_types, has_block_call)
+            # Keep the concrete receiver-owned specialization. lower_function_if_needed
+            # will materialize it through the deferred included-module path.
+            mangled_method_name = desired_mangled
+          end
         end
         if mangled_method_name.includes?("$arity")
           mangled_method_name = desired_mangled

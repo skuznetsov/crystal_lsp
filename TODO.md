@@ -65,6 +65,19 @@ Current diagnosis / recently fixed roots:
   - splat parameters are rebound to tuple locals in the method body, so
     `Dir.glob(*patterns, &block)` no longer self-recurses through its
     `_block_splat` wrapper.
+- Nilable query calls on concrete containers can now materialize inherited
+  included-module implementations instead of falling back to the first fuzzy
+  overload. This keeps `Array(Nil | Array(ExprId))#[]?$Int32` on the
+  `Indexable#[]?` path instead of mis-targeting `#[]?$Range`.
+- Semantic compiler cache key hashing no longer calls `.hash` on immediate
+  primitive fields (`UInt64`, `Bool`) while self-hosting. The cache keys now
+  combine object ids and booleans arithmetically, avoiding the generated
+  stage2 `Object#hash` vdispatch corridor.
+- `TypeInferenceEngine#primitive_metaclass?` no longer relies on flow narrowing
+  across `type.is_a?(PrimitiveType) && type.name...`. It now explicitly casts to
+  `PrimitiveType` before calling `#name`, so HIR emits
+  `PrimitiveType#name -> String` followed by `String#ends_with?`, not stale
+  `Hash(... )#ends_with?`.
 - `Hash(String, Nil).new(block, initial_capacity:)` no longer resolves to the
   `default_value : V` overload. Generic overload matching now evaluates
   annotations in the requested concrete owner context, so `V` is `Nil` for
@@ -94,12 +107,13 @@ Current diagnosis / recently fixed roots:
 
 Remaining risk:
 
-- The current generated stage2 still times out on a minimal no-prelude compile:
-  `scripts/run_safe.sh /tmp/cv2_s2_splat_tuple_guard 30 2048
-  /tmp/cv2_no_prelude_expr_splat_tuple_guard.cr --no-prelude --no-codegen`.
-  Latest sample points at `__crystal_v2_string_eq` / earlier at
-  `Indexable.range_to_index_and_count -> Range(Int32, Int32)#begin`. Treat this
-  as the next root-cause target before any `s3b+` attempt.
+- The current generated stage2 still times out on a minimal no-prelude compile
+  after `parse_file_recursive parse ok`. The latest sample points at
+  `__crystal_v2_string_eq`; earlier blockers in this corridor were
+  `Array(...ExprId)#[]?$Range`, `Object#hash`, and stale
+  `Hash(...HIR::Value)#ends_with?`, all now moved forward. Treat
+  `__crystal_v2_string_eq` as the next root-cause target before any `s3b+`
+  attempt.
 - Stage2 still has a separate generic module block corridor around
   `Enumerable(T)#any?$$block`. A no-prelude function-definition HIR emit and a
   full `puts 42` smoke can still hang/abort there under the generated s2

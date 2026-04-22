@@ -100,4 +100,11 @@ reject_in_function 'func @Dir\.glob\$Path \| String_File::MatchOptions_Bool_bloc
   'call @[0-9]+[(]%0, %1, %2' \
   'self-recursive Dir.glob block_splat call'
 
+require_in_function 'func @CrystalV2::Compiler::Semantic::TypeInferenceEngine#primitive_metaclass\?\$CrystalV2::Compiler::Semantic::Type' \
+  'bitcast %[0-9]+ : Type#[0-9]+' \
+  'PrimitiveType cast before PrimitiveType#name'
+reject_in_function 'func @CrystalV2::Compiler::Semantic::TypeInferenceEngine#primitive_metaclass\?\$CrystalV2::Compiler::Semantic::Type' \
+  'Hash\(String, Hash\(UInt32, Crystal::HIR::Value\)\)#ends_with\?\$String' \
+  'stale Hash#ends_with target after PrimitiveType#name'
+
 echo "p2_selfhost_stage2_shape_guard_ok"
