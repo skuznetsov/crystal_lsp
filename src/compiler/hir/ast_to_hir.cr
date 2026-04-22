@@ -65759,8 +65759,7 @@ module Crystal::HIR
       if block_return_name
         receiver_base_for_block_target = nil
         if receiver_id
-          receiver_desc = @module.get_type_descriptor(ctx.type_of(receiver_id))
-          receiver_base_for_block_target = yield_receiver_base_name(ctx.type_of(receiver_id)) unless receiver_desc && receiver_desc.name.includes?('(')
+          receiver_base_for_block_target = yield_receiver_base_name(ctx.type_of(receiver_id))
         end
         block_target_arg_types = if block_id && !has_block_call && args.size > call_args.size && call_args.size <= arg_types.size
                                    arg_types[0, call_args.size]
@@ -65952,8 +65951,7 @@ module Crystal::HIR
       if has_block_call
         receiver_base_for_canon = nil
         if receiver_id
-          recv_desc_canon = @module.get_type_descriptor(ctx.type_of(receiver_id))
-          receiver_base_for_canon = yield_receiver_base_name(ctx.type_of(receiver_id)) unless recv_desc_canon && recv_desc_canon.name.includes?('(')
+          receiver_base_for_canon = yield_receiver_base_name(ctx.type_of(receiver_id))
         end
         typed_canon = lookup_block_function_def_for_call(base_method_name, call_args.size, arg_types, receiver_base_for_canon)
         if typed_canon
@@ -68254,10 +68252,7 @@ module Crystal::HIR
       # `args`/`arg_types` then include the proc, but `lookup_block_function_def_for_call` must match
       # the `def ... &` arity using only the non-proc arguments from `call_args`.
       if (has_block_call || block_id) && receiver_id
-        recv_desc_emit = @module.get_type_descriptor(ctx.type_of(receiver_id))
-        recv_base_for_emit = unless recv_desc_emit && recv_desc_emit.name.includes?('(')
-                                 yield_receiver_base_name(ctx.type_of(receiver_id))
-                               end
+        recv_base_for_emit = yield_receiver_base_name(ctx.type_of(receiver_id))
         lookup_arg_types = if block_id && !has_block_call && args.size > call_args.size && call_args.size <= arg_types.size
                              arg_types[0, call_args.size]
                            else
@@ -70894,6 +70889,7 @@ module Crystal::HIR
       # (e.g. `*, precision : Int = 1`). We fill in their defaults ourselves, so
       # the filter that normally skips named-only defs shouldn't apply here.
       func_entry = lookup_function_def_for_call(func_name, args.size, has_block_call, arg_types, false, true)
+      func_entry_arena : CrystalV2::Compiler::Frontend::ArenaLike? = nil
       # If not found directly, try parent classes (for inherited methods with defaults)
       unless func_entry
         parts = parse_method_name(func_name)
@@ -70917,6 +70913,51 @@ module Crystal::HIR
           end
         end
       end
+      # Included module methods can own default arguments (for example
+      # Enumerable#each_with_index(offset = 0, &) reached through Slice/Array).
+      # Default expansion runs before the final inherited/module target is
+      # canonicalized, so it must search the receiver's module chain itself.
+      unless func_entry
+        parts = parse_method_name(func_name)
+        if parts.separator == '#' && (method_part = parts.method)
+          receiver_owner = receiver_id ? yield_receiver_base_name(ctx.type_of(receiver_id)) : normalize_method_owner_name(strip_generic_args(parts.owner))
+          if receiver_owner && !receiver_owner.empty?
+            included = [] of String
+            if direct = @class_included_modules[receiver_owner]?
+              direct.each { |mod| push_unique_module_name(included, mod) }
+            end
+            owner_base = strip_generic_args(receiver_owner)
+            if owner_base != receiver_owner
+              if base_modules = @class_included_modules[owner_base]?
+                base_modules.each { |mod| push_unique_module_name(included, mod) }
+              end
+            end
+
+            queue = included.dup
+            visited_modules = Set(String).new
+            while mod = queue.shift?
+              next if visited_modules.includes?(mod)
+              visited_modules << mod
+              mod_base = strip_generic_args(mod)
+              visited_lookup = Set(String).new
+              if found = find_module_def_recursive_with_owner(mod_base, method_part, args.size, visited_lookup, arg_types, has_block_call)
+                found_owner = found[2]
+                func_entry = {"#{found_owner}##{method_part}", found[0]}
+                func_entry_arena = found[1]
+                break
+              end
+              if submods = @class_included_modules[mod]?
+                submods.each { |submod| queue << submod }
+              end
+              if mod_base != mod
+                if submods = @class_included_modules[mod_base]?
+                  submods.each { |submod| queue << submod }
+                end
+              end
+            end
+          end
+        end
+      end
       if env_has?("DEBUG_DEFAULT_ARGS") && func_name.includes?("to_s")
         found_name = func_entry ? func_entry[0] : "nil"
         STDERR.puts "[DEFAULT_ARGS] func_name=#{func_name} args.size=#{args.size} found=#{found_name}"
@@ -70924,7 +70965,7 @@ module Crystal::HIR
       return {args, call_has_named_args} unless func_entry
       func_def = func_entry[1]
       func_context = function_context_from_name(func_entry[0])
-      def_arena = @function_def_arenas[func_entry[0]]? || @arena
+      def_arena = func_entry_arena || @function_def_arenas[func_entry[0]]? || @arena
       params = function_param_infos(func_entry[0], func_def)
       return {args, call_has_named_args} if params.empty?
       func_stats = function_param_stats(func_entry[0], func_def)

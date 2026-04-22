@@ -1,6 +1,6 @@
 # LANDMARKS
 
-Updated: 2026-04-20
+Updated: 2026-04-22
 Context: compiler/bootstrap/stage2-stability
 
 This file is the active working set only. Historical landmarks before this
@@ -224,6 +224,48 @@ compiler. A 90s sampled STOP_AFTER_HIR run showed hotspots in string hashing,
 `force_lower_function_for_return_type -> lower_call -> lower_method` activity.
 Boundary: current cost is HIR/type/name work from excessive admitted wrappers,
 not LLVM or a single runtime tight loop. {F/G/R: 0.86/0.55/0.88} [verified]
+
+[LM-481|verified]: Concrete receiver block-target lookup fixes the
+`Indexable(T)#reverse_each$$block` abort-stub corridor. The root cause was that
+explicit receiver block lookup skipped receiver descriptors whose names
+contained generic arguments, so calls on concrete `Array(...)` receivers could
+fall back to the generic module block owner. The fix keeps
+`yield_receiver_base_name(ctx.type_of(receiver_id))` for block-target lookup,
+canonicalization, and block emit lookup. Evidence:
+`DEBUG_CALL_TRACE=reverse_each DEBUG_HOOK_FILTER=reverse_each
+CRYSTAL_V2_STOP_AFTER_HIR=1 scripts/run_safe.sh /tmp/cv2_commit_candidate 300
+4096 src/crystal_v2.cr -o /tmp/cv2_commit_candidate_reverse_stop` exited 0,
+and grep found no `Indexable(T)#reverse_each$block` trace while concrete
+`Array(...)#reverse_each$block` targets were lowered. {F/G/R:
+0.93/0.62/0.94} [verified]
+
+[LM-482|verified]: Default argument expansion must search included modules
+before final call-target canonicalization. The root cause was that
+`apply_default_args` looked up the pre-canonical concrete owner only, then
+parent classes, and missed defaulted module methods such as
+`Enumerable#each_with_index(offset = 0, &)`. The fix walks the receiver owner's
+included-module chain with `find_module_def_recursive_with_owner` and preserves
+the found arena for parameter/default reads. Evidence:
+`DEBUG_CALL_TRACE=each_with_index DEBUG_HOOK_FILTER=each_with_index
+CRYSTAL_V2_STOP_AFTER_HIR=1 scripts/run_safe.sh /tmp/cv2_commit_candidate 300
+4096 src/crystal_v2.cr -o /tmp/cv2_commit_candidate_each_stop` exited 0 and
+showed repeated `after_args ... args=0` followed by `after_defaults ... args=1`
+for concrete Array/Slice calls. {F/G/R: 0.93/0.62/0.94} [verified]
+
+[LM-483|verified]: Direct LLVM small-Hash linear-scan overrides are unsound for
+self-hosted `Hash(String, Nil)` / `Hash(String, T)` paths. The root cause was
+duplicating `Hash::Entry` field layout in the backend while V2's entry payloads
+and offsets are owned by the type registry and normal lowering. The fix disables
+`emit_hash_string_linear_scan_override` and lets HIR/MIR lowering emit the real
+method body. Evidence: full self-compile with
+`CRYSTAL_V2_PHASE_STATS=1 scripts/run_safe.sh /tmp/cv2_commit_candidate 300
+4096 src/crystal_v2.cr -o /tmp/cv2_s2_commit_candidate` exited 0, the generated
+LL had no `direct small Hash linear scan` marker and no
+`Hash$LString$C$_Nil$R$Hupdate_linear_scan`, and
+`regression_tests/p2_selfhost_hir_emit_no_prelude.sh /tmp/cv2_s2_commit_candidate`
+printed `p2_selfhost_hir_emit_no_prelude_ok`. Boundary: stage2 still has a
+separate `Enumerable(T)#any?$$block` blocker for richer no-prelude/function
+smokes. {F/G/R: 0.92/0.55/0.93} [verified]
 
 ## Active Strategy
 

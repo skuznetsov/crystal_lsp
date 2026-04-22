@@ -57,6 +57,18 @@ Current diagnosis / recently fixed roots:
   `default_value : V` overload. Generic overload matching now evaluates
   annotations in the requested concrete owner context, so `V` is `Nil` for
   `Hash(String, Nil)` instead of a wildcard.
+- Explicit receiver block calls now keep the concrete generic receiver owner
+  when searching block thunks. This removes late generic-module abort stubs such
+  as `Indexable(T)#reverse_each$$block`; the self-host HIR trace now lowers
+  concrete `Array(...)#reverse_each$block` targets instead.
+- Default argument expansion now searches included module chains before final
+  target canonicalization. This preserves `Enumerable#each_with_index(offset =
+  0, &)` when reached through concrete Array/Slice owners, so zero-arg block
+  calls become one-arg calls before block proc lowering.
+- Direct LLVM small-Hash linear-scan overrides are disabled. They duplicated
+  `Hash::Entry` layout knowledge in the backend and corrupted self-hosted
+  `Hash(String, Nil)` / `Hash(String, T)` paths; normal HIR/MIR lowering now
+  owns those method bodies.
 - Exact-demand helper bodies invalidated by layout repair are requeued and can
   be processed again in the same pending pass. This removed late abort stubs for
   `Array(String)#increase_capacity` and `Array(Crystal::HIR::TypeRef)#to_unsafe`.
@@ -70,6 +82,11 @@ Current diagnosis / recently fixed roots:
 
 Remaining risk:
 
+- Stage2 still has a separate generic module block corridor around
+  `Enumerable(T)#any?$$block`. A no-prelude function-definition HIR emit and a
+  full `puts 42` smoke can still hang/abort there under the generated s2
+  compiler. A broader implicit-self block receiver experiment was refuted
+  because it caused an early `Index out of bounds` in self-host HIR lowering.
 - `lower_missing` still grows HIR heavily during full self-compile
   (`~25k -> ~54k` functions in the latest focused s2 build). This no longer
   blocks producing s2 in the current gate, but it remains the main demand-driven

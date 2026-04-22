@@ -11259,6 +11259,13 @@ module Crystal::MIR
     end
 
     private def emit_hash_string_linear_scan_override(func : Function, mangled : String) : Bool
+      # These direct small-Hash linear-scan overrides duplicate Hash::Entry layout
+      # knowledge in the backend. That is not stable in V2 because Entry payloads
+      # are heap objects while field offsets are owned by the type registry.
+      # Let normal lowering handle the method body instead of emitting partial
+      # layout clones that corrupt self-hosted Hash(String, Nil) / Hash(String, T).
+      return false
+
       if split = mangled.split("$Hfind_entry_with_index_linear_scan$$", 2)
         if split.size == 2
           hash_prefix = split[0]
