@@ -53,6 +53,18 @@ BOOTSTRAP_MEM_MB=4096 \
 
 Current diagnosis / recently fixed roots:
 
+- Stage2 shape guard now protects four self-host codegen roots in one MIR
+  gate (`regression_tests/p2_selfhost_stage2_shape_guard.sh`):
+  - stale cache-only call return repair no longer rewrites
+    `Slice(UInt8)#[]` from `UInt8` to stale container-shaped returns;
+  - bare `return` in nilable functions now materializes a nil union value
+    (`String#byte_index(Int32, Int32)` no longer emits bare MIR `ret`);
+  - deferred runtime constants update `@constant_types` after real lowering
+    (`CRYSTAL_SRC_PATH` now reads as `String`, not `VOID`, avoiding
+    `Path | String` variant miswrap);
+  - splat parameters are rebound to tuple locals in the method body, so
+    `Dir.glob(*patterns, &block)` no longer self-recurses through its
+    `_block_splat` wrapper.
 - `Hash(String, Nil).new(block, initial_capacity:)` no longer resolves to the
   `default_value : V` overload. Generic overload matching now evaluates
   annotations in the requested concrete owner context, so `V` is `Nil` for
@@ -82,6 +94,12 @@ Current diagnosis / recently fixed roots:
 
 Remaining risk:
 
+- The current generated stage2 still times out on a minimal no-prelude compile:
+  `scripts/run_safe.sh /tmp/cv2_s2_splat_tuple_guard 30 2048
+  /tmp/cv2_no_prelude_expr_splat_tuple_guard.cr --no-prelude --no-codegen`.
+  Latest sample points at `__crystal_v2_string_eq` / earlier at
+  `Indexable.range_to_index_and_count -> Range(Int32, Int32)#begin`. Treat this
+  as the next root-cause target before any `s3b+` attempt.
 - Stage2 still has a separate generic module block corridor around
   `Enumerable(T)#any?$$block`. A no-prelude function-definition HIR emit and a
   full `puts 42` smoke can still hang/abort there under the generated s2
@@ -143,6 +161,7 @@ regression_tests/p2_selfhost_hir_emit_no_prelude.sh bin/crystal_v2
 regression_tests/p2_pending_budget_no_prelude.sh bin/crystal_v2
 regression_tests/p2_root_self_replay_no_prelude.sh bin/crystal_v2
 regression_tests/p2_universal_helper_fanout_no_prelude.sh bin/crystal_v2
+regression_tests/p2_selfhost_stage2_shape_guard.sh bin/crystal_v2
 ```
 
 Expected current signals:
@@ -152,6 +171,7 @@ Expected current signals:
 - `p2_pending_budget_no_prelude_ok ... total=103 max_queue=57`
 - `p2_root_self_replay_no_prelude_ok process_delta=20 total=47 ...`
 - `p2_universal_helper_fanout_no_prelude_ok deep_helpers=0`
+- `p2_selfhost_stage2_shape_guard_ok`
 
 Boundary: `src/crystal_v2.cr --no-prelude` still exits `11` in an
 inline-yield recursion / force-return corridor before it can serve as a green
@@ -161,12 +181,14 @@ pending-budget oracle.
 
 1. Run the full `scripts/build_bootstrap_stages.sh --stages 2` wrapper gate and
    confirm it produces the same s2 result as the direct command above.
-2. Compare `s1_bootstrap` and `s2b` on the fixed no-prelude corpus before
+2. Fix the current generated-stage2 no-prelude hang around string/range
+   primitives before treating the produced s2 as usable for corpus comparison.
+3. Compare `s1_bootstrap` and `s2b` on the fixed no-prelude corpus before
    trying `s3b+`.
-3. Add/inspect exact-called provenance for `record_pending_callee_for_rta` so
+4. Add/inspect exact-called provenance for `record_pending_callee_for_rta` so
    the source of remaining `keep:exact_called Array#to_s` / `Hash#to_s` demand
    is explicit.
-4. Verify whether broad fallback self-calls should mark exact concrete wrapper
+5. Verify whether broad fallback self-calls should mark exact concrete wrapper
    names as demanded, or whether they should remain virtual/demand-local until a
    real callsite asks for that concrete owner.
 

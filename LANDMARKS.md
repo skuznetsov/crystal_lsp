@@ -267,6 +267,40 @@ printed `p2_selfhost_hir_emit_no_prelude_ok`. Boundary: stage2 still has a
 separate `Enumerable(T)#any?$$block` blocker for richer no-prelude/function
 smokes. {F/G/R: 0.92/0.55/0.93} [verified]
 
+[LM-484|verified]: Four stage2 shape roots were isolated and guarded in
+`regression_tests/p2_selfhost_stage2_shape_guard.sh`. First, cache-only return
+repair must not overwrite already concrete call-site types: the bad
+`Slice(UInt8)#[] -> Slice(UInt8)` repair caused `Parser#is_constant_name?` to
+load a `Char` from a `UInt8` value; the fixed MIR keeps `UInt8` and emits
+`zext ... : Char`. Second, bare `return` in nilable functions must emit a nil
+union value; `String#byte_index(Int32, Int32)` no longer contains a bare `ret`.
+Third, deferred runtime constants must update `@constant_types` after lowering;
+`CRYSTAL_SRC_PATH` now reads as `String` instead of `VOID`, avoiding
+`Path | String` variant-0 miswrap and the previous `String#bytesize` crash.
+Fourth, splat parameters must be rebound as tuple locals inside method bodies;
+`Dir.glob$..._block_splat` now allocates a tuple for `patterns` and no longer
+self-recurses. Evidence: `crystal build src/crystal_v2.cr -o
+/tmp/cv2_splat_tuple_guard --error-trace` exited 0;
+`CRYSTAL_V2_STOP_AFTER_MIR=1 scripts/run_safe.sh /tmp/cv2_splat_tuple_guard
+300 4096 src/crystal_v2.cr --emit mir --no-link -o
+/tmp/cv2_splat_tuple_guard_mir` exited 0; and
+`regression_tests/p2_selfhost_stage2_shape_guard.sh /tmp/cv2_splat_tuple_guard`
+printed `p2_selfhost_stage2_shape_guard_ok`. Boundary: this proves shape
+invariants, not a green generated-stage2 compiler. {F/G/R: 0.94/0.62/0.94}
+[verified]
+
+[LM-485|verified]: The current generated stage2 compiler still times out even
+after LM-484. Full-prelude `puts 42` compilation moves past the old
+`CRYSTAL_SRC_PATH`/`Dir.glob` crashes but times out under `run_safe.sh`.
+The smallest no-prelude smoke also times out:
+`scripts/run_safe.sh /tmp/cv2_s2_splat_tuple_guard 30 2048
+/tmp/cv2_no_prelude_expr_splat_tuple_guard.cr --no-prelude --no-codegen`.
+Samples identify the next root area rather than the fixed roots:
+`__crystal_v2_string_eq` in one timeout and
+`Indexable.range_to_index_and_count -> Range(Int32, Int32)#begin` in another.
+Boundary: do not run `s3b+`; next work is a minimal no-prelude oracle for this
+string/range primitive hang. {F/G/R: 0.88/0.42/0.90} [verified]
+
 ## Active Strategy
 
 - Main fast loop: `--no-prelude` oracles and focused STOP_AFTER_HIR budget

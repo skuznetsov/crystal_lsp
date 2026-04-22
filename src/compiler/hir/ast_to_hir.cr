@@ -22190,6 +22190,9 @@ module Crystal::HIR
         end
         ctx.register_local(param_name, hir_param.id)
         ctx.register_type(hir_param.id, param_type)
+        if splat_param_name && param_name == splat_param_name
+          bind_splat_param_tuple_local(ctx, param_name, hir_param.id, param_type)
+        end
         if debug_env_filter_match?("DEBUG_PARAM_TYPES", full_name, param_name)
           type_name = get_type_name_from_ref(param_type)
           STDERR.puts "[PARAM_TYPES] func=#{full_name} param=#{param_name} id=#{hir_param.id} type=#{type_name}(id=#{param_type.id})"
@@ -27564,6 +27567,9 @@ module Crystal::HIR
         end
         ctx.register_local(param_name, hir_param.id)
         ctx.register_type(hir_param.id, param_type)
+        if splat_param_name && param_name == splat_param_name
+          bind_splat_param_tuple_local(ctx, param_name, hir_param.id, param_type)
+        end
         if debug_env_filter_match?("DEBUG_PARAM_TYPES", full_name, param_name)
           type_name = get_type_name_from_ref(param_type)
           STDERR.puts "[PARAM_TYPES] func=#{full_name} param=#{param_name} id=#{hir_param.id} type=#{type_name}(id=#{param_type.id})"
@@ -32529,11 +32535,13 @@ module Crystal::HIR
 
     private def resolved_call_return_type_for_repair(inst : Call, value_types : Hash(ValueId, TypeRef)) : TypeRef
       candidate = TypeRef::VOID
+      candidate_from_materialized_function = false
 
       if target = @module.function_by_name(inst.method_name)
         target_return = target.return_type
         if target_return != TypeRef::VOID && target_return != TypeRef::NIL
           candidate = target_return
+          candidate_from_materialized_function = true
         end
       end
 
@@ -32550,6 +32558,15 @@ module Crystal::HIR
 
       return TypeRef::VOID if candidate == TypeRef::VOID || candidate == TypeRef::NIL
 
+      # Function type caches can be stale while demand-driven lowering is still
+      # materializing concrete overloads. Do not let a cache-only repair overwrite
+      # an explicit, already-concrete call-site type (for example Slice(UInt8)#[]:
+      # the call-site knows UInt8, while an older unresolved signature may say
+      # Slice(UInt8) until the real overload body is lowered).
+      unless candidate_from_materialized_function || stale_call_return_type?(inst.type)
+        return TypeRef::VOID
+      end
+
       candidate_name = get_type_name_from_ref(candidate)
       if unresolved_generic_return_type?(candidate) || type_param_like?(candidate_name)
         return TypeRef::VOID
@@ -32564,6 +32581,13 @@ module Crystal::HIR
       end
 
       candidate
+    end
+
+    private def stale_call_return_type?(type : TypeRef) : Bool
+      return true if type == TypeRef::VOID || type == TypeRef::POINTER || type == TypeRef::NIL
+
+      name = get_type_name_from_ref(type)
+      unresolved_generic_return_type?(type) || type_param_like?(name)
     end
 
     private def module_includers_match?(name : String) : Bool
@@ -37472,6 +37496,37 @@ module Crystal::HIR
       ctx.emit(get)
       ctx.register_type(get.id, const_type)
       get.id
+    end
+
+    private def record_lowered_constant_type(full_name : String, value_type : TypeRef) : Nil
+      return if value_type == TypeRef::VOID
+
+      if existing = @constant_types[full_name]?
+        @constant_types[full_name] = value_type if existing == TypeRef::VOID
+      else
+        @constant_types[full_name] = value_type
+      end
+    end
+
+    private def bind_splat_param_tuple_local(
+      ctx : LoweringContext,
+      param_name : String,
+      param_id : ValueId,
+      param_type : TypeRef,
+    ) : Nil
+      return if param_type == TypeRef::VOID
+      return if is_tuple_type_ref?(param_type)
+
+      tuple_type = tuple_type_from_arg_types([param_type], allow_void: true)
+      return if tuple_type == TypeRef::VOID
+
+      tuple_alloc = Allocate.new(ctx.next_id, tuple_type, [param_id] of ValueId)
+      ctx.emit(tuple_alloc)
+      ctx.register_local(param_name, tuple_alloc.id)
+      ctx.register_type(tuple_alloc.id, tuple_type)
+
+      tuple_name = get_type_name_from_ref(tuple_type)
+      update_typeof_local_name(param_name, tuple_name) unless tuple_name.empty?
     end
 
     private def resolve_type_name_in_context(name : String) : String
@@ -43451,6 +43506,9 @@ module Crystal::HIR
         end
         ctx.register_local(param_name, hir_param.id)
         ctx.register_type(hir_param.id, param_type) # Track param type for inference
+        if splat_param_name && param_name == splat_param_name
+          bind_splat_param_tuple_local(ctx, param_name, hir_param.id, param_type)
+        end
         if (param_literal_flags[idx]? || param_name.ends_with?("_class")) && param_type != TypeRef::VOID
           ctx.mark_type_literal(hir_param.id) unless module_type_ref?(param_type)
         end
@@ -43671,6 +43729,7 @@ module Crystal::HIR
           value_type = ctx.type_of(value)
           full_name = constant_full_name(owner == "$" ? nil : owner, const_name)
           storage_owner, storage_name = constant_storage_info(full_name)
+          record_lowered_constant_type(full_name, value_type)
           if env_has?("DEBUG_DEFERRED_CONST")
             STDERR.puts "[DEFERRED_CONST] OK #{owner}::#{const_name} → value=#{value} type=#{value_type.id}"
           end
@@ -43743,6 +43802,7 @@ module Crystal::HIR
           value_type = ctx.type_of(value)
           full_name = constant_full_name(owner == "$" ? nil : owner, const_name)
           storage_owner, storage_name = constant_storage_info(full_name)
+          record_lowered_constant_type(full_name, value_type)
           set = ClassVarSet.new(ctx.next_id, value_type, storage_owner, storage_name, value)
           ctx.emit(set)
           @current_class = old_class
@@ -56156,7 +56216,10 @@ module Crystal::HIR
       # Coerce return value to match declared return type if needed.
       # This handles cases like returning {nil, 0} (Tuple(Nil, Int32))
       # from a function with return type {Int32?, Int32?} (Tuple(Int32|Nil, Int32|Nil)).
-      ret_type = @current_def_return_type
+      ret_type = @current_def_return_type == TypeRef::VOID ? ctx.function.return_type : @current_def_return_type
+      if value_id.nil?
+        value_id = nil_return_value_for(ctx, ret_type)
+      end
       if ret_type != TypeRef::VOID && (vid = value_id)
         val_type = ctx.type_of(vid)
         if val_type != ret_type && val_type != TypeRef::VOID
@@ -56180,7 +56243,13 @@ module Crystal::HIR
         ret = block.terminator.as?(Return)
         next unless ret
         value_id = ret.value
-        next unless value_id
+        unless value_id
+          ctx.current_block = idx.to_u32
+          if nil_id = nil_return_value_for(ctx, return_type)
+            block.terminator = Return.new(nil_id)
+          end
+          next
+        end
 
         value_type = ctx.type_of(value_id)
         next if value_type == return_type || value_type == TypeRef::VOID
@@ -56193,6 +56262,21 @@ module Crystal::HIR
       if saved = saved_block
         ctx.current_block = saved
       end
+    end
+
+    private def nil_return_value_for(ctx : LoweringContext, return_type : TypeRef) : ValueId?
+      return nil if return_type == TypeRef::VOID
+
+      nil_lit = Literal.new(ctx.next_id, TypeRef::NIL, nil)
+      ctx.emit(nil_lit)
+      return nil_lit.id if return_type == TypeRef::NIL
+
+      if get_union_variant_id(return_type, TypeRef::NIL) >= 0 ||
+         get_union_variant_id(return_type, TypeRef::VOID) >= 0
+        return coerce_value_to_type(ctx, nil_lit.id, return_type)
+      end
+
+      nil_lit.id
     end
 
     private def infer_yield_return_type(ctx : LoweringContext) : TypeRef?
