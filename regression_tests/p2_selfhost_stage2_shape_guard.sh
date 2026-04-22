@@ -37,6 +37,15 @@ require_pattern() {
   fi
 }
 
+reject_pattern() {
+  local pattern="$1"
+  local label="$2"
+  if grep -Eq "$pattern" "$MIR"; then
+    echo "p2_selfhost_stage2_shape_guard_failed: unexpected $label" >&2
+    exit 1
+  fi
+}
+
 reject_in_function() {
   local func_pattern="$1"
   local bad_pattern="$2"
@@ -106,5 +115,8 @@ require_in_function 'func @CrystalV2::Compiler::Semantic::TypeInferenceEngine#pr
 reject_in_function 'func @CrystalV2::Compiler::Semantic::TypeInferenceEngine#primitive_metaclass\?\$CrystalV2::Compiler::Semantic::Type' \
   'Hash\(String, Hash\(UInt32, Crystal::HIR::Value\)\)#ends_with\?\$String' \
   'stale Hash#ends_with target after PrimitiveType#name'
+
+reject_pattern 'Tuple#includes\?\$String' \
+  'generic Tuple#includes?$String target in self-host MIR'
 
 echo "p2_selfhost_stage2_shape_guard_ok"

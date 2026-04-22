@@ -63695,6 +63695,17 @@ module Crystal::HIR
         end
       end
 
+      # Concrete Tuple#includes?(x) must not call the generic Tuple method in
+      # self-hosted code: Tuple is a typeid-less struct and the generic method
+      # can load elements with the wrong ABI shape. Inline it as a static
+      # element comparison chain, mirroring Object#in?(tuple).
+      if method_name == "includes?" && receiver_id && args.size == 1
+        recv_type = ctx.type_of(receiver_id)
+        if lowered = lower_tuple_includes_intrinsic(ctx, receiver_id, recv_type, args[0])
+          return lowered
+        end
+      end
+
       # String#index(String) and String#index(Char) intercept — DISABLED
       # Now handled by LLVM override (String$Hindex$$Char) which returns Nil | Int32 union.
       # The old runtime helper returned plain i32 (-1 for not found), which broke
@@ -82839,6 +82850,63 @@ module Crystal::HIR
       ctx.emit(alloc)
       record_allocation_location(ctx, alloc.id, @arena, node)
       alloc.id
+    end
+
+    private def lower_tuple_includes_intrinsic(
+      ctx : LoweringContext,
+      tuple_id : ValueId,
+      tuple_type : TypeRef,
+      needle_id : ValueId,
+    ) : ValueId?
+      tuple_name = get_type_name_from_ref(tuple_type)
+      return nil unless tuple_name.starts_with?("Tuple(")
+      tuple_size = tuple_size_from_type_name(tuple_name)
+      return nil unless tuple_size && tuple_size > 0
+
+      needle_type = ctx.type_of(needle_id)
+      result_id : ValueId? = nil
+
+      tuple_size.times do |i|
+        elem_type = tuple_element_type(tuple_type, i) || TypeRef::VOID
+        cmp_id = if tuple_includes_static_mismatch?(elem_type, needle_type)
+                   emit_bool_literal(ctx, false)
+                 else
+                   idx_lit = Literal.new(ctx.next_id, TypeRef::INT32, i.to_i64)
+                   ctx.emit(idx_lit)
+                   ctx.register_type(idx_lit.id, TypeRef::INT32)
+
+                   elem = IndexGet.new(ctx.next_id, elem_type, tuple_id, idx_lit.id)
+                   ctx.emit(elem)
+                   ctx.register_type(elem.id, elem_type)
+                   emit_binary_call(ctx, elem.id, "==", needle_id)
+                 end
+
+        if prev = result_id
+          or_op = BinaryOperation.new(ctx.next_id, TypeRef::BOOL, BinaryOp::Or, prev, cmp_id)
+          ctx.emit(or_op)
+          ctx.register_type(or_op.id, TypeRef::BOOL)
+          result_id = or_op.id
+        else
+          result_id = cmp_id
+        end
+      end
+
+      result_id || emit_bool_literal(ctx, false)
+    end
+
+    private def tuple_includes_static_mismatch?(elem_type : TypeRef, needle_type : TypeRef) : Bool
+      return false if elem_type == TypeRef::VOID || needle_type == TypeRef::VOID
+      return false if elem_type == needle_type
+      return false if is_union_or_nilable_type?(elem_type) || is_union_or_nilable_type?(needle_type)
+
+      true
+    end
+
+    private def emit_bool_literal(ctx : LoweringContext, value : Bool) : ValueId
+      lit = Literal.new(ctx.next_id, TypeRef::BOOL, value ? 1_i64 : 0_i64)
+      ctx.emit(lit)
+      ctx.register_type(lit.id, TypeRef::BOOL)
+      lit.id
     end
 
     private def lower_named_tuple_literal(ctx : LoweringContext, node : CrystalV2::Compiler::Frontend::NamedTupleLiteralNode) : ValueId
