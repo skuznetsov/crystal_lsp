@@ -498,6 +498,27 @@ formatting root cause in semantic inference, but no-prelude top-level `puts`
 resolution is still missing.
 {F/G/R: 0.93/0.58/0.93} [verified]
 
+[LM-495|verified]: The generated-stage2 no-prelude top-level `puts` failure was
+a semantic/HIR parity gap, not a new runtime problem. After LM-494, generated
+`s2b` no longer aborted in `Printer.shortest`, but
+`test_no_prelude_interpolation.cr --no-prelude --no-codegen` still stopped in
+semantic analysis with `error[E3001]: Function 'puts' not found`. The HIR
+lowerer already has receiverless `puts`/`print` corridors; type inference did
+not. The fix adds a tiny receiverless builtin semantic path for top-level
+`puts`/`print`, returning `Nil` and letting HIR handle the actual lowering.
+Evidence: `crystal build src/crystal_v2.cr -o /tmp/cv2_puts --error-trace`
+exited 0; `regression_tests/p2_bootstrap_semantic_emit_oracle.sh /tmp/cv2_puts`
+and `regression_tests/p2_selfhost_stage2_shape_guard.sh /tmp/cv2_puts` passed;
+fresh `scripts/run_safe.sh /tmp/cv2_puts 420 4096 src/crystal_v2.cr -o
+/tmp/cv2_puts_s2_full` exited 0 after about `241s`;
+`regression_tests/p2_generated_stage2_no_prelude_interp.sh /tmp/cv2_puts`
+passed. The next measured blocker is
+`STUB CALLED: Tuple$Heach$$block` from
+`regression_tests/stage2_no_prelude_puts_runtime_repro.sh /tmp/cv2_puts_s2_full`.
+Boundary: top-level `puts` semantic parity is fixed, but runtime no-prelude
+`puts` still falls into a tuple/block lowering corridor in generated stage2.
+{F/G/R: 0.94/0.60/0.94} [verified]
+
 ## Active Strategy
 
 - Main fast loop: `--no-prelude` oracles and focused STOP_AFTER_HIR budget

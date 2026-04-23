@@ -228,15 +228,16 @@ Expected current signals:
 - `p2_root_self_replay_no_prelude_ok process_delta=20 total=47 ...`
 - `p2_universal_helper_fanout_no_prelude_ok deep_helpers=0`
 - `p2_selfhost_stage2_shape_guard_ok`
+- `p2_generated_stage2_no_prelude_interp_ok`
 
 Latest generated-stage2 frontier:
 
-- `s1 -> s2b` builds with `/tmp/cv2_printerfix` in about `242s`.
+- `s1 -> s2b` builds with `/tmp/cv2_puts` in about `241s`.
 - Generated `s2b` no-prelude no-codegen smoke moved past
-  `Class$Dcrystal_type_id`, `Char$Hascii_control$Q`, and
-  `Printer$Dshortest$$Float32_IO`. It now reaches semantic checking and stops
-  with `error[E3001]: Function 'puts' not found` on the top-level no-prelude
-  input.
+  `Class$Dcrystal_type_id`, `Char$Hascii_control$Q`,
+  `Printer$Dshortest$$Float32_IO`, and the top-level no-prelude `puts`
+  semantic error. `regression_tests/p2_generated_stage2_no_prelude_interp.sh
+  /tmp/cv2_puts` is now green.
 - Root moved: type-literal `crystal_type_id`/`crystal_instance_type_id`
   must lower to an `Int32` type-id literal before both `lower_call` and
   `lower_member_access` rewrite type literals to static `Class.*` targets.
@@ -246,7 +247,14 @@ Latest generated-stage2 frontier:
   `Char#ascii_control?` self-host MIR targets. Separately, `TypeInferenceEngine`
   debug strings now evaluate lazily, so disabled debug hooks no longer trigger
   `Object#to_s(io)` on compiler-internal objects and accidentally materialize
-  float-printing stubs during generated-stage2 semantic inference.
+  float-printing stubs during generated-stage2 semantic inference. Receiverless
+  semantic inference now also treats top-level `puts`/`print` as builtins,
+  matching the HIR lowering corridor.
+
+- Next measured blocker: generated `s2b` still aborts on
+  `STUB CALLED: Tuple$Heach$$block` when compiling a tiny no-prelude runtime
+  `puts 7` program. Repro:
+  `regression_tests/stage2_no_prelude_puts_runtime_repro.sh /tmp/cv2_puts_s2_full`.
 
 Boundary: `src/crystal_v2.cr --no-prelude` still exits `11` in an
 inline-yield recursion / force-return corridor before it can serve as a green
@@ -254,9 +262,8 @@ pending-budget oracle.
 
 ## Next Work
 
-1. Localize and fix the generated-stage2 no-prelude top-level `puts` resolution
-   error reached by `regression_tests/combined/test_no_prelude_interpolation.cr
-   --no-prelude --no-codegen`.
+1. Localize and fix the generated-stage2 `Tuple#each(&block)` stub reached by
+   `regression_tests/stage2_no_prelude_puts_runtime_repro.sh`.
 2. Add a fast no-prelude oracle for the generated-stage2 `puts$String` hang, or
    reduce it to the smallest HIR/MIR shape that reproduces without full wrapper
    bootstrap.

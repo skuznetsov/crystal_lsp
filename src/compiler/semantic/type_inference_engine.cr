@@ -6747,6 +6747,10 @@ module CrystalV2
               return infer_block_if_present.call(result)
             end
 
+            if result = infer_receiverless_builtin_call(method_name, arg_types, has_block, node)
+              return infer_block_if_present.call(result)
+            end
+
             if result = infer_receiverless_constructor_call(method_name, arg_types, has_block, node)
               return infer_block_if_present.call(result)
             end
@@ -7888,6 +7892,22 @@ module CrystalV2
           end
 
           nil
+        end
+
+        private def infer_receiverless_builtin_call(
+          method_name : String,
+          arg_types : Array(Type),
+          has_block : Bool,
+          node : Frontend::CallNode
+        ) : Type?
+          return nil if has_block
+
+          case method_name
+          when "puts", "print"
+            @context.nil_type
+          else
+            nil
+          end
         end
 
         private def known_macro_condition_value(expr_id : ExprId) : Bool?
