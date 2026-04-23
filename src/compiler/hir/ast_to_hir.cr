@@ -28650,6 +28650,8 @@ module Crystal::HIR
         lower_primitive_pointer_diff(ctx, receiver_id, args, mangled_name)
       when "object_crystal_type_id"
         lower_primitive_crystal_type_id(ctx, receiver_id)
+      when "class_crystal_instance_type_id"
+        lower_primitive_class_crystal_instance_type_id(ctx, receiver_id)
       when "object_id"
         lower_primitive_object_id(ctx, receiver_id)
       when "allocate"
@@ -28950,11 +28952,29 @@ module Crystal::HIR
       receiver_id : ValueId?,
     ) : ValueId?
       return nil unless receiver_id
+      if ctx.type_literal?(receiver_id)
+        type_id_lit = Literal.new(ctx.next_id, TypeRef::INT32, ctx.type_of(receiver_id).id.to_i64)
+        ctx.emit(type_id_lit)
+        ctx.register_type(type_id_lit.id, TypeRef::INT32)
+        return type_id_lit.id
+      end
       # Read the type_id field at offset 0 (i32)
       type_id_field = FieldGet.new(ctx.next_id, TypeRef::INT32, receiver_id, "__type_id", 0)
       ctx.emit(type_id_field)
       ctx.register_type(type_id_field.id, TypeRef::INT32)
       type_id_field.id
+    end
+
+    private def lower_primitive_class_crystal_instance_type_id(
+      ctx : LoweringContext,
+      receiver_id : ValueId?,
+    ) : ValueId?
+      return nil unless receiver_id && ctx.type_literal?(receiver_id)
+
+      type_id_lit = Literal.new(ctx.next_id, TypeRef::INT32, ctx.type_of(receiver_id).id.to_i64)
+      ctx.emit(type_id_lit)
+      ctx.register_type(type_id_lit.id, TypeRef::INT32)
+      type_id_lit.id
     end
 
     private def lower_primitive_object_id(
@@ -62927,6 +62947,16 @@ module Crystal::HIR
              (obj_node.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode) && (safe_slice_to_string(obj_node.name) || "") == "self"))
             receiver_is_type_literal = false
           end
+          if receiver_is_type_literal &&
+             call_args.empty? &&
+             block_expr.nil? &&
+             block_pass_expr.nil? &&
+             (method_name == "crystal_type_id" || method_name == "crystal_instance_type_id")
+            type_id_lit = Literal.new(ctx.next_id, TypeRef::INT32, receiver_type.id.to_i64)
+            ctx.emit(type_id_lit)
+            ctx.register_type(type_id_lit.id, TypeRef::INT32)
+            return type_id_lit.id
+          end
           if env_get("DEBUG_SELF_TO_S") && method_name == "to_s"
             recv_name = receiver_id ? get_type_name_from_ref(ctx.type_of(receiver_id)) : "nil"
             STDERR.puts "[SELF_TO_S_LIT] explicit=#{explicit_self_receiver} force=#{force_instance_receiver} lit=#{receiver_is_type_literal} recv_type=#{recv_name}"
@@ -67495,7 +67525,8 @@ module Crystal::HIR
         end
       end
 
-      if receiver_id && ctx.type_literal?(receiver_id) && mangled_method_name.includes?('#')
+      if receiver_id && ctx.type_literal?(receiver_id) && mangled_method_name.includes?('#') &&
+         method_name != "crystal_type_id" && method_name != "crystal_instance_type_id"
         receiver_type = ctx.type_of(receiver_id)
         if env_get("DEBUG_DECODE_CALL") && method_name == "decode"
           STDERR.puts "[DECODE_CALL_CONVERT] recv_type=#{get_type_name_from_ref(receiver_type)} module=#{module_type_ref?(receiver_type)}"
@@ -78104,6 +78135,12 @@ module Crystal::HIR
           class_name = desc.name unless desc.name.empty?
         end
         if class_name
+          if member_name == "crystal_type_id" || member_name == "crystal_instance_type_id"
+            type_id_lit = Literal.new(ctx.next_id, TypeRef::INT32, receiver_type.id.to_i64)
+            ctx.emit(type_id_lit)
+            ctx.register_type(type_id_lit.id, TypeRef::INT32)
+            return type_id_lit.id
+          end
           if member_name == "name"
             lit = Literal.new(ctx.next_id, TypeRef::STRING, class_name)
             ctx.emit(lit)

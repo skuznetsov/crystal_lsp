@@ -434,6 +434,27 @@ still timed out at 300s in later lowering, so the next frontier must be
 re-measured from a fresh generated `s2b` rather than assumed green.
 {F/G/R: 0.92/0.48/0.91} [verified]
 
+[LM-492|verified]: The generated-stage2 `Class$Dcrystal_type_id` abort was a
+type-literal primitive lowering hole duplicated across `lower_call` and
+`lower_member_access`. `Hasher#class(value)` was emitted as
+`copy %value; call Class.crystal_type_id()` because member-access on a
+type-literal receiver fell through to static `Class.*` resolution before
+primitive lowering could emit the original compiler's metaclass/type-id
+semantics. The fix keeps `crystal_type_id` and `crystal_instance_type_id` on
+the primitive path for type-literal receivers and emits an `Int32` type-id
+literal in both call and no-parens member-access paths. Evidence:
+`crystal build src/crystal_v2.cr -o /tmp/cv2_typeid3 --error-trace` exited 0;
+`regression_tests/p2_selfhost_stage2_shape_guard.sh /tmp/cv2_typeid3` passed
+and now rejects `Class.crystal_type_id` / `Class#crystal_type_id`;
+`regression_tests/p2_bootstrap_semantic_emit_oracle.sh /tmp/cv2_typeid3`
+passed; fresh `scripts/run_safe.sh /tmp/cv2_typeid3 420 4096
+src/crystal_v2.cr -o /tmp/cv2_typeid3_s2_full` exited 0 after about `248s`;
+generated `s2b` no-prelude no-codegen smoke moved past
+`Class$Dcrystal_type_id` to `STUB CALLED: Char$Hascii_control$Q`. Boundary:
+this is a root fix for type-id primitive dispatch, not a green generated-stage2
+compiler; the next frontier is `Char#ascii_control?` materialization.
+{F/G/R: 0.93/0.55/0.93} [verified]
+
 ## Active Strategy
 
 - Main fast loop: `--no-prelude` oracles and focused STOP_AFTER_HIR budget

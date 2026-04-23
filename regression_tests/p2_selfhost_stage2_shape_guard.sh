@@ -130,5 +130,7 @@ reject_pattern 'NameResolver#(current_owner_symbol|in_method_body\?|current_meth
   'unmaterialized NameResolver zero-arg helper target in self-host MIR'
 require_pattern 'func @CrystalV2::Compiler::Semantic::TypeInferenceEngine#guard_watchdog!' \
   'materialized TypeInferenceEngine guard_watchdog! helper in self-host MIR'
+reject_pattern 'Class\.crystal_type_id|Class#crystal_type_id' \
+  'Class.crystal_type_id stub target in self-host MIR'
 
 echo "p2_selfhost_stage2_shape_guard_ok"

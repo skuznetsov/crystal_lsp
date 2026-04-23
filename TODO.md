@@ -229,22 +229,37 @@ Expected current signals:
 - `p2_universal_helper_fanout_no_prelude_ok deep_helpers=0`
 - `p2_selfhost_stage2_shape_guard_ok`
 
+Latest generated-stage2 frontier:
+
+- `s1 -> s2b` builds with `/tmp/cv2_typeid3` in about `248s`.
+- Generated `s2b` no-prelude no-codegen smoke moved past
+  `Class$Dcrystal_type_id` and now aborts at `STUB CALLED:
+  Char$Hascii_control$Q`.
+- Root moved: type-literal `crystal_type_id`/`crystal_instance_type_id`
+  must lower to an `Int32` type-id literal before both `lower_call` and
+  `lower_member_access` rewrite type literals to static `Class.*` targets.
+  The shape guard now rejects `Class.crystal_type_id` / `Class#crystal_type_id`
+  in self-host MIR.
+
 Boundary: `src/crystal_v2.cr --no-prelude` still exits `11` in an
 inline-yield recursion / force-return corridor before it can serve as a green
 pending-budget oracle.
 
 ## Next Work
 
-1. Add a fast no-prelude oracle for the generated-stage2 `puts$String` hang, or
+1. Localize and fix the generated-stage2 `Char#ascii_control?` stub reached by
+   `regression_tests/combined/test_no_prelude_interpolation.cr --no-prelude
+   --no-codegen`.
+2. Add a fast no-prelude oracle for the generated-stage2 `puts$String` hang, or
    reduce it to the smallest HIR/MIR shape that reproduces without full wrapper
    bootstrap.
-2. Fix the generated-stage2 `String#each(&)` block stub in prelude loading.
-3. Compare `s1_bootstrap` and `s2b` on the fixed no-prelude corpus before
+3. Fix the generated-stage2 `String#each(&)` block stub in prelude loading.
+4. Compare `s1_bootstrap` and `s2b` on the fixed no-prelude corpus before
    trying `s3b+`.
-4. Add/inspect exact-called provenance for `record_pending_callee_for_rta` so
+5. Add/inspect exact-called provenance for `record_pending_callee_for_rta` so
    the source of remaining `keep:exact_called Array#to_s` / `Hash#to_s` demand
    is explicit.
-5. Verify whether broad fallback self-calls should mark exact concrete wrapper
+6. Verify whether broad fallback self-calls should mark exact concrete wrapper
    names as demanded, or whether they should remain virtual/demand-local until a
    real callsite asks for that concrete owner.
 
