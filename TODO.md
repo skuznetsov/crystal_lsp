@@ -80,10 +80,12 @@ Current diagnosis / recently fixed roots:
   -> `not reproduced`;
   `regression_tests/p2_generated_stage2_no_prelude_interp.sh /tmp/cv2_puts_receiverfix`
   -> `p2_generated_stage2_no_prelude_interp_ok`;
-  `regression_tests/p2_generated_stage2_no_prelude_puts_guard.sh /tmp/cv2_puts_receiverfix`
-  -> `p2_generated_stage2_no_prelude_puts_guard_ok frontier=missing___crystal_main`.
+  `regression_tests/p2_generated_stage2_no_prelude_puts_guard.sh /tmp/cv2_owned_return_fix3`
+  -> `p2_generated_stage2_no_prelude_puts_guard_ok frontier=io_filedescriptor_tell`.
   The old generated-stage2 no-prelude `Tuple$Heach$$block` frontier is removed;
-  the new first compile blocker is `error: Missing hash key: __crystal_main`.
+  the old synthetic-main MIR blockers (`Missing hash key: __crystal_main` and
+  `MIR function stub not found for: __crystal_main`) are removed. Generated
+  `s2b` now reaches `STUB CALLED: IO::FileDescriptor#tell`.
 - Stage2 shape guard now protects four self-host codegen roots in one MIR
   gate (`regression_tests/p2_selfhost_stage2_shape_guard.sh`):
   - stale cache-only call return repair no longer rewrites

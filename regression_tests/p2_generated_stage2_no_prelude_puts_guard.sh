@@ -62,7 +62,19 @@ if [[ $compile_status -eq 0 && -x "$OUT_BIN" ]]; then
 fi
 
 if grep -q 'Missing hash key: __crystal_main' "$COMPILE_LOG"; then
-  echo "p2_generated_stage2_no_prelude_puts_guard_ok frontier=missing___crystal_main"
+  echo "p2_generated_stage2_no_prelude_puts_guard_failed: old __crystal_main hash-key frontier regressed" >&2
+  tail -120 "$COMPILE_LOG" >&2 || true
+  exit 1
+fi
+
+if grep -q 'MIR function stub not found for: __crystal_main' "$COMPILE_LOG"; then
+  echo "p2_generated_stage2_no_prelude_puts_guard_failed: old __crystal_main MIR-stub frontier regressed" >&2
+  tail -120 "$COMPILE_LOG" >&2 || true
+  exit 1
+fi
+
+if grep -q 'STUB CALLED: IO\$CCFileDescriptor\$Htell' "$COMPILE_LOG"; then
+  echo "p2_generated_stage2_no_prelude_puts_guard_ok frontier=io_filedescriptor_tell"
   exit 0
 fi
 

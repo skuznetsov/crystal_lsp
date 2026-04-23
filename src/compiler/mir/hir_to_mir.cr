@@ -1217,6 +1217,16 @@ module Crystal
         # Get the pre-created function stub
         mir_func = @mir_module.get_function(hir_func.name)
         if mir_func.nil?
+          # Generated stage2 has shown rare hash-key misses on function names even
+          # when the backing array still contains the matching stub.
+          @mir_module.functions.each do |func|
+            if func.name == hir_func.name
+              mir_func = func
+              break
+            end
+          end
+        end
+        if mir_func.nil?
           # List available functions for debugging
           available = @mir_module.functions.map(&.name).sort.join(", ")
           raise "MIR function stub not found for: #{hir_func.name}\nAvailable functions containing 'step': #{@mir_module.functions.select { |f| f.name.includes?("step") }.map(&.name).join(", ")}"
@@ -2117,6 +2127,8 @@ module Crystal
       # Uses interprocedural fixed-point analysis tracing return values back to origins.
       private def build_owned_return_set
         @owned_return_funcs = ::Set(String).new
+        debug_owned = ENV.has_key?("CRYSTAL_V2_OWNED_RETURN_TRACE")
+        initial_func_count = @hir_module.functions.size
 
         # Build instruction map per function for fast lookup
         func_inst_map = {} of String => ::Hash(HIR::ValueId, HIR::Value)
@@ -2131,7 +2143,14 @@ module Crystal
         # Phase 1: Seed with functions that return direct Allocate results
         @hir_module.functions.each do |func|
           next if @owned_return_funcs.includes?(func.name)
-          if returns_allocated_value?(func, func_inst_map[func.name])
+          unless inst_map = lookup_hir_inst_map(func_inst_map, func.name)
+            if debug_owned
+              keys = func_inst_map.keys.first(5).join(",")
+              STDERR.puts "[OWNED_RETURN_MISS] phase=seed func=#{func.name} map_size=#{func_inst_map.size} initial_funcs=#{initial_func_count} current_funcs=#{@hir_module.functions.size} keys=#{keys}"
+            end
+            next
+          end
+          if returns_allocated_value?(func, inst_map)
             @owned_return_funcs << func.name
           end
         end
@@ -2143,10 +2162,37 @@ module Crystal
           changed = false
           @hir_module.functions.each do |func|
             next if @owned_return_funcs.includes?(func.name)
-            if returns_owned_call_result?(func, func_inst_map[func.name])
+            unless inst_map = lookup_hir_inst_map(func_inst_map, func.name)
+              if debug_owned
+                keys = func_inst_map.keys.first(5).join(",")
+                STDERR.puts "[OWNED_RETURN_MISS] phase=closure func=#{func.name} map_size=#{func_inst_map.size} initial_funcs=#{initial_func_count} current_funcs=#{@hir_module.functions.size} keys=#{keys}"
+              end
+              next
+            end
+            if returns_owned_call_result?(func, inst_map)
               @owned_return_funcs << func.name
               changed = true
             end
+          end
+        end
+      end
+
+      private def lookup_hir_inst_map(
+        func_inst_map : ::Hash(String, ::Hash(HIR::ValueId, HIR::Value)),
+        name : String
+      ) : ::Hash(HIR::ValueId, HIR::Value)?
+        func_inst_map[name]? || begin
+          # Keep the fast hash path, but recover if self-hosted String-key lookup
+          # drifts and the equal key only remains discoverable by linear scan.
+          matching_key : String? = nil
+          func_inst_map.each_key do |key|
+            if key == name
+              matching_key = key
+              break
+            end
+          end
+          if key = matching_key
+            func_inst_map[key]?
           end
         end
       end

@@ -127,10 +127,13 @@ builtin exemption removes the old frontier. Evidence:
 => `not reproduced`;
 `regression_tests/p2_generated_stage2_no_prelude_interp.sh /tmp/cv2_puts_receiverfix`
 => `p2_generated_stage2_no_prelude_interp_ok`;
-`regression_tests/p2_generated_stage2_no_prelude_puts_guard.sh /tmp/cv2_puts_receiverfix`
-=> `p2_generated_stage2_no_prelude_puts_guard_ok frontier=missing___crystal_main`.
+`regression_tests/p2_generated_stage2_no_prelude_puts_guard.sh /tmp/cv2_owned_return_fix3`
+=> `p2_generated_stage2_no_prelude_puts_guard_ok frontier=io_filedescriptor_tell`.
 Boundary: this does not make generated no-prelude codegen fully green; the next
-blocker is `error: Missing hash key: __crystal_main`. {F/G/R: 0.92/0.70/0.93}
+blocker is `STUB CALLED: IO::FileDescriptor#tell`. The synthetic-main MIR
+blockers (`Missing hash key: __crystal_main`, then `MIR function stub not found
+for: __crystal_main`) are removed by the function-name fallback fix in MIR
+owned-return/stub lookup. {F/G/R: 0.92/0.70/0.93}
 [verified]
 
 [LM-470|hypothesis]: The current bootstrap blocker is not one universal-method
