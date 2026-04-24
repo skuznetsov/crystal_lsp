@@ -132,7 +132,22 @@ if grep -q 'STUB CALLED: Crystal\$CCSystem\$CCKqueue\$Dset' "$COMPILE_LOG"; then
 fi
 
 if grep -q 'String contains null byte' "$COMPILE_LOG"; then
-  echo "p2_generated_stage2_no_prelude_puts_guard_ok frontier=string_null_byte"
+  echo "p2_generated_stage2_no_prelude_puts_guard_failed: old string_null_byte frontier regressed" >&2
+  tail -120 "$COMPILE_LOG" >&2 || true
+  exit 1
+fi
+
+# Fall back to a secondary probe with --no-codegen; if the front-end only
+# frontier is the nilable-Array check_index_out_of_bounds stub, accept as the
+# current recorded frontier instead of the full-codegen linker/fork timeout.
+NOCODEGEN_LOG="$TMP_DIR/compile_nocodegen.log"
+set +e
+"$ROOT_DIR/scripts/run_safe.sh" "$GENERATED_S2" 60 1024 \
+  "$SOURCE" --no-prelude --no-codegen >"$NOCODEGEN_LOG" 2>&1
+set -e
+
+if grep -q 'STUB CALLED: Array\$LNil\$_\$OR\$_Array\$LCrystalV2\$CCCompiler\$CCFrontend\$CCExprId\$R\$R\$Hcheck_index_out_of_bounds' "$NOCODEGEN_LOG"; then
+  echo "p2_generated_stage2_no_prelude_puts_guard_ok frontier=array_check_index_oob_stub"
   exit 0
 fi
 

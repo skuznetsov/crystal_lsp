@@ -17194,7 +17194,14 @@ module Crystal::MIR
           is_signed = false
         end
       else
-        is_signed = left_is_signed || right_is_signed || (operand_type.id <= TypeRef::INT128.id)
+        # Division/remainder signedness follows the dividend. UInt64#remainder(Int32)
+        # is used by Int#to_s(base); treating the signed Int32 divisor as enough to
+        # select srem corrupts high-bit unsigned values.
+        is_signed = if inst.op.div? || inst.op.rem?
+                      left_is_signed
+                    else
+                      left_is_signed || right_is_signed
+                    end
       end
 
       # Use float operations for float/double types

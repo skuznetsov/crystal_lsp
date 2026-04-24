@@ -1,6 +1,6 @@
 # Crystal V2 Bootstrap TODO
 
-Updated: 2026-04-23
+Updated: 2026-04-24
 Branch: `codegen`
 
 This is the active working backlog only. Historical detail is in git history,
@@ -63,15 +63,24 @@ regression_tests/p2_generated_stage2_no_prelude_puts_guard.sh /tmp/cv2_inherited
 ```
 
 Verified signal: `p2_generated_stage2_no_prelude_puts_guard_ok
-frontier=string_null_byte`.
+frontier=array_check_index_oob_stub` (after div/rem signedness root fix).
 
-The next measured generated-stage blocker is now a `String contains null byte`
-error from generated `s2b` while compiling the one-expression no-prelude repro.
-This is consistent with the existing bootstrap comments in `src/compiler/cli.cr`
-that `String#byte_index(0)` falsely reports null bytes in stage2 and forced
-temporary `LibC` file-operation workarounds. Do not add more callsite
-workarounds for `check_no_null_byte`; fix the `String#byte_index(0)` / string
-search root cause and cover it with a no-prelude oracle.
+The previous `String contains null byte` frontier was resolved as a div/rem
+signedness bug in `llvm_backend`, not a `String#byte_index(0)` search bug.
+`CLI` builds `pipeline_hash_str = pipeline_hash.to_s(16)` from a `UInt64` FNV
+hash; `Int#to_s(base)` calls `num.remainder(base).abs`; the backend selected
+`srem` because it OR-ed operand signedness, which turns high-bit unsigned
+values into negative remainders and corrupts hex digits into bytes containing
+`0x00`. The fix matches original Crystal `primitives.cr:149`
+(`t1.signed? ? srem : urem`): div/rem signedness now follows the dividend
+only. See LM-499 and `regression_tests/p2_u64_to_s_base16_no_null.sh`.
+
+The next measured generated-stage blocker is
+`STUB CALLED: Array(Nil | Array(Crystal::Compiler::Frontend::ExprId))#check_index_out_of_bounds$Int32_block`
+under `--no-codegen`. Full codegen times out in `Crystal::RWLock#write_lock`
+reached from `Process.fork`, which is likely a downstream symptom of the same
+missing-body corridor. Do not add a universal bounds-check body shim; find
+the demand/materialization root for this concrete nilable-Array wrapper.
 
 Current diagnosis / recently fixed roots:
 

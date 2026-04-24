@@ -665,6 +665,34 @@ Boundary: `IO#pos` is now an accepted runtime dispatch-helper shape for
 `String#byte_index(0)` / null-byte false positive, not another
 `check_no_null_byte` callsite workaround. {F/G/R: 0.94/0.68/0.93} [verified]
 
+[LM-499|verified]: The generated-stage2 `String contains null byte` frontier was
+a div/rem signedness bug in `llvm_backend`, not a `String#byte_index(0)` search
+bug. Root chain: `CLI` builds `pipeline_hash_str = pipeline_hash.to_s(16)` from
+a `UInt64` FNV hash whose seed is `0xcbf29ce484222325` (high bit set);
+`Int#to_s(base)` calls `num.remainder(base).abs` where `num : UInt64` and
+`base : Int32`; MIR emits `BinaryOp::Mod` with `receiver_type = UInt64` as
+result but keeps the `Int32` right operand untouched; the backend then
+promoted both operands via `sext Int32 -> i64` (fine) but selected `srem`
+because `is_signed = left_is_signed || right_is_signed` was true whenever any
+operand was signed. `srem i64 0xcbf29ce484222325, 16` returns a negative
+remainder (srem follows dividend sign in 2's complement), which `.abs` on a
+`UInt64` treats as a huge index into the `digits` buffer, corrupting bytes and
+inserting `0x00`. `File.exists?("#{pipeline_hash_str}.ll")` then raises
+`String contains null byte` through `check_no_null_byte`. The fix mirrors
+original Crystal `primitives.cr:149`: `t1.signed? ? srem : urem`. In
+`llvm_backend.cr`, div/rem now derives signedness from dividend only
+(`left_is_signed`) instead of OR-ing both operands. Evidence:
+`regression_tests/p2_u64_to_s_base16_no_null.sh bin/crystal_v2` baseline
+without fix printed corrupted bytes with embedded nul (`byte_index(0)==0`);
+with fix prints `cbf29ce484222325`, `16`, `true`. Full regression suite delta
+vs baseline: zero changed. The generated-stage2 no-prelude `puts 7` frontier
+moves past `string_null_byte` to a new corridor: `--no-codegen` now hits
+`STUB CALLED: Array(Nil | Array(Crystal::Compiler::Frontend::ExprId))#check_index_out_of_bounds$Int32_block`;
+full codegen times out in `Crystal::RWLock#write_lock` reached from
+`Process.fork`. Boundary: this is a codegen root fix, not a demand-pipeline
+fix; the next frontier is the new `check_index_out_of_bounds` stub on a
+deep nilable-Array container. {F/G/R: 0.94/0.70/0.94} [verified]
+
 ## Active Strategy
 
 - Main fast loop: `--no-prelude` oracles and focused STOP_AFTER_HIR budget
