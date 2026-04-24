@@ -91,11 +91,24 @@ in both functions. Evidence: `generated_s2.ll` now has 78 real
 `check_index_out_of_bounds` definitions with 0 `abort_stub` lines; the
 nocodegen probe exits clean; zero regression suite delta. See LM-500.
 
-The next measured generated-stage blocker is the full-codegen hang after
-`lower_main: exprs=1` on `--no-prelude puts 7`, which remains the
-`Crystal::RWLock#write_lock` / `Process.fork` corridor previously noted on
-LM-499. The `--no-codegen` front end now runs to completion on the same
-source.
+The `Crystal::RWLock#write_lock` corridor noted on LM-499 was then narrowed
+to a two-layer root by LM-501. Inline lowering of `Atomic#set` / `Atomic#swap`
+in `hir_to_mir.cr` was reading `args[2]` as the stored value, but the Crystal
+signature is `swap(value : T, ordering = :seq_cst)`, so `args[2]` is the
+`AtomicOrdering` enum and `args[1]` is the value. The writer-lock path
+therefore stored `AtomicOrdering::Acquire = 4` into `@writer` instead of
+`LOCKED = 1`. The fix pins both inlined ops to `args[1]`; fresh
+`write_lock` disassembly now emits `ldr w9, [Crystal$CCRWLock__classvar__LOCKED]`
+instead of `mov w9, #0x4`. The puts-guard now carries a positive-shape
+regression check for both invariants. See LM-501.
+
+The next measured generated-stage blocker is LM-502 candidate: with the
+Atomic args bug gone, `write_lock` still faults because the
+`Crystal::System::Process.@@rwlock` classvar remains `null` —
+`Crystal::RWLock.new` is never lowered by RTA as an initializer for the
+classvar. This is a similar-shaped allowlist / lowering-demand gap to
+LM-500 but for struct-classvar initialization constructors. The
+`--no-codegen` front end still runs to completion on the same source.
 
 Current diagnosis / recently fixed roots:
 

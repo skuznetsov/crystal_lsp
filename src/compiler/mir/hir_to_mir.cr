@@ -2977,15 +2977,19 @@ module Crystal
             return builder.load(val_ptr, convert_type(call.type))
           elsif method_suffix == "set" || method_suffix == "Hset"
             # Atomic#set: store value to self + 0
+            # Signature: set(value : T, ordering = :seq_cst) — args[0]=self, args[1]=value, args[2]=ordering.
+            # The value is always args[1]; args[2] is the ordering enum (not a value to store).
             self_ptr = args[0]
-            new_val = args.size > 2 ? args[2] : (args.size > 1 ? args[1] : builder.const_int(0, TypeRef::INT32))
+            new_val = args.size > 1 ? args[1] : builder.const_int(0, TypeRef::INT32)
             val_ptr = builder.gep(self_ptr, [0_u32], TypeRef::POINTER)
             builder.store(val_ptr, new_val)
             return new_val
           elsif method_suffix == "swap" || method_suffix == "Hswap"
             # Atomic#swap: load old, store new, return old
+            # Signature: swap(value : T, ordering = :seq_cst) — args[0]=self, args[1]=value, args[2]=ordering.
+            # The value is always args[1]; args[2] is the ordering enum (not a value to store).
             self_ptr = args[0]
-            new_val = args.size > 2 ? args[2] : (args.size > 1 ? args[1] : builder.const_int(0, TypeRef::INT32))
+            new_val = args.size > 1 ? args[1] : builder.const_int(0, TypeRef::INT32)
             val_ptr = builder.gep(self_ptr, [0_u32], TypeRef::POINTER)
             old_val = builder.load(val_ptr, convert_type(call.type))
             builder.store(val_ptr, new_val)

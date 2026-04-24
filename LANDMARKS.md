@@ -727,6 +727,44 @@ regression suite delta vs baseline on the same branch is zero (original 147:
 likely still the `Crystal::RWLock#write_lock` / `Process.fork` corridor noted
 in LM-499. {F/G/R: 0.92/0.72/0.94} [verified]
 
+[LM-501|verified]: The generated-stage2 `Crystal::RWLock#write_lock` prologue
+emitted `mov w9, #0x4 ; str w9, [x10]`, writing LLVM
+`AtomicOrdering::Acquire = 4` into the `@writer` atomic slot instead of the
+intended `LOCKED = 1`. Root cause: the inline lowering of `Atomic(T)#set` and
+`Atomic(T)#swap` in `src/compiler/mir/hir_to_mir.cr` lines 2978-2992 read
+`args[2]` as the stored value whenever the HIR call carried three arguments.
+Crystal's `Atomic#swap(value, ordering)` puts the value at arg index 1 and the
+ordering enum at index 2, so the inliner was storing the ordering enum (Acquire
+= 4) into the slot and reading the prior contents back as an 8-byte `ptr`
+(aliasing the full pointer-sized word of the heap-allocated `Atomic(Int32)`
+struct). Fix: both branches now read `new_val = args.size > 1 ? args[1] :
+const_int(0, INT32)`; the old `args[2]` fallback is removed. Evidence: before
+the fix, the generated-stage2 binary's `Crystal$CCRWLock$Hwrite_lock`
+disassembly contained `mov w9, #0x4 ; str w9, [x10]`; after the fix the
+prologue instead does `adrp x8, Crystal$CCRWLock__classvar__LOCKED ; ldr w9,
+[x8] ; str w9, [x10]` (loads the `LOCKED` classvar and stores that i32 into
+the atomic slot). Grok (xAI grok-build via `~/.grok/bin/grok_acp_delegate.py`)
+located the suspicious inline lowering and the pre-existing proper-atomic path
+(`emit_atomic_rmw` in `src/compiler/mir/llvm_backend.cr` near line 23719) with
+28 read-only tool calls on a timeboxed task file; verification happened here.
+Regression guard is extended in
+`regression_tests/p2_generated_stage2_no_prelude_puts_guard.sh` to assert the
+positive shape (no raw `#0x4` store, presence of the LOCKED classvar symbol
+reference) in the write_lock disassembly. Boundary: the write_lock body is
+still a non-atomic load+store inline — `emit_atomic_rmw` / `atomicrmw xchg`
+infrastructure exists in the backend but is not reached because hir_to_mir
+short-circuits `Atomic#swap` before any MIR `AtomicRMW` is produced; for
+single-threaded stage2 the non-atomic behaviour is not the active blocker.
+The full-codegen `puts 7 --no-prelude` corridor now fails one level deeper:
+`Crystal::System::Process.@@rwlock` classvar stays `null` because
+`Crystal::RWLock.new` is never lowered (RTA never records the constructor for
+a struct-classvar init), and `write_lock(NULL)` faults on entry with
+`EXC_BAD_ACCESS address=0x0` at offset +24 (first load through self). That is
+the next frontier. Regression suite delta vs baseline on the same branch is
+zero (original and combined counts unchanged; the first combined 21/10 run
+was a flake reproduced back to 23/8 on isolated rerun). {F/G/R: 0.92/0.55/0.92}
+[verified]
+
 ## Active Strategy
 
 - Main fast loop: `--no-prelude` oracles and focused STOP_AFTER_HIR budget
