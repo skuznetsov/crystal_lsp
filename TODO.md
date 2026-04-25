@@ -63,13 +63,20 @@ regression_tests/p2_generated_stage2_no_prelude_puts_guard.sh /tmp/cv2_inherited
 ```
 
 Verified signal: `p2_generated_stage2_no_prelude_puts_guard_ok
-frontier=eventloop_after_fork_rta_gap` (after LM-504 cleared the
-`->Module.method` eager-call bug that was feeding bogus Procs into
-`Process.after_fork_child_callbacks`). The next root is an RTA
-discovery gap for `Crystal::EventLoop#after_fork` — the abstract base
-emits an ABORT stub because the virtual dispatch reached through
-`Proc.call` in the child fork iteration is not discovered by RTA.
-This is the sibling pattern to LM-503(B) for `after_fork_before_exec`.
+frontier=nocodegen_clean_full_codegen_hang` after `f8313232` cleared the
+prior `eventloop_after_fork_rta_gap`. Root cause was not the abstract-base
+RTA discovery itself — Polling/Kqueue#after_fork were correctly recorded
+in `@rta_called_method_parts` and pushed onto `@pending_function_queue`
+by `undefer_rta_functions`. The bug was that
+`force_lower_function_for_return_type` mutated the same queue via
+`Array#delete(name)` while `process_pending_lower_functions` was iterating
+it by index; the delete shifted later entries down, skipping the
+undefer-pushed virtual subtypes past the loop's current `idx`. Fix:
+drop the queue mutation; existing `has_function_with_body?` /
+`function_state.completed?` guards make stale entries safe. The next
+recorded frontier is the `--no-codegen` clean exit while full-codegen
+still hangs in `Crystal::RWLock#write_lock` reached from `Process.fork`,
+tracked separately.
 
 The previous `String contains null byte` frontier was resolved as a div/rem
 signedness bug in `llvm_backend`, not a `String#byte_index(0)` search bug.
