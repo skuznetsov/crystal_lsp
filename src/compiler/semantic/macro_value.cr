@@ -637,6 +637,22 @@ module CrystalV2
             base_name = stringify_node(@arena[node.base_type])
             args = node.type_args.map { |arg_id| stringify_node(@arena[arg_id]) }
             "#{base_name}(#{args.join(", ")})"
+          when Frontend::PointerofNode
+            inner = node.args.first?
+            inner_text = inner ? stringify_node(@arena[inner]) : ""
+            "pointerof(#{inner_text})"
+          when Frontend::UnaryNode
+            op = String.new(node.operator)
+            operand = stringify_node(@arena[node.operand])
+            "#{op}#{operand}"
+          when Frontend::GroupingNode
+            "(#{stringify_node(@arena[node.expression])})"
+          when Frontend::TupleLiteralNode
+            parts = node.elements.map { |elem_id| stringify_node(@arena[elem_id]) }
+            "{#{parts.join(", ")}}"
+          when Frontend::ArrayLiteralNode
+            parts = node.elements.map { |elem_id| stringify_node(@arena[elem_id]) }
+            "[#{parts.join(", ")}]"
           else
             Frontend.node_literal_string(node) || ""
           end
