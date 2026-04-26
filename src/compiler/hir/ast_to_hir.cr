@@ -65795,6 +65795,13 @@ module Crystal::HIR
           # Structural guard: if callee has both `yield` and explicit `return`,
           # inline-yield may misroute return control flow to the caller.
           # Avoid name-based special cases (like any?) and detect capability gap directly.
+          #
+          # Exception: when the user's block ALSO contains `return`, the proc-based
+          # fallback silently DROPS that return (block writes to local alloca; caller
+          # never sees the result). In that case we MUST inline so the existing
+          # inline_block_body override mechanism (line ~76246) can route the block's
+          # `return` to a real Return while callee's own `return` jumps to the
+          # inline-merge exit.
           if !skip_inline
             receiver_base_for_lookup = receiver_id ? strip_generic_args(get_type_name_from_ref(ctx.type_of(receiver_id))) : nil
             if entry = lookup_block_function_def_for_call(base_method_name, call_args.size, arg_types, receiver_base_for_lookup)
@@ -65805,7 +65812,8 @@ module Crystal::HIR
                 if body = def_node.body
                   callee_has_return = with_arena(def_arena) { contains_return?(body) }
                 end
-                if def_contains_yield?(def_node, def_arena) && callee_has_return
+                block_has_return = contains_return?(block_for_inline.body)
+                if def_contains_yield?(def_node, def_arena) && callee_has_return && !block_has_return
                   skip_inline = true
                   debug_hook("call.inline.skip", "callee=#{mangled_method_name} reason=callee_yield_with_return")
                 end
