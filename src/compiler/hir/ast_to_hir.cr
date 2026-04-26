@@ -21309,6 +21309,13 @@ module Crystal::HIR
             next if expr_id.null_ptr? || expr_id.invalid?
             member = unwrap_visibility_member(@arena[expr_id])
             case member
+            when CrystalV2::Compiler::Frontend::AnnotationNode
+              # Capture @[Primitive(:name)] (and other effect annotations) so the
+              # following DefNode can be registered as a primitive intrinsic.
+              # Without this, primitives declared in nested modules (e.g.
+              # Atomic::Ops.atomicrmw) are silently treated as ordinary methods
+              # with empty bodies → callers receive zero/null at runtime.
+              remember_effect_annotation(member, @arena)
             when CrystalV2::Compiler::Frontend::DefNode
               method_name = (safe_slice_to_string(member.name) || "")
               recv = member.receiver
@@ -21327,6 +21334,14 @@ module Crystal::HIR
                 STDERR.puts "[DEBUG_MODULE_LOOKUP] register #{full_name}.#{method_name}"
               end
               base_name = "#{full_name}.#{method_name}"
+              # Register pending @[Primitive(:name)] before processing the def body.
+              if prim = @pending_primitive_kind
+                @pending_primitive_kind = nil
+                @module.register_primitive(base_name, prim)
+                if env_get("DEBUG_PRIMITIVES")
+                  STDERR.puts "[PRIMITIVE_REG] #{base_name} → :#{prim}"
+                end
+              end
               member_arena = registration_member_arena_for(base_name, member)
               # Keep nested-module defs anchored to their original arena.
               # Reparsed snippet defs are useful for source-derived metadata, but
