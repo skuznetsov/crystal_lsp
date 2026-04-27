@@ -22170,7 +22170,18 @@ module Crystal::HIR
         splat_type = TypeRef::VOID
         remaining = [] of TypeRef
         if !call_types.empty?
-          remaining = call_types[call_index..-1]? || [] of TypeRef
+          # See lower_def for explanation of splat slice computation.
+          splat_pos_nilable = splat_param_types_index
+          splat_pos = splat_pos_nilable.is_a?(Int32) ? splat_pos_nilable : 0
+          non_splat_after = call_index - splat_pos
+          if non_splat_after > 0
+            end_idx = call_types.size - non_splat_after
+            if end_idx > splat_pos
+              remaining = call_types[splat_pos...end_idx].to_a
+            end
+          else
+            remaining = call_types[call_index..-1]? || [] of TypeRef
+          end
           # Avoid re-wrapping: if single remaining arg is already a Tuple, use it directly
           if remaining.size == 1 && is_tuple_type_ref?(remaining[0])
             splat_type = remaining[0]
@@ -27460,7 +27471,20 @@ module Crystal::HIR
         splat_type = TypeRef::VOID
         remaining = [] of TypeRef
         if !call_types.empty?
-          remaining = call_types[call_index..-1]? || [] of TypeRef
+          # Compute splat slice taking trailing positional params into account.
+          # When the splat is not at the end (e.g. `*patterns, match, follow_symlinks`),
+          # only consume args between the splat position and the trailing positionals.
+          splat_pos_nilable = splat_param_types_index
+          splat_pos = splat_pos_nilable.is_a?(Int32) ? splat_pos_nilable : 0
+          non_splat_after = call_index - splat_pos
+          if non_splat_after > 0
+            end_idx = call_types.size - non_splat_after
+            if end_idx > splat_pos
+              remaining = call_types[splat_pos...end_idx].to_a
+            end
+          else
+            remaining = call_types[call_index..-1]? || [] of TypeRef
+          end
           # Avoid re-wrapping: if single remaining arg is already a Tuple, use it directly
           if remaining.size == 1 && is_tuple_type_ref?(remaining[0])
             splat_type = remaining[0]
@@ -43641,7 +43665,22 @@ module Crystal::HIR
         splat_type = TypeRef::VOID
         remaining = [] of TypeRef
         if !call_types.empty?
-          remaining = call_types[call_index..-1]? || [] of TypeRef
+          # Compute splat slice carefully: splat may not be at the end.
+          # call_index counts non-splat positionals encountered (both before
+          # AND after the splat). splat_param_types_index records the splat's
+          # position in param_types — same as its position in call_types.
+          # non_splat_after = number of non-splat positionals AFTER the splat.
+          splat_pos_nilable = splat_param_types_index
+          splat_pos = splat_pos_nilable.is_a?(Int32) ? splat_pos_nilable : 0
+          non_splat_after = call_index - splat_pos
+          if non_splat_after > 0
+            end_idx = call_types.size - non_splat_after
+            if end_idx > splat_pos
+              remaining = call_types[splat_pos...end_idx].to_a
+            end
+          else
+            remaining = call_types[call_index..-1]? || [] of TypeRef
+          end
           # Avoid re-wrapping: if single remaining arg is already a Tuple
           # (e.g. pack_splat_args_for_call already packed the call site), use
           # it directly so `*items : T` does not become Tuple(Tuple(T, ...)).
