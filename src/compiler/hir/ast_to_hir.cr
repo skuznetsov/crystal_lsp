@@ -76189,7 +76189,15 @@ module Crystal::HIR
           # Bind function parameters to call arguments
           if params = func_def.params
             inline_func_context = function_context_from_name(inline_key)
+            # Track call_args index separately from param index: a bare `*`
+            # named-only separator is a Parameter slot but does NOT correspond
+            # to a call arg (reorder_named_args/apply_default_args skip it),
+            # so indexing call_args by raw param idx mis-maps every param
+            # appearing after the separator. Likewise, `&block` is bound from
+            # the block argument, not from call_args.
+            arg_idx = 0
             each_param_with_index(params) do |param, idx|
+              next if named_only_separator?(param)
               if pname = param.name
                 param_name = (safe_slice_to_string(pname) || "")
                 if param.is_block
@@ -76228,11 +76236,12 @@ module Crystal::HIR
                     ctx.register_local(param_name, proc_id)
                     ctx.register_type(proc_id, ctx.type_of(proc_id))
                   end
-                elsif idx < call_args.size
-                  arg_id = call_args[idx]
+                elsif arg_idx < call_args.size
+                  arg_id = call_args[arg_idx]
                   ctx.register_local(param_name, arg_id)
                   # Also register the type so it's available when the parameter is accessed
                   ctx.register_type(arg_id, ctx.type_of(arg_id))
+                  arg_idx += 1
                 elsif default_expr = param.default_value
                   default_id = with_arena(callee_arena) do
                     if ta = param.type_annotation
