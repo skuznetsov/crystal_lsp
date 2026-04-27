@@ -31447,6 +31447,7 @@ module Crystal::HIR
       type_param_names = [] of String
       has_non_type_param_annotation = false
       after_named_only_separator = false
+      splat_seen = false
 
       function_param_infos(def_node).each do |param|
         if param.is_block
@@ -31457,6 +31458,15 @@ module Crystal::HIR
           has_named_only = true
           after_named_only_separator = true
           next
+        end
+        # Params appearing after a (named or bare) splat are named-only in
+        # Crystal semantics: positional args either go before the splat or
+        # get consumed by it, so reaching a post-splat param positionally
+        # is impossible. Only the first transition flips the flag, so the
+        # splat itself remains positional.
+        if splat_seen && !param.is_splat && !param.is_double_splat && !after_named_only_separator
+          has_named_only = true
+          after_named_only_separator = true
         end
         has_splat = true if param.is_splat
         has_double_splat = true if param.is_double_splat
@@ -31480,6 +31490,7 @@ module Crystal::HIR
             has_non_type_param_annotation = true
           end
         end
+        splat_seen = true if param.is_splat || param.is_double_splat
       end
 
       DefParamStats.new(
