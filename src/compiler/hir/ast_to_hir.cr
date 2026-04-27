@@ -76157,26 +76157,41 @@ module Crystal::HIR
               if pname = param.name
                 param_name = (safe_slice_to_string(pname) || "")
                 if param.is_block
-                  # &block parameter: convert the caller's block to a Proc and bind it.
-                  # Without this, methods that store blocks as Procs (e.g., OptionParser#on)
-                  # would receive null instead of a valid function pointer.
-                  block_arena_for_proc = @block_node_arenas[block.object_id]? || resolve_arena_for_block(block, caller_arena) || caller_arena
-                  # Block literals capture the caller's lexical environment, not the
-                  # temporary inline callee locals. Restore the full caller snapshot
-                  # while materializing the Proc so capture detection sees outer writes.
-                  saved_inline_locals = ctx.save_locals
-                  ctx.restore_locals(caller_locals)
-                  heap_block_proc = block_arg_requires_heap_proc?(inline_key, base_inline_name, method_name)
-                  # Hint: when the proc body is a yield-forwarding shape, its yields
-                  # delegate through a captured POINTER whose original Proc type was
-                  # erased. The forwarder typically returns whatever the enclosing
-                  # function returns (e.g., Array#fetch's inner block forwards the
-                  # caller's default to `check_index_out_of_bounds`).
-                  hint_return_type = proc_materialize_hint_return_type(ctx)
-                  proc_id = lower_block_to_proc(ctx, block, block_param_types, block_arena_for_proc, heap_block_proc, hint_return_type)
-                  ctx.restore_locals(saved_inline_locals)
-                  ctx.register_local(param_name, proc_id)
-                  ctx.register_type(proc_id, ctx.type_of(proc_id))
+                  if block_contains_return
+                    # Block has a non-local return. A Proc cannot represent
+                    # non-local return semantics — once materialized and widened
+                    # by RTA into a vdispatch union, the captured continuation is
+                    # erased and downstream callers get a null block (root of the
+                    # Array#fetch s3b crash). apply_inline only fires in the
+                    # inline-yield path, where the callee's `yield` is rewritten
+                    # to the block body directly, so leaving the named &block
+                    # parameter unbound is safe for yield-only callees.
+                    debug_hook(
+                      "inline.yield.skip_proc_materialize_with_return",
+                      "callee=#{inline_key} param=#{param_name}"
+                    )
+                  else
+                    # &block parameter: convert the caller's block to a Proc and bind it.
+                    # Without this, methods that store blocks as Procs (e.g., OptionParser#on)
+                    # would receive null instead of a valid function pointer.
+                    block_arena_for_proc = @block_node_arenas[block.object_id]? || resolve_arena_for_block(block, caller_arena) || caller_arena
+                    # Block literals capture the caller's lexical environment, not the
+                    # temporary inline callee locals. Restore the full caller snapshot
+                    # while materializing the Proc so capture detection sees outer writes.
+                    saved_inline_locals = ctx.save_locals
+                    ctx.restore_locals(caller_locals)
+                    heap_block_proc = block_arg_requires_heap_proc?(inline_key, base_inline_name, method_name)
+                    # Hint: when the proc body is a yield-forwarding shape, its yields
+                    # delegate through a captured POINTER whose original Proc type was
+                    # erased. The forwarder typically returns whatever the enclosing
+                    # function returns (e.g., Array#fetch's inner block forwards the
+                    # caller's default to `check_index_out_of_bounds`).
+                    hint_return_type = proc_materialize_hint_return_type(ctx)
+                    proc_id = lower_block_to_proc(ctx, block, block_param_types, block_arena_for_proc, heap_block_proc, hint_return_type)
+                    ctx.restore_locals(saved_inline_locals)
+                    ctx.register_local(param_name, proc_id)
+                    ctx.register_type(proc_id, ctx.type_of(proc_id))
+                  end
                 elsif idx < call_args.size
                   arg_id = call_args[idx]
                   ctx.register_local(param_name, arg_id)
