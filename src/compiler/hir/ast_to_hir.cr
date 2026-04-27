@@ -3615,6 +3615,12 @@ module Crystal::HIR
     # Standalone proc/block bodies may still contain `yield`, which must target the
     # enclosing method callback instead of guessing from the proc's own params.
     @explicit_yield_target_stack : Array(ValueId) = [] of ValueId
+    # Hint stack: when a block is materialized as a proc whose yields delegate to a
+    # captured outer block, the captured target is stored as a generic POINTER and
+    # its real Proc TypeDescriptor (and thus return type) is lost. The caller of
+    # lower_block_to_proc pushes the expected proc return type here so
+    # infer_yield_return_type can recover the correct ABI.
+    @expected_proc_return_type_hint_stack : Array(TypeRef) = [] of TypeRef
     # Counter for generating unique proc function names
     @proc_function_counter : Int32 = 0
     # Closure by-reference cells: var_name → {classvar_class, classvar_name, type}
@@ -56650,6 +56656,34 @@ module Crystal::HIR
     end
 
     private def infer_yield_return_type(ctx : LoweringContext) : TypeRef?
+      # Proc-context yield: when lowering a block-as-proc body that yields to a
+      # captured outer block, the proc was created with return_type=VOID and
+      # ctx.function.name is `__crystal_block_proc_N` (not in @function_defs).
+      # The fallback below would return VOID, causing yield to emit `call void`
+      # and discarding the result. Look up the captured Proc's TypeDescriptor
+      # directly so the call gets the correct ABI.
+      if @inline_yield_proc_depth > 0 && (yield_target_id = @explicit_yield_target_stack.last?)
+        yield_target_type = ctx.type_of(yield_target_id)
+        if type_desc = @module.get_type_descriptor(yield_target_type)
+          if type_desc.kind == TypeKind::Proc && type_desc.type_params.size > 1
+            proc_ret = type_desc.type_params.last
+            if proc_ret != TypeRef::VOID && proc_ret != TypeRef::NIL
+              return proc_ret
+            end
+          end
+        end
+      end
+      # Fallback: caller of lower_block_to_proc may have pushed the expected proc
+      # return type. This recovers ABI when the captured target is a POINTER
+      # (TypeRef 18) whose original Proc TypeDescriptor was lost during capture.
+      if @inline_yield_proc_depth > 0
+        if hint = @expected_proc_return_type_hint_stack.last?
+          if hint != TypeRef::VOID && hint != TypeRef::NIL
+            return hint
+          end
+        end
+      end
+
       func_name = ctx.function.name
       if @inline_yield_block_body_depth > 0 && @current_class && @current_method
         sep = @current_method_is_class ? "." : "#"
@@ -68814,7 +68848,8 @@ module Crystal::HIR
             owner_arena = call_arena
             block_arena_for_proc = @block_node_arenas[blk_node.object_id]? || resolve_arena_for_block(blk_node, owner_arena) || owner_arena
             heap_block_proc = block_arg_requires_heap_proc?(mangled_method_name, base_method_name, method_name)
-            proc_id = lower_block_to_proc(ctx, blk_node, block_param_types_for_proc, block_arena_for_proc, heap_block_proc)
+            hint_return_type = ctx.function.return_type
+            proc_id = lower_block_to_proc(ctx, blk_node, block_param_types_for_proc, block_arena_for_proc, heap_block_proc, hint_return_type)
             args << proc_id
             if env_get("DEBUG_WITH_BRACE_CALL") && (method_name == "with_brace_newlines_skipped" || base_method_name.includes?("with_brace_newlines_skipped") || mangled_method_name.includes?("with_brace_newlines_skipped"))
               STDERR.puts "[WITH_BRACE_FALLBACK] stage=proc_appended method=#{method_name} base=#{base_method_name} mangled=#{mangled_method_name} block_id=#{block_id} args=#{args.size}"
@@ -75656,7 +75691,16 @@ module Crystal::HIR
         # is not reliably represented in lowered function params for all yield paths.
         block_arena_for_proc = @block_node_arenas[block.object_id]? || resolve_arena_for_block(block, caller_arena) || caller_arena
         heap_block_proc = block_arg_requires_heap_proc?(inline_key, base_inline_name)
-        proc_id = lower_block_to_proc(ctx, block, block_param_types, block_arena_for_proc, heap_block_proc)
+        # Hint: prefer the block's inferred return type when the inline-yield path
+        # already computed it (block_return_name resolved); else fall back to the
+        # caller's return type for yield-forwarding procs.
+        hint_return_type = if block_return_name
+                             tref = type_ref_for_name(block_return_name)
+                             tref == TypeRef::VOID ? ctx.function.return_type : tref
+                           else
+                             ctx.function.return_type
+                           end
+        proc_id = lower_block_to_proc(ctx, block, block_param_types, block_arena_for_proc, heap_block_proc, hint_return_type)
         fallback_args << proc_id
         # `inline_key` can still be a bare `Owner#m` when the yield inline path bails out early,
         # or it can be the currently-lowered splat wrapper when a nested inline fallback hits a
@@ -76094,7 +76138,13 @@ module Crystal::HIR
                   saved_inline_locals = ctx.save_locals
                   ctx.restore_locals(caller_locals)
                   heap_block_proc = block_arg_requires_heap_proc?(inline_key, base_inline_name, method_name)
-                  proc_id = lower_block_to_proc(ctx, block, block_param_types, block_arena_for_proc, heap_block_proc)
+                  # Hint: when the proc body is a yield-forwarding shape, its yields
+                  # delegate through a captured POINTER whose original Proc type was
+                  # erased. The forwarder typically returns whatever the enclosing
+                  # function returns (e.g., Array#fetch's inner block forwards the
+                  # caller's default to `check_index_out_of_bounds`).
+                  hint_return_type = ctx.function.return_type
+                  proc_id = lower_block_to_proc(ctx, block, block_param_types, block_arena_for_proc, heap_block_proc, hint_return_type)
                   ctx.restore_locals(saved_inline_locals)
                   ctx.register_local(param_name, proc_id)
                   ctx.register_type(proc_id, ctx.type_of(proc_id))
@@ -82696,6 +82746,7 @@ module Crystal::HIR
       param_types : Array(TypeRef)?,
       block_arena : CrystalV2::Compiler::Frontend::ArenaLike,
       heap_proc : Bool = false,
+      expected_return_type : TypeRef? = nil,
     ) : ValueId
       debug_trace_each = env_get("DEBUG_TRACE_EACH_WITH_INDEX") &&
                          ctx.function.name.includes?("each_with_index")
@@ -83101,9 +83152,15 @@ module Crystal::HIR
         @explicit_yield_target_stack << explicit_yield_target_id
         pushed_explicit_yield_target = true
       end
+      pushed_return_type_hint = false
+      if expected_return_type && expected_return_type != TypeRef::VOID
+        @expected_proc_return_type_hint_stack << expected_return_type
+        pushed_return_type_hint = true
+      end
       last_value = begin
         lower_body(proc_ctx, block_node.body)
       ensure
+        @expected_proc_return_type_hint_stack.pop? if pushed_return_type_hint
         unless heap_proc
           captures.each do |cap_name, _, _|
             next if written_captures.includes?(cap_name)
@@ -83150,6 +83207,33 @@ module Crystal::HIR
       # Update return type
       if proc_return_type == TypeRef::VOID
         actual_return_type = proc_ctx.type_of(last_value)
+        if actual_return_type == TypeRef::VOID || actual_return_type == TypeRef::NIL
+          # last_value is nil_lit when lower_return ran inside the proc body
+          # (because @inline_yield_proc_depth > 0 makes lower_return emit
+          # Return.new(value_id) and return nil_lit.id as the dummy result).
+          # Scan the actual Return terminators for the real value type so that
+          # blocks containing `return X` get a non-void proc signature.
+          proc_func.blocks.each do |blk|
+            ret = blk.terminator.as?(Return)
+            next unless ret
+            if ret_value = ret.value
+              val_type = proc_ctx.type_of(ret_value)
+              if val_type != TypeRef::VOID && val_type != TypeRef::NIL
+                actual_return_type = val_type
+                break
+              end
+            end
+          end
+        end
+        # Final fallback: caller-provided expected return type. Used when the
+        # proc's body is a yield-forwarding shape (`yield via captured` whose
+        # return type collapsed to VOID because the captured target is a
+        # POINTER) — without this, MIR/LLVM lower the call as `call void` and
+        # the caller derefs garbage as a typed pointer.
+        if (actual_return_type == TypeRef::VOID || actual_return_type == TypeRef::NIL) &&
+           expected_return_type && expected_return_type != TypeRef::VOID
+          actual_return_type = expected_return_type
+        end
         if actual_return_type != TypeRef::VOID
           proc_return_type = actual_return_type
           proc_func.return_type = proc_return_type
