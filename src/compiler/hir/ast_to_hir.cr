@@ -69873,7 +69873,7 @@ module Crystal::HIR
       end
 
       splat_index : Int32? = nil
-      splat_is_last = true
+      trailing_positional_count = 0
       param_index = 0
       saw_splat = false
       params.each do |param|
@@ -69882,14 +69882,15 @@ module Crystal::HIR
           splat_index = param_index
           saw_splat = true
         elsif saw_splat
-          splat_is_last = false
-          break
+          trailing_positional_count += 1
         end
         param_index += 1
       end
 
-      return {args, false} unless splat_index && splat_is_last
+      return {args, false} unless splat_index
       return {args, false} if args.size <= splat_index
+      # Need at least enough args to cover the trailing positionals after splat.
+      return {args, false} if args.size < splat_index + trailing_positional_count
 
       # Before packing into a Tuple, check if a non-splat overload exists
       # that accepts the expanded args with compatible types. This prevents
@@ -69919,14 +69920,27 @@ module Crystal::HIR
         end
       end
 
-      fixed = args[0, splat_index]
-      splat_args = args[splat_index..-1] || [] of ValueId
+      # Compute splat slice with trailing positionals accounted for.
+      # When the splat is non-trailing (e.g. `*patterns, match, follow_symlinks`),
+      # the splat consumes only args[splat_index ... args.size - trailing_count].
+      splat_end = args.size - trailing_positional_count
+      fixed_pre = args[0, splat_index]
+      splat_args = if splat_end > splat_index
+                     args[splat_index, splat_end - splat_index]
+                   else
+                     [] of ValueId
+                   end
+      fixed_post = if splat_end < args.size
+                     args[splat_end, args.size - splat_end]
+                   else
+                     [] of ValueId
+                   end
       return {args, false} if splat_args.empty?
 
       splat_types = splat_args.map { |arg_id| ctx.type_of(arg_id) }
       if env_get("DEBUG_SPLAT_PACK")
         type_names = splat_types.map { |t| type_name_for_mangling(t) }
-        STDERR.puts "[SPLAT_PACK] fn=#{ctx.function.name} method=#{method_name} types=#{type_names.join(", ")}"
+        STDERR.puts "[SPLAT_PACK] fn=#{ctx.function.name} method=#{method_name} types=#{type_names.join(", ")} trailing=#{trailing_positional_count}"
       end
       tuple_type = tuple_type_from_arg_types(splat_types, allow_void: true)
       return {args, false} if tuple_type == TypeRef::VOID
@@ -69934,7 +69948,7 @@ module Crystal::HIR
       tuple_alloc = Allocate.new(ctx.next_id, tuple_type, splat_args)
       ctx.emit(tuple_alloc)
 
-      {fixed + [tuple_alloc.id], true}
+      {fixed_pre + [tuple_alloc.id] + fixed_post, true}
     end
 
     private def ensure_double_splat_arg(
