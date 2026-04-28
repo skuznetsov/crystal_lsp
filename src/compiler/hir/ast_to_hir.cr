@@ -69100,8 +69100,9 @@ module Crystal::HIR
         end
       end
 
-      # Union arg dispatch: branch on union arg variant for distinct overloads
-      if receiver_id && !call_virtual && block_id.nil?
+      # Union arg dispatch: branch on union arg variant for distinct overloads.
+      # Applies to instance and class method calls (the latter have nil receiver).
+      if !call_virtual && block_id.nil?
         if uad = try_emit_union_arg_dispatch(ctx, receiver_id, base_method_name,
              mangled_method_name, args, arg_types, return_type, has_block_call)
           return uad
@@ -69242,7 +69243,7 @@ module Crystal::HIR
 
     # Union arg dispatch: when an arg is union with distinct typed overloads
     private def try_emit_union_arg_dispatch(
-      ctx : LoweringContext, receiver_id : ValueId, base_method_name : String,
+      ctx : LoweringContext, receiver_id : ValueId?, base_method_name : String,
       mangled_method_name : String, args : Array(ValueId), arg_types : Array(TypeRef),
       return_type : TypeRef, has_block_call : Bool,
     ) : ValueId?
@@ -69268,6 +69269,21 @@ module Crystal::HIR
       return nil if vs.size < 2
       bfm = strip_type_suffix(base_method_name)
       vo = [] of {String, TypeRef, Int32}
+      # If the last arg is an empty Tuple() coming from empty-splat padding,
+      # also try a variant lookup that drops it. The actual call site had no
+      # extra args, so the right per-variant overload is the non-splat one
+      # (e.g. Path.new$Path / Path.new$String, not Path.new$Path_Tuple()).
+      drop_trailing_empty_tuple = false
+      if arg_types.size > 1
+        last_t = arg_types[-1]
+        if last_t != TypeRef::VOID && (ld = @module.get_type_descriptor(last_t))
+          if ld.kind == TypeKind::Tuple && ld.name == "Tuple()"
+            drop_trailing_empty_tuple = true
+          end
+        end
+      end
+
+      vo_drop = [] of Bool
       vs.each do |vn|
         vr = type_ref_for_name(vn)
         next if vr == TypeRef::VOID
@@ -69276,6 +69292,7 @@ module Crystal::HIR
         vat = arg_types.dup
         vat[ui] = vr
         vm = mangle_function_name(bfm, vat, has_block_call)
+        drop_for_this = false
         unless @function_types.has_key?(vm) || @function_defs.has_key?(vm) || @module.has_function?(vm)
           if res = resolve_untyped_overload(bfm, arg_types.size, has_block_call)
             rb = strip_type_suffix(res)
@@ -69289,7 +69306,28 @@ module Crystal::HIR
           end
           lower_function_if_needed(vm)
         end
+
+        # Fallback: if the variant target is not yet known, but a non-splat
+        # overload exists for the per-variant arg list (e.g. Path.new$Path),
+        # use that. This rescues the empty-splat-padding case where the call
+        # `new(name)` was padded to `new(name, Tuple())` to match the only
+        # union-typed overload.
+        unless @function_types.has_key?(vm) || @function_defs.has_key?(vm) || @module.has_function?(vm)
+          if drop_trailing_empty_tuple
+            vat_no_splat = vat[0, vat.size - 1]
+            vm_no_splat = mangle_function_name(bfm, vat_no_splat, has_block_call)
+            unless @function_types.has_key?(vm_no_splat) || @function_defs.has_key?(vm_no_splat) || @module.has_function?(vm_no_splat)
+              lower_function_if_needed(vm_no_splat)
+            end
+            if @function_types.has_key?(vm_no_splat) || @function_defs.has_key?(vm_no_splat) || @module.has_function?(vm_no_splat)
+              vm = vm_no_splat
+              drop_for_this = true
+            end
+          end
+        end
+
         vo << {vm, vr, vid}
+        vo_drop << drop_for_this
       end
       return nil if vo.size < 2
       return nil if vo.map { |i| i[0] }.uniq.size < 2
@@ -69306,6 +69344,7 @@ module Crystal::HIR
       vo.each { |m, _, _| lower_function_if_needed(m) }
       ua = args[ui]
       fm, fr, fv = vo[0]; sm, sr, sv = vo[1]
+      f_drop = vo_drop[0]; s_drop = vo_drop[1]
       uis = UnionIs.new(ctx.next_id, ua, fv)
       ctx.emit(uis); ctx.register_type(uis.id, TypeRef::BOOL)
       pb = ctx.save_locals
@@ -69315,6 +69354,7 @@ module Crystal::HIR
       uw1 = UnionUnwrap.new(ctx.next_id, fr, ua, fv, false)
       ctx.emit(uw1); ctx.register_type(uw1.id, fr)
       ta = args.dup; ta[ui] = uw1.id
+      ta = ta[0, ta.size - 1] if f_drop && ta.size > 1
       c1 = Call.new(ctx.next_id, return_type, receiver_id, fm, ta)
       ctx.emit(c1); ctx.register_type(c1.id, return_type)
       te = ctx.current_block; ctx.terminate(Jump.new(mb))
@@ -69322,6 +69362,7 @@ module Crystal::HIR
       uw2 = UnionUnwrap.new(ctx.next_id, sr, ua, sv, false)
       ctx.emit(uw2); ctx.register_type(uw2.id, sr)
       ea = args.dup; ea[ui] = uw2.id
+      ea = ea[0, ea.size - 1] if s_drop && ea.size > 1
       c2 = Call.new(ctx.next_id, return_type, receiver_id, sm, ea)
       ctx.emit(c2); ctx.register_type(c2.id, return_type)
       ee = ctx.current_block; ctx.terminate(Jump.new(mb))
