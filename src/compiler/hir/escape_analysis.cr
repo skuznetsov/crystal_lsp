@@ -133,6 +133,12 @@ module Crystal::HIR
         append_user_use(value.value, value.id)
       when UnionUnwrap
         append_user_use(value.union_value, value.id)
+      when PointerStore
+        append_user_use(value.pointer, value.id)
+        append_user_use(value.value, value.id)
+        if idx = value.index
+          append_user_use(idx, value.id)
+        end
       end
     end
 
@@ -222,6 +228,12 @@ module Crystal::HIR
         when IndexSet
           # Value escapes into container
           mark_escape(value.value, LifetimeTag::ArgEscape)
+
+        when PointerStore
+          # Raw pointer store: stored value escapes through the pointer.
+          # Conservative HeapEscape because pointers typically reference
+          # heap buffers that outlive the current frame (e.g. Array@buffer).
+          mark_escape(value.value, LifetimeTag::HeapEscape)
         end
       end
 
