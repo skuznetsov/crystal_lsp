@@ -939,6 +939,39 @@ Evidence:
   closes a real dead-demand bug but does not solve the broader formatting
   helper explosion. {F/G/R: 0.9/0.55/0.9} [verified]
 
+[LM-506|verified]: RTA method-part replay was over-permissive for root-typed
+virtual calls. A call such as `exception : Object;
+exception.inspect_with_backtrace(io)` records a broad receiver, then
+`rta_method_part_matches_owner?` could keep any live owner whose hierarchy
+matched the broad receiver, even if that owner did not declare or inherit the
+called instance method. This produced thousands of queued/lowered names like
+`Array(UInt64)#inspect_with_backtrace$IO::Memory` from
+`Crystal#buffered_message`; `lower_function_if_needed_impl` later reported a
+lookup miss for that exact name. A broad method-family suppression was refuted:
+it removed the concrete `MyError#inspect_with_backtrace` override for an
+`Object`-typed receiver. The accepted fix instead adds a method-existence gate
+inside RTA method-part matching: the candidate owner must declare or inherit the
+short method name directly, via ancestors, or via included modules before the
+method part can keep/replay it.
+
+Evidence:
+
+- `regression_tests/rta_root_virtual_method_replay_guard.sh
+  /tmp/cv2_rta_declared_method` -> `rta_root_virtual_method_replay_ok`
+  (preserves `MyError#inspect_with_backtrace$IO`, rejects unrelated owner).
+- `regression_tests/p2_pending_budget_no_prelude.sh
+  /tmp/cv2_rta_declared_method` ->
+  `p2_pending_budget_no_prelude_ok process_delta=3 emit_delta=4
+  lower_missing_delta=44 total=92 max_queue=57`.
+- `CRYSTAL_V2_STOP_AFTER_HIR=1 CRYSTAL_V2_PHASE_STATS=1
+  DEBUG_PENDING_SOURCES=1 ... scripts/run_safe.sh /tmp/cv2_rta_declared_method
+  300 4096 src/crystal_v2.cr -o /tmp/cv2_rta_decl_stop_hir` -> `[EXIT: 0]`;
+  `lower_missing` improved from `+28667` to `+25702`, and `Array` function
+  prefix count dropped from `11817` to `8930`. `Array#inspect_with_backtrace`
+  remains visible in enqueue-source accounting, so the next root remains the
+  broader `lower_missing`/container-helper materialization corridor.
+  {F/G/R: 0.9/0.65/0.9} [verified]
+
 ## Active Strategy
 
 - Main fast loop: `--no-prelude` oracles and focused STOP_AFTER_HIR budget

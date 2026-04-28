@@ -2370,6 +2370,10 @@ module Crystal::HIR
     @[AlwaysInline]
     private def rta_method_part_matches_owner?(mpart : String, owner_name : String) : Bool
       return false unless @rta_called_method_parts.includes?(mpart)
+      if method_name = rta_method_name_from_part(mpart)
+        return false unless rta_owner_has_instance_method_name?(owner_name, method_name)
+      end
+
       owner_base = strip_generics_simple(owner_name)
       receivers = @rta_virtual_receivers[mpart]?
       return true unless receivers  # No receiver info → conservative, keep
@@ -2393,6 +2397,83 @@ module Crystal::HIR
           return true if receivers.includes?(mod_base)
         end
       end
+      false
+    end
+
+    private def rta_method_name_from_part(mpart : String) : String?
+      return nil if mpart.empty?
+      if dollar = mpart.index('$')
+        return nil if dollar == 0
+        mpart.byte_slice(0, dollar)
+      else
+        mpart
+      end
+    end
+
+    private def rta_owner_has_instance_method_name?(owner_name : String, method_name : String) : Bool
+      current = owner_name
+      visited = Set(String).new
+      16.times do
+        break if current.empty? || visited.includes?(current)
+        visited << current
+        current_base = strip_generics_simple(current)
+
+        return true if rta_owner_declares_instance_method_name?(current, method_name)
+        return true if current_base != current && rta_owner_declares_instance_method_name?(current_base, method_name)
+        return true if rta_included_module_declares_instance_method_name?(current, current_base, method_name)
+
+        parent = @class_info[current]?.try(&.parent_name) ||
+                 @module.class_parents[current]? ||
+                 (current_base != current ? (@class_info[current_base]?.try(&.parent_name) || @module.class_parents[current_base]?) : nil)
+        break unless parent
+        current = parent
+      end
+
+      if template_owner = primitive_template_owner(owner_name)
+        return true if rta_owner_declares_instance_method_name?(template_owner, method_name)
+      end
+
+      false
+    end
+
+    private def rta_owner_declares_instance_method_name?(owner_name : String, method_name : String) : Bool
+      if names = @instance_method_names_by_owner[owner_name]?
+        return true if names.includes?(method_name)
+      end
+      false
+    end
+
+    private def rta_included_module_declares_instance_method_name?(owner_name : String, owner_base : String, method_name : String) : Bool
+      included = [] of String
+      if direct = @class_included_modules[owner_name]?
+        direct.each { |mod| included << mod }
+      end
+      if owner_base != owner_name
+        if base = @class_included_modules[owner_base]?
+          base.each { |mod| included << mod }
+        end
+      end
+      return false if included.empty?
+
+      queue = included.dup
+      visited = Set(String).new
+      while mod = queue.shift?
+        next if visited.includes?(mod)
+        visited << mod
+        mod_base = strip_generics_simple(mod)
+        return true if rta_owner_declares_instance_method_name?(mod, method_name)
+        return true if mod_base != mod && rta_owner_declares_instance_method_name?(mod_base, method_name)
+
+        if submods = @class_included_modules[mod]?
+          submods.each { |submod| queue << submod }
+        end
+        if mod_base != mod
+          if submods = @class_included_modules[mod_base]?
+            submods.each { |submod| queue << submod }
+          end
+        end
+      end
+
       false
     end
 

@@ -49,6 +49,13 @@ type is exactly `Nil` as statically false. Covered by
 `regression_tests/dead_nil_branch_after_splat_repro.sh`. This is a correctness
 and demand-source fix, but not the main `lower_missing` growth fix.
 
+RTA root virtual replay checkpoint (2026-04-28): method-part RTA now requires a
+live owner to declare or inherit the called instance method before replaying a
+virtual target to that owner. This preserves `Exception` subclass overrides for
+root-typed calls such as `exception : Object; exception.inspect_with_backtrace`,
+but avoids materializing unrelated live owners that cannot answer the method.
+Covered by `regression_tests/rta_root_virtual_method_replay_guard.sh`.
+
 Direct `s1 -> s2` now produces a stage2 compiler in the focused gate:
 
 ```bash
@@ -340,7 +347,7 @@ Remaining risk:
   compiler. A broader implicit-self block receiver experiment was refuted
   because it caused an early `Index out of bounds` in self-host HIR lowering.
 - `lower_missing` still grows HIR heavily during full self-compile
-  (`17775 -> 46442`, `+28667`, in the latest focused STOP_AFTER_HIR gate). This no longer
+  (`17769 -> 43471`, `+25702`, in the latest focused STOP_AFTER_HIR gate). This no longer
   blocks producing s2 in the current gate, but it remains the main demand-driven
   cleanup target.
 - Dominant families are broad fallback helpers on compiler-internal containers:
