@@ -4088,7 +4088,14 @@ module CrystalV2
             # Allow statement separators before the branch body
             skip_statement_end
 
-            # Parse in body
+            # Parse in body. The `in` keyword is also a binary operator
+            # (containment check, e.g. `x in 1..10`); inside a case/in body
+            # parse_statement would greedily consume the next branch's `in
+            # B` clause as `(prev_stmt) in B`, collapsing all branches into
+            # the first one. Disable the binary-`in` operator while parsing
+            # branch bodies so the outer loop can break on `In`.
+            old_allow_in_body = @allow_in_operator
+            @allow_in_operator = false
             in_body_b = ExprIdBuffer.new(2)
             loop do
               skip_trivia
@@ -4100,6 +4107,7 @@ module CrystalV2
               # Allow statement separators between statements in branch body
               skip_statement_end
             end
+            @allow_in_operator = old_allow_in_body
 
             # Capture in span
             in_span = if in_body_b.size > 0
