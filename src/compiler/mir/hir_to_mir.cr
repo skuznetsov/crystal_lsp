@@ -6271,38 +6271,25 @@ module Crystal
         ptr = get_value(realloc.pointer)
         new_size = get_value(realloc.new_size)
 
-        # Crystal's Pointer#realloc(count) expects element count, but C realloc expects bytes.
-        # Multiply count by element size. Determine element size from the pointer's type descriptor.
-        elem_size = 8 # default: pointer-sized elements (class instances)
+        # Crystal's Pointer#realloc(count) expects element count, but C realloc expects
+        # bytes. Element stride MUST match what PointerStore/PointerLoad/PointerAdd use
+        # (container_elem_storage_size_u64), or the realloc'd buffer is sized for a
+        # different stride than later writes/reads — corrupting Array(Union) buffers
+        # whose union MIR size (incl. alignment padding) is larger than the variant
+        # max (e.g. 24 bytes for a 16-byte-payload union over reference variants).
         ptr_type = realloc.type
-        if desc = @hir_module.get_type_descriptor(ptr_type)
-          if desc.name.starts_with?("Pointer(")
-            elem_name = desc.name[8, desc.name.size - 9]
-            elem_size = case elem_name
-                        when "UInt8", "Int8", "Bool"              then 1
-                        when "UInt16", "Int16"                    then 2
-                        when "UInt32", "Int32", "Float32", "Char" then 4
-                        when "UInt64", "Int64", "Float64"         then 8
-                        when "UInt128", "Int128"                  then 16
-                        else
-                          # Structs, classes, and tuples are heap-allocated in V2 ABI, so
-                          # Pointer(T) buffers store 8-byte pointers, not inline data.
-                          # Only enums use actual element size (enums are stored inline).
-                          if elem_mir_type = @mir_module.type_registry.get_by_name(elem_name)
-                            if elem_mir_type.kind.enum?
-                              elem_mir_type.size > 0 ? elem_mir_type.size.to_i32 : 8
-                            else
-                              8 # heap-allocated → pointer-sized elements
-                            end
-                          else
-                            8 # class/reference instances are pointers (8 bytes)
-                          end
-                        end
-          end
-        end
+        elem_hir = pointer_element_hir_type(ptr_type)
+        elem_mir_ref = pointer_element_mir_type(ptr_type)
 
-        # Multiply element count by element size to get byte count
-        elem_size_val = builder.const_int(elem_size.to_i64, TypeRef::INT64)
+        elem_size = if elem_hir && hir_type_is_lib_struct?(elem_hir)
+                      require_lib_struct_byte_size(elem_hir).to_i64
+                    elsif elem_mir_ref && (elem_mir = @mir_module.type_registry.get(elem_mir_ref))
+                      container_elem_storage_size_u64(elem_mir).to_i64
+                    else
+                      pointer_word_bytes_u64.to_i64
+                    end
+
+        elem_size_val = builder.const_int(elem_size, TypeRef::INT64)
         # Extend new_size to i64 for multiplication
         size_i64 = builder.cast(CastKind::SExt, new_size, TypeRef::INT64)
         byte_count = builder.mul(size_i64, elem_size_val, TypeRef::INT64)

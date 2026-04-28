@@ -23035,8 +23035,20 @@ module Crystal::MIR
         # Load buffer pointer from Crystal Array layout (offset 16 = @buffer field)
         emit "%#{base_name}.buf_addr = getelementptr i8, ptr #{array_ptr}, i32 16"
         emit "%#{base_name}.buf = load ptr, ptr %#{base_name}.buf_addr"
-        # Get element from buffer
-        emit "%#{base_name}.elem_ptr = getelementptr #{element_type}, ptr %#{base_name}.buf, i32 #{normalized_index}"
+        # Inline-stored unions have MIR size = 4 (tid) + alignment-padding + max payload,
+        # but LLVM's natural sizeof of `{i32, [N x i32]}` lacks the alignment padding.
+        # PointerStore and realloc use container_elem_storage_size_u64 (=MIR size), so
+        # the buffer is sized and written at that stride; reads must match or we'd
+        # read across slot boundaries (Array(Globber-Union) returned garbage at i≥1).
+        elem_mir_for_stride = @module.type_registry.get(inst.element_type)
+        if elem_mir_for_stride && elem_mir_for_stride.kind.union? && elem_mir_for_stride.size > pointer_word_bytes_u64
+          stride = elem_mir_for_stride.size
+          emit "%#{base_name}.idx_i64 = sext i32 #{normalized_index} to i64"
+          emit "%#{base_name}.byte_off = mul i64 %#{base_name}.idx_i64, #{stride}"
+          emit "%#{base_name}.elem_ptr = getelementptr i8, ptr %#{base_name}.buf, i64 %#{base_name}.byte_off"
+        else
+          emit "%#{base_name}.elem_ptr = getelementptr #{element_type}, ptr %#{base_name}.buf, i32 #{normalized_index}"
+        end
         emit "#{name} = load #{element_type}, ptr %#{base_name}.elem_ptr"
       end
 
@@ -23274,8 +23286,17 @@ module Crystal::MIR
         # Load buffer pointer from Crystal Array layout (offset 16 = @buffer field)
         emit "%#{base_name}.buf_addr = getelementptr i8, ptr #{array_ptr}, i32 16"
         emit "%#{base_name}.buf = load ptr, ptr %#{base_name}.buf_addr"
-        # Set element in buffer
-        emit "%#{base_name}.elem_ptr = getelementptr #{element_type}, ptr %#{base_name}.buf, i32 #{normalized_index}"
+        # See emit_array_get for the rationale: inline-stored unions need byte-stride
+        # GEP (=MIR size) so writes land at the same offsets the buffer was sized for.
+        elem_mir_for_stride = @module.type_registry.get(inst.element_type)
+        if elem_mir_for_stride && elem_mir_for_stride.kind.union? && elem_mir_for_stride.size > pointer_word_bytes_u64
+          stride = elem_mir_for_stride.size
+          emit "%#{base_name}.idx_i64 = sext i32 #{normalized_index} to i64"
+          emit "%#{base_name}.byte_off = mul i64 %#{base_name}.idx_i64, #{stride}"
+          emit "%#{base_name}.elem_ptr = getelementptr i8, ptr %#{base_name}.buf, i64 %#{base_name}.byte_off"
+        else
+          emit "%#{base_name}.elem_ptr = getelementptr #{element_type}, ptr %#{base_name}.buf, i32 #{normalized_index}"
+        end
         emit "store #{element_type} #{value}, ptr %#{base_name}.elem_ptr"
       end
     end
