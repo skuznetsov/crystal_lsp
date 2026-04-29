@@ -44935,14 +44935,34 @@ module Crystal::HIR
       end
 
       # Final pass: lower any remaining call targets that already appear in HIR.
+      if phase_stats
+        phase_step_count = @module.function_count
+        phase_step_time = Time.instant
+      end
       lower_missing_call_targets
+      if phase_stats
+        phase_step_time = phase_stats_step("lower_missing.initial", phase_step_count.not_nil!, phase_step_time.not_nil!)
+        phase_step_count = @module.function_count
+      end
 
       # Some callers are lowered before deferred callees settle on their final
       # return type. Repair those direct call instructions now that the work
       # queue and safety nets have finished.
       repair_stale_call_return_types
+      if phase_stats
+        phase_step_time = phase_stats_step("repair_stale_calls", phase_step_count.not_nil!, phase_step_time.not_nil!)
+        phase_step_count = @module.function_count
+      end
       repair_receiver_bound_call_targets
+      if phase_stats
+        phase_step_time = phase_stats_step("repair_receiver_calls", phase_step_count.not_nil!, phase_step_time.not_nil!)
+        phase_step_count = @module.function_count
+      end
       process_pending_lower_functions
+      if phase_stats
+        phase_step_time = phase_stats_step("post_repair_pending", phase_step_count.not_nil!, phase_step_time.not_nil!)
+        phase_step_count = @module.function_count
+      end
       # Late lowering can discover new ivars and invalidate allocators after
       # fixup_inherited_ivars already ran its early deferred flush. Regenerate
       # those allocators before handing the HIR module to MIR/LLVM, otherwise
@@ -44952,6 +44972,10 @@ module Crystal::HIR
         flush_deferred_allocators
         process_pending_lower_functions
         deferred_allocator_passes += 1
+      end
+      if phase_stats
+        phase_step_time = phase_stats_step("deferred_allocators", phase_step_count.not_nil!, phase_step_time.not_nil!)
+        phase_step_count = @module.function_count
       end
       # The repair/deferred-allocator passes can lower new bodies after the
       # first safety net scan. Iterate the concrete-call sweep to a small fixed
@@ -44964,6 +44988,9 @@ module Crystal::HIR
         lower_missing_call_targets
         process_pending_lower_functions
         final_missing_passes += 1
+        if phase_stats
+          STDERR.puts "[PHASE_STATS] final_missing_pass=#{final_missing_passes} funcs=#{before_final_missing}->#{@module.function_count} bodies_before=#{before_final_missing_bodies}"
+        end
         after_final_missing_bodies = hir_function_body_count
         break if (@module.function_count == before_final_missing &&
                   after_final_missing_bodies == before_final_missing_bodies &&
@@ -44974,6 +45001,7 @@ module Crystal::HIR
       if phase_stats
         after3 = @module.function_count
         t3 = Time.instant
+        phase_stats_step("final_missing.fixed_point", phase_step_count.not_nil!, phase_step_time.not_nil!)
         STDERR.puts "[PHASE_STATS] lower_missing: #{after2} -> #{after3} (+#{after3 - after2.not_nil!}) in #{(t3.not_nil! - t2.not_nil!).total_milliseconds.round(1)}ms"
         # Function-owner histogram
         prefix_counts = Hash(String, Int32).new(0)
@@ -45064,6 +45092,13 @@ module Crystal::HIR
         STDERR.puts "[VTR_STATS] Top parents by target count:"
         top_parents.each { |name, targets| STDERR.puts "  #{name}: #{targets.size} targets" }
       end
+    end
+
+    private def phase_stats_step(label : String, before_count : Int32, before_time : Time::Instant) : Time::Instant
+      now = Time.instant
+      after_count = @module.function_count
+      STDERR.puts "[PHASE_STATS] #{label}: #{before_count} -> #{after_count} (+#{after_count - before_count}) in #{(now - before_time).total_milliseconds.round(1)}ms"
+      now
     end
 
     # Emit all tracked callsite signatures that haven't been lowered yet.

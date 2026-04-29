@@ -67,6 +67,25 @@ Stage1 builds and both smokes pass; stage2 is killed at about 302s after
 sample the allocator/MIR/LLVM tail, not re-open the backend intrinsic boundary
 unless new evidence appears. {F/G/R: 0.93/0.54/0.94} [verified]
 
+[LM-485|verified]: The canonical `s1 -> s2` timeout is visible after allocator
+flush, but the measured primary supplier is the initial missing-target sweep,
+not allocator generation or repair fixed points. A phase-split
+`CRYSTAL_V2_STOP_AFTER_HIR=1 CRYSTAL_V2_PHASE_STATS=1` run using
+`/tmp/cv2_phase_split_check` reports:
+`process_pending: 3159 -> 17572 (+14413)`, `emit_tracked_sigs: 17572 -> 17836
+(+264)`, `lower_missing.initial: 17836 -> 43126 (+25290) in 144271.9ms`,
+`repair_stale_calls: +26`, `repair_receiver_calls: +217`,
+`deferred_allocators: +5`, and `final_missing.fixed_point: +110`. The same
+run exits `STOP_AFTER_HIR` in about 220s. A separate
+`CRYSTAL_V2_STOP_AFTER_MIR=1` run still times out at 300s during
+`Pass 2: Lowering 35221 function bodies... Body 20001/35221`, so MIR is
+processing the large reachable set created upstream. Refuted branches:
+pre-sizing MIR `@cross_block_values` did not move the full bootstrap frontier,
+and a delta-only `lower_missing_call_targets` scan changed fixed-point timing
+and grew the HIR set to 47120 functions. Next work should reduce concrete-call
+demand admitted by `lower_missing.initial`, not optimize allocator flush first.
+{F/G/R: 0.93/0.58/0.93} [verified]
+
 [LM-462|verified]: Bootstrap semantic-equivalence scaffolding exists as a thin
 scripts-only layer over the current bootstrap ladder. `scripts/build_bootstrap_stages.sh`
 wraps `scripts/bootstrap_chain.sh` and exposes stable names

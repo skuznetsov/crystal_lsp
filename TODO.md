@@ -46,8 +46,15 @@ and fresh generated `s1` `STOP_AFTER_HIR` full-source run all passed; the
 missing summary no longer contains the backend-owned intrinsic names. Boundary:
 canonical `s1 -> s2` still times out at 300s after `[ALLOC_FLUSH] Generated 98
 deferred allocators`, producing only a partial `cv2_s2.ll` (~3.7MB in this run).
-Next root is the post-HIR allocator / MIR / LLVM tail, not these backend helper
-names.
+Follow-up phase splitting shows the visible timeout is downstream of HIR volume,
+not allocator flush itself: full-source `STOP_AFTER_HIR` with
+`CRYSTAL_V2_PHASE_STATS=1` reports `lower_missing.initial: 17836 -> 43126
+(+25290) in 144271.9ms`, while stale-call repair, receiver repair, deferred
+allocators, and final fixed-point missing together add only about 400 functions
+and about 11s. `CRYSTAL_V2_STOP_AFTER_MIR=1` still times out at 300s while
+lowering `Body 20001/35221`, so the next root is the concrete-call demand
+volume created by the initial missing-target sweep; MIR/allocator symptoms are
+secondary until that reachable HIR set shrinks.
 
 Macro control checkpoint (2026-04-29): full-prelude Kqueue HIR no longer
 registers both sides of the Darwin `LibC.has_constant?(:EVFILT_USER)` macro

@@ -137,3 +137,14 @@
 **Adversary check:** local verification did not depend on Grok: build and four no-prelude guards passed; fresh generated `s1` `STOP_AFTER_HIR` full-source run exited 0; grep confirmed the exact backend-owned intrinsic names are absent from missing-target logs.
 **Verdict:** useful partial reviewer, but for Codex-driven beta use we should pass `--always-approve` for read-only bounded tasks or explicitly forbid Grok from running terminal commands.
 **Cost saved:** small; the main value was independent confirmation of the ownership-boundary framing.
+
+### Session 7 — 2026-04-29 — stage2 tail / lower_missing audit
+**Задача:** read-only audit fresh `s1 -> s2` timeout after `ce29f7f2`: decide whether the next root is `lower_missing_call_targets`, MIR lowering, deferred allocator flush, or LLVM tail.
+**Brief size:** ~13 строк, ~1.5 KB, файл `/tmp/grok_stage2_tail_audit.txt`.
+**Latency:** ~several minutes, exit 0, launched with `--always-approve`.
+**Output quality:** ⚠ useful routing, unsafe first fix. Grok correctly identified that the large `lower_missing`/Hash-family HIR volume feeds the MIR timeout and that allocator flush is not the primary root. It recommended a delta-only scan inside `lower_missing_call_targets`.
+**Что было хорошо:** strong source anchors around `flush_pending_functions`, `lower_missing_call_targets`, RTA pruning, and MIR `lower_function_body`; correctly treated MIR Hash/Set samples as downstream volume symptoms rather than the only root.
+**Что было плохо:** the concrete delta-scan recommendation was locally refuted. A minimal implementation preserved no-prelude guards but changed full-source fixed-point timing: `STOP_AFTER_HIR` grew to `47120` functions and `lower_missing +29285` in `176178.2ms`, worse than baseline `43526` / `+25690` / `155487.7ms`.
+**Adversary check:** local phase-split instrumentation showed the real breakdown: `lower_missing.initial` alone adds `+25290` functions in `144271.9ms`; stale-call repair, receiver repair, allocator flush, and final missing add only about 400 functions. The correct next target is demand admitted by the initial concrete-call sweep, not scan order.
+**Verdict:** useful as a routing sidecar, not sufficient as patch authority. For optimization/demand-model work, Grok's recommended code shape needs a local fixed-point equivalence check before acceptance.
+**Cost saved:** ~2-4k Codex-токенов on source routing; cost increased slightly from implementing and reverting the unsafe delta-scan experiment.
