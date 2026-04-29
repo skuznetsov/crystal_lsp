@@ -1333,6 +1333,65 @@ generated compiler exits cleanly under `--no-codegen`, and the full path emits
 a valid-looking `.ll`/object but leaves no executable. {F/G/R: 0.93/0.65/0.92}
 [verified]
 
+[LM-515|verified]: The full-prelude Kqueue `after_fork` HIR branch leak was a
+macro-literal registration ordering bug, not a stdlib/runtime problem.
+
+Findings:
+
+- `Crystal::EventLoop::Kqueue#after_fork` was first registered through the
+  module macro-literal path, before the later class macro-literal consistency
+  path could replace the poisoned base symbol.
+- `process_macro_literal_in_module` evaluated `strip_macro_lines` before
+  `expand_flag_macro_text`, destroying `{% if LibC.has_constant?(:EVFILT_USER)
+  %}` / `{% else %}` markers before the platform branch selector could run.
+  The parser then saw both branch bodies as plain Crystal and registered the
+  EVFILT_USER path together with the fallback `@pipe` / `system_pipe` path.
+- Semantic macro expansion also needed a platform `LibC.has_constant?`
+  fallback for constants whose declarations are hidden behind platform
+  requires. HIR and semantic fallback lists must stay synchronized; this
+  checkpoint aligns the modeled kqueue/epoll/io_uring/POSIX signal constants.
+
+Fix:
+
+- Expand flag/member-query macro controls before stripping macro lines in the
+  raw-text and per-text `process_macro_literal_in_module` paths.
+- Parse expanded class macro-literal bodies with
+  `parse_macro_literal_class_body` and feed children through
+  `register_class_members_from_expansion`, avoiding a second hand-written
+  registration case tree.
+- Teach `evaluate_flag_condition_state` to evaluate simple
+  `LibC.has_constant?(:X)` / `Type.has_method?(:x)` text conditions when
+  `expand_flag_macro_text` sees source text instead of AST `MacroIfNode`s.
+- Add a Darwin/BSD regression guard that extracts
+  `Crystal::EventLoop::Kqueue#after_fork` HIR and requires `LibC.@@EVFILT_USER`
+  while rejecting `Crystal::System::FileDescriptor.system_pipe`,
+  `LibC.@@EVFILT_READ`, and `Crystal::EventLoop::Polling#pipe` in that body.
+
+Evidence:
+
+- `crystal build src/crystal_v2.cr -o /tmp/cv2_macro_control_check
+  --error-trace` -> exit 0, only the known `Random::DEFAULT` warning.
+- `regression_tests/p2_macro_control_module_literal_guard.sh
+  /tmp/cv2_macro_control_check` -> `p2_macro_control_module_literal_guard_ok`.
+- `regression_tests/p2_bootstrap_semantic_emit_oracle.sh
+  /tmp/cv2_macro_control_check` -> `p2_bootstrap_semantic_emit_oracle_ok`.
+- `regression_tests/p2_pending_budget_no_prelude.sh
+  /tmp/cv2_macro_control_check` ->
+  `p2_pending_budget_no_prelude_ok process_delta=3 emit_delta=4
+  lower_missing_delta=44 total=92 max_queue=57`.
+- `regression_tests/p2_generated_stage2_no_prelude_puts_guard.sh
+  /tmp/cv2_macro_control_check` ->
+  `p2_generated_stage2_no_prelude_puts_guard_ok
+  frontier=nocodegen_clean_full_codegen_hang`.
+- `bash -n regression_tests/p2_macro_control_module_literal_guard.sh` and
+  `git diff --check` -> exit 0.
+
+Boundary: this proves the Kqueue `after_fork` branch leak is removed on the
+local Darwin target. It does not prove cross-target macro semantics, and
+`p2_selfhost_stage2_shape_guard.sh` currently fails an older
+`Array(String)#each` callback-shape sentinel on this checkout, so that guard is
+not evidence for this checkpoint. {F/G/R: 0.91/0.58/0.90} [verified]
+
 ## Active Strategy
 
 - Main fast loop: `--no-prelude` oracles and focused STOP_AFTER_HIR budget

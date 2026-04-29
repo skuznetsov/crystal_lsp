@@ -22,6 +22,28 @@ Working policy:
 
 ## Current Checkpoint
 
+Macro control checkpoint (2026-04-29): full-prelude Kqueue HIR no longer
+registers both sides of the Darwin `LibC.has_constant?(:EVFILT_USER)` macro
+inside `Crystal::EventLoop::Kqueue#after_fork`. The root was registration
+ordering for module macro literals: `process_macro_literal_in_module` stripped
+`{% if %}` / `{% else %}` control lines before `expand_flag_macro_text` could
+choose a platform branch, so the fallback pipe body was parsed and registered
+with the EVFILT_USER body. The fix expands platform macro controls before
+stripping in the raw-text and per-text module literal paths, keeps the class
+literal path on the centralized `register_class_members_from_expansion`
+walker, and synchronizes semantic/HIR platform `LibC.has_constant?` fallbacks
+for the currently modeled constants. Evidence:
+`crystal build src/crystal_v2.cr -o /tmp/cv2_macro_control_check --error-trace`,
+`regression_tests/p2_macro_control_module_literal_guard.sh
+/tmp/cv2_macro_control_check`, `p2_bootstrap_semantic_emit_oracle.sh`, and
+`p2_pending_budget_no_prelude.sh` passed; the generated-stage2 no-prelude
+guard remains at `frontier=nocodegen_clean_full_codegen_hang`. The new guard extracts
+`Kqueue#after_fork` HIR and requires `LibC.@@EVFILT_USER` while rejecting
+`Crystal::System::FileDescriptor.system_pipe` / `LibC.@@EVFILT_READ` inside
+that function. Boundary: `p2_selfhost_stage2_shape_guard.sh` currently fails
+an older `Array(String)#each` callback-shape sentinel on this checkout, so it
+was not used as evidence for this macro-control fix.
+
 Getter/proc-shape checkpoint (2026-04-29): `of -> Nil` type annotations now
 stringify as `Proc(Void)` so registration-time inference for
 `Process.after_fork_child_callbacks` does not seed `Array(String)` and later

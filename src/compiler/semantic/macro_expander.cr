@@ -1088,13 +1088,39 @@ module CrystalV2
         end
 
         private def symbol_has_constant?(symbol : Symbol, name : String) : Bool
+          clean_name = name.lstrip(':')
           case symbol
           when ClassSymbol
-            scope_has_constant?(symbol.scope, name)
+            scope_has_constant?(symbol.scope, clean_name) || platform_lib_constant?(symbol.name, clean_name)
           when ModuleSymbol
-            scope_has_constant?(symbol.scope, name)
+            scope_has_constant?(symbol.scope, clean_name) || platform_lib_constant?(symbol.name, clean_name)
           when EnumSymbol
-            symbol.members.has_key?(name) || scope_has_constant?(symbol.scope, name)
+            symbol.members.has_key?(clean_name) || scope_has_constant?(symbol.scope, clean_name)
+          else
+            false
+          end
+        end
+
+        private def platform_lib_constant?(owner_name : String, constant_name : String) : Bool
+          return false unless owner_name == "LibC"
+
+          is_darwin = @flags.includes?("darwin")
+          is_linux = @flags.includes?("linux")
+          is_bsd = @flags.includes?("freebsd") || @flags.includes?("openbsd") || @flags.includes?("netbsd") || @flags.includes?("dragonfly")
+
+          case constant_name
+          when "EVFILT_USER", "NOTE_TRIGGER", "EV_UDATA_SPECIFIC",
+               "EVFILT_READ", "EVFILT_WRITE", "EVFILT_TIMER", "EV_ADD", "EV_DELETE", "EV_CLEAR", "EV_EOF", "EV_ERROR",
+               "NOTE_NSECONDS"
+            is_darwin || is_bsd
+          when "EPOLL_CTL_ADD", "EPOLL_CTL_DEL", "EPOLL_CTL_MOD", "EPOLLIN", "EPOLLOUT", "EPOLLERR", "EPOLLHUP"
+            is_linux
+          when "IOURING_SETUP_SQPOLL", "IORING_ENTER_GETEVENTS"
+            is_linux
+          when "CLOCK_MONOTONIC", "TIOCGWINSZ", "TIOCSCTTY", "O_CLOEXEC", "O_DIRECTORY", "O_NONBLOCK", "SOCK_CLOEXEC"
+            is_darwin || is_linux || is_bsd
+          when "SIGRTMIN"
+            is_linux || is_bsd
           else
             false
           end

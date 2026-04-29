@@ -19117,8 +19117,7 @@ module Crystal::HIR
     private def process_macro_literal_in_module(node : CrystalV2::Compiler::Frontend::MacroLiteralNode, module_name : String)
       if raw_text = macro_literal_raw_text(node)
         expression_expanded = expand_macro_literal_expressions_for_registration(node) || raw_text
-        sanitized_raw = strip_macro_lines(expression_expanded)
-        expanded = expand_flag_macro_text(sanitized_raw) || sanitized_raw
+        expanded = expand_flag_macro_text(expression_expanded) || expression_expanded
         sanitized = strip_macro_lines(expanded)
         parsed_prog = parse_macro_literal_program(expanded)
         if parsed_prog.nil? && sanitized != expanded
@@ -19249,9 +19248,10 @@ module Crystal::HIR
       parsed_any = false
       texts.each do |text|
         next if text.strip.empty?
-        sanitized = strip_macro_lines(text)
-        parsed_prog = parse_macro_literal_program(text)
-        if parsed_prog.nil? && sanitized != text
+        expanded_text = expand_flag_macro_text(text) || text
+        sanitized = strip_macro_lines(expanded_text)
+        parsed_prog = parse_macro_literal_program(expanded_text)
+        if parsed_prog.nil? && sanitized != expanded_text
           parsed_prog = parse_macro_literal_program(sanitized)
         end
         if parsed_prog
@@ -20802,6 +20802,22 @@ module Crystal::HIR
               STDERR.puts "[MACRO_LITERAL_CLASS] class=#{class_name} sanitized_contains_open=true"
             end
           end
+        end
+        if parsed = parse_macro_literal_class_body(expanded)
+          parsed_arena, body_ids = parsed
+          with_arena(parsed_arena) do
+            body_ids.each do |expr_id|
+              register_class_members_from_expansion(
+                class_name,
+                expr_id,
+                Set(String).new,
+                Set(String).new,
+                ivars,
+                offset_ref
+              )
+            end
+          end
+          return
         end
         parsed_prog = parse_macro_literal_program(expanded)
         if parsed_prog.nil? && sanitized != expanded
@@ -47393,7 +47409,7 @@ module Crystal::HIR
 
         case clean_name
         # kqueue constants (Darwin, BSD)
-        when "EVFILT_USER", "NOTE_TRIGGER", "EV_UDATA_SPECIFIC"
+        when "EVFILT_USER", "NOTE_TRIGGER", "EV_UDATA_SPECIFIC", "NOTE_NSECONDS"
           is_darwin || is_bsd
         when "EVFILT_READ", "EVFILT_WRITE", "EVFILT_TIMER", "EV_ADD", "EV_DELETE", "EV_CLEAR", "EV_EOF", "EV_ERROR"
           is_darwin || is_bsd
@@ -47404,8 +47420,10 @@ module Crystal::HIR
         when "IOURING_SETUP_SQPOLL", "IORING_ENTER_GETEVENTS"
           is_linux
           # Common POSIX constants
-        when "CLOCK_MONOTONIC", "TIOCGWINSZ", "TIOCSCTTY", "O_CLOEXEC", "O_DIRECTORY", "O_NONBLOCK"
+        when "CLOCK_MONOTONIC", "TIOCGWINSZ", "TIOCSCTTY", "O_CLOEXEC", "O_DIRECTORY", "O_NONBLOCK", "SOCK_CLOEXEC"
           is_darwin || is_linux || is_bsd
+        when "SIGRTMIN"
+          is_linux || is_bsd
         else
           false
         end
@@ -49148,7 +49166,31 @@ module Crystal::HIR
       if flag_name = parse_flag_condition_name(cleaned)
         return evaluate_macro_flag(flag_name) ? 2 : 1
       end
+      if query = parse_macro_member_query_condition(cleaned)
+        owner_name, member_name, arg_name = query
+        result = case member_name
+                 when "has_constant?"
+                   evaluate_has_constant(owner_name, arg_name)
+                 when "has_method?"
+                   evaluate_has_method(owner_name, arg_name)
+                 else
+                   return 0
+                 end
+        return result ? 2 : 1
+      end
       0
+    end
+
+    private def parse_macro_member_query_condition(text : String) : Tuple(String, String, String)?
+      match = text.match(/\A([A-Za-z_][A-Za-z0-9_:]*)\.(has_constant\?|has_method\?)\s*\(\s*(?::([A-Za-z_][A-Za-z0-9_]*)|"([^"]+)"|'([^']+)')\s*\)\s*\z/)
+      return nil unless match
+
+      owner_name = match[1]
+      member_name = match[2]
+      arg_name = match[3]? || match[4]? || match[5]?
+      return nil unless arg_name
+
+      {owner_name, member_name, arg_name}
     end
 
     private def top_level_flag_condition_separator(
@@ -49372,6 +49414,12 @@ module Crystal::HIR
     private def expand_macro_literal_expressions_for_registration(node : CrystalV2::Compiler::Frontend::MacroLiteralNode) : String?
       pieces = node.pieces
       return nil if pieces.empty?
+      has_expression_piece = pieces.any? { |piece| piece.kind == CrystalV2::Compiler::Frontend::MacroPiece::Kind::Expression }
+      return nil unless has_expression_piece
+      return nil if macro_literal_has_control_pieces?(node)
+      if raw_text = macro_literal_raw_text(node)
+        return nil if raw_text.includes?("{%")
+      end
 
       vars = {} of String => CrystalV2::Compiler::Semantic::MacroValue
       owner_type = @current_class ? macro_owner_type_for(@current_class.not_nil!) : nil
@@ -49403,6 +49451,20 @@ module Crystal::HIR
 
       text = builder.to_s.strip
       text.empty? ? nil : text
+    end
+
+    private def macro_literal_has_control_pieces?(node : CrystalV2::Compiler::Frontend::MacroLiteralNode) : Bool
+      node.pieces.any? do |piece|
+        case piece.kind
+        when CrystalV2::Compiler::Frontend::MacroPiece::Kind::ControlStart,
+             CrystalV2::Compiler::Frontend::MacroPiece::Kind::ControlElseIf,
+             CrystalV2::Compiler::Frontend::MacroPiece::Kind::ControlElse,
+             CrystalV2::Compiler::Frontend::MacroPiece::Kind::ControlEnd
+          true
+        else
+          false
+        end
+      end
     end
 
     # Expand a MacroLiteralNode that contains nested control structures ({% for %}, {% if %})
