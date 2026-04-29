@@ -69739,6 +69739,15 @@ module Crystal::HIR
             arg_types,
             !!call_has_named_args
           )
+          # The inline-yield probe above already resolved the block parameter
+          # contract for this exact call site. Recomputing it here can drift
+          # after late call-target changes and materialize a standalone block
+          # proc with VOID parameters even though the inline block was lowered
+          # with concrete params (for example File.open { |file| ... }).
+          if block_param_types_for_proc.nil? ||
+             block_param_types_for_proc.all? { |type| type == TypeRef::VOID }
+            block_param_types_for_proc = block_param_types_inline
+          end
           if method_name == "try" && receiver_id
             if non_nil = non_nil_type_for_union(ctx.type_of(receiver_id))
               block_param_types_for_proc = [non_nil]
@@ -83202,16 +83211,46 @@ module Crystal::HIR
       when CrystalV2::Compiler::Frontend::IfNode
         collect_proc_body_ident_walk(node.condition, names)
         node.then_body.each { |e| collect_proc_body_ident_walk(e, names) }
+        if elsifs = node.elsifs
+          elsifs.each do |branch|
+            collect_proc_body_ident_walk(branch.condition, names)
+            branch.body.each { |e| collect_proc_body_ident_walk(e, names) }
+          end
+        end
         if eb = node.else_body
           eb.each { |e| collect_proc_body_ident_walk(e, names) }
         end
       when CrystalV2::Compiler::Frontend::WhileNode
         collect_proc_body_ident_walk(node.condition, names)
         node.body.each { |e| collect_proc_body_ident_walk(e, names) }
+      when CrystalV2::Compiler::Frontend::UntilNode
+        collect_proc_body_ident_walk(node.condition, names)
+        node.body.each { |e| collect_proc_body_ident_walk(e, names) }
+      when CrystalV2::Compiler::Frontend::LoopNode
+        node.body.each { |e| collect_proc_body_ident_walk(e, names) }
+      when CrystalV2::Compiler::Frontend::ForNode
+        node.body.each { |e| collect_proc_body_ident_walk(e, names) }
       when CrystalV2::Compiler::Frontend::AssignNode
         collect_proc_body_ident_walk(node.target, names)
         collect_proc_body_ident_walk(node.value, names)
+      when CrystalV2::Compiler::Frontend::MultipleAssignNode
+        node.targets.each { |target| collect_proc_body_ident_walk(target, names) }
+        collect_proc_body_ident_walk(node.value, names)
+      when CrystalV2::Compiler::Frontend::TypeDeclarationNode
+        if value = node.value
+          collect_proc_body_ident_walk(value, names)
+        end
+      when CrystalV2::Compiler::Frontend::GroupingNode
+        collect_proc_body_ident_walk(node.expression, names)
       when CrystalV2::Compiler::Frontend::ReturnNode
+        if v = node.value
+          collect_proc_body_ident_walk(v, names)
+        end
+      when CrystalV2::Compiler::Frontend::BreakNode
+        if v = node.value
+          collect_proc_body_ident_walk(v, names)
+        end
+      when CrystalV2::Compiler::Frontend::NextNode
         if v = node.value
           collect_proc_body_ident_walk(v, names)
         end
@@ -83236,6 +83275,12 @@ module Crystal::HIR
         node.when_branches.each do |wb|
           wb.conditions.each { |c| collect_proc_body_ident_walk(c, names) }
           wb.body.each { |b| collect_proc_body_ident_walk(b, names) }
+        end
+        if in_branches = node.in_branches
+          in_branches.each do |branch|
+            branch.conditions.each { |condition| collect_proc_body_ident_walk(condition, names) }
+            branch.body.each { |body_expr| collect_proc_body_ident_walk(body_expr, names) }
+          end
         end
         if eb = node.else_branch
           eb.each { |e| collect_proc_body_ident_walk(e, names) }
@@ -83262,6 +83307,19 @@ module Crystal::HIR
         node.entries.each do |entry|
           collect_proc_body_ident_walk(entry.key, names)
           collect_proc_body_ident_walk(entry.value, names)
+        end
+      when CrystalV2::Compiler::Frontend::BeginNode
+        node.body.each { |e| collect_proc_body_ident_walk(e, names) }
+        if clauses = node.rescue_clauses
+          clauses.each do |clause|
+            clause.body.each { |e| collect_proc_body_ident_walk(e, names) }
+          end
+        end
+        if eb = node.else_body
+          eb.each { |e| collect_proc_body_ident_walk(e, names) }
+        end
+        if ensure_body = node.ensure_body
+          ensure_body.each { |e| collect_proc_body_ident_walk(e, names) }
         end
       end
     end
@@ -83292,17 +83350,35 @@ module Crystal::HIR
       when CrystalV2::Compiler::Frontend::IfNode
         detect_written_captures_walk(node.condition, capture_names, written)
         node.then_body.each { |e| detect_written_captures_walk(e, capture_names, written) }
+        if elsifs = node.elsifs
+          elsifs.each do |branch|
+            detect_written_captures_walk(branch.condition, capture_names, written)
+            branch.body.each { |e| detect_written_captures_walk(e, capture_names, written) }
+          end
+        end
         if eb = node.else_body
           eb.each { |e| detect_written_captures_walk(e, capture_names, written) }
         end
       when CrystalV2::Compiler::Frontend::WhileNode
         detect_written_captures_walk(node.condition, capture_names, written)
         node.body.each { |e| detect_written_captures_walk(e, capture_names, written) }
+      when CrystalV2::Compiler::Frontend::UntilNode
+        detect_written_captures_walk(node.condition, capture_names, written)
+        node.body.each { |e| detect_written_captures_walk(e, capture_names, written) }
+      when CrystalV2::Compiler::Frontend::LoopNode
+        node.body.each { |e| detect_written_captures_walk(e, capture_names, written) }
+      when CrystalV2::Compiler::Frontend::ForNode
+        node.body.each { |e| detect_written_captures_walk(e, capture_names, written) }
       when CrystalV2::Compiler::Frontend::BlockNode
         node.body.each { |e| detect_written_captures_walk(e, capture_names, written) }
       when CrystalV2::Compiler::Frontend::IndexNode
         detect_written_captures_walk(node.object, capture_names, written)
         node.indexes.each { |idx| detect_written_captures_walk(idx, capture_names, written) }
+      when CrystalV2::Compiler::Frontend::BinaryNode
+        detect_written_captures_walk(node.left, capture_names, written)
+        detect_written_captures_walk(node.right, capture_names, written)
+      when CrystalV2::Compiler::Frontend::UnaryNode
+        detect_written_captures_walk(node.operand, capture_names, written)
       when CrystalV2::Compiler::Frontend::MemberAccessNode
         detect_written_captures_walk(node.object, capture_names, written)
       when CrystalV2::Compiler::Frontend::CallNode
@@ -83316,10 +83392,81 @@ module Crystal::HIR
           detect_written_captures_walk(cond, capture_names, written)
         end
         node.when_branches.each do |wb|
+          wb.conditions.each { |condition| detect_written_captures_walk(condition, capture_names, written) }
           wb.body.each { |b| detect_written_captures_walk(b, capture_names, written) }
+        end
+        if in_branches = node.in_branches
+          in_branches.each do |branch|
+            branch.conditions.each { |condition| detect_written_captures_walk(condition, capture_names, written) }
+            branch.body.each { |body_expr| detect_written_captures_walk(body_expr, capture_names, written) }
+          end
         end
         if eb = node.else_branch
           eb.each { |e| detect_written_captures_walk(e, capture_names, written) }
+        end
+      when CrystalV2::Compiler::Frontend::UnlessNode
+        detect_written_captures_walk(node.condition, capture_names, written)
+        node.then_branch.each { |e| detect_written_captures_walk(e, capture_names, written) }
+        if eb = node.else_branch
+          eb.each { |e| detect_written_captures_walk(e, capture_names, written) }
+        end
+      when CrystalV2::Compiler::Frontend::MultipleAssignNode
+        node.targets.each do |target_id|
+          target = @arena[target_id]
+          if target.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode)
+            name = (safe_slice_to_string(target.name) || "")
+            written.add(name) if capture_names.includes?(name)
+          end
+          detect_written_captures_walk(target_id, capture_names, written)
+        end
+        detect_written_captures_walk(node.value, capture_names, written)
+      when CrystalV2::Compiler::Frontend::TypeDeclarationNode
+        name = safe_slice_to_string(node.name) || ""
+        written.add(name) if capture_names.includes?(name)
+        if value = node.value
+          detect_written_captures_walk(value, capture_names, written)
+        end
+      when CrystalV2::Compiler::Frontend::GroupingNode
+        detect_written_captures_walk(node.expression, capture_names, written)
+      when CrystalV2::Compiler::Frontend::ReturnNode
+        if value = node.value
+          detect_written_captures_walk(value, capture_names, written)
+        end
+      when CrystalV2::Compiler::Frontend::BreakNode
+        if value = node.value
+          detect_written_captures_walk(value, capture_names, written)
+        end
+      when CrystalV2::Compiler::Frontend::NextNode
+        if value = node.value
+          detect_written_captures_walk(value, capture_names, written)
+        end
+      when CrystalV2::Compiler::Frontend::ArrayLiteralNode
+        node.elements.each { |e| detect_written_captures_walk(e, capture_names, written) }
+      when CrystalV2::Compiler::Frontend::TupleLiteralNode
+        node.elements.each { |e| detect_written_captures_walk(e, capture_names, written) }
+      when CrystalV2::Compiler::Frontend::HashLiteralNode
+        node.entries.each do |entry|
+          detect_written_captures_walk(entry.key, capture_names, written)
+          detect_written_captures_walk(entry.value, capture_names, written)
+        end
+      when CrystalV2::Compiler::Frontend::StringInterpolationNode
+        node.pieces.each do |piece|
+          if expr = piece.expr
+            detect_written_captures_walk(expr, capture_names, written)
+          end
+        end
+      when CrystalV2::Compiler::Frontend::BeginNode
+        node.body.each { |e| detect_written_captures_walk(e, capture_names, written) }
+        if clauses = node.rescue_clauses
+          clauses.each do |clause|
+            clause.body.each { |e| detect_written_captures_walk(e, capture_names, written) }
+          end
+        end
+        if eb = node.else_body
+          eb.each { |e| detect_written_captures_walk(e, capture_names, written) }
+        end
+        if ensure_body = node.ensure_body
+          ensure_body.each { |e| detect_written_captures_walk(e, capture_names, written) }
         end
       end
     end
@@ -83839,6 +83986,11 @@ module Crystal::HIR
                            else
                              TypeRef::VOID
                            end
+              # Keep parity with lower_block_to_block_id: unannotated block
+              # params are runtime pointer values even when inference did not
+              # recover a more precise type. Leaving them as VOID makes the
+              # standalone proc body drop receiver calls such as file.read(...).
+              param_type = TypeRef::POINTER if param_type == TypeRef::VOID
               proc_param_types << param_type
             end
           end

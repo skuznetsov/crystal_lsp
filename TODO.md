@@ -30,6 +30,33 @@ Working policy:
 
 ## Current Checkpoint
 
+Loop block-proc capture checkpoint (2026-04-29): generated stage2 still builds
+successfully, and the previous `file_sha256` smoke abort no longer resolves
+`file.read(buffer)` to the unrelated
+`Hash(String, Array(Tuple(String, Crystal::MIR::Function)))#read(Slice(UInt8))`.
+Two root invariants were missing. First, `collect_proc_body_ident_walk` and
+`detect_written_captures_walk` did not traverse `LoopNode` and several related
+control-flow/container nodes, so a block body shaped as `loop do ... end` could
+report `refs=` / `captures=` even when it read and wrote outer locals such as
+`buffer` and `hash`. Second, `lower_block_to_block_id` defaulted untyped block
+params from `VOID` to `POINTER`, but `lower_block_to_proc` kept the same
+untyped param as `VOID`, so a standalone block proc could erase its runtime
+receiver parameter even though the inline block view had a pointer-shaped
+param. The fix expands the capture walkers and keeps standalone block-proc
+param defaulting in parity with inline block lowering. Evidence:
+`crystal build src/crystal_v2.cr -o /tmp/cv2_loop_capture_walk3 --error-trace`,
+`regression_tests/p2_loop_block_proc_capture_no_prelude.sh
+/tmp/cv2_loop_capture_walk3`,
+`regression_tests/p2_abstract_getter_vdispatch_no_prelude.sh
+/tmp/cv2_loop_capture_walk3`,
+`regression_tests/p2_bootstrap_semantic_emit_oracle.sh
+/tmp/cv2_loop_capture_walk3`, and canonical `s1 -> s2` building `cv2_s2` in
+about 215s under the 300s/4GB gate. New frontier: generated `cv2_s2`
+no-prelude smoke aborts at `STUB CALLED: Pointer$Hread$$Slice$LUInt8$R` from
+`__crystal_block_proc_720 -> File.open -> CLI#file_sha256`; this is now a more
+precise block parameter type problem (the proc param is pointer-shaped, but not
+yet resolved to the concrete `File`/`IO::FileDescriptor` read implementation).
+
 Abstract generated-getter vdispatch checkpoint (2026-04-29): generated stage2
 still builds successfully, and the previous smoke abort at
 `STUB CALLED: CrystalV2$CCCompiler$CCFrontend$CCNode$Hspan` is resolved. The

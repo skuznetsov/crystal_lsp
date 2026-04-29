@@ -12,6 +12,28 @@ checkpoint remain recoverable from git history, especially:
 
 ## Active Bootstrap Gate
 
+[LM-522|verified]: Standalone block-proc lowering must use the same capture
+walk and untyped-param defaulting invariants as inline block lowering.
+`CLI#file_sha256` exposed both gaps: the block body is a `LoopNode`, but
+`collect_proc_body_ident_walk` and `detect_written_captures_walk` did not
+traverse `LoopNode` and several related AST containers, so `buffer` and
+written `hash` were missed; then `lower_block_to_proc` kept an untyped block
+parameter as `VOID` while `lower_block_to_block_id` defaulted the same param to
+`POINTER`. The fix expands those walkers and coerces untyped standalone block
+params from `VOID` to `POINTER`, preserving parity with the inline block view.
+Evidence: `p2_loop_block_proc_capture_no_prelude.sh` requires loop-body
+captures and `Reader#read(Buffer)` in the standalone proc HIR; the focused
+`File.open` reducer now captures `buffer,hash` and emits
+`Pointer#read(Slice(UInt8))` instead of dropping the call or selecting
+`Hash(...MIR::Function...)#read`; `p2_abstract_getter_vdispatch_no_prelude.sh`
+and `p2_bootstrap_semantic_emit_oracle.sh` pass; canonical `s1 -> s2` builds
+`cv2_s2` in about 215s and moves the smoke frontier from
+`Hash(String, Array(Tuple(String, Crystal::MIR::Function)))#read(Slice(UInt8))`
+to `Pointer#read(Slice(UInt8))` in `CLI#file_sha256`. Boundary: the remaining
+frontier is block-param precision for File.open (pointer-shaped param still
+needs dispatch to concrete File/IO read), not missing loop captures. {F/G/R:
+0.93/0.66/0.93} [verified]
+
 [LM-521|verified]: Generated concrete accessors must materialize before
 inherited abstract lookup for virtual dispatch targets. A concrete getter such
 as `Frontend::LiteralNode#span` is registered in `@function_types` but has no
