@@ -5408,6 +5408,12 @@ module Crystal::HIR
       end
     end
 
+    private def lower_required_virtual_target_function(name : String, exact_demand : Bool = false) : Nil
+      @rta_called_methods << name if exact_demand
+      @module.mark_virtual_dispatch_target_function(name)
+      lower_function_if_needed(name)
+    end
+
     private def replay_virtual_targets_for_registered_class(class_name : String) : Nil
       @vtr_stats_replay_calls &+= 1 if @debug_virtual_target_replay_stats
       ancestors = ([class_name] + get_ancestor_chain(class_name)).uniq
@@ -5445,16 +5451,19 @@ module Crystal::HIR
           preserve_requested_value_owner_specialization?(base_name, resolved_name)
         if preserve_requested_owner ||
            (!resolved_owner.empty? && strip_generic_args(resolved_owner) != strip_generic_args(owner))
-          lower_function_if_needed(candidate)
-          lower_function_if_needed(base_name) unless candidate == base_name
-        else
-          lower_function_if_needed(resolved_name)
+          lower_required_virtual_target_function(resolved_name, exact_demand: true)
           resolved_base = strip_type_suffix(resolved_name)
-          lower_function_if_needed(resolved_base) unless resolved_name == resolved_base
+          lower_required_virtual_target_function(resolved_base, exact_demand: true) unless resolved_name == resolved_base
+          lower_required_virtual_target_function(candidate)
+          lower_required_virtual_target_function(base_name) unless candidate == base_name
+        else
+          lower_required_virtual_target_function(resolved_name)
+          resolved_base = strip_type_suffix(resolved_name)
+          lower_required_virtual_target_function(resolved_base) unless resolved_name == resolved_base
         end
       else
-        lower_function_if_needed(candidate)
-        lower_function_if_needed(base_name) unless candidate == base_name
+        lower_required_virtual_target_function(candidate)
+        lower_required_virtual_target_function(base_name) unless candidate == base_name
       end
     end
 

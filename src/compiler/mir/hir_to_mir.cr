@@ -4793,10 +4793,13 @@ module Crystal
             end
           end
 
-          # Arity-only fallback is safe only for bare method names.
-          # For typed/mangled suffixes (contains '$'), returning by arity alone can
-          # select a wrong overload (e.g. <<$Char -> <<$String) and corrupt ABI.
-          if arg_count && !has_explicit_suffix
+          # Arity fallback is safe for bare method names. For typed/mangled
+          # suffixes (contains '$'), use it only when there is exactly one
+          # same-family candidate with the requested arity; this preserves
+          # inherited compatible signatures such as EventLoop#close(System FD)
+          # reached through a narrower IO::FileDescriptor call without reviving
+          # ambiguous overloads like <<$Char vs <<$String.
+          if arg_count
             # Use class index + pre-computed prefix (avoids O(N) full scan + GC from interpolation)
             instance_prefix = String.build(current.bytesize + 1 + base_method.bytesize) do |io|
               io << current; io << '#'; io << base_method

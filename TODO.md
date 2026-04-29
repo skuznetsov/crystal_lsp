@@ -514,14 +514,24 @@ Latest generated-stage2 frontier:
 - The tuple `join` frontier was localized with lldb to
   `LLVMIRGenerator#emit_extern_call`: `arg_entries.map { |(t, v, _)| ... }`
   forced tuple formatting in generated stage2. That formatter is now an inline
-  indexed builder. The next full-codegen frontier is
-  `STUB CALLED: Crystal$CCEventLoop$Hclose$$IO$CCFileDescriptor`; the
-  `--no-codegen` probe remains clean.
+  indexed builder.
+- The generated-stage2 `Crystal::EventLoop#close(IO::FileDescriptor)` frontier
+  is cleared. Root cause: HIR materialized inherited virtual-dispatch targets
+  (for example `Polling#close(Crystal::System::FileDescriptor)`) but final HIR
+  RTA pruned them, and MIR later refused to use the unique same-arity inherited
+  implementation for the narrower typed suffix. HIR now records lowered
+  virtual-dispatch targets as final-RTA roots, inherited resolved targets are
+  exact-demanded for lazy RTA, and MIR permits typed-suffix arity fallback only
+  when the same-method/arity candidate is unique. The old abstract
+  `Crystal$CCEventLoop$Hclose$$IO$CCFileDescriptor` stub is now a regression.
+  Current generated-stage2 guard frontier is
+  `frontier=nocodegen_clean_full_codegen_hang`.
 
-- Next frontier: reduce the `Crystal::EventLoop#close(IO::FileDescriptor)`
-  full-codegen RTA gap from the updated generated compiler. The previous
-  `Tuple$Heach$$block`, `debug_env_filter_match?..._splat`, and
-  `Tuple(String, Crystal::MIR::Type)#join(IO, String, &block)` repros are now
+- Next frontier: reduce the full-codegen-only generated-stage2 hang/frontier
+  after the no-codegen probe exits cleanly. The previous `Tuple$Heach$$block`,
+  `debug_env_filter_match?..._splat`,
+  `Tuple(String, Crystal::MIR::Type)#join(IO, String, &block)`, and
+  `Crystal::EventLoop#close(IO::FileDescriptor)` repros are now
   green/regression-guarded.
 
 Boundary: `src/crystal_v2.cr --no-prelude` still exits `11` in an
@@ -533,8 +543,8 @@ pending-budget oracle.
 1. Re-measure the next generated-stage2 failure after the no-prelude print-mode
    fix, starting from the fast no-prelude runtime/oracle corpus instead of full
    bootstrap.
-2. Reduce the generated-stage2 `Crystal::EventLoop#close(IO::FileDescriptor)`
-   RTA gap to the smallest no-prelude HIR/MIR shape.
+2. Reduce the generated-stage2 full-codegen-only hang/frontier now that
+   `--no-codegen` and the EventLoop close vdispatch corridor are clean.
 3. Audit remaining compiler hot paths that use tuple block destructuring or
    block `join` formatting; keep the general tuple-block fix as an explicit
    follow-up rather than hiding it with one-off stubs.

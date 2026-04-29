@@ -1118,6 +1118,52 @@ tuple block formatting, not a general tuple block/destructuring implementation.
 The next generated-stage2 root is `Crystal::EventLoop#close(IO::FileDescriptor)`
 RTA/lowering discovery. {F/G/R: 0.9/0.62/0.9} [verified]
 
+[LM-511|verified]: The generated-stage2
+`Crystal::EventLoop#close(IO::FileDescriptor)` frontier was a two-stage demand
+tracking mismatch, not an EventLoop-specific backend bug.
+
+Findings:
+
+- HIR lowering did emit the call as virtual and materialized the inherited
+  implementation as `Crystal::EventLoop::Polling#close$Crystal::System::FileDescriptor`.
+- Final HIR RTA then pruned that materialized virtual target because it rebuilt
+  reachability from calls and type descriptors without honoring the target set
+  already demanded by HIR virtual-dispatch lowering.
+- After retaining those HIR-demanded targets, MIR still needed one compatibility
+  rule: a virtual call with a typed suffix may resolve to a unique same-method,
+  same-arity inherited implementation when the exact typed name is absent. This
+  is constrained to a single candidate so ambiguous overload families such as
+  `<<$Char` vs `<<$String` stay rejected.
+
+Evidence:
+
+- `crystal build src/crystal_v2.cr -o /tmp/cv2_vtarget_mir --error-trace`
+  -> exit 0.
+- `CRYSTAL_V2_STOP_AFTER_HIR=1 scripts/run_safe.sh /tmp/cv2_vtarget_fix 300
+  4096 src/crystal_v2.cr --emit hir --no-link -o /tmp/cv2_vtarget_fix_hir`
+  -> exit 0; final HIR retained
+  `Crystal::EventLoop::Polling#close$Crystal::System::FileDescriptor`.
+- `CRYSTAL_V2_TRACE_STDERR=1 scripts/run_safe.sh /tmp/cv2_vtarget_mir 360
+  4096 src/crystal_v2.cr --emit llvm-ir --no-link -o /tmp/cv2_vtarget_mir_ir`
+  -> exit 0; `IO::FileDescriptor#system_close` calls
+  `__vdispatch__Crystal$CCEventLoop$Hclose$$IO$CCFileDescriptor$$T329`, the
+  vdispatch body calls `Crystal$CCEventLoop$CCPolling$Hclose$$Crystal$CCSystem$CCFileDescriptor`,
+  and the old `STUB CALLED: Crystal$CCEventLoop$Hclose$$IO$CCFileDescriptor`
+  string is absent.
+- `regression_tests/p2_generated_stage2_no_prelude_puts_guard.sh
+  /tmp/cv2_vtarget_mir` -> `p2_generated_stage2_no_prelude_puts_guard_ok
+  frontier=nocodegen_clean_full_codegen_hang`.
+- `regression_tests/p2_bootstrap_semantic_emit_oracle.sh /tmp/cv2_vtarget_mir`,
+  `regression_tests/p2_llvm_tail_stats_no_prelude.sh /tmp/cv2_vtarget_mir`,
+  and `regression_tests/p2_pending_budget_no_prelude.sh /tmp/cv2_vtarget_mir`
+  -> all ok.
+
+Boundary: this preserves HIR-demanded virtual targets and allows only unique
+same-arity MIR typed-suffix fallback. It is not a broad arity-only overload
+fallback and does not implement unresolved block/tuple lowering families.
+Current generated-stage2 guard frontier is the full-codegen-only
+`nocodegen_clean_full_codegen_hang` state. {F/G/R: 0.92/0.68/0.92} [verified]
+
 ## Active Strategy
 
 - Main fast loop: `--no-prelude` oracles and focused STOP_AFTER_HIR budget

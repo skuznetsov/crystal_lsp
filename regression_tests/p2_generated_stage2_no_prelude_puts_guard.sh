@@ -182,21 +182,18 @@ if grep -q 'STUB CALLED: Atomic\$L.*\$R\$Hatomicrmw' "$COMPILE_LOG"; then
   exit 0
 fi
 
-# 2026-04-28: fixed backend extern-call argument formatting no longer reaches
-# Tuple#join / Tuple#to_s in generated stage2. The next full-codegen frontier
-# is an unlowered EventLoop close overload reached while compiling `puts 7`.
+# 2026-04-28: HIR marks lowered virtual-dispatch targets as final-RTA roots and
+# MIR permits a unique same-arity typed-suffix fallback for inherited compatible
+# signatures. The old EventLoop#close abstract stub must not return.
 if grep -q 'STUB CALLED: Crystal\$CCEventLoop\$Hclose\$\$IO\$CCFileDescriptor' "$COMPILE_LOG"; then
-  echo "p2_generated_stage2_no_prelude_puts_guard_ok frontier=eventloop_close_fd_rta_gap"
-  exit 0
+  echo "p2_generated_stage2_no_prelude_puts_guard_failed: old eventloop_close_fd_rta_gap frontier regressed" >&2
+  tail -120 "$COMPILE_LOG" >&2 || true
+  exit 1
 fi
 
-# Fall back to a secondary probe with --no-codegen. The previous recorded
-# frontier (nilable-Array `check_index_out_of_bounds` ABORT stub) was cleared
-# by LM-500: the private Indexable helper is now in the lazy-RTA allowlist, so
-# `--no-codegen` front-end runs complete cleanly. Accept a clean nocodegen
-# exit as the new recorded state; the full-codegen corridor still hangs in
-# `Crystal::RWLock#write_lock` reached from `Process.fork`, which is tracked
-# as a separate frontier.
+# Fall back to a secondary probe with --no-codegen. The front-end/no-codegen
+# corridor is clean; if full codegen still fails without a known ABORT frontier,
+# keep the recorded state as a full-codegen-only hang/frontier.
 NOCODEGEN_LOG="$TMP_DIR/compile_nocodegen.log"
 set +e
 "$ROOT_DIR/scripts/run_safe.sh" "$GENERATED_S2" 60 1024 \
