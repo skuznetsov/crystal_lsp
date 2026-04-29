@@ -126,3 +126,14 @@
 **Adversary check:** local review found and fixed one issue before verification (`copy_file_raw` now closes fds in `ensure` and unlinks partial destinations only when the destination was opened). The actual commit gate used local build + p2 guards, not Grok.
 **Verdict:** not useful for this commit except as beta evidence. Retry only with a narrower question or longer timeout.
 **Cost saved:** none; cost increased slightly due timeout handling.
+
+### Session 6 — 2026-04-29 — backend-intrinsic boundary hostile review
+**Задача:** read-only hostile review точечного allowlist-флага для backend-owned HIR calls (`__crystal_v2_string_eq`, hash entry helpers, `__crystal_v2_select_ptr`) плюс следующий root после `STOP_AFTER_HIR`.
+**Brief size:** ~28 строк, ~2.3 KB, файл `/tmp/grok_task_intrinsic_boundary_review.md`.
+**Latency:** interrupted manually after several minutes.
+**Output quality:** ⚠ partial. Grok успел independently подтвердить основную рамку: these helper calls are emitted as HIR `Call`, then owned by MIR/LLVM extern/runtime lowering; broad `__crystal_v2_*` skipping would be unsafe because many runtime/helper names have other ownership paths. It did not produce a final answer because it requested permission for a bash command under the non-interactive ACP wrapper.
+**Что было хорошо:** source exploration was on target and the partial stream matched the local Adversary result: exact allowlist is safer than broad prefix filtering.
+**Что было плохо:** I launched `grok_acp_delegate.py` without `--always-approve`; when Grok attempted a verification shell command it entered `session/request_permission`, which this non-interactive Codex path cannot answer. I had to kill the Grok process. This should be treated as operator error plus ACP UX footgun.
+**Adversary check:** local verification did not depend on Grok: build and four no-prelude guards passed; fresh generated `s1` `STOP_AFTER_HIR` full-source run exited 0; grep confirmed the exact backend-owned intrinsic names are absent from missing-target logs.
+**Verdict:** useful partial reviewer, but for Codex-driven beta use we should pass `--always-approve` for read-only bounded tasks or explicitly forbid Grok from running terminal commands.
+**Cost saved:** small; the main value was independent confirmation of the ownership-boundary framing.

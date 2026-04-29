@@ -1142,6 +1142,21 @@ module Crystal::HIR
     end
 
     @[AlwaysInline]
+    private def backend_owned_runtime_intrinsic_call?(name : String) : Bool
+      # These names are emitted as plain HIR Call instructions but are owned by
+      # MIR/LLVM runtime lowering, not by source-level HIR def materialization.
+      case name
+      when "__crystal_v2_string_eq",
+           "__crystal_v2_hash_get_entry_ptr",
+           "__crystal_v2_hash_entry_deleted",
+           "__crystal_v2_select_ptr"
+        true
+      else
+        false
+      end
+    end
+
+    @[AlwaysInline]
     private def instance_method?(name : String) : Bool
       i = 0
       while i < name.bytesize
@@ -4080,6 +4095,11 @@ module Crystal::HIR
       @block_lowering_cache = {} of BlockLoweringKey => BlockId
       @block_lowering_in_progress = {} of BlockLoweringKey => BlockId
       @loop_break_inline_locals_stack = [] of Array({BlockId, Array(Hash(String, ValueId))})
+      # Closure by-reference state. Keep this explicit because generated
+      # stage2 can miss inline-default ivar initialization and leave Sets nil.
+      @closure_ref_cells = {} of String => {String, String, TypeRef}
+      @closure_ref_prefer_cell = Set(String).new
+      @closure_cell_counter = 0
       @sources_by_arena = sources_by_arena || {} of UInt64 => String
       @main_arenas = [] of CrystalV2::Compiler::Frontend::ArenaLike
       if configured_main_arenas = main_arenas
@@ -45327,6 +45347,7 @@ module Crystal::HIR
                 end
               end
               next if name.empty?
+              next if backend_owned_runtime_intrinsic_call?(name)
               next if @module.has_function_with_body?(name)
               if debug_env_filter_match?("DEBUG_MISSING_TARGET", name)
                 STDERR.puts "[MISSING_TARGET] seen name=#{name} func=#{func.name} body=#{@module.has_function_with_body?(name)} state=#{function_state(name)}"
@@ -58219,6 +58240,7 @@ module Crystal::HIR
     ) : Nil
       return if name.empty?
       return if name.to_unsafe[0] == '$'.ord
+      return if backend_owned_runtime_intrinsic_call?(name)
       base_key = base_callsite_key(name)
       # Avoid per-receiver callsite tracking for Object#in? (defined only on Object),
       # which otherwise causes massive monomorphization explosions.
@@ -59731,6 +59753,7 @@ module Crystal::HIR
     private def lower_function_if_needed_impl(name : String) : Nil
       return if name.empty?
       return if synthetic_numeric_conversion_lower_target?(name)
+      return if backend_owned_runtime_intrinsic_call?(name)
       is_math_min_debug = env_get("DEBUG_MATH_MIN") && name.includes?("Math") && (name.includes?("min") || name.includes?("max"))
       if is_math_min_debug
         base = strip_type_suffix(name)

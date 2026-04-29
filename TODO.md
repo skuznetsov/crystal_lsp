@@ -22,6 +22,33 @@ Working policy:
 
 ## Current Checkpoint
 
+Backend-intrinsic / vdispatch compaction checkpoint (2026-04-29): generated
+stage2 now reaches the full-source `STOP_AFTER_HIR` gate with the current
+compiler-built `s1`, and backend-owned helper calls no longer masquerade as
+missing HIR source demand. The root boundary is that HIR emits some helper
+operations as normal `Call` instructions (`__crystal_v2_string_eq`,
+`__crystal_v2_hash_get_entry_ptr`, `__crystal_v2_hash_entry_deleted`,
+`__crystal_v2_select_ptr`), but MIR/LLVM owns their implementation through
+`extern_call` emission / runtime helper definitions. `lower_missing_call_targets`,
+`remember_callsite_arg_types`, and `lower_function_if_needed_impl` now skip
+that exact allowlist instead of recording them as source-level callees. A fast
+no-prelude guard keeps the calls visible in HIR while rejecting their appearance
+in missing-target logs. The same checkpoint compacts class vdispatch wrappers
+by sharing identical inherited implementation blocks across many runtime type
+IDs; union dispatch and dispatch-class-specialized cases remain unshared. It
+also explicitly initializes closure by-reference state in `AstToHir#initialize`
+because generated stage2 can still miss inline-default ivar initialization for
+those sets. Evidence: `crystal build src/crystal_v2.cr -o
+/tmp/cv2_intrinsic_boundary_check --error-trace`,
+`p2_backend_intrinsic_boundary_no_prelude.sh`, `p2_pending_budget_no_prelude.sh`,
+`p2_bootstrap_semantic_emit_oracle.sh`, `p2_each_index_block_param_no_prelude.sh`,
+and fresh generated `s1` `STOP_AFTER_HIR` full-source run all passed; the
+missing summary no longer contains the backend-owned intrinsic names. Boundary:
+canonical `s1 -> s2` still times out at 300s after `[ALLOC_FLUSH] Generated 98
+deferred allocators`, producing only a partial `cv2_s2.ll` (~3.7MB in this run).
+Next root is the post-HIR allocator / MIR / LLVM tail, not these backend helper
+names.
+
 Macro control checkpoint (2026-04-29): full-prelude Kqueue HIR no longer
 registers both sides of the Darwin `LibC.has_constant?(:EVFILT_USER)` macro
 inside `Crystal::EventLoop::Kqueue#after_fork`. The root was registration

@@ -1,6 +1,6 @@
 # LANDMARKS
 
-Updated: 2026-04-23
+Updated: 2026-04-29
 Context: compiler/bootstrap/stage2-stability
 
 This file is the active working set only. Historical landmarks before this
@@ -11,6 +11,61 @@ checkpoint remain recoverable from git history, especially:
   `d43826fdcc2277b6075026244764a84d0069d1a30b675642b603f3511b14a1e5`
 
 ## Active Bootstrap Gate
+
+[LM-481|verified]: Backend-owned runtime intrinsics must not be demand-driven
+as source-level HIR functions. HIR currently emits `__crystal_v2_string_eq`,
+`__crystal_v2_hash_get_entry_ptr`, `__crystal_v2_hash_entry_deleted`, and
+`__crystal_v2_select_ptr` as plain `Call` instructions, but MIR lowering turns
+unresolved calls into `extern_call`, and the LLVM backend either defines those
+runtime helpers or intercepts them specially (`select_ptr`). A focused patch
+skips that exact allowlist in `lower_missing_call_targets`,
+`remember_callsite_arg_types`, and `lower_function_if_needed_impl`. Evidence:
+`regression_tests/p2_backend_intrinsic_boundary_no_prelude.sh
+/tmp/cv2_intrinsic_boundary_check` keeps `string_eq` / `select_ptr` visible in
+HIR while rejecting their appearance in missing-source logs; fresh generated
+`s1` full-source `STOP_AFTER_HIR` exits 0 after about 220s, and
+`rg '__crystal_v2_(string_eq|hash_get_entry_ptr|hash_entry_deleted|select_ptr)'
+/tmp/cv2_missing_intrinsic/run.log` returns no matches. Boundary: this removes
+one wrong demand source but does not by itself shrink the remaining
+`lower_missing` total (`+25690` in the measured run). {F/G/R:
+0.91/0.62/0.92} [verified]
+
+[LM-482|verified]: Class vdispatch wrappers can share a case body when many
+runtime type IDs resolve to the exact same inherited implementation. The MIR
+vdispatch generator now keeps all switch labels but interns only class-dispatch
+case bodies by callee `FunctionId`; union-dispatch cases and
+`dispatch_class`-specialized cases remain unique because they carry
+case-specific unwrap/specialization semantics. Evidence: local hostile review
+of `generate_vdispatch_body` confirmed legal multi-label switch targets and
+PHI predecessor shape; the focused self-host artifact reduced broad
+`Object#hash` wrapper size from roughly 50k lines to roughly 10k lines, and the
+current canonical `s1 -> s2` partial `cv2_s2.ll` is about 3.7MB instead of the
+previous 170MB+ over-materialized artifacts. Boundary: this is an IR-size/root
+compaction, not the final bootstrap fix; full `s1 -> s2` still times out after
+allocator flush. {F/G/R: 0.86/0.64/0.84} [verified]
+
+[LM-483|verified]: Generated stage2 can still miss inline-default ivar
+initialization for closure by-reference state in `AstToHir`; keep those fields
+explicitly initialized in the constructor until the broader inline-default
+root is fixed. Evidence: the vdispatch-compacted generated `cv2_s2` no-prelude
+smoke crashed in `Set(String)#includes?` from
+`AstToHir#lower_identifier` because `@closure_ref_prefer_cell` was nil despite
+the inline ivar default. Explicit constructor initialization restored the
+focused no-prelude guards. Boundary: this is a contained workaround for a known
+generated-stage2 initialization bug, not a replacement for the later general
+inline-default fix. {F/G/R: 0.86/0.45/0.88} [verified]
+
+[LM-484|verified]: Current full `s1 -> s2` frontier has moved past HIR
+STOP_AFTER_HIR but still fails the canonical 300s bootstrap gate in the
+post-HIR tail. Command:
+`BOOTSTRAP_STAGE_OUT=/tmp/cv2_bs_s2_intrinsic BOOTSTRAP_CHAIN_STAGES=2
+BOOTSTRAP_TIMEOUT_SEC=300 BOOTSTRAP_MEM_MB=4096
+scripts/build_bootstrap_stages.sh --stages 2 --out /tmp/cv2_bs_s2_intrinsic`.
+Stage1 builds and both smokes pass; stage2 is killed at about 302s after
+`[ALLOC_FLUSH] Generated 98 deferred allocators`, with partial
+`/tmp/cv2_bs_s2_intrinsic/cv2_s2.ll` around 3.7MB. Boundary: next work should
+sample the allocator/MIR/LLVM tail, not re-open the backend intrinsic boundary
+unless new evidence appears. {F/G/R: 0.93/0.54/0.94} [verified]
 
 [LM-462|verified]: Bootstrap semantic-equivalence scaffolding exists as a thin
 scripts-only layer over the current bootstrap ladder. `scripts/build_bootstrap_stages.sh`

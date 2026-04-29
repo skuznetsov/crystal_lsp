@@ -3887,11 +3887,41 @@ module Crystal
           dispatch_func.get_block(nb).terminator = Jump.new(end_block)
         end
 
-        # 3. Create default block and case blocks
+        # 3. Create default block and case blocks.
+        #
+        # Class dispatch does not unwrap or otherwise specialize the receiver
+        # per concrete type. If many type IDs resolve to the same inherited
+        # implementation, all those switch labels can share one block. This
+        # preserves dispatch coverage while avoiding thousands of cloned
+        # `Reference#hash` / `Object#to_s` bodies in full self-host LLVM IR.
         default_block = dispatch_func.create_block
         cases = [] of Tuple(Int64, BlockId)
+        case_blocks = [] of BlockId
+        case_candidates = [] of VDispatchCandidate
+        shared_class_blocks = {} of FunctionId => BlockId
         candidates.each do |candidate|
-          case_block = dispatch_func.create_block
+          case_block = nil.as(BlockId?)
+          if kind.class? && candidate[:dispatch_class].nil?
+            if func = candidate[:func]
+              if existing = shared_class_blocks[func.id]?
+                case_block = existing
+              else
+                new_block = dispatch_func.create_block
+                shared_class_blocks[func.id] = new_block
+                case_block = new_block
+                case_blocks << new_block
+                case_candidates << candidate
+              end
+            end
+          end
+
+          unless case_block
+            new_block = dispatch_func.create_block
+            case_block = new_block
+            case_blocks << new_block
+            case_candidates << candidate
+          end
+
           # For union dispatch: use type_ref.id (global MIR type ID) to match
           # what emit_union_wrap stores as the discriminator via variant_global_id().
           # For class dispatch: type_id already IS the global runtime type_id.
@@ -3900,15 +3930,17 @@ module Crystal
                     else
                       candidate[:type_id].to_i64
                     end
-          cases << {case_id, case_block}
+          cases << {case_id, case_block.not_nil!}
         end
 
         # 4. Set up switch in the appropriate block
         dispatch_func.get_block(switch_block).terminator = Switch.new(type_id_val, cases, default_block)
 
-        # 5. Generate each case
-        candidates.each_with_index do |candidate, idx|
-          case_block = cases[idx][1]
+        # 5. Generate each unique case body. Multiple switch case values may
+        # target the same block when class-dispatch candidates share the exact
+        # same callee.
+        case_candidates.each_with_index do |candidate, idx|
+          case_block = case_blocks[idx]
           dispatch_builder.current_block = case_block
 
           cand_args = param_values.dup
