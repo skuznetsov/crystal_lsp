@@ -20,7 +20,34 @@ Working policy:
 - Use `s1 -> s2b` as the main integration gate.
 - Run `s1 -> s5b` rarely, after `s1 -> s2b` is clean.
 
+## Open Design Constraints
+
+- Do not solve block/proc or generic-container demand bugs with fixed nesting
+  depth caps. Real Crystal programs can contain deeply nested block, tuple,
+  hash, array, proc, and iterator shapes. Guards may use focused negative
+  patterns to catch known bad demand, but production fixes must preserve
+  demanded deep shapes and remove only proven non-demand/root pollution.
+
 ## Current Checkpoint
+
+Nested generic namespace checkpoint (2026-04-29): method/overload lookup now
+strips generic arguments per namespace segment instead of truncating the owner
+at the first `(`. The root was that owners like
+`Indexable(T)::ItemIterator(Array(String), String)` were normalized to
+`Indexable`, so `ItemIterator#each` could reuse `Indexable#each` and generate
+bogus demand such as `ItemIterator(ItemIterator(...)).new`. Constructor
+inference for generic classes under generic namespaces now resolves template
+bases such as `Indexable::IndexIterator` and specializes `.new(self)` from the
+receiver argument. Evidence: `crystal build src/crystal_v2.cr -o
+/tmp/cv2_method_index_path3 --error-trace`,
+`p2_nested_generic_new_inference.sh`, the fast p2 no-prelude guards, and
+`p1_ir_shape_check.sh` passed; full-source `STOP_AFTER_HIR` exits 0 after
+about 234s. Boundary: this is a correctness/root fix, not the final demand
+pruning fix. The full-source sweep still reports
+`lower_missing: 17423 -> 50628 (+33205)`, dominated by concrete-call demand
+families (`IO#<<`, `Hash/Array/Indexable`, `Proc#call`, formatting helpers).
+Next root remains shrinking `lower_missing.initial` without heuristic depth
+limits.
 
 Backend-intrinsic / vdispatch compaction checkpoint (2026-04-29): generated
 stage2 now reaches the full-source `STOP_AFTER_HIR` gate with the current

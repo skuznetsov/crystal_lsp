@@ -170,3 +170,14 @@
 **Adversary check:** local verification refuted the exact `Proc#call` change for this frontier: it removed `Proc#call` from the missing summary but changed full-source `lower_missing.initial` by only one function (`+25104` -> `+25103`) and made the run slower, so the experiment was reverted.
 **Verdict:** no value for this commit. Use Grok again for narrower read-only source audits, not as a blocking gate for quick root-cause falsifiers.
 **Cost saved:** none.
+
+### Session 10 — 2026-04-29 — nested generic iterator method lookup
+**Task:** read-only audit the `ItemIterator#each` wrong-body reducer: `items = ["x"].each; again = items.each; again.next` lowered `ItemIterator#each` using the `Indexable#each` body and emitted `ItemIterator(ItemIterator(...)).new`.
+**Brief size:** ~36 lines, ~2.6 KB, files under `/tmp/grok_itemiterator_each_audit*`.
+**Latency:** no actionable final output before local root cause was verified.
+**Output quality:** not useful. The first attempt sent plain text to `grok agent stdio`, which expects ACP/JSON frames, producing parse errors. The corrected headless `grok --prompt-file` launch started, but the captured output contained only startup warnings and no usable analysis.
+**What worked:** the failed attempts did not block local work; the direct `grok --help` path clarified that `agent stdio` is for ACP integration, while `--prompt-file` is the headless path.
+**What did not:** ACP/plain-stdio mismatch is an easy operator footgun, and the headless run produced no timely findings. For fast compiler falsifier loops, Grok should be treated as optional sidecar only.
+**Adversary check:** local evidence found the root independently: `function_def_overloads` and stripped overload lookup used first-paren generic stripping, mapping `Indexable(T)::ItemIterator(...)#each` to `Indexable#each`. A path-aware namespace-generic strip plus a focused regression guard fixed the reducer.
+**Verdict:** no value for this commit; useful beta evidence. Use narrower prompts and the correct headless/ACP wrapper split next time.
+**Cost saved:** none.

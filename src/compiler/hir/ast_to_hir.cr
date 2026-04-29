@@ -1234,6 +1234,61 @@ module Crystal::HIR
       name
     end
 
+    private def strip_generic_args_from_namespace_path(name : String) : String
+      return name unless name.includes?('(')
+
+      String.build(name.bytesize) do |io|
+        depth = 0
+        i = 0
+        while i < name.bytesize
+          byte = name.to_unsafe[i]
+          case byte
+          when '('.ord
+            depth += 1
+          when ')'.ord
+            depth -= 1 if depth > 0
+          else
+            io << byte.unsafe_chr if depth == 0
+          end
+          i += 1
+        end
+      end
+    end
+
+    @[AlwaysInline]
+    private def method_index_owner_key(owner : String) : String
+      strip_generic_args_from_namespace_path(owner)
+    end
+
+    private def strip_generic_receiver_from_method_path(method_name : String) : String
+      bytesize = method_name.bytesize
+      ptr = method_name.to_unsafe
+      sep_idx : Int32? = nil
+
+      i = 0
+      while i < bytesize
+        byte = ptr[i]
+        if byte == '#'.ord || byte == '.'.ord
+          sep_idx = i
+          break
+        end
+        i += 1
+      end
+
+      unless sep = sep_idx
+        return strip_generic_args_from_namespace_path(method_name)
+      end
+
+      owner = method_name.byte_slice(0, sep)
+      stripped_owner = strip_generic_args_from_namespace_path(owner)
+      return method_name if stripped_owner == owner
+
+      String.build(stripped_owner.bytesize + bytesize - sep) do |io|
+        io << stripped_owner
+        io.write Slice.new(ptr + sep, bytesize - sep)
+      end
+    end
+
     # Split a generic type args string (e.g., "K, V" or "Tuple(A, B), C") into
     # top-level components, respecting nested parentheses.
     private def split_top_level_type_args(args : String) : Array(String)
@@ -1376,39 +1431,7 @@ module Crystal::HIR
 
     @[AlwaysInline]
     private def strip_generic_receiver_from_base_name(base_name : String) : String
-      bytesize = base_name.bytesize
-      ptr = base_name.to_unsafe
-      sep_idx : Int32? = nil
-      paren_idx : Int32? = nil
-
-      i = 0
-      while i < bytesize
-        byte = ptr[i]
-        if byte == '('.ord
-          paren_idx ||= i
-        elsif byte == '#'.ord || byte == '.'.ord
-          sep_idx = i
-          break
-        end
-        i += 1
-      end
-
-      if sep_idx
-        return base_name unless paren_idx && paren_idx < sep_idx
-
-        generic_start = paren_idx.not_nil!
-        total = bytesize - (sep_idx - generic_start)
-        return String.build(total) do |io|
-          io.write Slice.new(ptr, generic_start)
-          io.write Slice.new(ptr + sep_idx, bytesize - sep_idx)
-        end
-      end
-
-      if generic_start = paren_idx
-        base_name.byte_slice(0, generic_start)
-      else
-        base_name
-      end
+      strip_generic_receiver_from_method_path(base_name)
     end
 
     @[AlwaysInline]
@@ -3129,7 +3152,7 @@ module Crystal::HIR
       # Update method index: base_owner → method_name → [full_names]
       parts = parse_method_name_compact(full_name)
       if parts.separator && parts.method
-        base_owner = strip_generic_args(parts.owner)
+        base_owner = method_index_owner_key(parts.owner)
         method_name = parts.method.not_nil!
         owner_methods = @method_index[base_owner]?
         unless owner_methods
@@ -3157,7 +3180,7 @@ module Crystal::HIR
         next if count <= @method_index_processed_count
         parts = parse_method_name_compact(full_name)
         next unless parts.separator && parts.method
-        base_owner = strip_generic_args(parts.owner)
+        base_owner = method_index_owner_key(parts.owner)
         method_name = parts.method.not_nil!
         owner_methods = @method_index[base_owner]?
         unless owner_methods
@@ -3214,7 +3237,7 @@ module Crystal::HIR
       method : String,
       suffix : String?,
     ) : ParentLookupResult?
-      base_parent = strip_generic_args(parent)
+      base_parent = method_index_owner_key(parent)
       owner_methods = @method_index[base_parent]?
       return nil unless owner_methods
       candidates = owner_methods[method]?
@@ -3376,7 +3399,7 @@ module Crystal::HIR
               break
             end
             # Check if index had candidates at all (even if no match)
-            base_parent = strip_generic_args(parent)
+            base_parent = method_index_owner_key(parent)
             owner_methods = @method_index[base_parent]?
             index_had_candidates = owner_methods ? owner_methods.has_key?(method) : false
 
@@ -31276,7 +31299,7 @@ module Crystal::HIR
         parts = parse_method_name_compact(base_name)
         if parts.separator && parts.method
           ensure_method_index_built
-          base_owner = strip_generic_args(parts.owner)
+          base_owner = method_index_owner_key(parts.owner)
           method_name = parts.method.not_nil!
           if @method_index_last_owner == base_owner && @method_index_last_method == method_name
             if cached_candidates = @method_index_last_candidates
@@ -31346,7 +31369,7 @@ module Crystal::HIR
         parts = parse_method_name_compact(base_name)
         if parts.separator && parts.method
           ensure_method_index_built
-          base_owner = strip_generic_args(parts.owner)
+          base_owner = method_index_owner_key(parts.owner)
           if owner_methods = @method_index[base_owner]?
             if candidates = owner_methods[parts.method.not_nil!]?
               value = candidates.any? { |name| name.includes?("_splat") }
@@ -31378,7 +31401,7 @@ module Crystal::HIR
         parts = parse_method_name_compact(base_name)
         if parts.separator && parts.method
           ensure_method_index_built
-          base_owner = strip_generic_args(parts.owner)
+          base_owner = method_index_owner_key(parts.owner)
           if owner_methods = @method_index[base_owner]?
             if candidates = owner_methods[parts.method.not_nil!]?
               value = candidates.any? { |name| name.includes?("_double_splat") }
@@ -40980,37 +41003,7 @@ module Crystal::HIR
         end
       end
 
-      bytesize = method_name.bytesize
-      ptr = method_name.to_unsafe
-      sep_idx : Int32? = nil
-      paren_idx : Int32? = nil
-
-      i = 0
-      while i < bytesize
-        byte = ptr[i]
-        if byte == '('.ord
-          paren_idx ||= i
-        elsif byte == '#'.ord || byte == '.'.ord
-          sep_idx = i
-          break
-        end
-        i += 1
-      end
-
-      unless sep_idx && paren_idx && paren_idx < sep_idx
-        @strip_generic_receiver_last_id = method_id
-        @strip_generic_receiver_last = method_name
-        @strip_generic_receiver_table_keys[slot] = method_id
-        @strip_generic_receiver_table_vals[slot] = method_name
-        return method_name
-      end
-
-      generic_start = paren_idx.not_nil!
-      total = bytesize - (sep_idx - generic_start)
-      result = String.build(total) do |io|
-        io.write Slice.new(ptr, generic_start)
-        io.write Slice.new(ptr + sep_idx, bytesize - sep_idx)
-      end
+      result = strip_generic_receiver_from_method_path(method_name)
 
       @strip_generic_receiver_last_id = method_id
       @strip_generic_receiver_last = result
@@ -41020,31 +41013,7 @@ module Crystal::HIR
     end
 
     private def strip_generic_receiver_uncached(method_name : String) : String
-      bytesize = method_name.bytesize
-      sep_idx : Int32? = nil
-      paren_idx : Int32? = nil
-      sep_char : UInt8? = nil
-      i = 0
-      while i < bytesize
-        byte = method_name.to_unsafe[i]
-        if byte == '('.ord
-          paren_idx ||= i
-        elsif byte == '#'.ord || byte == '.'.ord
-          sep_idx = i
-          sep_char = byte
-          break
-        end
-        i += 1
-      end
-
-      return method_name unless sep_idx && paren_idx && paren_idx < sep_idx
-
-      total = bytesize - (sep_idx - paren_idx)
-      ptr = method_name.to_unsafe
-      String.build(total) do |io|
-        io.write Slice.new(ptr, paren_idx)
-        io.write Slice.new(ptr + sep_idx, bytesize - sep_idx)
-      end
+      strip_generic_receiver_from_method_path(method_name)
     end
 
     private def block_return_type_name(ctx : LoweringContext, block_id : BlockId) : String?
@@ -42321,7 +42290,7 @@ module Crystal::HIR
           @method_inheritance_cache[cache_key] = test_name
           return test_name # Return base name - caller will mangle
         end
-        current_base = strip_generic_args(current)
+        current_base = strip_generic_args_from_namespace_path(current)
         if current_base != current
           base_test = "#{current_base}##{method_name}"
           if @function_types.has_key?(base_test) || has_function_base?(base_test) || @function_defs.has_key?(base_test) ||
@@ -42353,7 +42322,7 @@ module Crystal::HIR
           while mod = queue.shift?
             next if visited_modules.includes?(mod)
             visited_modules << mod
-            base_module = strip_generic_args(mod)
+            base_module = strip_generic_args_from_namespace_path(mod)
             module_method = "#{base_module}##{method_name}"
             if @function_types.has_key?(module_method) || has_function_base?(module_method) || @function_defs.has_key?(module_method) ||
                !function_def_overloads(module_method).empty?
@@ -42784,6 +42753,35 @@ module Crystal::HIR
         end
       end
       inferred
+    end
+
+    private def specialize_generic_namespace_new_receiver(
+      resolved : String,
+      args : Array(CrystalV2::Compiler::Frontend::ExprId)?,
+      block : CrystalV2::Compiler::Frontend::ExprId?,
+      ctx : LoweringContext,
+      named_args : Array(CrystalV2::Compiler::Frontend::NamedArgument)? = nil,
+    ) : String?
+      resolved = resolve_type_alias_chain(resolved)
+      return nil if split_generic_base_and_args(resolved)
+
+      template_base = resolve_generic_template_base(resolved)
+      return nil if template_base == resolved
+      return nil unless @generic_templates.has_key?(template_base)
+
+      if multi_args = infer_generic_type_args_multi(template_base, args, ctx)
+        specialized_name = "#{resolved}(#{multi_args.join(", ")})"
+        monomorphize_generic_class(template_base, multi_args, specialized_name) unless @monomorphized.includes?(specialized_name)
+        return specialized_name
+      end
+
+      if inferred_type = infer_generic_type_arg(template_base, args, block, ctx, named_args)
+        specialized_name = "#{resolved}(#{inferred_type})"
+        monomorphize_generic_class(template_base, [inferred_type], specialized_name) unless @monomorphized.includes?(specialized_name)
+        return specialized_name
+      end
+
+      nil
     end
 
     # Infer type name from an expression AST node (returns String name, not TypeRef)
@@ -50729,7 +50727,7 @@ module Crystal::HIR
                 end
                 ensure_method_index_built
                 owners.each do |owner|
-                  base_owner = strip_generic_args(owner)
+                  base_owner = method_index_owner_key(owner)
                   unless @method_index[base_owner]?.try(&.has_key?(name))
                     next unless @class_info.has_key?(owner)
                   end
@@ -59014,6 +59012,10 @@ module Crystal::HIR
     # as a last resort so `Box` in one module does not bind to `Other::Box` by accident.
     private def resolve_generic_template_base(base : String) : String
       return base if base.empty? || @generic_templates.has_key?(base)
+      if base.includes?('(')
+        stripped_path = strip_generic_args_from_namespace_path(base)
+        return stripped_path if stripped_path != base && @generic_templates.has_key?(stripped_path)
+      end
       return base if base.includes?('(')
 
       unless base.includes?("::")
@@ -63767,6 +63769,11 @@ module Crystal::HIR
             normalized_class_name = strip_absolute_name_prefix(normalized_class_name)
           end
           class_name_str = normalized_class_name unless normalized_class_name.empty?
+          if method_name == "new"
+            if specialized = specialize_generic_namespace_new_receiver(class_name_str, call_args, block_expr, ctx, node.named_args)
+              class_name_str = specialized
+            end
+          end
         end
 
         # Fast callsite cache for instance member calls when receiver and arg types are known.
@@ -66501,7 +66508,7 @@ module Crystal::HIR
             used_full = false
             if module_full.includes?('(')
               ensure_method_index_built
-              base_owner = strip_generic_args(module_full)
+              base_owner = method_index_owner_key(module_full)
               if owner_methods = @method_index[base_owner]?
                 if candidates = owner_methods[method_name]?
                   owner_prefix = "#{module_full}."
@@ -69081,7 +69088,7 @@ module Crystal::HIR
               owners.each do |owner|
                 # Fast pre-filter: skip owners that don't have this method registered
                 # (uses pre-built method_index for O(1) lookup, avoids string building + hash)
-                base_owner = strip_generic_args(owner)
+                base_owner = method_index_owner_key(owner)
                 unless @method_index[base_owner]?.try(&.has_key?(method_name))
                   next unless @class_info.has_key?(owner)
                 end
@@ -69173,7 +69180,7 @@ module Crystal::HIR
             ensure_method_index_built
             owners.each do |owner|
               # Skip owners without registered class info or the method
-              base_owner = strip_generic_args(owner)
+              base_owner = method_index_owner_key(owner)
               unless @method_index[base_owner]?.try(&.has_key?(method_name))
                 next unless @class_info.has_key?(owner)
               end
@@ -71336,7 +71343,7 @@ module Crystal::HIR
         parts = parse_method_name_compact(func_name)
         if parts.separator && parts.method
           ensure_method_index_built
-          base_owner = strip_generic_args(parts.owner)
+          base_owner = method_index_owner_key(parts.owner)
           if dbg_slice_lookup
             STDERR.puts "[SLICE_LOOKUP_FN] func=#{func_name} base_owner=#{base_owner} method=#{parts.method}"
           end
@@ -71392,7 +71399,7 @@ module Crystal::HIR
 
             if found_parent.nil? && (!cache_hit || parent_parts.suffix)
               get_parent_chain(parent_parts.owner).each do |parent|
-                base_parent = strip_generic_args(parent)
+                base_parent = method_index_owner_key(parent)
                 owner_methods = @method_index[base_parent]?
                 next unless owner_methods
                 if owner_methods.has_key?(parent_method)
@@ -71404,7 +71411,7 @@ module Crystal::HIR
             end
 
             if found_parent
-              parent_owner = strip_generic_args(found_parent)
+              parent_owner = method_index_owner_key(found_parent)
               if owner_methods = @method_index[parent_owner]?
                 if candidates = owner_methods[parent_method]?
                   overload_keys = candidates unless candidates.empty?
@@ -80819,7 +80826,7 @@ module Crystal::HIR
               end
               ensure_method_index_built
               owners.each do |owner|
-                base_owner = strip_generic_args(owner)
+                base_owner = method_index_owner_key(owner)
                 unless @method_index[base_owner]?.try(&.has_key?(member_name))
                   next unless @class_info.has_key?(owner)
                 end

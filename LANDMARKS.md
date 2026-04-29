@@ -12,6 +12,23 @@ checkpoint remain recoverable from git history, especially:
 
 ## Active Bootstrap Gate
 
+[LM-519|verified]: Generic receiver stripping must preserve namespace path
+segments. The old overload/method-index helpers normalized
+`Indexable(T)::ItemIterator(Array(String), String)#each` to `Indexable#each`,
+so `ItemIterator#each` could select the `Indexable(T)#each` body and emit a
+bogus nested constructor demand
+`Indexable(T)::ItemIterator(Indexable(T)::ItemIterator(Array(String), String), String).new`.
+The fix strips generic arguments per namespace segment for method-index keys
+and stripped overload lookup, producing `Indexable::ItemIterator#each`, and
+adds generic-template resolution for classes declared under generic
+namespaces. Evidence: `regression_tests/p2_nested_generic_new_inference.sh
+/tmp/cv2_method_index_path3` requires the specialized iterator constructors
+and rejects the bogus nested `ItemIterator(...).new`; build and p1/p2 focused
+guards passed; full-source `STOP_AFTER_HIR` exits 0 after about 234s. Boundary:
+full-source `lower_missing` still grows `17423 -> 50628 (+33205)`, so the next
+bootstrap root is broad concrete-call demand volume, not this namespace
+lookup bug. {F/G/R: 0.92/0.66/0.93} [verified]
+
 [LM-481|verified]: Backend-owned runtime intrinsics must not be demand-driven
 as source-level HIR functions. HIR currently emits `__crystal_v2_string_eq`,
 `__crystal_v2_hash_get_entry_ptr`, `__crystal_v2_hash_entry_deleted`, and

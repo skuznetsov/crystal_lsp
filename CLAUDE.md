@@ -31,6 +31,14 @@ scripts/run_safe.sh /tmp/test_hello 5 512                          # run safely
 - Keep **TODO.md** updated when shipping meaningful changes.
 - Many bugs trace back to **incorrect arena lifetime / tracking** — verify arenas first.
 
+## Grok ACP Sidecar
+- Use Grok via `~/.grok/bin` as a cheap read-only sidecar for non-trivial root-cause work.
+- Give Grok narrow bounded questions with exact files, logs, anchors, and required output shape; do not ask it to make edits.
+- Treat Grok output as candidate evidence only. Verify locally before adopting any claim.
+- Record useful and failed Grok interactions in `grok_acp_beta_report.md` so the beta-test signal survives context resets.
+- Prefer Grok for parallel audits such as "classify this missing-demand family", "find all call paths to this enqueue site", or "review this proposed root-cause hypothesis".
+- Do not wait on Grok when the next local falsifier is obvious; continue local work and integrate Grok only if it returns actionable evidence.
+
 ## Architecture
 - Pipeline: HIR (ast_to_hir.cr) → MIR (hir_to_mir.cr) → LLVM IR (llvm_backend.cr)
 - Mangling: `$CC` = `::`, `$H` = `#`, `$L` = `(`, `$R` = `)`, `$D` = `.`
