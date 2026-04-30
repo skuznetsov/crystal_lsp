@@ -30,6 +30,29 @@ Working policy:
 
 ## Current Checkpoint
 
+Union annotation + protected namespace checkpoint (2026-04-29): stage2
+`STOP_AFTER_HIR` now gets past the former
+`debug_cli_root_block_state(...AstArena...)` stub/miss and the subsequent
+`protected method 'entries_size' called for Hash(...)` failure. The root fixes
+are: registration resolves annotations in the method owner's namespace
+(`Frontend::ArenaLike` inside `CLI` resolves to the frontend alias), union
+descriptors keep their union-shaped mangled names instead of collapsing through
+`resolve_type_alias_chain`, union alias strings are resolved structurally per
+variant, union cache hits reject stale non-union descriptors, and protected
+visibility now mirrors Crystal's `has_protected_access_to?` rule by allowing
+same top namespace/nested types such as `Hash::KeyIterator -> Hash` without
+whitelisting `entries_size`. Evidence: `crystal build src/crystal_v2.cr -o
+/private/tmp/cv2_protected_namespace --error-trace`;
+`regression_tests/p2_visibility_protected_namespace_no_prelude.sh
+/private/tmp/cv2_protected_namespace`;
+`regression_tests/p2_visibility_private_accessor_no_prelude.sh
+/private/tmp/cv2_protected_namespace`; `CRYSTAL_V2_STOP_AFTER_HIR=1
+CRYSTAL_V2_PHASE_STATS=1 scripts/run_safe.sh /private/tmp/cv2_protected_namespace
+180 4096 src/crystal_v2.cr -o /private/tmp/cv2_protected_namespace_s2` exits 0
+after ~145s. Boundary: this unblocks HIR completion but does not solve the
+remaining `lower_missing` fanout (`615 -> 35882`, ~159s), which is the next
+demand-driven root-cause corridor.
+
 Visibility accessor checkpoint (2026-04-29): parser/HIR now preserve
 `private`/`protected` on accessor macros instead of dropping the modifier at
 `private getter` / `protected property` parse time. Accessor nodes carry

@@ -5573,6 +5573,38 @@ module Crystal::HIR
       chain.includes?(parent_name)
     end
 
+    private def protected_top_namespace(name : String) : String
+      stripped = strip_generic_args_from_namespace_path(name)
+      if idx = namespace_separator_index(stripped)
+        stripped.byte_slice(0, idx)
+      else
+        stripped
+      end
+    end
+
+    private def same_protected_namespace?(current_name : String, owner_name : String) : Bool
+      owner_top = protected_top_namespace(owner_name)
+      return false if owner_top.empty?
+
+      current_top = protected_top_namespace(current_name)
+      return true if current_top == owner_top
+
+      get_ancestor_chain(current_name).any? do |parent|
+        protected_top_namespace(parent) == owner_top
+      end
+    end
+
+    private def has_protected_access_to?(current_name : String, owner_name : String) : Bool
+      return true if class_inherits_from?(current_name, owner_name) || class_inherits_from?(owner_name, current_name)
+
+      current_base = strip_generic_args_from_namespace_path(current_name)
+      owner_base = strip_generic_args_from_namespace_path(owner_name)
+      return true if current_base == owner_base
+      return true if class_inherits_from?(current_base, owner_base) || class_inherits_from?(owner_base, current_base)
+
+      same_protected_namespace?(current_base, owner_base)
+    end
+
     private def validate_call_visibility!(
       ctx : LoweringContext,
       node : CrystalV2::Compiler::Frontend::Node,
@@ -5599,7 +5631,7 @@ module Crystal::HIR
         raise LoweringError.new("private method '#{method_name}' called for #{receiver_type}", node)
       when CrystalV2::Compiler::Frontend::Visibility::Protected
         if current = @current_class
-          return if class_inherits_from?(current, owner_name) || class_inherits_from?(owner_name, current)
+          return if has_protected_access_to?(current, owner_name)
         end
         receiver_type = get_type_name_from_ref(ctx.type_of(receiver_id.not_nil!))
         raise LoweringError.new("protected method '#{method_name}' called for #{receiver_type}", node)
@@ -28592,6 +28624,8 @@ module Crystal::HIR
       else
         # User-defined type - look up name from module's type descriptors
         if desc = @module.get_type_descriptor(type)
+          return normalize_union_type_name(desc.name) if desc.kind == TypeKind::Union
+
           result = resolve_type_alias_chain(desc.name)
           if env_has?("DEBUG_RANGE_MANGLE") && result.includes?("Range")
             STDERR.puts "[RANGE_MANGLE] type.id=#{type.id} desc.name=#{result}"
@@ -34857,6 +34891,8 @@ module Crystal::HIR
       param_types = [] of TypeRef
       param_type_map = {} of String => TypeRef
       has_block = false
+      signature_owner = method_owner_from_name(base_name)
+      signature_owner = nil if signature_owner.empty? || signature_owner == base_name
 
       old_typeof_locals = @current_typeof_locals
       @current_typeof_locals = param_type_map
@@ -34873,7 +34909,7 @@ module Crystal::HIR
                          "_"
                        end
           param_type = if (ta = param.type_annotation) && (ta_s = safe_slice_to_string(ta))
-                         type_ref_for_name(ta_s)
+                         annotation_type_ref(ta_s, signature_owner)
                        elsif param.is_double_splat
                          type_ref_for_name("NamedTuple")
                        else
@@ -34898,7 +34934,7 @@ module Crystal::HIR
       STDERR.puts "[REGISTER_DEF_RAW] phase=after_pre_yield_scan has_block=#{has_block ? 1 : 0}" if debug_register_raw
 
       return_type = if (rt = node.return_type) && (rt_s = safe_slice_to_string(rt))
-                      type_ref_for_name(rt_s)
+                      annotation_type_ref(rt_s, signature_owner)
                     else
                       TypeRef::VOID
                     end
@@ -38813,6 +38849,48 @@ module Crystal::HIR
       nil
     end
 
+    private def namespace_path_head_in_namespace(head : String, namespace : String) : String?
+      return nil if head.empty? || namespace.empty?
+      base = if info = split_generic_base_and_args(namespace)
+               info.base
+             else
+               namespace
+             end
+      loop do
+        candidate = "#{base}::#{head}"
+        if @module_defs.has_key?(candidate) ||
+           @class_info.has_key?(candidate) ||
+           @generic_templates.has_key?(candidate) ||
+           @type_aliases.has_key?(candidate) ||
+           safe_set_includes?(@top_level_type_names, candidate) ||
+           @top_level_class_kinds.has_key?(candidate)
+          return candidate
+        end
+        idx = base.rindex("::")
+        break unless idx
+        base = base[0, idx]
+      end
+      nil
+    end
+
+    private def namespace_path_head_in_context(head : String) : String?
+      return nil if head.empty?
+      namespaces = [] of String
+      if override = @current_namespace_override
+        namespaces << override
+      end
+      if current = @current_class
+        namespaces << current unless namespaces.includes?(current)
+      end
+
+      namespaces.each do |ns|
+        if resolved = namespace_path_head_in_namespace(head, ns)
+          return resolved
+        end
+      end
+      nil
+    end
+
     private def nested_shadowed_type_name?(name : String) : Bool
       return false unless safe_set_includes?(@top_level_type_names,name) ||
                           @top_level_class_kinds.has_key?(name) ||
@@ -38843,7 +38921,22 @@ module Crystal::HIR
     private def qualify_unqualified_type_in_namespace(name : String, namespace : String) : String
       name = name.strip
       return name if name.empty?
-      return name if name.includes?("::")
+      return name if name.starts_with?("::")
+      if sep = namespace_separator_index(name)
+        head = name[0, sep]
+        tail_start = sep + 2
+        tail = tail_start < name.bytesize ? name.byte_slice(tail_start, name.bytesize - tail_start) : ""
+        anchored_head = head == "Crystal" ||
+                        safe_set_includes?(@top_level_type_names, head) ||
+                        @top_level_class_kinds.has_key?(head) ||
+                        BUILTIN_TYPE_NAMES.includes?(head)
+        unless anchored_head
+          if contextual_head = namespace_path_head_in_namespace(head, namespace)
+            return "#{contextual_head}::#{tail}"
+          end
+        end
+        return name
+      end
       candidate = "#{namespace}::#{name}"
       if env_get("DEBUG_WUINT128") && name == "UInt128" && namespace.includes?("Dragonbox::WUInt")
         exists = type_name_exists?(candidate) ||
@@ -38931,6 +39024,11 @@ module Crystal::HIR
       tail = tail_start < path.bytesize ? path.byte_slice(tail_start, path.bytesize - tail_start) : ""
 
       resolved_head = resolve_class_name_in_context(head)
+      if resolved_head == head
+        if contextual_head = namespace_path_head_in_context(head)
+          resolved_head = contextual_head
+        end
+      end
       return path if resolved_head == head
 
       resolved = "#{resolved_head}::#{tail}"
@@ -39722,6 +39820,16 @@ module Crystal::HIR
 
     private def resolve_type_alias_chain(name : String) : String
       return "" if name.unsafe_as(UInt64) == 0_u64
+      stripped_name = name.strip
+      if union_type_name?(stripped_name)
+        variants = split_union_type_name(stripped_name)
+        if variants.size > 1
+          resolved_variants = variants.map do |variant|
+            resolve_type_alias_chain(variant.strip)
+          end
+          return normalize_union_type_name(resolved_variants.join(" | "))
+        end
+      end
       contextual = !name.includes?("::")
       cache_key = if contextual
                     ns_override = @current_namespace_override || ""
@@ -87545,7 +87653,11 @@ module Crystal::HIR
       input_name = normalize_union_type_name(name)
       input_cache_key = type_cache_key(input_name)
       if cached = @type_cache[input_cache_key]?
-        return cached unless cached == TypeRef::VOID
+        if cached != TypeRef::VOID
+          if cached_desc = @module.get_type_descriptor(cached)
+            return cached if cached_desc.kind == TypeKind::Union
+          end
+        end
       end
 
       # Parse variant type names (handle both "Type1 | Type2" and "Type1|Type2")
@@ -87610,7 +87722,11 @@ module Crystal::HIR
       if @union_in_progress.includes?(normalized_name)
         # If we're already building this union, prefer a cached concrete type.
         if cached = @type_cache[type_cache_key(normalized_name)]?
-          return cached unless cached == TypeRef::VOID
+          if cached != TypeRef::VOID
+            if cached_desc = @module.get_type_descriptor(cached)
+              return cached if cached_desc.kind == TypeKind::Union
+            end
+          end
         end
         # Return a provisional union type to avoid VOID cascading into inference.
         provisional = @module.intern_type(TypeDescriptor.new(TypeKind::Union, normalized_name))

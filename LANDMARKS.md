@@ -12,6 +12,30 @@ checkpoint remain recoverable from git history, especially:
 
 ## Active Bootstrap Gate
 
+[LM-526|verified]: Owner-context annotation resolution, structural union alias
+resolution, and Crystal-compatible protected namespace access are one
+bootstrap corridor. The first symptom was a stage2 stub for
+`CLI#debug_cli_root_block_state(String, AstArena, Array(ExprId))`: the method
+was declared against `Frontend::ArenaLike`, but registration resolved
+annotations without the method owner's namespace and then let union descriptors
+collapse through scalar alias resolution/type-cache hits. The follow-up symptom
+was `protected method 'entries_size' called for Hash(...)`; trace showed
+`current=Hash::KeyIterator(...)`, `owner=Hash(...)`, so the missing invariant
+was Crystal's `has_protected_access_to?` same-namespace rule, not an
+`entries_size` special case. The fix resolves def annotations with the method
+owner, preserves union descriptor names during mangling, resolves union aliases
+per variant, rejects non-union cache hits for union keys, and implements
+protected access through hierarchy/generic-base/same-top-namespace checks.
+Evidence: `crystal build src/crystal_v2.cr -o /private/tmp/cv2_protected_namespace
+--error-trace`; `p2_visibility_protected_namespace_no_prelude.sh` and
+`p2_visibility_private_accessor_no_prelude.sh` pass with that compiler;
+`CRYSTAL_V2_STOP_AFTER_HIR=1 CRYSTAL_V2_PHASE_STATS=1 scripts/run_safe.sh
+/private/tmp/cv2_protected_namespace 180 4096 src/crystal_v2.cr -o
+/private/tmp/cv2_protected_namespace_s2` exits 0 after ~145s. Boundary:
+`lower_missing` still fanouts from `615 -> 35882` in ~159s; that is the next
+demand-driven root, not part of this visibility/union fix. {F/G/R:
+0.91/0.62/0.91} [verified]
+
 [LM-525|verified]: LLVM value lookup in the generated-stage2 backend must avoid
 block iterator helpers in the materialization predicate. After LM-524 removed
 the debug-cache tuple-key crash, generated `cv2_s2` crashed in
