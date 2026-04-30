@@ -158,6 +158,16 @@
 **What did not:** still framed some effects too broadly (`VOID` signature skip / AST filter) without proving they dominate this run. The actionable patch must be locally falsified against `Call#virtual` semantics and MIR vdispatch, not adopted directly.
 **Adversary check:** local source reads confirmed `HIR::Call` carries `virtual`, MIR lowers virtual calls via `lower_virtual_dispatch` before direct lookup, and `lower_missing_call_targets` currently treats every `Call` as concrete body demand. This is now the next separate hypothesis, not bundled with the macro JSON fix.
 **Verdict:** useful as a cheap hypothesis router for the next branch. Continue using it for bounded read-only audits; keep local fixed-point and no-prelude verification as the commit gate.
+
+### Session 9 — 2026-04-29 — lower_missing virtual-demand audit
+**Task:** read-only audit after `a8edf3c4`: classify `lower_missing_call_targets` demand families and propose the smallest root fix for the remaining `lower_missing.initial` fanout.
+**Brief size:** ~24 lines, ~1.3 KB, file `/private/tmp/grok_lower_missing_audit/task.md`.
+**Latency:** ~70s, exit 0, launched with `--always-approve`.
+**Output quality:** useful but partially refuted. Grok correctly identified a real design mismatch: RTA scan treats `HIR::Call#virtual` as virtual receiver/method-part evidence, while `lower_missing_call_targets` treats every `Call` as concrete demand. It also correctly flagged `Proc#call` as a pseudo/backend-owned call family.
+**What worked:** concise source anchors around `scan_hir_function_for_live_types`, `lower_missing_call_targets`, `HIR::Call#virtual`, and MIR virtual dispatch. The analysis was useful for a bounded falsifier.
+**What did not:** the proposed first patch (`next if inst.virtual` plus `Proc#call` backend-owned) was not sufficient as a root fix. Local measurement changed `lower_missing.initial` only from `615 -> 35544 (+34929)` to `615 -> 34973 (+34358)` and total STOP_AFTER_HIR time from ~151s to ~148s. That is a marginal cleanup, not the dominant root.
+**Adversary check:** patch was applied temporarily, built, and measured with `CRYSTAL_V2_STOP_AFTER_HIR=1 CRYSTAL_V2_PHASE_STATS=1 DEBUG_MISSING_SUMMARY=1`. It was reverted because the remaining top suppliers are mostly non-virtual direct calls from reachable compiler paths (`IO#<<`, `Hash#[]=`, `Rope#size`, `Lexer#advance`, `Hash::Entry#deleted?`, etc.).
+**Verdict:** good hypothesis router, not patch authority. Grok found a valid boundary issue, but local fixed-point evidence shows the next root is broader direct demand / full-compiler reachability, not primarily virtual-call misclassification.
 **Cost saved:** ~2-3k Codex tokens on source routing and hypothesis ranking.
 
 ### Session 9 — 2026-04-29 — exact Proc#call backend-owned audit
