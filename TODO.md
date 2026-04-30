@@ -1152,8 +1152,20 @@ pending-budget oracle.
   - lazy enum source discovery was running under `--no-prelude`, where there
     is no prelude sibling graph to recover. That made an ordinary
     `private class Hidden` reducer scan the temp directory through `Dir.glob`.
-    `lazy_discover_enum_from_source` now returns false in no-prelude mode.
+  `lazy_discover_enum_from_source` now returns false in no-prelude mode.
   Guard: `p2_generated_stage2_lookup_lazy_enum_no_prelude.sh`.
+- The `Array(Box)#unsafe_fetch$Int32` no-prelude backend frontier is cleared.
+  Root cause: LLVM `emit_extern_call` treated the qualified method suffix
+  `$Int32` as return-type evidence, even though it is the index argument
+  specialization. Calls were emitted as `i32` and the missing-body pass
+  synthesized an abort stub for `Array$LBox$R$Hunsafe_fetch$$Int32`.
+  The backend now keeps suffix-return hints only for bare primitive helpers and
+  materializes a generic late `Array(T)#unsafe_fetch(Int32)` body using the
+  element ABI from `Array(T)`. Guard:
+  `p2_array_class_ref_unsafe_fetch_no_prelude.sh`; related checks:
+  `p2_array_struct_unsafe_fetch_return_no_prelude.sh`,
+  `p2_bootstrap_semantic_emit_oracle.sh`, and
+  `p2_generated_stage2_lookup_lazy_enum_no_prelude.sh`.
 
 ## Next Work
 

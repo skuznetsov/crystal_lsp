@@ -2668,6 +2668,33 @@ module Crystal::MIR
       pointer_sized_int_llvm_type == "i32" ? 4 : 8
     end
 
+    private def zero_return_for_llvm_type(llvm_type : String) : String
+      case llvm_type
+      when "void"
+        "  ret void\n"
+      when "ptr"
+        "  ret ptr null\n"
+      when "float", "double"
+        "  ret #{llvm_type} 0.0\n"
+      else
+        "  ret #{llvm_type} zeroinitializer\n"
+      end
+    end
+
+    private def array_element_llvm_type_from_mangled_method(name : String) : String?
+      match = name.match(/\AArray\$L(.+)\$R\$H/)
+      return nil unless match
+
+      elem_mangled = match[1]
+      elem_type = @module.type_registry.types.find do |type|
+        @type_mapper.mangle_name(type.name) == elem_mangled
+      end
+      return nil unless elem_type
+
+      elem_llvm = @type_mapper.llvm_type(TypeRef.new(elem_type.id))
+      elem_llvm == "void" ? "ptr" : elem_llvm
+    end
+
     def generate(output : IO? = nil) : String
       @output = output || IO::Memory.new
       @toplevel_output = nil
@@ -4101,6 +4128,31 @@ module Crystal::MIR
                "}\n"
       end
 
+      if name.starts_with?("Array$") &&
+         name.ends_with?("$Hunsafe_fetch$$Int32") &&
+         arg_count == 2
+        elem_type = array_element_llvm_type_from_mangled_method(name) || return_type
+        elem_type = "ptr" if elem_type.empty? || elem_type == "void"
+        return "; #{name} — primitive Array#unsafe_fetch(Int32) for late generic fetch bodies\n" \
+               "define #{elem_type} @#{name}(ptr %self, i32 %index) {\n" \
+               "entry:\n" \
+               "  %self_null = icmp eq ptr %self, null\n" \
+               "  br i1 %self_null, label %ret_zero, label %load_fields\n" \
+               "load_fields:\n" \
+               "  %off_ptr = getelementptr i8, ptr %self, i32 12\n" \
+               "  %off = load i32, ptr %off_ptr\n" \
+               "  %physical_index = add i32 %off, %index\n" \
+               "  %buf_field = getelementptr i8, ptr %self, i32 16\n" \
+               "  %buf = load ptr, ptr %buf_field\n" \
+               "  %idx64 = sext i32 %physical_index to i64\n" \
+               "  %slot = getelementptr #{elem_type}, ptr %buf, i64 %idx64\n" \
+               "  %value = load #{elem_type}, ptr %slot\n" \
+               "  ret #{elem_type} %value\n" \
+               "ret_zero:\n" \
+               "#{zero_return_for_llvm_type(elem_type)}" \
+               "}\n"
+      end
+
       # Crystal::MIR::Array(T) is the same runtime object as top-level ::Array(T),
       # but self-host sometimes materializes a separate V2 symbol path for methods
       # like #size / #unsafe_fetch. Delegate those missing bodies to the real Array.
@@ -5246,6 +5298,23 @@ module Crystal::MIR
         return name[(dollar + 1)..]
       end
       nil
+    end
+
+    @[AlwaysInline]
+    private def extern_type_suffix_return_hint?(extern_name : String, method_core : String) : Bool
+      # In qualified Crystal method names the `$...` suffix encodes argument
+      # specialization, not the return type: Array(Box)#unsafe_fetch$Int32
+      # returns Box even though the suffix is Int32. Keep the old return-hint
+      # behavior only for bare primitive extern helpers where the suffix really
+      # denotes the operation/result width.
+      return false if qualified_method_name?(extern_name)
+
+      case method_core
+      when "unsafe_shl", "unsafe_shr", "unsafe_div", "unsafe_mod"
+        true
+      else
+        false
+      end
     end
 
     @[AlwaysInline]
@@ -13358,14 +13427,12 @@ module Crystal::MIR
                 end
               end
             end
-            # Apply type suffix heuristics AFTER function matching to ensure
-            # prepass and emission agree on return types.  The emission path
-            # unconditionally applies suffix overrides, so the prepass must too.
-            # This fixes slot-type / call-type mismatches for primitive-returning
-            # methods on struct types (e.g., Array(UInt32)#unsafe_fetch$Int32
-            # where the MIR function returns a struct type mapped to ptr, but
-            # the real LLVM return type is i32).
-            if suffix2 = suffix_after_dollar(extern_name)
+            # Apply type suffix return hints only for bare primitive helpers.
+            # Qualified Crystal names use the suffix for argument specialization;
+            # treating it as a return type corrupts calls such as
+            # Array(Box)#unsafe_fetch$Int32, whose suffix is the index argument.
+            if extern_type_suffix_return_hint?(extern_name, extern_method_core) &&
+               (suffix2 = suffix_after_dollar(extern_name))
               if !suffix2.includes?('_')
                 case suffix2
                 when "UInt64", "Int64"
@@ -21200,9 +21267,11 @@ module Crystal::MIR
         matching_func ||= rooted_delegate[1]
       end
 
-      # Type suffix heuristics - apply BEFORE void check since MIR might have wrong ptr type
-      # Methods with type suffix in HIR (e.g., "unsafe_shr$UInt64").
-      if suffix = suffix_after_dollar(extern_name)
+      # Type suffix return hints - apply BEFORE void check since MIR might have
+      # wrong ptr type for bare primitive helpers (e.g. "unsafe_shr$UInt64").
+      # Do not apply to qualified methods: their suffix encodes argument types.
+      if extern_type_suffix_return_hint?(extern_name, extern_method_core) &&
+         (suffix = suffix_after_dollar(extern_name))
         if !suffix.includes?('_')
           case suffix
           when "UInt64", "Int64"

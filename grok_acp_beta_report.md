@@ -486,3 +486,25 @@ source discovery under `--no-prelude`.
 **Verdict:** no evidence value. For future Grok usage, prefer an external
 Grok 4.1 Fast structured flow or enforce a hard "answer before tools" prompt.
 **Cost saved:** none.
+
+### Session 23 — 2026-04-30 — Array unsafe_fetch extern ABI audit
+**Task:** read-only audit of the `Array(Box)#unsafe_fetch(Int32)` backend
+frontier: whether the root is qualified `$Int32` suffix-as-return inference,
+the missing top-level `Array(T)#unsafe_fetch` body, or another ABI layer.
+**Brief size:** one task file, ~1.1 KB, focused on
+`src/compiler/mir/llvm_backend.cr` and the no-prelude reducer.
+**Latency:** timed out after 90s.
+**Output quality:** no final answer. The ACP stream showed many grep/read_file
+tool calls, but no concise findings before timeout.
+**What worked:** it ran as a non-blocking sidecar while local build and
+regression checks continued.
+**What did not:** repeated ACP failure mode: broad source reading consumed the
+full budget despite a narrow prompt. No Grok claim was used as evidence.
+**Adversary check:** local evidence found the root independently. HIR/MIR
+typed `Array(Box)#unsafe_fetch$Int32` as `Box`, while LLVM emitted `call i32`
+and an abort stub. Restricting suffix-return hints to bare primitive helpers
+plus adding a generic `Array(T)#unsafe_fetch(Int32)` late body made the runtime
+guard and generated-stage2 lookup guard pass.
+**Verdict:** no evidence value for this commit. Future prompts need a hard
+partial-answer deadline before tool exploration.
+**Cost saved:** none.

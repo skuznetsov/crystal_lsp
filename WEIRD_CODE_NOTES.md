@@ -108,3 +108,12 @@ be verified anchors, not broad opinions.
   trivial private class reducer scan temporary sibling files via `Dir.glob`.
   Keep filesystem recovery paths out of no-prelude reducers unless the reducer
   explicitly opts into a source graph.
+
+- `src/compiler/mir/llvm_backend.cr` historically applied type-suffix return
+  hints broadly to `ExternCall` names. This is unsafe for qualified Crystal
+  method names because `$...` usually describes argument specialization, not
+  the return type (`Array(Box)#unsafe_fetch$Int32` returns `Box`). The current
+  fix narrows the heuristic to bare primitive helpers; future backend cleanup
+  should remove broad suffix ABI inference entirely and route Crystal method
+  calls through resolved MIR function signatures or explicit primitive
+  contracts.

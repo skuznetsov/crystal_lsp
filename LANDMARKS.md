@@ -2348,3 +2348,37 @@ is solved. It fixes the lazy enum state that was missing from the existing
 explicit constructor/reset corridor and records the broader pattern in
 `WEIRD_CODE_NOTES.md`.
 {F/G/R: 0.90/0.56/0.90} [verified]
+
+[LM-531|verified]: Qualified extern-call type suffixes are argument
+specializations, not return-type evidence.
+
+Findings:
+
+- The reducer `Array(Box)#unsafe_fetch$Int32` had HIR/MIR return `Box`/`ptr`,
+  but LLVM `emit_extern_call` treated `$Int32` as a return hint, emitted
+  `call i32`, and the missing-body pass synthesized an abort stub for
+  `Array$LBox$R$Hunsafe_fetch$$Int32`.
+- The fix restricts suffix-return hints to bare primitive extern helpers
+  (`unsafe_shl`, `unsafe_shr`, `unsafe_div`, `unsafe_mod`), where the suffix
+  denotes operation/result width instead of a qualified method argument.
+- The missing-body pass now has a generic top-level
+  `Array(T)#unsafe_fetch(Int32)` late primitive body. It derives the element ABI
+  from the `Array(T)` owner and loads `@buffer[@offset_to_buffer + index]`.
+
+Evidence:
+
+- `crystal build src/crystal_v2.cr -o /tmp/cv2_array_fetch_candidate
+  --error-trace` passed.
+- `regression_tests/p2_array_class_ref_unsafe_fetch_no_prelude.sh
+  /tmp/cv2_array_fetch_candidate` passed.
+- `regression_tests/p2_array_struct_unsafe_fetch_return_no_prelude.sh
+  /tmp/cv2_array_fetch_candidate` passed.
+- Generated LLVM for the reducer contains
+  `call ptr @Array$LBox$R$Hunsafe_fetch$$Int32` and
+  `define ptr @Array$LBox$R$Hunsafe_fetch$$Int32`, with no abort stub.
+- `regression_tests/p2_generated_stage2_lookup_lazy_enum_no_prelude.sh
+  /tmp/cv2_array_fetch_candidate` passed.
+
+Boundary: this fixes the backend extern/stub ABI root for direct
+`Array(T)#unsafe_fetch(Int32)`, not all collection method materialization gaps.
+{F/G/R: 0.94/0.68/0.94} [verified]
