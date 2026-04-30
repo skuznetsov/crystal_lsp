@@ -1233,16 +1233,28 @@ pending-budget oracle.
   /tmp/cv2_bs_s2_numeric_suffix_chain` builds `s2`, passes no-prelude smoke,
   and advances plain smoke to `resolve_lib_global_decl_from_source(Span,
   ArenaLike)` during `LibC` registration.
+- The generated-stage2 full-prelude lib global source-recovery stub is
+  cleared. Root cause: `resolve_lib_global_decl` delegated to a one-use helper
+  with an explicit `ArenaLike` parameter, recreating the same source-helper ABI
+  boundary that previously broke extern source recovery. Adding the helper to
+  exact-demand was refuted (the same stub remained), so the accepted fix
+  removes the helper boundary and performs source recovery directly in
+  `resolve_lib_global_decl` using `@arena`. Current evidence: `crystal build
+  src/crystal_v2.cr -o /tmp/cv2_lib_global_inline_candidate --error-trace`
+  passed; `scripts/build_bootstrap_stages.sh --stages 2 --out
+  /tmp/cv2_bs_s2_lib_global_inline` builds `s2`, passes no-prelude smoke, and
+  advances plain smoke past full `LibC` registration to
+  `detect_method_yield(DefNode, ArenaLike, Bool)` during `Errno` enum
+  registration.
 
 ## Next Work
 
 1. Root-cause the generated-stage2 full-prelude plain-smoke frontier:
-   `resolve_lib_global_decl_from_source(Span, ArenaLike)` abort stub during
-   `LibC` registration. First checks: inspect whether this is the same concrete
-   vs broad helper signature pattern as the earlier source-backed extern
-   helpers, whether the helper should read `@arena` internally, and whether
-   exact-demand registration includes the concrete `AstArena/PageArena` call
-   symbol emitted by generated `s2`.
+   `detect_method_yield(DefNode, ArenaLike, Bool)` abort stub during `Errno`
+   enum registration. First checks: inspect call sites at
+   `ast_to_hir.cr:20602/20657/20736`, whether this helper should read
+   `@arena` internally or split source vs arena modes, and whether it is another
+   broad `ArenaLike` helper boundary rather than a missing enum-specific case.
 2. Run the generated-stage2 compiler on the broader fixed no-prelude corpus and
    add focused oracles for any new first failure.
 3. Compare `s1_bootstrap` and `s2b` on the fixed no-prelude corpus before

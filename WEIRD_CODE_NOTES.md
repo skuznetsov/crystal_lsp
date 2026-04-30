@@ -162,3 +162,11 @@ be verified anchors, not broad opinions.
   compiler-internal fixed-table lookups: if they execute during bootstrap
   macro evaluation, prefer direct branch code until Array/block lowering is
   proven by a focused oracle.
+
+- One-use source-recovery helpers in `AstToHir` should be treated with
+  suspicion when their only extra parameter is `ArenaLike`. The
+  `resolve_lib_global_decl_from_source(span, arena)` boundary produced a
+  generated-stage2 abort stub even after an exact-demand allowlist experiment,
+  while inlining the source recovery into `resolve_lib_global_decl` and reading
+  `@arena` directly moved the bootstrap frontier. Prefer eliminating these
+  one-use ABI boundaries before adding more helper-demand allowlists.

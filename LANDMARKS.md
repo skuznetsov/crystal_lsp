@@ -2555,3 +2555,35 @@ Boundary: this is a targeted fixed-table bootstrap hardening, not proof that
 general `Array#find` or block lowering is fixed. Add a focused oracle before
 claiming the broader iterator/block path.
 {F/G/R: 0.90/0.55/0.90} [verified]
+
+[LM-536|verified]: One-use lib global source recovery should not expose an
+`ArenaLike` helper ABI boundary.
+
+Findings:
+
+- After LM-535, generated `s2` full-prelude plain smoke failed during `LibC`
+  registration on an abort stub for
+  `AstToHir#resolve_lib_global_decl_from_source(Span, ArenaLike)`.
+- Adding the helper to the AstToHir exact-demand allowlist was refuted: `s2`
+  still built successfully, but plain smoke hit the same stub. This ruled out a
+  simple omitted-method-name explanation.
+- The helper was only called from `resolve_lib_global_decl` and only passed the
+  current `@arena`. Inlining source lookup/parsing into
+  `resolve_lib_global_decl` removed the concrete-vs-broad helper symbol and
+  kept the recovery logic on the already demanded caller.
+
+Evidence:
+
+- `crystal build src/crystal_v2.cr -o
+  /tmp/cv2_lib_global_inline_candidate --error-trace` passed.
+- `scripts/build_bootstrap_stages.sh --stages 2 --out
+  /tmp/cv2_bs_s2_lib_global_inline` built `s2` in 250s and passed no-prelude
+  smoke. Full-prelude plain smoke advanced past complete `LibC` registration
+  and now fails later during `Errno` enum registration on
+  `detect_method_yield(DefNode, ArenaLike, Bool)`.
+
+Boundary: this fixes a one-use source-recovery ABI boundary. It does not prove
+that all remaining `ArenaLike` helpers should be inlined; each should be
+checked against call count, exact-demand behavior, and whether it can read
+`@arena` internally without changing semantics.
+{F/G/R: 0.90/0.58/0.90} [verified]

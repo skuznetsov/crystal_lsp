@@ -8145,45 +8145,32 @@ module Crystal::HIR
     end
 
     private def resolve_lib_global_decl(node : CrystalV2::Compiler::Frontend::GlobalVarDeclNode) : {String, String}
-      if parsed = resolve_lib_global_decl_from_source(node.span, @arena)
-        return parsed
-      end
-
-      path = source_path_for(@arena) || "(unknown)"
-      snippet = callsite_snippet_for(@arena, node.span) || "<unavailable>"
-      raise LoweringError.new("Unable to recover lib global declaration at #{path}:#{node.span.start_line}:#{node.span.start_column} snippet=#{snippet.inspect}")
-    end
-
-    private def resolve_lib_global_decl_from_source(
-      span : CrystalV2::Compiler::Frontend::Span,
-      arena : CrystalV2::Compiler::Frontend::ArenaLike,
-    ) : {String, String}?
-      source = source_for_arena(arena)
+      source = source_for_arena(@arena)
       if source.nil?
-        if path = source_path_for(arena)
+        if path = source_path_for(@arena)
           if File.file?(path)
             source = File.read(path)
           end
         end
       end
-      return nil unless source
 
-      snippet = slice_source_for_span(span, source)
-      return nil unless snippet
+      if source
+        snippet = slice_source_for_span(node.span, source)
+        if snippet
+          text = strip_single_line_comments(snippet).strip
+          if text.starts_with?('$')
+            if colon_index = text.index(':')
+              raw_name = text.byte_slice(0, colon_index).strip
+              type_name = text.byte_slice(colon_index + 1, text.bytesize - colon_index - 1).strip
+              return {raw_name, type_name} unless raw_name.empty? || type_name.empty?
+            end
+          end
+        end
+      end
 
-      text = strip_single_line_comments(snippet).strip
-      return nil unless text.starts_with?('$')
-
-      colon_index = text.index(':')
-      return nil unless colon_index
-
-      raw_name = text.byte_slice(0, colon_index).strip
-      type_name = text.byte_slice(colon_index + 1, text.bytesize - colon_index - 1).strip
-      return nil if raw_name.empty? || type_name.empty?
-
-      return {raw_name, type_name}
-
-      nil
+      path = source_path_for(@arena) || "(unknown)"
+      snippet = callsite_snippet_for(@arena, node.span) || "<unavailable>"
+      raise LoweringError.new("Unable to recover lib global declaration at #{path}:#{node.span.start_line}:#{node.span.start_column} snippet=#{snippet.inspect}")
     end
 
     private def reparse_lib_class_from_source(
