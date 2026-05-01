@@ -1295,21 +1295,22 @@ pending-budget oracle.
    is also advanced by replacing `Hash({String, ...}, String)` alias caches
    with nested String-key maps and by rewriting `module_name_from_node` to avoid
    a lambda/map/reject block that lost captured `self` in generated stage2.
-   Redirected lldb shows the new frontier is `body_ids_match_arena?` crashing
-   in `Array(ExprId)#to_unsafe` through
-   `def_body_nodes_match_arena? -> arena_fits_def? ->
-   register_type_method_from_def` at module register idx=3.
+   The `body_ids_match_arena?` nilable-array frontier is also advanced by
+   splitting the nilable wrapper from the non-nil `Array(ExprId)` arena-fit
+   scan and adding a raw low-pointer guard. Redirected lldb shows the new
+   frontier is `each_param(Array(Parameter), &block)` crashing while
+   `register_concrete_class` scans method params at module register idx=3.
    Remaining known root pattern: `next` combined with non-local `return` inside
    nested inlined iterator blocks is still semantically wrong; the attempted
    generic `InlineNextContext` extension fixed neither local-state merging nor
    the reducer, so it was not kept. Add a proper CFG/local-state oracle before
    changing that broad path.
-2. Root-cause `body_ids_match_arena?` under generated stage2. The source
-   already has `body.nil?` and zero-size checks, so first falsifiers should
-   distinguish nilable-array narrowing failure from a corrupt non-nil
-   `Array(ExprId)` pointer. Do not replace it with a caller allowlist; either
-   normalize the helper contract or make the nil/corrupt-array guard raw-pointer
-   safe with a focused no-prelude oracle.
+2. Root-cause `each_param(Array(Parameter), &block)` under generated stage2.
+   The helper already has struct-as-pointer null-element guards, so first
+   falsifiers should distinguish a corrupt `params` array object from a bad
+   yielded `Parameter` element or block transport. Do not special-case a method
+   name; add/extend a no-prelude oracle for param-array scanning before changing
+   the general helper.
 3. Run the generated-stage2 compiler on the broader fixed no-prelude corpus and
    add focused oracles for any new first failure.
 4. Compare `s1_bootstrap` and `s2b` on the fixed no-prelude corpus before

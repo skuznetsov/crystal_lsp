@@ -210,6 +210,14 @@ be verified anchors, not broad opinions.
   `CRYSTAL_V2_IDENTITY_DRY_RUN`; otherwise diagnostics become bootstrap
   dependencies.
 
+- `body_ids_match_arena?` looked source-safe because it accepted
+  `Array(ExprId)?` and checked `body.nil?`, but generated stage2 still reached
+  `Array(ExprId)#to_unsafe` through the nilable helper signature. Splitting
+  nilable wrappers from non-nil array scanners is a recurring self-host
+  hardening pattern: keep raw pointer guards inside the non-nil helper, and
+  avoid relying on generated stage2 to preserve source-level nilable narrowing
+  across hot helper boundaries.
+
 ## 2026-04-30
 
 - A broad local-inference nil-guard patch is unsafe as a bootstrap shortcut.

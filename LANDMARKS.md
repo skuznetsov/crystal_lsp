@@ -2879,3 +2879,34 @@ and block-proc capture remain open root families; this commit removes two
 compiler-internal bootstrap dependencies on those incomplete paths. The next
 frontier is the nil/corrupt-array guard in `body_ids_match_arena?`.
 {F/G/R: 0.90/0.61/0.89} [verified]
+
+## LM-544 — Stage2 arena body-id guard advanced to param iteration
+
+Context: compiler/bootstrap/codegen, 2026-04-30, `codegen`.
+
+Verified:
+
+- The `body_ids_match_arena?` frontier was a nilable/corrupt array boundary in
+  the arena-fit helper. The source had `body.nil?`, but generated stage2 still
+  reached `Array(ExprId)#to_unsafe` through the nilable signature. Splitting
+  the public nilable wrapper from `body_ids_match_arena_non_nil?` and making the
+  non-nil helper guard low raw array pointers advanced the crash.
+
+Evidence:
+
+- `crystal build src/crystal_v2.cr -o /tmp/cv2_body_ids_candidate
+  --error-trace` passed.
+- `regression_tests/p2_yield_body_infer_no_prelude.sh`,
+  `regression_tests/p2_prior_nil_guard_infer_no_prelude.sh`,
+  `regression_tests/p2_source_extern_signature_no_prelude.sh`, and
+  `regression_tests/p2_pending_budget_no_prelude.sh` passed with
+  `/tmp/cv2_body_ids_candidate`.
+- `scripts/build_bootstrap_stages.sh --stages 2 --out
+  /tmp/cv2_bs_s2_body_ids` built `s2` in ~235s and passed no-prelude smoke.
+  Redirected lldb now stops in `each_param(Array(Parameter), &block)` from
+  `register_concrete_class`, not in `body_ids_match_arena?`.
+
+Boundary: generated `s2` full-prelude plain smoke still fails. The next root is
+parameter-array iteration or block transport inside `each_param`, not arena
+body-id matching.
+{F/G/R: 0.90/0.58/0.88} [verified]

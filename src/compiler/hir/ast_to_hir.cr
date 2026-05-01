@@ -11963,7 +11963,9 @@ module Crystal::HIR
                     -1
                   end
       return false if max_index >= 0 && max_index >= arena.size
-      return false unless body_ids_match_arena?(arena, body)
+      if body_ids = body
+        return false unless body_ids_match_arena_non_nil?(arena, body_ids)
+      end
       span_fits_source?(arena, span)
     end
 
@@ -12431,7 +12433,9 @@ module Crystal::HIR
       func_def : CrystalV2::Compiler::Frontend::DefNode,
     ) : Bool
       body = func_def.body
-      return false unless body_ids_match_arena?(arena, body)
+      if body_ids = body
+        return false unless body_ids_match_arena_non_nil?(arena, body_ids)
+      end
       body_subtrees_match_arena?(arena, body, func_def.span)
     end
 
@@ -13109,7 +13113,16 @@ module Crystal::HIR
       arena : CrystalV2::Compiler::Frontend::ArenaLike,
       body : Array(ExprId)?,
     ) : Bool
-      return true if body.nil?
+      return true unless body
+      body_ids_match_arena_non_nil?(arena, body)
+    end
+
+    private def body_ids_match_arena_non_nil?(
+      arena : CrystalV2::Compiler::Frontend::ArenaLike,
+      body : Array(ExprId),
+    ) : Bool
+      raw = body.unsafe_as(UInt64)
+      return true if raw == 0_u64 || raw < 4096_u64
       return true if body.to_unsafe.address == 0_u64
       sz = body.size
       return true if sz == 0
@@ -13214,7 +13227,7 @@ module Crystal::HIR
                   end
       path = source_path_for(arena) || "(unknown)"
       type_name = arena.class.name.split("::").last
-      body_ids_fit = body_ids_match_arena?(arena, body)
+      body_ids_fit = body ? body_ids_match_arena_non_nil?(arena, body) : true
       subtree_fit = body_ids_fit && body_subtrees_match_arena?(arena, body, func_def.span)
       span_fit = span_fits_source?(arena, func_def.span)
       fit = body_ids_fit && subtree_fit && span_fit
