@@ -22329,8 +22329,8 @@ module Crystal::HIR
                       has_block = true
                       next
                     end
-                    param_type = if ta = param.type_annotation
-                                   type_ref_for_name(qualify_unqualified_type_in_namespace((safe_slice_to_string(ta) || ""), full_name))
+                    param_type = if ta_s = parameter_type_annotation_string(param, member_arena, false)
+                                   type_ref_for_name(qualify_unqualified_type_in_namespace(ta_s, full_name))
                                  elsif param.is_double_splat
                                    type_ref_for_name("NamedTuple")
                                  else

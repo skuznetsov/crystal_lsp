@@ -70,6 +70,21 @@ are read from source-backed parameter spans. Evidence:
 shows the new frontier is a different `each_param` block inside
 `register_nested_module_in_current_arena`.
 
+Stage2 nested-module parameter checkpoint (2026-05-01): the
+`register_nested_module_in_current_arena` PASS 2 class-method registration path
+now resolves parameter annotations from source-backed `Parameter#type_span`
+instead of direct `param.type_annotation` slices when a member arena is known.
+Evidence: `crystal build src/crystal_v2.cr -o
+/tmp/cv2_nested_module_params_candidate --error-trace`; the five p2 no-prelude
+guards including `p2_implicit_ivar_param_source_scan_no_prelude.sh`; and
+`scripts/run_safe.sh /tmp/cv2_nested_module_params_candidate 300 4096
+src/crystal_v2.cr -o /tmp/cv2_direct_nested_module_params/cv2_s2`, which
+builds generated `cv2_s2` in ~155s. Boundary: generated `cv2_s2` still fails
+plain full-prelude `puts 42`, but lldb no longer shows `each_param` /
+`safe_slice_to_string`; the next frontier is
+`infer_type_from_expr_inner -> infer_concrete_return_type_from_body` while
+registering `Float::Float::Bigint`.
+
 Stage2 no-prelude semantic-corpus checkpoint (2026-05-01): generated `cv2_s2`
 now compiles and runs `regression_tests/bootstrap_semantic_corpus.cr
 --no-prelude` after the HIR inline-yield/proc-literal corridor and the MIR/LLVM
@@ -1407,14 +1422,15 @@ pending-budget oracle.
    generic `InlineNextContext` extension fixed neither local-state merging nor
    the reducer, so it was not kept. Add a proper CFG/local-state oracle before
    changing that broad path.
-2. Root-cause the remaining full-prelude nested-module registration crash under
-   generated stage2. Current evidence: source-backed initializer capture and
-   source-prefiltered implicit-ivar param scanning are green for
-   `s1 -> cv2_s2`, and `Exception::CallStack` now reaches
-   `after_new_register`; lldb shows the next crash is a different
-   `each_param` block inside `register_nested_module_in_current_arena`. Do not
-   special-case a method name; first localize that nested-module parameter block
-   and add a focused no-prelude oracle before changing the general helper.
+2. Root-cause the remaining full-prelude nested-class return-inference crash
+   under generated stage2. Current evidence: stale parameter slice frontiers are
+   advanced through source-backed initializer capture, source-prefiltered
+   implicit-ivar param scanning, and source-backed nested-module method params.
+   The latest lldb frontier is now `infer_type_from_expr_inner` from
+   `infer_concrete_return_type_from_body` while registering
+   `Float::Float::Bigint` through the reparsed/generic nested-class corridor.
+   First determine why registration is doing eager body inference there, and
+   add a focused no-prelude oracle before changing the inference policy.
 3. Run the generated-stage2 compiler on the broader fixed no-prelude corpus and
    add focused oracles for any new first failure.
 4. Compare `s1_bootstrap` and `s2b` on the fixed no-prelude corpus before

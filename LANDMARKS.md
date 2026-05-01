@@ -3095,3 +3095,46 @@ moved past `Exception::CallStack` class finalization to nested module
 registration after `after_new_register`; continue localizing the new
 `register_nested_module_in_current_arena` parameter block before trying `s3b`.
 {F/G/R: 0.92/0.61/0.90} [verified]
+
+## LM-547 — Nested module method params moved from raw slices to source-backed spans
+
+Context: compiler/bootstrap/codegen, 2026-05-01, `codegen`.
+
+Verified:
+
+- After LM-546, the next `each_param` / `safe_slice_to_string` crash came from
+  `register_nested_module_in_current_arena` PASS 2. That path registered
+  nested-module class methods and still read `param.type_annotation` directly
+  while resolving method signatures.
+- The fix switches that nested-module method param registration to
+  `parameter_type_annotation_string(param, member_arena, false)` and then
+  qualifies the resulting source text in the module namespace. This preserves
+  the existing signature policy while avoiding raw frontend slices when the
+  member arena is known.
+
+Evidence:
+
+- `crystal build src/crystal_v2.cr -o
+  /tmp/cv2_nested_module_params_candidate --error-trace` passed.
+- `p2_enum_class_setter_return_infer_no_prelude.sh`,
+  `p2_nested_module_registration_no_prelude.sh`,
+  `p2_bootstrap_semantic_emit_oracle.sh`,
+  `p2_visibility_private_accessor_no_prelude.sh`, and
+  `p2_implicit_ivar_param_source_scan_no_prelude.sh` passed with
+  `/tmp/cv2_nested_module_params_candidate`.
+- `scripts/run_safe.sh /tmp/cv2_nested_module_params_candidate 300 4096
+  src/crystal_v2.cr -o /tmp/cv2_direct_nested_module_params/cv2_s2` built
+  generated `cv2_s2` in ~155s with `[EXIT: 0]`.
+- `CRYSTAL_V2_TRACE_CLASS_FRONTIER=1` on the generated compiler now advances
+  past `Float::Float::ParsedNumberStringT` and reaches
+  `Float::Float::Bigint` before the next crash.
+- Fresh lldb shows the new frontier is not `each_param` or
+  `safe_slice_to_string`; it is `infer_type_from_expr_inner` reached from
+  `infer_concrete_return_type_from_body` while registering
+  `Float::Float::Bigint`.
+
+Boundary: generated `s2` plain full-prelude smoke still fails. The current
+frontier has moved from stale parameter slices to eager return/body inference
+inside the reparsed/generic `Float::FastFloat` nested-class corridor. Do not
+continue patching parameter loops until a new trace points back there.
+{F/G/R: 0.92/0.60/0.90} [verified]
