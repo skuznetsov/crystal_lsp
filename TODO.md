@@ -1282,6 +1282,11 @@ pending-budget oracle.
    inspect whether method registration should force this helper body, whether
    it is another broad `ArenaLike` helper boundary, or whether enum method
    return inference should avoid eager body inference for this path.
+   Refuted branch: broad local-inference nil-guard narrowing is not the right
+   shortcut. A focused prior-guard `ExprId` no-prelude reducer is now covered
+   by `p2_prior_nil_guard_infer_no_prelude.sh`, and clean HEAD already passes
+   it; the broader dirty narrowing experiment regressed full-source
+   `STOP_AFTER_HIR` to `ExprId out of bounds`.
 2. Run the generated-stage2 compiler on the broader fixed no-prelude corpus and
    add focused oracles for any new first failure.
 3. Compare `s1_bootstrap` and `s2b` on the fixed no-prelude corpus before

@@ -2656,3 +2656,42 @@ Boundary: opt-in `CRYSTAL_V2_PHASE0_METRICS` and
 `CRYSTAL_V2_IDENTITY_DRY_RUN` paths still need their own targeted verification
 before relying on body-inference identity counts under generated stage2.
 {F/G/R: 0.91/0.62/0.90} [verified]
+
+[LM-539|verified]: The prior-nil-guard body-inference shape is already covered
+on clean `codegen`, and a broader local narrowing patch was refuted.
+
+Findings:
+
+- A focused no-prelude reducer for `value = maybe; return ExprId.new unless
+  value; expr_id = value; expr_id` now guards that body/return inference keeps
+  the helper return concrete (`ExprId`) and calls `consume$ExprId`, not a
+  nilable overload.
+- The reducer passes on clean HEAD (`48833dd4`) and on the dirty experiment,
+  so it is useful as coverage but not evidence that the dirty implementation is
+  required.
+- The dirty implementation was refuted by a clean-vs-dirty full-source
+  comparison: clean HEAD `CRYSTAL_V2_STOP_AFTER_HIR=1
+  CRYSTAL_V2_PHASE_STATS=1 scripts/run_safe.sh /tmp/cv2_clean_head_candidate
+  300 4096 src/crystal_v2.cr -o /tmp/cv2_clean_head_stop_hir` exits 0 after
+  about 145s, while the dirty narrowing patch exits 1 after about 34s with
+  `ExprId out of bounds: 1684105331`.
+
+Evidence:
+
+- `crystal build src/crystal_v2.cr -o /tmp/cv2_dirty_guard_candidate
+  --error-trace` passed before the experiment was reverted.
+- `regression_tests/p2_prior_nil_guard_infer_no_prelude.sh
+  /tmp/cv2_clean_head_candidate` -> `p2_prior_nil_guard_infer_no_prelude_ok`.
+- `regression_tests/p2_prior_nil_guard_infer_no_prelude.sh
+  /tmp/cv2_dirty_guard_candidate` -> `p2_prior_nil_guard_infer_no_prelude_ok`.
+- `regression_tests/p2_source_extern_signature_no_prelude.sh`,
+  `p2_array_class_ref_unsafe_fetch_no_prelude.sh`,
+  `p2_elsif_short_circuit_condition_no_prelude.sh`,
+  `p2_visibility_modifier_semantics_no_prelude.sh`,
+  `p2_pending_budget_no_prelude.sh`, and
+  `p2_selfhost_stage2_shape_guard.sh` passed with the dirty compiler before
+  the full-source adversary check refuted it.
+
+Boundary: this lands only the no-prelude guard and refutation record. It does
+not fix the current generated-stage2 semantic body-inference frontier.
+{F/G/R: 0.92/0.50/0.92} [verified]

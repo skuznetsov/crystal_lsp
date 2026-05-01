@@ -187,3 +187,16 @@ be verified anchors, not broad opinions.
   Gate canonical identity work on `CRYSTAL_V2_PHASE0_METRICS` or
   `CRYSTAL_V2_IDENTITY_DRY_RUN`; otherwise diagnostics become bootstrap
   dependencies.
+
+## 2026-04-30
+
+- A broad local-inference nil-guard patch is unsafe as a bootstrap shortcut.
+  The rejected experiment narrowed `x = value` after a preceding
+  `return/break unless value`, narrowed `||` left operands in body inference,
+  and cast multi-reference nilable unions after `not_nil!`. It made the focused
+  `ExprId` return-inference shape pass, but the clean HEAD already passed that
+  no-prelude shape, while the patched compiler regressed full-source
+  `STOP_AFTER_HIR` from a clean exit to `ExprId out of bounds: 1684105331` in
+  about 34s. Keep the regression guard, but do not reintroduce ad-hoc source
+  inference narrowing without a CFG-level proof and full-source phase-stats
+  comparison.
