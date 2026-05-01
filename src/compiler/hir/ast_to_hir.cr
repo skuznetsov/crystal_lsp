@@ -3678,8 +3678,8 @@ module Crystal::HIR
     @deferred_module_context_first_lookup : Hash(DeferredModuleLookupKey, DeferredModuleContext)
     @lazy_module_methods : Bool
     @module_defs_cache_version : Int32
-    @module_include_alias_cache : Hash({String, String?, Int32}, String)
-    @module_alias_prefix_cache : Hash({String, Int32}, String)
+    @module_include_alias_cache : Hash(Int32, Hash(String, Hash(String, String)))
+    @module_alias_prefix_cache : Hash(Int32, Hash(String, String))
     @resolve_module_ns_cache : Hash({String, String, Int32}, String?)
     @module_def_lookup_cache_version : Int32
     @module_def_lookup_cache : Hash(String, Tuple(CrystalV2::Compiler::Frontend::DefNode, CrystalV2::Compiler::Frontend::ArenaLike)?)
@@ -4120,8 +4120,8 @@ module Crystal::HIR
       @deferred_module_context_first_lookup = {} of DeferredModuleLookupKey => DeferredModuleContext
       @lazy_module_methods = false
       @module_defs_cache_version = 0
-      @module_include_alias_cache = {} of {String, String?, Int32} => String
-      @module_alias_prefix_cache = {} of {String, Int32} => String
+      @module_include_alias_cache = {} of Int32 => Hash(String, Hash(String, String))
+      @module_alias_prefix_cache = {} of Int32 => Hash(String, String)
       @resolve_module_ns_cache = {} of {String, String, Int32} => String?
       @module_def_lookup_cache_version = 0
       @module_def_lookup_cache = {} of String => Tuple(CrystalV2::Compiler::Frontend::DefNode, CrystalV2::Compiler::Frontend::ArenaLike)?
@@ -4940,14 +4940,25 @@ module Crystal::HIR
       return module_name if module_name.empty?
       return module_name if @module_defs.has_key?(module_name)
 
-      cache_key = {module_name, @current_class, @module_defs_cache_version}
-      if cached = @module_include_alias_cache[cache_key]?
+      cache_version = @module_defs_cache_version
+      cache_context = @current_class || ""
+      include_cache_by_context = @module_include_alias_cache[cache_version]? || begin
+        new_cache = {} of String => Hash(String, String)
+        @module_include_alias_cache[cache_version] = new_cache
+        new_cache
+      end
+      include_cache = include_cache_by_context[cache_context]? || begin
+        new_cache = {} of String => String
+        include_cache_by_context[cache_context] = new_cache
+        new_cache
+      end
+      if cached = include_cache[module_name]?
         return cached
       end
 
       resolved = resolve_module_alias_prefix(module_name)
       if @module_defs.has_key?(resolved)
-        @module_include_alias_cache[cache_key] = resolved
+        include_cache[module_name] = resolved
         return resolved
       end
 
@@ -4958,7 +4969,7 @@ module Crystal::HIR
           ns = module_name.byte_slice(0, ns_sep)
           requalified = "#{ns}::#{resolved}"
           if @module_defs.has_key?(requalified)
-            @module_include_alias_cache[cache_key] = requalified
+            include_cache[module_name] = requalified
             return requalified
           end
         end
@@ -4973,7 +4984,7 @@ module Crystal::HIR
             candidate = "#{scope}::#{module_name}"
             resolved_candidate = resolve_module_alias_prefix(candidate)
             if @module_defs.has_key?(resolved_candidate)
-              @module_include_alias_cache[cache_key] = resolved_candidate
+              include_cache[module_name] = resolved_candidate
               return resolved_candidate
             end
             i = sep - 1
@@ -4983,19 +4994,24 @@ module Crystal::HIR
         end
       end
 
-      @module_include_alias_cache[cache_key] = module_name
+      include_cache[module_name] = module_name
       module_name
     end
 
     private def resolve_module_alias_prefix(module_name : String) : String
-      cache_key = {module_name, @module_defs_cache_version}
-      if cached = @module_alias_prefix_cache[cache_key]?
+      cache_version = @module_defs_cache_version
+      prefix_cache = @module_alias_prefix_cache[cache_version]? || begin
+        new_cache = {} of String => String
+        @module_alias_prefix_cache[cache_version] = new_cache
+        new_cache
+      end
+      if cached = prefix_cache[module_name]?
         return cached
       end
 
       unless module_name.includes?("::")
         resolved = resolve_type_alias_chain(module_name)
-        @module_alias_prefix_cache[cache_key] = resolved
+        prefix_cache[module_name] = resolved
         return resolved
       end
 
@@ -5021,7 +5037,7 @@ module Crystal::HIR
                 end
               end
             end
-            @module_alias_prefix_cache[cache_key] = result
+            prefix_cache[module_name] = result
             return result
           end
           i = sep - 1
@@ -5031,7 +5047,7 @@ module Crystal::HIR
       end
 
       resolved = resolve_type_alias_chain(module_name)
-      @module_alias_prefix_cache[cache_key] = resolved
+      prefix_cache[module_name] = resolved
       resolved
     end
 
@@ -6130,12 +6146,7 @@ module Crystal::HIR
       source : String? = nil,
     ) : String?
       type_params = node.type_params
-      append_type_params = ->(base_name : String) do
-        return base_name if base_name.empty? || !type_params || base_name.includes?('(')
-        params = type_params.not_nil!.map { |param| safe_slice_to_string(param) || "" }.reject(&.empty?)
-        return base_name if params.empty?
-        "#{base_name}(#{params.join(", ")})"
-      end
+      raw_name = nil.as(String?)
 
       # Path-based nested wrappers can reuse the full definition span, so
       # source-first recovery can return the outer header component for inner
@@ -6144,22 +6155,50 @@ module Crystal::HIR
       # present and only fall back to source recovery when the slice is empty
       # or corrupted.
       if name = safe_slice_to_string(node.name)
-        return append_type_params.call(name) unless name.empty?
+        raw_name = name unless name.empty?
       end
 
-      source ||= source_text_for_arena_or_file(@arena)
-      if source
+      if raw_name.nil?
+        source ||= source_text_for_arena_or_file(@arena)
+      end
+      if raw_name.nil? && source
         # Namespace wrapper modules can come from `module Foo::Bar`, but also from
         # path-based class/struct/union/enum forms like `struct Foo::Bar`.
         wrapper_prefixes = ["module ", "class ", "struct ", "union ", "enum "]
         if header = definition_header_text_from_source(node.span, source, wrapper_prefixes)
           if name = definition_name_from_header_text(header, wrapper_prefixes)
-            return append_type_params.call(name)
+            raw_name = name
           end
         end
       end
 
-      nil
+      return nil unless raw_name
+      return raw_name if raw_name.empty? || !type_params || raw_name.includes?('(')
+
+      params = type_params.not_nil!
+      return raw_name if params.empty?
+
+      param_names = [] of String
+      i = 0
+      while i < params.size
+        if param_name = safe_slice_to_string(params.unsafe_fetch(i))
+          param_names << param_name unless param_name.empty?
+        end
+        i += 1
+      end
+      return raw_name if param_names.empty?
+
+      String.build do |io|
+        io << raw_name
+        io << '('
+        j = 0
+        while j < param_names.size
+          io << ", " if j > 0
+          io << param_names.unsafe_fetch(j)
+          j += 1
+        end
+        io << ')'
+      end
     end
 
     private def enum_base_type_for_node(node : CrystalV2::Compiler::Frontend::EnumNode) : TypeRef

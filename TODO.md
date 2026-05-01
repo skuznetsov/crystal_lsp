@@ -1285,28 +1285,31 @@ pending-budget oracle.
    a central `infer_concrete_return_type_from_body` guard that refuses to walk
    defs requiring caller block context (`yield` or direct implicit
    `&block.call`). Current evidence:
-   `/tmp/cv2_bs_s2_include_contract` builds `s2` in ~230s and passes
-   no-prelude smoke. Plain smoke still fails, but the wide registration-helper
+   `/tmp/cv2_bs_s2_module_name` builds `s2` in ~237s and passes no-prelude
+   smoke. Plain smoke still fails, but the wide registration-helper
    abort-stub corridor is advanced: `record_nested_type_names` now threads an
    explicit `ArenaLike`, annotation registration call sites explicitly cast
    proven `AnnotationNode` values, default include debug probes are gated behind
    `DEBUG_REG_CONCRETE_PHASE`, and the class include expansion call now passes
-   exact `ArenaLike`/`Set(String)` contracts. Redirected lldb shows the new
-   frontier is a real `EXC_BAD_ACCESS` in
-   `Hash(Tuple(String, Int32), String)#[]?` while
-   `resolve_module_alias_prefix` looks up `@module_alias_prefix_cache`, from
-   `register_module_instance_methods_for` at module register idx=3.
+   exact `ArenaLike`/`Set(String)` contracts. The tuple-key alias-cache crash
+   is also advanced by replacing `Hash({String, ...}, String)` alias caches
+   with nested String-key maps and by rewriting `module_name_from_node` to avoid
+   a lambda/map/reject block that lost captured `self` in generated stage2.
+   Redirected lldb shows the new frontier is `body_ids_match_arena?` crashing
+   in `Array(ExprId)#to_unsafe` through
+   `def_body_nodes_match_arena? -> arena_fits_def? ->
+   register_type_method_from_def` at module register idx=3.
    Remaining known root pattern: `next` combined with non-local `return` inside
    nested inlined iterator blocks is still semantically wrong; the attempted
    generic `InlineNextContext` extension fixed neither local-state merging nor
    the reducer, so it was not kept. Add a proper CFG/local-state oracle before
    changing that broad path.
-2. Root-cause the tuple-key/hash alias-prefix cache crash without replacing it
-   with a one-off module-name allowlist. First falsifiers: determine whether the
-   key tuple contains a corrupt `String`, whether tuple equality/hash is wrong
-   for `{String, Int32}`, or whether the hash table stores stale key memory in
-   generated stage2. Add a no-prelude oracle before changing the general tuple
-   path.
+2. Root-cause `body_ids_match_arena?` under generated stage2. The source
+   already has `body.nil?` and zero-size checks, so first falsifiers should
+   distinguish nilable-array narrowing failure from a corrupt non-nil
+   `Array(ExprId)` pointer. Do not replace it with a caller allowlist; either
+   normalize the helper contract or make the nil/corrupt-array guard raw-pointer
+   safe with a focused no-prelude oracle.
 3. Run the generated-stage2 compiler on the broader fixed no-prelude corpus and
    add focused oracles for any new first failure.
 4. Compare `s1_bootstrap` and `s2b` on the fixed no-prelude corpus before

@@ -181,6 +181,18 @@ be verified anchors, not broad opinions.
   `AnnotationNode`) at the call site; when the helper is diagnostic-only, keep
   it behind its debug env gate so default bootstrap does not depend on it.
 
+- `AstToHir` compiler-internal caches should avoid tuple keys on generated
+  stage2 hot paths until the general `Hash(Tuple(...), V)` ABI is proven. The
+  module alias caches crashed in `Hash(Tuple(String, Int32), String)#[]?` during
+  full-prelude plain smoke; nested String-key maps advanced the frontier without
+  changing alias semantics. This does not close the general tuple-key bug.
+
+- `module_name_from_node` previously used a lambda plus `map/reject` to append
+  type parameters. Generated stage2 lost the captured `AstToHir` self inside
+  that proc and crashed in `safe_slice_to_string -> env_get`. Keep registration
+  name-recovery helpers on explicit loops unless a focused block-capture oracle
+  proves the block path safe.
+
 - Tiny AstToHir wrapper helpers can still be worse than duplication when they
   expose broad compiler-internal signatures to generated stage2. The
   `detect_method_yield(def, arena, prefer_source_scan)` wrapper only selected

@@ -2837,3 +2837,45 @@ Boundary: this is still not a green generated `s2`; the next root is the
 still misleadingly stop near enum/lib registration; redirected child stderr and
 lldb are the stronger frontier evidence.
 {F/G/R: 0.91/0.64/0.90} [verified]
+
+## LM-543 — Stage2 alias-cache tuple key and module-name block proc advanced
+
+Context: compiler/bootstrap/codegen, 2026-04-30, `codegen`.
+
+Verified:
+
+- The alias-prefix frontier at LM-542 was not fixed with a module-name
+  allowlist. The compiler-internal cache shape was changed from tuple keys
+  (`Hash({String, String?, Int32}, String)` and
+  `Hash({String, Int32}, String)`) to nested maps keyed by cache version,
+  context string, and module name. This preserves the same cache dimensions
+  while avoiding generated-stage2 tuple-key hash/equality in the bootstrap
+  registration path.
+- After the cache-shape change, redirected lldb advanced to
+  `module_name_from_node -> safe_slice_to_string -> env_get` through a generated
+  block proc. The root was the lambda plus `type_params.map { ... }.reject`
+  helper in `module_name_from_node`; generated stage2 lost the captured
+  `AstToHir` self in that proc. Rewriting the helper as a direct `while` scan
+  removed the block-proc frontier.
+
+Evidence:
+
+- `crystal build src/crystal_v2.cr -o /tmp/cv2_module_name_candidate
+  --error-trace` passed.
+- `regression_tests/p2_yield_body_infer_no_prelude.sh`,
+  `regression_tests/p2_prior_nil_guard_infer_no_prelude.sh`,
+  `regression_tests/p2_source_extern_signature_no_prelude.sh`, and
+  `regression_tests/p2_pending_budget_no_prelude.sh` passed with
+  `/tmp/cv2_module_name_candidate`.
+- `scripts/build_bootstrap_stages.sh --stages 2 --out
+  /tmp/cv2_bs_s2_module_name` built `s2` in ~237s and passed no-prelude smoke.
+  Redirected lldb now stops at `Array(ExprId)#to_unsafe` from
+  `body_ids_match_arena? -> def_body_nodes_match_arena? -> arena_fits_def? ->
+  register_type_method_from_def`, not in alias-cache tuple hashing or the
+  module-name block proc.
+
+Boundary: this is still not a green generated `s2`. General tuple-key hashing
+and block-proc capture remain open root families; this commit removes two
+compiler-internal bootstrap dependencies on those incomplete paths. The next
+frontier is the nil/corrupt-array guard in `body_ids_match_arena?`.
+{F/G/R: 0.90/0.61/0.89} [verified]
