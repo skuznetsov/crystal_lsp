@@ -219,3 +219,11 @@ be verified anchors, not broad opinions.
   `unique_enum_match_by_suffix` helper to avoid that pattern. The root fix
   needs a CFG/local-state design for inlined block `next`, not another local
   branch patch.
+
+- `infer_concrete_return_type_from_body` is a tempting catch-all, but it must
+  not infer through defs that require caller block context (`yield` or direct
+  implicit `&block.call`). Registration paths do not know the block return
+  type, so walking `SpinLock#sync(&)`/`unsync(&)` during class registration
+  exposed generated-stage2 null-load crashes. Keep the central guard, and route
+  future block-return precision through demanded callsite/lowering logic rather
+  than broad registration-time AST walks.

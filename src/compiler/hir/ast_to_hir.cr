@@ -15902,6 +15902,12 @@ module Crystal::HIR
         end
       end
 
+      # Registration-time body inference has no caller block context. Walking a
+      # body that yields or directly calls an implicit block can infer through
+      # the wrong control-flow edge, or crash self-hosted stage2 on unresolved
+      # block-return state. Let demanded lowering/callsite paths handle these.
+      return nil if def_requires_callsite_block_context?(node, resolved_arena)
+
       # Phase 0 metric: count ACTUAL body inference walks (past body-presence guard),
       # but key by canonical DefIdentity after arena resolution instead of the
       # caller-local DefNode heap identity.
@@ -35351,6 +35357,14 @@ module Crystal::HIR
       @yield_check_cache[cache_key] = result
       STDERR.puts "[DEF_CONTAINS_YIELD] phase=after_store" if debug_register_raw
       result
+    end
+
+    private def def_requires_callsite_block_context?(
+      node : CrystalV2::Compiler::Frontend::DefNode,
+      arena : CrystalV2::Compiler::Frontend::ArenaLike,
+    ) : Bool
+      return true if def_contains_yield?(node, arena)
+      def_contains_block_call?(node, arena)
     end
 
     private def def_contains_yield_uncached?(node : CrystalV2::Compiler::Frontend::DefNode, resolved_arena : CrystalV2::Compiler::Frontend::ArenaLike) : Bool

@@ -2743,3 +2743,48 @@ Boundary: this is verified progress, not a green bootstrap. The next work item
 is the module/class body-inference crash; do not claim `s2` plain smoke is
 fixed until that stage passes under `scripts/run_safe.sh`.
 {F/G/R: 0.91/0.58/0.90} [verified]
+
+[LM-541|verified]: Registration-time body inference now skips defs that need
+caller block context; generated stage2 advances past `Crystal::SpinLock`.
+
+Findings:
+
+- The module/class plain-smoke crash after LM-540 was `Crystal::SpinLock`, not
+  a SpinLock-specific semantic issue. The failing methods are unannotated
+  `sync(&)` / `unsync(&)` bodies that yield inside `begin/ensure`. Generic
+  registration-time `infer_concrete_return_type_from_body` has no caller block
+  return context, so walking those bodies can infer through an invalid block
+  edge or crash generated stage2.
+- The accepted fix is central, not a local class special case:
+  `infer_concrete_return_type_from_body` now returns `nil` before body walking
+  when `def_contains_yield?` or direct implicit `&block.call` is detected.
+  Registration call sites then fall back to their existing conservative return
+  types (`Void`, explicit annotations, query heuristics, or later demanded
+  lowering).
+- The first no-edit debug attempt was refuted as evidence: setting
+  `DEBUG_INFER_CRASH`, `DEBUG_REG_CONCRETE_PHASE`, or
+  `CRYSTAL_V2_TRACE_CLASS_FRONTIER` changes the generated-stage2 failure
+  timing and can report older enum-looking crashes. lldb with redirected child
+  stdout/stderr is the stronger signal for this frontier.
+
+Evidence:
+
+- `crystal build src/crystal_v2.cr -o /tmp/cv2_yield_context_guard
+  --error-trace` passed.
+- `regression_tests/p2_yield_body_infer_no_prelude.sh`,
+  `regression_tests/p2_prior_nil_guard_infer_no_prelude.sh`,
+  `regression_tests/p2_source_extern_signature_no_prelude.sh`, and
+  `regression_tests/p2_pending_budget_no_prelude.sh` passed with
+  `/tmp/cv2_yield_context_guard`.
+- `scripts/build_bootstrap_stages.sh --stages 2 --out
+  /tmp/cv2_bs_s2_yield_context_guard` built `s2` in ~228s and passed
+  no-prelude smoke. Plain smoke still fails. Redirected lldb shows the new
+  frontier is
+  `resolve_path_like_name_in_arena(ExprId, ArenaLike | String)` abort-stub
+  during `record_nested_type_names -> collect_nested_type_names` at module
+  register idx=3.
+
+Boundary: this is verified progress, not a green bootstrap. The current
+generated `s2` still fails full-prelude plain smoke; next work is the
+`resolve_path_like_name_in_arena` stub/demand boundary.
+{F/G/R: 0.90/0.62/0.90} [verified]

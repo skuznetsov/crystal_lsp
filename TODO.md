@@ -1277,18 +1277,21 @@ pending-budget oracle.
 ## Next Work
 
 1. Root-cause the generated-stage2 full-prelude plain-smoke frontier now past
-   enum registration. The enum body-inference corridor was advanced by:
-   typed `ArenaLike` resolution for
+   registration-time block/yield body inference. The enum/class body-inference
+   corridor was advanced by: typed `ArenaLike` resolution for
    `infer_concrete_return_type_from_body_inner`, source-backed explicit return
-   recovery for enum methods whose self-hosted `return_type` field is lost, and
-   skipping body-return inference for unannotated yield/block enum methods
-   (for example `Errno#unsafe_message`). Current evidence:
-   `/tmp/cv2_bs_s2_enum_yield_skip` builds `s2` in ~225s and passes
-   no-prelude smoke; under lldb, plain smoke advances through `Errno`,
-   `WinError`, `WasiError`, enum resolve, aliases, macros, and fails next in
-   module/class registration via
-   `register_module_with_name -> register_concrete_class ->
-   infer_concrete_return_type_from_body_inner`.
+   recovery for enum methods whose self-hosted `return_type` field is lost,
+   skipping body-return inference for unannotated enum yield/block methods, and
+   a central `infer_concrete_return_type_from_body` guard that refuses to walk
+   defs requiring caller block context (`yield` or direct implicit
+   `&block.call`). Current evidence:
+   `/tmp/cv2_bs_s2_yield_context_guard` builds `s2` in ~228s and passes
+   no-prelude smoke. Plain smoke still fails, but redirected lldb shows it now
+   advances through `Errno`, `WinError`, `WasiError`, enum resolve, aliases,
+   macros, `Crystal::SpinLock`, and fails next at module register idx=3 with
+   an abort stub for
+   `resolve_path_like_name_in_arena(ExprId, ArenaLike | String)` during
+   `record_nested_type_names -> collect_nested_type_names`.
    Remaining known root pattern: `next` combined with non-local `return` inside
    nested inlined iterator blocks is still semantically wrong; the attempted
    generic `InlineNextContext` extension fixed neither local-state merging nor

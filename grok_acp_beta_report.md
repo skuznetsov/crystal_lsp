@@ -534,3 +534,25 @@ were hardened against block-heavy `map/find` plus unchecked arena access.
 **Verdict:** no evidence value for this commit. For future Grok use, require a
 two-phase prompt: first answer from provided anchors, then optional tool audit.
 **Cost saved:** none.
+
+### Session 25 — 2026-04-30 — yield body-inference invariant audit
+**Task:** read-only audit of the proposed invariant that registration-time
+`infer_concrete_return_type_from_body` should not walk unannotated defs that
+need caller block context (`yield` or direct implicit `&block.call`).
+**Brief size:** one task file, ~1.5 KB, with exact current lldb frontier
+(`Crystal::SpinLock`) and required four-part output shape.
+**Latency:** no usable stdout was produced before the local falsifier finished.
+The wrapper process had exited by the time results were checked, and the output
+file was empty.
+**Output quality:** no final answer and no partial findings.
+**What worked:** the sidecar was launched non-blocking, so local work continued.
+**What did not:** this repeated the beta failure mode: the ACP flow did not
+return a concise answer for a narrow prompt.
+**Adversary check:** local evidence was sufficient. The central guard moved the
+generated-stage2 plain-smoke frontier past `Crystal::SpinLock`; redirected lldb
+then showed the next abort stub at
+`resolve_path_like_name_in_arena(ExprId, ArenaLike | String)` during nested
+type recording.
+**Verdict:** no evidence value. Keep Grok sidecar optional and do not wait when
+lldb/no-prelude falsifiers are already available.
+**Cost saved:** none.
