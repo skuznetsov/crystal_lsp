@@ -14,6 +14,33 @@
 
 ## Сессии
 
+### Session 2026-05-01 — suffix-rewrite audit during bootstrap triage
+**Context:** Crystal V2 `codegen` branch. Stage2 compiler had crashed in
+`String#bytesize -> String#sub` while `AstToHir#function_full_name_for_def`
+rewrote `_double_splat` / `_splat` / `_block` suffixes with replacement strings
+containing literal `$arity...`.
+
+**Task:** Read-only audit: decide whether replacing regex `String#sub` calls
+with deterministic byte-suffix rewrite is root-cause or symptom; find identical
+sites; suggest regression shape.
+
+**Invocation:** direct
+`python3 ~/.grok/bin/grok_acp_delegate.py --cwd /Users/sergey/Projects/Crystal/crystal_v2_repo --task-file /tmp/grok_suffix_review_task.txt --request-timeout 30 --prompt-timeout 120 --stream-limit-mb 2`.
+
+**Result:** timeout after 120s waiting for stdout. Stream showed tool activity
+(`[tool] list_dir`, several `grep`, `read_file`, `run_terminal_cmd`) but no final
+answer. Local work did not wait on it.
+
+**What worked:** ACP started and tool calls were visible, so permissions/path
+were usable after the user adjusted access.
+
+**Problem:** for a narrow one-file audit, Grok still failed to deliver a concise
+final response within 120s. This makes it useful only as a background sidecar
+unless the timeout is raised or the prompt is made even more constrained.
+
+**Verdict:** partial/no-result. Do not block local falsifiers on Grok ACP
+completion; use it for parallel read-only search and record timeouts.
+
 ### Session 1 — 2026-04-27 — поиск второго lower_method-вызова
 **Контекст:** Crystal V2 stage2 SEGV на `Dir.glob`. Через DBG_DIRGLOB_PARAM трассы видно, что `lower_method` вызывается ДВАЖДЫ с одним именем `Dir.glob$String_File::MatchOptions_Bool` (line 47 в `src/stdlib/dir/glob.cr` лоуэрится сначала, потом line 111 — deprecated `&block`-вариант — перезаписывает тело). Нужно найти call-сайт второго вызова.
 

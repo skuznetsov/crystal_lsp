@@ -30,6 +30,44 @@ Working policy:
 
 ## Current Checkpoint
 
+Stage2 container/arena/backend checkpoint (2026-05-01): generated `cv2_s2`
+now builds again after several root-cause fixes in the container storage and
+mixed-union ownership corridor. Fixed evidence-backed issues: `Array(Slice(UInt8))`
+registered its element from an early `Generic Slice(UInt8)` alias instead of
+the later concrete `Struct Slice(UInt8)` descriptor; broad inline struct-array
+storage corrupted pointer-shaped frontend structs such as `Array(Parameter)`;
+mixed unions like `Array(Parameter) | ExprId` failed to transfer ownership of
+reference payload variants, so parser-returned arrays could be `rc_dec`'d while
+stored in the union; function-name suffix rewriting sent literal `$arity...`
+through `String#sub` regex replacement; V2 heap `Slice(UInt8)` validation only
+probed the first bytes before `String.new(slice)`; module arena validation used
+the recursion depth cap as a hard mismatch and could trigger repeated source
+reparse repair for deeply nested namespace modules; GEP dynamic index conversion
+could emit self-referential SSA names in no-prelude interpolation. Evidence:
+`crystal build src/crystal_v2.cr -o /tmp/cv2_gep_selfref_candidate
+--error-trace`; `regression_tests/p2_array_struct_unsafe_fetch_return_no_prelude.sh
+/tmp/cv2_gep_selfref_candidate`; `regression_tests/p2_pending_budget_no_prelude.sh
+/tmp/cv2_gep_selfref_candidate`; `scripts/run_safe.sh
+/tmp/cv2_gep_selfref_candidate 30 1024
+regression_tests/combined/test_no_prelude_interpolation.cr --no-prelude -o
+/tmp/cv2_gep_selfref_interp_bin`; `scripts/run_safe.sh
+/tmp/cv2_gep_selfref_candidate 120 4096
+regression_tests/complex/test_array_map_select_chain.cr -o
+/tmp/cv2_gep_selfref_plain_smoke`; and
+`BOOTSTRAP_STAGE_OUT=/tmp/cv2_bs_s2_gep_name BOOTSTRAP_CHAIN_STAGES=2
+BOOTSTRAP_TIMEOUT_SEC=300 BOOTSTRAP_MEM_MB=4096
+scripts/build_bootstrap_stages.sh --stages 2 --out /tmp/cv2_bs_s2_gep_name`,
+which builds generated `cv2_s2` in ~218s but still fails both smoke tests.
+Boundaries: `s2` plain smoke still segfaults during nested module registration;
+the latest lldb trace showed a stack-overflow-shaped `with_reparsed_module_from_current_source
+-> register_nested_module` recursion through `parse_type_annotation`.
+`s2` no-prelude interpolation still needs rechecking on a newly generated `s2`
+after the self-reference guard; prior generated `s2` showed
+`%r8.idx64_ext = sext i32 %r8.idx64_ext to i64`. Stochastic stage2 build OOBs
+with ASCII-like ExprId payloads (`[S2_`, `shad`) were observed in wrapper runs
+but not reproduced under direct `run_safe` with `DEBUG_EXPR_OOB=1`; treat them
+as suspected memory corruption, not verified root cause yet.
+
 Stage2 source-backed extern registration checkpoint (2026-04-30): generated
 `cv2_s2` now advances past the LibC registration abort stubs for
 `extract_alias_name_value_from_source`, `register_extern_fun_from_source`, and

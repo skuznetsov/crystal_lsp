@@ -11147,14 +11147,11 @@ module Crystal::HIR
       ptr = slice.to_unsafe
       addr = ptr.address
       return false if addr == 0_u64 || addr < 4096_u64 || addr > 0x0000_7FFF_FFFF_FFFF_u64
-      if sizeof(Slice(UInt8)) <= 8
-        return false unless trust || readable_address?(addr)
-      end
       sz = slice.size
       return false if sz < 0 || sz > 10_000_000
       if sizeof(Slice(UInt8)) <= 8
         return false unless trust || readable_address?(raw)
-        return false unless trust || readable_address?(addr)
+        return false unless trust || readable_range?(addr, sz.to_u64)
       end
       true
     end
@@ -11177,6 +11174,29 @@ module Crystal::HIR
         return kr == 0
       {% else %}
         return true # assume readable on non-Darwin
+      {% end %}
+    end
+
+    @[AlwaysInline]
+    private def readable_range?(addr : UInt64, bytes : UInt64) : Bool
+      return false if addr == 0_u64 || addr < 4096_u64 || addr > 0x0000_7FFF_FFFF_FFFF_u64
+      return true if bytes == 0_u64
+      last = addr &+ bytes &- 1_u64
+      return false if last < addr || last > 0x0000_7FFF_FFFF_FFFF_u64
+      return false unless readable_address?(addr)
+      {% if flag?(:darwin) %}
+        buf = uninitialized UInt8[1]
+        outsize = 0_u64
+        kr = LibMachVM.mach_vm_read_overwrite(
+          LibMachVM.mach_task_self,
+          last,
+          1_u64,
+          buf.to_unsafe.address.to_u64,
+          pointerof(outsize)
+        )
+        return kr == 0 && outsize == 1_u64
+      {% else %}
+        true
       {% end %}
     end
 
@@ -11283,6 +11303,9 @@ module Crystal::HIR
         return nil if addr < 0x1_0000_0000_u64
       end
       return "" if sz == 0
+      if sizeof(Slice(UInt8)) <= 8
+        return nil unless trust_slice_addr || readable_range?(addr, sz.to_u64)
+      end
       String.new(slice)
     end
 
@@ -12152,7 +12175,10 @@ module Crystal::HIR
       node : CrystalV2::Compiler::Frontend::ModuleNode,
       depth : Int32 = 0,
     ) : Bool
-      return false if depth > 8
+      # The depth cap bounds arena validation work. Hitting it should stop
+      # descending, not force source reparse repair; otherwise deeply nested
+      # namespace modules repeatedly reparse the same valid subtree.
+      return true if depth > 8
       return false unless arena_fits_body_ids?(arena, node.body, node.span)
       module_body_nodes_match_arena?(arena, node, depth)
     end
@@ -12884,7 +12910,7 @@ module Crystal::HIR
       node : CrystalV2::Compiler::Frontend::ModuleNode,
       depth : Int32 = 0,
     ) : Bool
-      return false if depth > 8
+      return true if depth > 8
       body = node.body
       return true if body.nil?
       sz = body.size
@@ -12970,7 +12996,7 @@ module Crystal::HIR
       owner_span : CrystalV2::Compiler::Frontend::Span,
       depth : Int32 = 0,
     ) : Bool
-      return false if depth > 8
+      return true if depth > 8
       return true if expr_id.null_ptr? || expr_id.invalid?
       return false unless expr_id_matches_arena?(arena, expr_id)
 
@@ -13038,7 +13064,7 @@ module Crystal::HIR
       owner_span : CrystalV2::Compiler::Frontend::Span,
       depth : Int32 = 0,
     ) : Bool
-      return false if depth > 8
+      return true if depth > 8
       case member
       when CrystalV2::Compiler::Frontend::ModuleNode
         arena_fits_module_node?(arena, member, depth + 1)
@@ -30318,11 +30344,11 @@ module Crystal::HIR
       # other overload that only shares the typed prefix.
       if has_untyped && param_count > typed_param_count && full_name != base_name
         if full_name.ends_with?("_double_splat")
-          full_name = full_name.sub(/_double_splat$/, "$arity#{param_count}_double_splat")
+          full_name = replace_function_name_suffix(full_name, "_double_splat", "$arity#{param_count}_double_splat")
         elsif full_name.ends_with?("_splat")
-          full_name = full_name.sub(/_splat$/, "$arity#{param_count}_splat")
+          full_name = replace_function_name_suffix(full_name, "_splat", "$arity#{param_count}_splat")
         elsif full_name.ends_with?("_block")
-          full_name = full_name.sub(/_block$/, "$arity#{param_count}_block")
+          full_name = replace_function_name_suffix(full_name, "_block", "$arity#{param_count}_block")
         else
           full_name = "#{full_name}$arity#{param_count}"
         end
@@ -30359,6 +30385,13 @@ module Crystal::HIR
       end
 
       full_name
+    end
+
+    private def replace_function_name_suffix(name : String, suffix : String, replacement : String) : String
+      prefix_size = name.bytesize - suffix.bytesize
+      return name if prefix_size < 0 || !name.ends_with?(suffix)
+
+      name.byte_slice(0, prefix_size) + replacement
     end
 
     private def canonical_function_name_for_def(

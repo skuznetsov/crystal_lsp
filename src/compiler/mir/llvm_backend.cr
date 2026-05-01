@@ -2058,6 +2058,7 @@ module Crystal::MIR
     @func_by_id : Hash(FunctionId, Function)  # Fast lookup by function id for Call lowering/prepass
     @alloc_element_types : Hash(ValueId, TypeRef)  # For GEP element type lookup
     @array_info : Hash(ValueId, {String, Int32})  # Array element_type and size
+    @array_element_type_refs : Hash(ValueId, TypeRef) # Refined Array(T) storage element type per array SSA value
     @string_constants : Hash(String, String)  # String value -> global name
     @string_constant_values : Array(String) = [] of String
     @string_constant_names : Array(String) = [] of String
@@ -2441,6 +2442,7 @@ module Crystal::MIR
       @value_types = {} of ValueId => TypeRef
       @alloc_element_types = {} of ValueId => TypeRef
       @array_info = {} of ValueId => {String, Int32}
+      @array_element_type_refs = {} of ValueId => TypeRef
       @string_constants = {} of String => String
       @string_constant_values = [] of String
       @string_constant_names = [] of String
@@ -2651,8 +2653,25 @@ module Crystal::MIR
         return elem_type.size
       end
 
-      # Classes/structs/non-inline values are represented as pointers in containers.
+      # Only structs with an implemented container-value ABI are stored inline.
+      # Most V2 structs are still heap-pointer values; treating every Struct as
+      # inline corrupts arrays such as Array(Parameter).
+      if inline_container_struct_type?(elem_type)
+        return elem_type.size
+      end
+
+      # Classes/non-inline values are represented as pointers in containers.
       pointer_word_bytes_u64
+    end
+
+    private def inline_container_struct_type?(elem_type : Type?) : Bool
+      return false unless elem_type
+      return false unless elem_type.kind.struct? && elem_type.size > 0
+
+      name = elem_type.name
+      name.starts_with?("Slice(") ||
+        name.starts_with?("StaticArray(") ||
+        name.starts_with?("Hash::Entry(")
     end
 
     private def llvm_store_size_bytes(llvm_type : String) : Int32
@@ -7221,7 +7240,9 @@ module Crystal::MIR
       emit_raw "}\n\n"
 
       # Hash entry access helpers for Hash#each/keys intrinsics.
-      # Hash layout: offset 8=@entries(ptr) where entries stores Entry pointers.
+      # Hash layout: offset 8=@entries(ptr). Entries are stored inline in the
+      # buffer, so the helper returns the address of the entry slot rather than
+      # loading an Entry* pointer.
       # hash_offset is provided by HIR from Hash::Entry(K,V) ClassInfo.
       emit_raw "define ptr @__crystal_v2_hash_get_entry_ptr(ptr %hash, i32 %index, i32 %entry_size) {\n"
       emit_raw "  %entries_addr = getelementptr i8, ptr %hash, i32 8\n"
@@ -7232,8 +7253,9 @@ module Crystal::MIR
       emit_raw "  ret ptr null\n"
       emit_raw "compute:\n"
       emit_raw "  %idx64 = sext i32 %index to i64\n"
-      emit_raw "  %entry_addr = getelementptr ptr, ptr %entries, i64 %idx64\n"
-      emit_raw "  %entry = load ptr, ptr %entry_addr\n"
+      emit_raw "  %entry_size64 = sext i32 %entry_size to i64\n"
+      emit_raw "  %entry_off = mul i64 %idx64, %entry_size64\n"
+      emit_raw "  %entry = getelementptr i8, ptr %entries, i64 %entry_off\n"
       emit_raw "  ret ptr %entry\n"
       emit_raw "}\n\n"
 
@@ -10481,10 +10503,12 @@ module Crystal::MIR
         return true
       end
 
-      # Hash::Entry#deleted? — pointer-slot-safe semantics.
-      # In our current ABI Hash entry slots can be zeroed pointers after clear/delete.
-      # Treat null entry pointer as deleted and otherwise read @hash by computed offset.
+      # Historical Hash::Entry overrides below assumed Hash entry buffers stored
+      # Entry* pointer slots. The current Pointer(T)/Array(T) ABI stores Crystal
+      # structs inline, so regular lowering must own the Entry layout.
       if mangled.includes?("Hash$CCEntry$L") && mangled.ends_with?("$Hdeleted$Q")
+        return false
+
         entry_prefix = mangled.sub("$Hdeleted$Q", "")
         inner = entry_prefix.sub("Hash$CCEntry$L", "")
         inner = inner.ends_with?("$R") ? inner[0...-2] : inner
@@ -10638,11 +10662,11 @@ module Crystal::MIR
         return true
       end
 
-      # Hash#get_entry — null-safe pointer-slot stride for heap-allocated Entry*.
-      # Unmatched null slots used to reach entry_matches? and fault on entry+0x10.
-      # MIR often lowers the Int32 index as ptr (inttoptr) and mangles the method as
-      # $$arity1 or plain $Hget_entry, so the old $$Int32-only hook never fired.
+      # Hash#get_entry — legacy pointer-slot override. Disabled for the inline
+      # struct-buffer ABI; regular PointerLoad now computes the Entry slot address.
       if mangled.starts_with?("Hash$") && mangled.includes?("$Hget_entry") && !mangled.includes?("$Hget_entry$$Pointer")
+        return false
+
         emit_raw "; #{mangled} — null-safe get_entry with pointer-slot stride\n"
         if mangled.includes?("$Hget_entry$$Int32")
           emit_raw "define ptr @#{mangled}(ptr %self, i32 %index) {\n"
@@ -10676,11 +10700,11 @@ module Crystal::MIR
         return true
       end
 
-      # Hash#get_entry(pointer-index) — pointer-index decoding.
-      # In current Hash paths, nil reaches this overload as `ptr null` and
-      # represents index 0 (ptrtoint null == 0). Returning null here breaks
-      # compaction/linear-scan logic that intentionally probes entry 0.
+      # Hash#get_entry(pointer-index) — legacy pointer-slot override. Disabled
+      # with the rest of the Hash entry layout hooks.
       if mangled.includes?("$Hget_entry$$Pointer") && mangled.includes?("Hash$L")
+        return false
+
         emit_raw "; #{mangled} — pointer-index get_entry override\n"
         emit_raw "define ptr @#{mangled}(ptr %self, ptr %index) {\n"
         emit_raw "entry:\n"
@@ -10720,11 +10744,11 @@ module Crystal::MIR
         return true
       end
 
-      # Hash#set_entry(nilable_index, Entry) where index flows as ptr-encoded Int.
-      # In compaction paths nilable index values can reach this overload encoded as
-      # ptr (null => 0). The default lowered body may collapse index to slot 0.
-      # Decode ptr index explicitly and write to the corresponding entry slot.
+      # Hash#set_entry(nilable_index, Entry) — legacy pointer-slot override.
+      # Regular lowering must perform the inline Entry copy.
       if mangled.includes?("$Hset_entry$$Nil_Hash$CCEntry$L") && mangled.includes?("Hash$L")
+        return false
+
         emit_raw "; #{mangled} — pointer-index set_entry override\n"
         emit_raw "define void @#{mangled}(ptr %self, ptr %index, ptr %value) {\n"
         emit_raw "entry:\n"
@@ -14452,6 +14476,7 @@ module Crystal::MIR
       @value_types.clear
       @void_values.clear
       @array_info.clear
+      @array_element_type_refs.clear
       @alloc_types.clear
       @alloc_element_types.clear
       @inttoptr_value_ids.clear
@@ -16556,7 +16581,15 @@ module Crystal::MIR
             if val == "null"
               emit "call void @llvm.memset.p0.i64(ptr #{ptr}, i8 0, i64 #{aggregate_size}, i1 false)"
             else
-              emit "call void @llvm.memcpy.p0.p0.i64(ptr #{ptr}, ptr #{val}, i64 #{aggregate_size}, i1 false)"
+              source_ptr = val
+              source_type = @emitted_value_types[val]? || actual_val_type || val_type_str
+              if source_type != "ptr"
+                tmp = "%r#{inst.id}.aggregate_store_src"
+                emit "#{tmp} = alloca #{source_type}, align 8"
+                emit "store #{source_type} #{normalize_union_value(val, source_type)}, ptr #{tmp}"
+                source_ptr = tmp
+              end
+              emit "call void @llvm.memcpy.p0.p0.i64(ptr #{ptr}, ptr #{source_ptr}, i64 #{aggregate_size}, i1 false)"
             end
             return
           end
@@ -16642,6 +16675,18 @@ module Crystal::MIR
       # fields. The allocation is already zeroed by malloc.
       if src == "null" || src == "0"
         return
+      end
+      src_type = @emitted_value_types[src]?
+      unless src_type
+        if src_ref = @value_types[inst.src]?
+          src_type = @type_mapper.llvm_type(src_ref)
+        end
+      end
+      if src_type && src_type != "ptr" && src.starts_with?('%')
+        tmp = "%r#{inst.id}.memcopy_src"
+        emit "#{tmp} = alloca #{src_type}, align 8"
+        emit "store #{src_type} #{normalize_union_value(src, src_type)}, ptr #{tmp}"
+        src = tmp
       end
       emit "call void @llvm.memcpy.p0.p0.i64(ptr #{dst}, ptr #{src}, i64 #{inst.size}, i1 false)"
     end
@@ -16760,7 +16805,8 @@ module Crystal::MIR
       # NOT the tuple's inline byte size. Force struct_elem_size = 0 (which yields
       # `getelementptr ptr, ptr base, i64 idx`) for tuple element types, even if HIR
       # set element_byte_size to the inline size (e.g. 12 for Tuple(Int32,Int32,Int32)).
-      # Structs follow the same rule (heap-allocated, ptr-sized in array buffers).
+      # Crystal structs do NOT follow the tuple rule: Pointer(T)/Array(T)
+      # buffers store their bytes inline, and loads return the element address.
       struct_elem_size = inst.element_byte_size  # Explicit size from HIR (for generic structs)
       if element_type == "ptr" && inst.element_type.id > TypeRef::POINTER.id
         if mir_type = @module.type_registry.get(inst.element_type)
@@ -16849,29 +16895,32 @@ module Crystal::MIR
       if index_type_str == "i64"
         # Already i64
       elsif index_type_str == "ptr"
-        ext_name = "#{name}.idx64"
-        emit "#{ext_name} = ptrtoint ptr #{index} to i64"
+        ext_name = "#{name}.idx64_ext"
+        index_src = index == ext_name ? "null" : index
+        emit "#{ext_name} = ptrtoint ptr #{index_src} to i64"
         idx64 = ext_name
       elsif index_type_str == "void"
         idx64 = "0"
       elsif index_type_str == "float" || index_type_str == "double"
-        ext_name = "#{name}.idx64"
-        emit "#{ext_name} = fptosi #{index_type_str} #{index} to i64"
+        ext_name = "#{name}.idx64_ext"
+        index_src = index == ext_name ? "0.0" : index
+        emit "#{ext_name} = fptosi #{index_type_str} #{index_src} to i64"
         idx64 = ext_name
       else
-        ext_name = "#{name}.idx64"
+        ext_name = "#{name}.idx64_ext"
+        index_src = index == ext_name ? "0" : index
         bits = nil.as(Int32?)
         if index_type_str.starts_with?('i')
           bits = index_type_str[1..].to_i?
         end
         if bits && bits > 64
-          emit "#{ext_name} = trunc #{index_type_str} #{index} to i64"
+          emit "#{ext_name} = trunc #{index_type_str} #{index_src} to i64"
         else
           is_unsigned = index_type == TypeRef::UINT8 || index_type == TypeRef::UINT16 ||
                         index_type == TypeRef::UINT32 || index_type == TypeRef::UINT64 ||
                         index_type == TypeRef::UINT128
           op = is_unsigned ? "zext" : "sext"
-          emit "#{ext_name} = #{op} #{index_type_str} #{index} to i64"
+          emit "#{ext_name} = #{op} #{index_type_str} #{index_src} to i64"
         end
         idx64 = ext_name
       end
@@ -22571,6 +22620,7 @@ module Crystal::MIR
               emit "store i32 #{array_type_id}, ptr %#{base_name}.tid_fix_ptr"
             end
             @array_info[inst.id] = {element_type, size}
+            @array_element_type_refs[inst.id] = inst.element_type
             return
           end
         end
@@ -22581,25 +22631,13 @@ module Crystal::MIR
       # Byte offsets: 0, 4, 8, 12, 16. Total: 24 bytes.
       # Buffer is heap-allocated so resize/push works correctly.
 
-      # Compute element size in bytes for buffer allocation
-      elem_byte_size = case element_type
-                       when "i1", "i8"  then 1
-                       when "i16"       then 2
-                       when "i32"       then 4
-                       when "i64"       then 8
-                       when "i128"      then 16
-                       when "float"     then 4
-                       when "double"    then 8
-                       when "ptr"       then 8
-                       else
-                         if element_type.includes?(".union")
-                           # Union types: {i32, [N x i8]} — get size from type definition
-                           union_type_info = @module.type_registry.get(inst.element_type)
-                           union_type_info.try(&.size) || 16
-                         else
-                           8 # default to pointer size
-                         end
-                       end
+      elem_mir_for_storage = @module.type_registry.get(inst.element_type)
+      # Keep array literal allocation in lock-step with Array#get/set, PointerStore,
+      # and realloc. Struct element types still lower as opaque ptr values, but
+      # Array(T) buffers store their bytes inline.
+      elem_byte_size = container_elem_storage_size_u64(elem_mir_for_storage)
+      inline_struct_element = inline_container_struct_type?(elem_mir_for_storage)
+      inline_union_element = elem_mir_for_storage && elem_mir_for_storage.kind.union? && elem_mir_for_storage.size > pointer_word_bytes_u64
 
       capacity = size < 4 ? 4 : size  # minimum capacity like Crystal's Array
 
@@ -22654,10 +22692,19 @@ module Crystal::MIR
         original_element_type = "ptr" if original_element_type == "void"
       end
       inst.elements.each_with_index do |elem_id, idx|
-        emit "%#{base_name}.elem#{idx}_ptr = getelementptr #{element_type}, ptr %#{base_name}.buf, i32 #{idx}"
+        if inline_struct_element || inline_union_element
+          byte_offset = idx.to_u64 * elem_byte_size
+          emit "%#{base_name}.elem#{idx}_ptr = getelementptr i8, ptr %#{base_name}.buf, i64 #{byte_offset}"
+        else
+          emit "%#{base_name}.elem#{idx}_ptr = getelementptr #{element_type}, ptr %#{base_name}.buf, i32 #{idx}"
+        end
         # If original element was void, store null; otherwise store actual value
         if original_element_type == "void"
-          emit "store ptr null, ptr %#{base_name}.elem#{idx}_ptr"
+          if inline_struct_element || inline_union_element
+            emit "call void @llvm.memset.p0.i64(ptr %#{base_name}.elem#{idx}_ptr, i8 0, i64 #{elem_byte_size}, i1 false)"
+          else
+            emit "store ptr null, ptr %#{base_name}.elem#{idx}_ptr"
+          end
         else
           elem_val = value_ref(elem_id)
           # Check actual element value type and convert if needed
@@ -22715,7 +22762,28 @@ module Crystal::MIR
           if element_type == "ptr" && elem_val == "0"
             elem_val = "null"
           end
-          emit "store #{element_type} #{elem_val}, ptr %#{base_name}.elem#{idx}_ptr"
+          if inline_struct_element
+            if elem_val == "null" || elem_val == "0"
+              emit "call void @llvm.memset.p0.i64(ptr %#{base_name}.elem#{idx}_ptr, i8 0, i64 #{elem_byte_size}, i1 false)"
+            else
+              source_ptr = elem_val
+              source_type = actual_elem_type_str || element_type
+              if source_type != "ptr"
+                emit "%#{base_name}.elem#{idx}_src = alloca #{source_type}, align 8"
+                emit "store #{source_type} #{normalize_union_value(elem_val, source_type)}, ptr %#{base_name}.elem#{idx}_src"
+                source_ptr = "%#{base_name}.elem#{idx}_src"
+              end
+              emit "call void @llvm.memcpy.p0.p0.i64(ptr %#{base_name}.elem#{idx}_ptr, ptr #{source_ptr}, i64 #{elem_byte_size}, i1 false)"
+            end
+          elsif inline_union_element
+            if elem_val == "null" || elem_val == "0"
+              emit "call void @llvm.memset.p0.i64(ptr %#{base_name}.elem#{idx}_ptr, i8 0, i64 #{elem_byte_size}, i1 false)"
+            else
+              emit "store #{element_type} #{normalize_union_value(elem_val, element_type)}, ptr %#{base_name}.elem#{idx}_ptr"
+            end
+          else
+            emit "store #{element_type} #{elem_val}, ptr %#{base_name}.elem#{idx}_ptr"
+          end
         end
       end
 
@@ -22724,6 +22792,7 @@ module Crystal::MIR
 
       # Remember array info for later use
       @array_info[inst.id] = {element_type, size}
+      @array_element_type_refs[inst.id] = inst.element_type
     end
 
     private def emit_array_size(inst : ArraySize, name : String)
@@ -22884,6 +22953,7 @@ module Crystal::MIR
 
       # Register as array for IndexGet/IndexSet/ArraySize
       @array_info[inst.id] = {element_type, 0}
+      @array_element_type_refs[inst.id] = inst.element_type_ref
     end
 
     private def emit_array_get(inst : ArrayGet, name : String)
@@ -23294,6 +23364,8 @@ module Crystal::MIR
         normalized_index = "%#{base_name}.idx_final"
       end
 
+      effective_element_type_ref = inst.element_type
+
       if is_static_array
         # StaticArray stores elements inline at offset 0
         emit "%#{base_name}.elem_ptr = getelementptr #{element_type}, ptr #{array_ptr}, i32 #{index}"
@@ -23308,20 +23380,45 @@ module Crystal::MIR
         # the buffer is sized and written at that stride; reads must match or we'd
         # read across slot boundaries (Array(Globber-Union) returned garbage at i≥1).
         elem_mir_for_stride = @module.type_registry.get(inst.element_type)
+        if ct = inst.container_type
+          if container_mir = @module.type_registry.get(ct)
+            if container_elem = container_mir.element_type
+              elem_mir_for_stride = container_elem
+              effective_element_type_ref = TypeRef.new(container_elem.id)
+            end
+          end
+        end
+        if refined_elem_ref = @array_element_type_refs[inst.array_value]?
+          if effective_element_type_ref == TypeRef::POINTER && refined_elem_ref != TypeRef::POINTER
+            effective_element_type_ref = refined_elem_ref
+            elem_mir_for_stride = @module.type_registry.get(refined_elem_ref)
+            element_type = @type_mapper.llvm_type(refined_elem_ref)
+            element_type = "ptr" if element_type == "void"
+          end
+        end
         if elem_mir_for_stride && elem_mir_for_stride.kind.union? && elem_mir_for_stride.size > pointer_word_bytes_u64
           stride = elem_mir_for_stride.size
           emit "%#{base_name}.idx_i64 = sext i32 #{normalized_index} to i64"
           emit "%#{base_name}.byte_off = mul i64 %#{base_name}.idx_i64, #{stride}"
           emit "%#{base_name}.elem_ptr = getelementptr i8, ptr %#{base_name}.buf, i64 %#{base_name}.byte_off"
+        elsif (stride_type = elem_mir_for_stride) && inline_container_struct_type?(stride_type)
+          stride = stride_type.size
+          emit "%#{base_name}.idx_i64 = sext i32 #{normalized_index} to i64"
+          emit "%#{base_name}.byte_off = mul i64 %#{base_name}.idx_i64, #{stride}"
+          emit "#{name} = getelementptr i8, ptr %#{base_name}.buf, i64 %#{base_name}.byte_off"
+          @value_types[inst.id] = effective_element_type_ref
+          record_emitted_type(name, "ptr")
+          return
         else
           emit "%#{base_name}.elem_ptr = getelementptr #{element_type}, ptr %#{base_name}.buf, i32 #{normalized_index}"
         end
         emit "#{name} = load #{element_type}, ptr %#{base_name}.elem_ptr"
+        record_emitted_type(name, element_type)
       end
 
       # Update @value_types with actual emitted LLVM type (may differ from MIR type)
       # This is critical for phi nodes that reference this value
-      @value_types[inst.id] = inst.element_type
+      @value_types[inst.id] = effective_element_type_ref
     end
 
     private def emit_array_set(inst : ArraySet, name : String)
@@ -23556,11 +23653,37 @@ module Crystal::MIR
         # See emit_array_get for the rationale: inline-stored unions need byte-stride
         # GEP (=MIR size) so writes land at the same offsets the buffer was sized for.
         elem_mir_for_stride = @module.type_registry.get(inst.element_type)
+        if ct = inst.container_type
+          if container_mir = @module.type_registry.get(ct)
+            if container_elem = container_mir.element_type
+              elem_mir_for_stride = container_elem
+            end
+          end
+        end
+        if current_ref = @array_element_type_refs[inst.array_value]?
+          if current_ref == TypeRef::POINTER && inst.element_type != TypeRef::POINTER
+            @array_element_type_refs[inst.array_value] = inst.element_type
+            elem_mir_for_stride = @module.type_registry.get(inst.element_type)
+          end
+        else
+          @array_element_type_refs[inst.array_value] = inst.element_type
+        end
         if elem_mir_for_stride && elem_mir_for_stride.kind.union? && elem_mir_for_stride.size > pointer_word_bytes_u64
           stride = elem_mir_for_stride.size
           emit "%#{base_name}.idx_i64 = sext i32 #{normalized_index} to i64"
           emit "%#{base_name}.byte_off = mul i64 %#{base_name}.idx_i64, #{stride}"
           emit "%#{base_name}.elem_ptr = getelementptr i8, ptr %#{base_name}.buf, i64 %#{base_name}.byte_off"
+        elsif (stride_type = elem_mir_for_stride) && inline_container_struct_type?(stride_type)
+          stride = stride_type.size
+          emit "%#{base_name}.idx_i64 = sext i32 #{normalized_index} to i64"
+          emit "%#{base_name}.byte_off = mul i64 %#{base_name}.idx_i64, #{stride}"
+          emit "%#{base_name}.elem_ptr = getelementptr i8, ptr %#{base_name}.buf, i64 %#{base_name}.byte_off"
+          if value == "null"
+            emit "call void @llvm.memset.p0.i64(ptr %#{base_name}.elem_ptr, i8 0, i64 #{stride}, i1 false)"
+          else
+            emit "call void @llvm.memcpy.p0.p0.i64(ptr %#{base_name}.elem_ptr, ptr #{value}, i64 #{stride}, i1 false)"
+          end
+          return
         else
           emit "%#{base_name}.elem_ptr = getelementptr #{element_type}, ptr %#{base_name}.buf, i32 #{normalized_index}"
         end

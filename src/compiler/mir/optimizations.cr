@@ -1516,13 +1516,13 @@ module Crystal::MIR
         array_val = resolve(inst.array_value, replacements, block_id, inst_index, def_blocks, def_index, dominance_info)
         index_val = resolve(inst.index_value, replacements, block_id, inst_index, def_blocks, def_index, dominance_info)
         return inst if array_val == inst.array_value && index_val == inst.index_value
-        ArrayGet.new(inst.id, inst.element_type, array_val, index_val)
+        ArrayGet.new(inst.id, inst.element_type, array_val, index_val, inst.container_type)
       when ArraySet
         array_val = resolve(inst.array_value, replacements, block_id, inst_index, def_blocks, def_index, dominance_info)
         index_val = resolve(inst.index_value, replacements, block_id, inst_index, def_blocks, def_index, dominance_info)
         value_id = resolve(inst.value_id, replacements, block_id, inst_index, def_blocks, def_index, dominance_info)
         return inst if array_val == inst.array_value && index_val == inst.index_value && value_id == inst.value_id
-        ArraySet.new(inst.id, inst.element_type, array_val, index_val, value_id)
+        ArraySet.new(inst.id, inst.element_type, array_val, index_val, value_id, inst.container_type)
       when ArraySetSize
         array_val = resolve(inst.array_value, replacements, block_id, inst_index, def_blocks, def_index, dominance_info)
         size_val = resolve(inst.size_value, replacements, block_id, inst_index, def_blocks, def_index, dominance_info)

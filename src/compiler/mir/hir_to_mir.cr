@@ -733,7 +733,7 @@ module Crystal
               STDERR.puts "[CONTAINER_REG] kind=#{desc.kind} name=#{desc.name} hir=#{hir_ref.id} mir=#{mir_ref.id} existing=#{existing} params=#{desc.type_params.map(&.id).join(",")}"
             end
 
-            size, align = container_layout_for_descriptor(desc)
+            size, align = container_layout_for_descriptor(desc, type_descriptors)
 
             mir_type = if existing_mir_type
                          existing_mir_type.kind = mir_kind
@@ -752,16 +752,19 @@ module Crystal
                        end
 
             if elem_hir_ref = desc.type_params.first?
-              elem_mir_ref = convert_type(elem_hir_ref)
+              elem_storage_hir_ref = storage_hir_type_ref(elem_hir_ref, type_descriptors)
+              elem_mir_ref = convert_type(elem_storage_hir_ref)
               elem_type = @mir_module.type_registry.get(elem_mir_ref) || @mir_module.type_registry.get(TypeRef::POINTER)
               mir_type.set_element_type(elem_type) if elem_type
               if ENV["DEBUG_CONTAINER_REGISTER"]? && desc.name.includes?("Array(")
-                STDERR.puts "[CONTAINER_REG] element name=#{desc.name} elem_hir=#{elem_hir_ref.id} elem_mir=#{elem_mir_ref.id} elem_type=#{elem_type.try(&.name) || "nil"}"
+                STDERR.puts "[CONTAINER_REG] element name=#{desc.name} elem_hir=#{elem_hir_ref.id} storage_hir=#{elem_storage_hir_ref.id} elem_mir=#{elem_mir_ref.id} elem_type=#{elem_type.try(&.name) || "nil"}"
               end
             end
           end
           idx += 1
         end
+
+        refresh_container_element_types(type_descriptors)
       end
 
       private def canonical_container_kind_for_descriptor(desc : Crystal::HIR::TypeDescriptor) : TypeKind?
@@ -843,6 +846,61 @@ module Crystal
           end
           idx += 1
         end
+
+        refresh_container_element_types(type_descriptors)
+      end
+
+      private def refresh_container_element_types(type_descriptors : ::Array(Crystal::HIR::TypeDescriptor)) : Nil
+        idx = 0
+        while idx < type_descriptors.size
+          desc = type_descriptors.unsafe_fetch(idx)
+          if canonical_container_kind_for_descriptor(desc)
+            if elem_hir_ref = desc.type_params.first?
+              hir_ref = Crystal::HIR::TypeRef.new(Crystal::HIR::TypeRef::FIRST_USER_TYPE + idx.to_u32)
+              mir_type = @mir_module.type_registry.get(convert_type(hir_ref))
+              if mir_type
+                elem_storage_hir_ref = storage_hir_type_ref(elem_hir_ref, type_descriptors)
+                elem_type = @mir_module.type_registry.get(convert_type(elem_storage_hir_ref))
+                if elem_type
+                  old_elem = mir_type.element_type
+                  if old_elem.nil? || old_elem.not_nil!.id != elem_type.id
+                    mir_type.set_element_type(elem_type)
+                    if ENV["DEBUG_CONTAINER_REGISTER"]? && desc.name.includes?("Array(")
+                      STDERR.puts "[CONTAINER_REG] refresh element name=#{desc.name} old=#{old_elem.try(&.name) || "nil"} new=#{elem_type.name}"
+                    end
+                  end
+                end
+              end
+            end
+          end
+          idx += 1
+        end
+      end
+
+      # Some HIR descriptors keep an early Generic(T) alias and later add the
+      # concrete storage descriptor with the same name (for example
+      # Generic Slice(UInt8) followed by Struct Slice(UInt8)). Array/Pointer
+      # storage must use the concrete descriptor when it exists; otherwise MIR
+      # falls back to pointer-sized slots for inline structs.
+      private def storage_hir_type_ref(type_ref : Crystal::HIR::TypeRef, type_descriptors : ::Array(Crystal::HIR::TypeDescriptor)) : Crystal::HIR::TypeRef
+        return type_ref if type_ref.id < Crystal::HIR::TypeRef::FIRST_USER_TYPE
+
+        idx = (type_ref.id - Crystal::HIR::TypeRef::FIRST_USER_TYPE).to_i32
+        return type_ref if idx < 0 || idx >= type_descriptors.size
+
+        desc = type_descriptors.unsafe_fetch(idx)
+        return type_ref unless desc.kind == Crystal::HIR::TypeKind::Generic
+
+        concrete_idx = 0
+        while concrete_idx < type_descriptors.size
+          candidate = type_descriptors.unsafe_fetch(concrete_idx)
+          if candidate.name == desc.name && candidate.kind != Crystal::HIR::TypeKind::Generic
+            return Crystal::HIR::TypeRef.new(Crystal::HIR::TypeRef::FIRST_USER_TYPE + concrete_idx.to_u32)
+          end
+          concrete_idx += 1
+        end
+
+        type_ref
       end
 
       private def align_u64(value : UInt64, align : UInt32) : UInt64
@@ -851,13 +909,13 @@ module Crystal
         ((value + a - 1) // a) * a
       end
 
-      private def container_layout_for_descriptor(desc : Crystal::HIR::TypeDescriptor) : {UInt64, UInt32}
+      private def container_layout_for_descriptor(desc : Crystal::HIR::TypeDescriptor, type_descriptors : ::Array(Crystal::HIR::TypeDescriptor)) : {UInt64, UInt32}
         case desc.kind
         when Crystal::HIR::TypeKind::Pointer
           {pointer_word_bytes_u64, pointer_word_align_u32}
         when Crystal::HIR::TypeKind::Array
           if desc.name.starts_with?("StaticArray(")
-            elem_type = desc.type_params.first?.try { |ref| @mir_module.type_registry.get(convert_type(ref)) }
+            elem_type = desc.type_params.first?.try { |ref| @mir_module.type_registry.get(convert_type(storage_hir_type_ref(ref, type_descriptors))) }
             elem_size = container_elem_storage_size_u64(elem_type)
             elem_align = container_elem_alignment_u32(elem_type)
             count = static_array_count_from_name(desc.name)
@@ -1167,8 +1225,25 @@ module Crystal
           return elem_type.size
         end
 
-        # Classes/structs/non-inline values are represented as pointers in containers.
+        # Only structs with an implemented container-value ABI are stored inline.
+        # Most V2 structs are still represented as heap pointers; treating all
+        # Struct types as inline corrupts arrays such as Array(Parameter).
+        if inline_container_struct_type?(elem_type)
+          return elem_type.size
+        end
+
+        # Classes/non-inline values are represented as pointers in containers.
         pointer_word_bytes_u64
+      end
+
+      private def inline_container_struct_type?(elem_type : Type?) : Bool
+        return false unless elem_type
+        return false unless elem_type.kind.struct? && elem_type.size > 0
+
+        name = elem_type.name
+        name.starts_with?("Slice(") ||
+          name.starts_with?("StaticArray(") ||
+          name.starts_with?("Hash::Entry(")
       end
 
       private def container_elem_alignment_u32(elem_type : Type?) : UInt32
@@ -2980,6 +3055,13 @@ module Crystal
         desc.name.starts_with?("StaticArray(")
       end
 
+      private def hir_type_is_array_container?(type : HIR::TypeRef) : Bool
+        return false if type.id < HIR::TypeRef::FIRST_USER_TYPE
+        desc = @hir_module.get_type_descriptor(type)
+        return false unless desc
+        desc.name.starts_with?("Array(") || desc.name.starts_with?("StaticArray(")
+      end
+
       private def hir_type_is_lib_struct?(type : HIR::TypeRef) : Bool
         return false if type.id < HIR::TypeRef::FIRST_USER_TYPE
         desc = @hir_module.get_type_descriptor(type)
@@ -3014,6 +3096,19 @@ module Crystal
           return mir_type.size.to_i32 if mir_type.size > 0
         end
         0
+      end
+
+      private def hir_type_is_inline_container_struct?(type : HIR::TypeRef?) : Bool
+        return false unless type
+        desc = @hir_module.get_type_descriptor(type)
+        return false unless desc
+        # Do not include Tuple/NamedTuple here. V2 currently stores tuple values as
+        # heap pointers in Pointer(Tuple)/Array(Tuple) slots, and emit_gep_dynamic
+        # has an explicit tuple pointer-slot guard for that ABI.
+        return false unless desc.kind == HIR::TypeKind::Struct
+        return false if hir_type_is_lib_struct?(type)
+        mir_ref = convert_type(type)
+        inline_container_struct_type?(@mir_module.type_registry.get(mir_ref))
       end
 
       # Resolve MIR element type for HIR Pointer(T).
@@ -3062,10 +3157,12 @@ module Crystal
           element_type = MIR::TypeRef::INT32
         end
 
-        # Detect StaticArray container so LLVM backend uses inline element access
+        # Preserve the container type so LLVM can recover the real storage
+        # element. HIR values for structs are often typed as opaque Pointer, but
+        # Array(T) buffers still store T inline.
         container_type : MIR::TypeRef? = nil
         if obj_hir_type = @hir_value_types[idx.object]?
-          if hir_type_is_static_array?(obj_hir_type)
+          if hir_type_is_array_container?(obj_hir_type)
             container_type = convert_type(obj_hir_type)
           end
         end
@@ -3096,10 +3193,12 @@ module Crystal
           element_type = MIR::TypeRef::INT32
         end
 
-        # Detect StaticArray container so LLVM backend uses inline element access
+        # Preserve the container type so LLVM can recover the real storage
+        # element. HIR values for structs are often typed as opaque Pointer, but
+        # Array(T) buffers still store T inline.
         container_type : MIR::TypeRef? = nil
         if obj_hir_type = @hir_value_types[idx.object]?
-          if hir_type_is_static_array?(obj_hir_type)
+          if hir_type_is_array_container?(obj_hir_type)
             container_type = convert_type(obj_hir_type)
           end
         end
@@ -6018,13 +6117,15 @@ module Crystal
         )
         builder.emit(mir_wrap)
 
-        # OWNERSHIP TRANSFER: wrapping an owned reference into an all-ref union
-        # moves the owned value into the union carrier. Without this, block-end
-        # ARC cleanup can rc_dec a freshly allocated object before the raw-ptr
-        # union value is returned or stored (for example `Config?`).
+        # OWNERSHIP TRANSFER: wrapping an owned reference into a union variant
+        # moves the owned value into the union carrier. This is required for
+        # mixed unions too: `Array(T) | ExprId` still owns the Array payload even
+        # though the union itself is not all-reference. Without the move,
+        # block-end ARC cleanup can rc_dec a freshly allocated payload before
+        # the union is returned or stored.
         unless @hir_constant_values.includes?(wrap.value)
           if value_hir_type = @hir_value_types[wrap.value]?
-            if type_needs_rc?(convert_type(value_hir_type)) && type_needs_rc?(union_type)
+            if type_needs_rc?(convert_type(value_hir_type)) && union_variant_owns_reference_payload?(union_type, variant_type_id)
               is_last_use = (@remaining_uses[wrap.value]? || 0) <= 0
               is_owned_temp = @block_arc_temps.any? { |(hid, _)| hid == wrap.value }
               if is_last_use && is_owned_temp && !@cross_block_values.includes?(wrap.value)
@@ -6035,6 +6136,23 @@ module Crystal
         end
 
         mir_wrap.id
+      end
+
+      private def union_variant_owns_reference_payload?(union_type : TypeRef, variant_type_id : Int32) : Bool
+        return true if type_needs_rc?(union_type)
+
+        descriptor = @mir_module.get_union_descriptor(union_type)
+        return false unless descriptor
+
+        variant = descriptor.variants.find { |candidate| candidate.type_id == variant_type_id }
+        return false unless variant
+        return true if variant.type_ref == TypeRef::POINTER || variant.type_ref == TypeRef::STRING
+
+        if variant_type = @mir_module.type_registry.get(variant.type_ref)
+          runtime_pointer_like_union_variant?(variant_type)
+        else
+          false
+        end
       end
 
       private def lower_union_unwrap(unwrap : HIR::UnionUnwrap) : ValueId
@@ -6292,6 +6410,8 @@ module Crystal
         count = get_value(malloc.count)
         elem_size = if hir_type_is_lib_struct?(malloc.element_type)
                        require_lib_struct_byte_size(malloc.element_type).to_i32
+                     elsif hir_type_is_inline_container_struct?(malloc.element_type)
+                       hir_type_inline_size(malloc.element_type)
                      else
                        type_size(malloc.element_type)
                      end
@@ -6320,6 +6440,8 @@ module Crystal
           elem_hir = pointer_element_hir_type(@hir_value_types[load.pointer]?) || load.type
           elem_size = if hir_type_is_lib_struct?(elem_hir)
                         require_lib_struct_byte_size(elem_hir)
+                      elsif hir_type_is_inline_container_struct?(elem_hir)
+                        hir_type_inline_size(elem_hir).to_u64
                       else
                         container_elem_storage_size_u64(@mir_module.type_registry.get(elem_mir))
                       end
@@ -6328,9 +6450,11 @@ module Crystal
             # Same ABI as ptr.value: inline C struct at gep; opaque ptr handle, no heap slot load.
             return gep
           end
-          # Our compiler heap-allocates structs, so Pointer(Struct) buffers
-          # store heap pointers (not inline data). Always load the pointer
-          # from the buffer slot, then FieldGet dereferences it.
+          if hir_type_is_inline_container_struct?(elem_hir)
+            @inline_struct_ptrs << gep
+            return gep
+          end
+          # Small structs still use the legacy pointer-slot path.
           builder.load(gep, result_type)
         else
           # ptr.value - direct access
@@ -6340,8 +6464,11 @@ module Crystal
             # still represents struct "values" as opaque ptr handles; pass the address through.
             return ptr
           end
-          # Our compiler heap-allocates structs, so *ptr contains a heap pointer.
-          # Load it so that subsequent FieldGet can dereference it correctly.
+          if hir_type_is_inline_container_struct?(load.type)
+            @inline_struct_ptrs << load.id
+            return ptr
+          end
+          # Small structs still use the legacy pointer-slot path.
           builder.load(ptr, result_type)
         end
       end
@@ -6367,6 +6494,11 @@ module Crystal
             gep = builder.gep_dynamic(ptr, index, elem_type, sz)
             builder.memcopy(gep, val, sz)
             lib_struct_indexed_memcpy = true
+          elsif elem_hir && hir_type_is_inline_container_struct?(elem_hir)
+            sz = hir_type_inline_size(elem_hir).to_u64
+            gep = builder.gep_dynamic(ptr, index, elem_type, sz)
+            builder.memcopy(gep, val, sz)
+            lib_struct_indexed_memcpy = true
           else
             elem_size = container_elem_storage_size_u64(@mir_module.type_registry.get(elem_type))
             gep = builder.gep_dynamic(ptr, index, elem_type, elem_size)
@@ -6374,7 +6506,14 @@ module Crystal
           end
         else
           # ptr.value = val - direct store
-          builder.store(ptr, val)
+          elem_hir = pointer_element_hir_type(@hir_value_types[store.pointer]?) || @hir_value_types[store.value]? || store.type
+          if elem_hir && hir_type_is_inline_container_struct?(elem_hir)
+            sz = hir_type_inline_size(elem_hir).to_u64
+            builder.memcopy(ptr, val, sz)
+            lib_struct_indexed_memcpy = true
+          else
+            builder.store(ptr, val)
+          end
         end
 
         # rc_inc for reference-typed values: the buffer now holds a reference.
