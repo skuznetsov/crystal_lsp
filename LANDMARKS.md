@@ -12,6 +12,46 @@ checkpoint remain recoverable from git history, especially:
 
 ## Active Bootstrap Gate
 
+[LM-532|in_progress]: The next confirmed root pattern is registration-time
+semantic work reading AST slices too early, rather than true demand-driven
+lowering. Source-first extraction for `DefNode` names, `def self` receivers,
+explicit return annotations, and parameter type annotations moves generated
+stage2 full-prelude compilation past `Errno` enum registration and past nested
+`Crystal::Once` module registration. Disabling eager body-return inference only
+for nested module method registration also preserves demanded no-prelude
+lowering: `M::N.value` still emits `func @M::N.value() -> Int32`. Evidence:
+host-built `/tmp/cv2_param_source_candidate` passes
+`p2_enum_class_setter_return_infer_no_prelude.sh`,
+`p2_nested_module_registration_no_prelude.sh`,
+`p2_bootstrap_semantic_emit_oracle.sh`, and
+`p2_visibility_private_accessor_no_prelude.sh`; direct self-host build
+`scripts/run_safe.sh /tmp/cv2_param_source_candidate 300 4096
+src/crystal_v2.cr -o /tmp/cv2_direct_param_source/cv2_s2` exits 0 after ~143s.
+Boundary: the produced `cv2_s2` still cannot compile a full-prelude smoke; it
+now fails later at `Exception::CallStack#initialize` while class registration
+handles an index expression/parameter annotation corridor. This is progress to
+a later `s2` smoke frontier, not `s2 -> s3` readiness. {F/G/R:
+0.86/0.52/0.88} [in_progress]
+
+[LM-531|in_progress]: `safe_slice_to_string` is now the concrete
+generated-stage2 crash corridor, but the first raw-readable guard attempt is
+too broad. Evidence: lldb with ASLR enabled on generated `cv2_s2` stopped at
+`Slice(UInt8)#to_unsafe -> AstToHir#safe_slice_to_string`, first from
+`infer_concrete_return_type_from_body(Errno.value=)` and then, after moving
+method-name lookup to source fallback, from `register_type_method_from_def`.
+This refines LM-530: the immediate fault is not proven to be arena object
+identity; it is an unsafe parser-slice representation boundary where generated
+self-host code can treat a `Slice(UInt8)` argument as a heap-backed/invalid
+slot and crash before the code validates the underlying address. Adversary:
+applying a raw `readable_address?` check to every `pointerof(slice)` slot is
+not correct; a host no-prelude enum-setter reducer then fails in `lower_main`
+with `Index out of bounds`, and `CRYSTAL_V2_TRUST_SLICE_ADDR=1` restores exit
+0 but emits wrong method names (`ErrnoTest.()` / `ErrnoTest.=`). Next root
+step: implement a dual-representation slice decoder or source-first extraction
+at the vulnerable call sites, and keep `safe_slice_to_string` from calling
+`slice.to_unsafe` until the active representation is proven safe. {F/G/R:
+0.84/0.50/0.86} [in_progress]
+
 [LM-530|in_progress]: Generated `cv2_s2` full-prelude smoke currently fails
 before `s3` starts. Canonical `scripts/run_safe.sh` output stops during
 `Errno` registration at `register_type_method_from_def(Errno.value=)`, after
@@ -29,9 +69,13 @@ canonical `run_safe` crash. Current strongest root hypothesis is not
 lookups can choose a wrong or unstable arena under generated `s2`; Grok ACP
 independently proposed replacing `ArenaLike.object_id`-style keys with stable
 arena ids and registering all reparse/macro arenas before using them. Boundary:
-this is a hypothesis with live traces, not a verified fix; any stable-arena-id
-change is CAUTION-tier and must start with a tiny no-prelude arena identity
-oracle before touching the full bootstrap. {F/G/R: 0.72/0.52/0.78}
+this is a hypothesis with live traces, not a verified fix. Later local source
+review refuted one Grok sub-premise: `AstArena`, `VirtualArena`, and `PageArena`
+are classes in current source, not copied struct arenas, so the stable-arena-id
+idea may still be useful for source/cache keys but does not explain the
+confirmed `safe_slice_to_string` crash by itself. Any stable-arena-id change is
+CAUTION-tier and must start with a tiny no-prelude arena identity oracle before
+touching the full bootstrap. {F/G/R: 0.76/0.50/0.80}
 [in_progress]
 
 [LM-529|in_progress]: The current `codegen` bootstrap frontier is past the

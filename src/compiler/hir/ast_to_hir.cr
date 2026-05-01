@@ -16103,7 +16103,7 @@ module Crystal::HIR
       # Return types will be inferred lazily when the method is actually called.
       return nil if @defer_body_return_inference
       body = node.body
-      method_name = (safe_slice_to_string(node.name) || "")
+      method_name = def_method_name_from_node(node, preferred_arena || @arena) || ""
       debug_name = env_get("DEBUG_INFER_BODY_NAME")
       debug_infer = debug_name ? method_name.includes?(debug_name) : false
       if env_get("DEBUG_INFER_BODY") && method_name.includes?("internal_representation")
@@ -16122,11 +16122,7 @@ module Crystal::HIR
           resolve_arena_for_def(node, @arena)
         end
       if self_type_name
-        sep = if recv = node.receiver
-                (safe_slice_to_string(recv) || "") == "self" ? "." : "#"
-              else
-                "#"
-              end
+        sep = def_receiver_is_self_from_node(node, resolved_arena) ? "." : "#"
         full_name = "#{self_type_name}#{sep}#{method_name}"
         if arena = @function_def_arenas[full_name]?
           recorded_arena = arena.as(CrystalV2::Compiler::Frontend::ArenaLike)
@@ -20699,10 +20695,6 @@ module Crystal::HIR
       node : CrystalV2::Compiler::Frontend::DefNode,
       arena : CrystalV2::Compiler::Frontend::ArenaLike? = @arena,
     ) : String?
-      if name = CrystalV2::Compiler::Frontend.node_def_name_string(node)
-        return name unless name.empty?
-      end
-
       if name = safe_slice_to_string(node.name)
         return name unless name.empty?
       end
@@ -20754,22 +20746,55 @@ module Crystal::HIR
       name
     end
 
-    private def parameter_type_annotation_string(
-      param : CrystalV2::Compiler::Frontend::Parameter,
-    ) : String?
-      return nil unless type_slice = param.type_annotation
-
-      if text = safe_slice_to_string(type_slice)
-        return text unless text.empty?
+    private def def_receiver_is_self_from_node(
+      node : CrystalV2::Compiler::Frontend::DefNode,
+      arena : CrystalV2::Compiler::Frontend::ArenaLike? = @arena,
+    ) : Bool
+      if source = source_text_for_arena_or_file(arena)
+        if snippet = slice_source_for_span(node.span, source)
+          header_end = snippet.index('\n') || snippet.bytesize
+          header = strip_single_line_comments(snippet.byte_slice(0, header_end)).strip
+          prefixes = [
+            "private abstract def ",
+            "protected abstract def ",
+            "abstract def ",
+            "private def ",
+            "protected def ",
+            "def ",
+          ]
+          prefixes.each do |prefix|
+            if header.starts_with?(prefix)
+              rest = header.byte_slice(prefix.bytesize, header.bytesize - prefix.bytesize).lstrip
+              return rest.starts_with?("self.")
+            end
+          end
+        end
       end
 
+      if recv = node.receiver
+        (safe_slice_to_string(recv) || "") == "self"
+      else
+        false
+      end
+    end
+
+    private def parameter_type_annotation_string(
+      param : CrystalV2::Compiler::Frontend::Parameter,
+      arena : CrystalV2::Compiler::Frontend::ArenaLike? = @arena,
+    ) : String?
       if span = param.type_span
-        if source = source_for_arena(@arena)
+        if source = source_for_arena(arena || @arena)
           if text = slice_source_for_span(span, source)
             stripped = strip_single_line_comments(text).strip
             return stripped unless stripped.empty?
           end
         end
+      end
+
+      return nil unless type_slice = param.type_annotation
+
+      if text = safe_slice_to_string(type_slice)
+        return text unless text.empty?
       end
 
       nil
@@ -20869,11 +20894,7 @@ module Crystal::HIR
       prefer_source_yield_scan : Bool = false,
     )
       method_name = def_method_name_from_node(member, known_arena || @arena) || return
-      is_class_method = if recv = member.receiver
-                          (safe_slice_to_string(recv) || "") == "self"
-                        else
-                          false
-                        end
+      is_class_method = def_receiver_is_self_from_node(member, known_arena || @arena)
       base_name = if is_class_method
                     "#{type_name}.#{method_name}"
                   else
@@ -20918,8 +20939,8 @@ module Crystal::HIR
           STDERR.puts "[SET_FTYPE_PRE] base=#{base_name} tail=#{tail_desc} arena_size=#{member_arena.size}"
         end
       end
-      explicit_return_type_name = if rt = effective_member.return_type
-                                    safe_slice_to_string(rt) || def_explicit_return_type_from_source(effective_member, member_arena)
+      explicit_return_type_name = if effective_member.return_type
+                                    def_explicit_return_type_from_source(effective_member, member_arena) || safe_slice_to_string(effective_member.return_type.not_nil!)
                                   elsif prefer_source_yield_scan
                                     def_explicit_return_type_from_source(effective_member, member_arena)
                                   else
@@ -20981,7 +21002,7 @@ module Crystal::HIR
             has_block = true
             next
           end
-          param_type = if (ta = param.type_annotation) && (ta_str = safe_slice_to_string(ta))
+          param_type = if ta_str = parameter_type_annotation_string(param, member_arena)
                          ref = annotation_type_ref(ta_str, type_name)
                          # Forall resolution: if annotation wasn't resolved and
                          # contains generic args with type-param-like names,
@@ -21976,7 +21997,6 @@ module Crystal::HIR
 
     private def register_nested_module_in_current_arena(node : CrystalV2::Compiler::Frontend::ModuleNode, full_name : String)
       trace_nested_child = env_has?("CRYSTAL_V2_TRACE_NESTED_CHILD")
-      owner_raw_name = safe_slice_to_string(node.name) || ""
       record_nested_type_names(full_name, node.body)
       # Keep nested module AST around for mixin expansion.
       existing_defs = @module_defs.has_key?(full_name)
@@ -22093,9 +22113,8 @@ module Crystal::HIR
             next if expr_id.null_ptr? || expr_id.invalid?
             member = unwrap_visibility_member(@arena[expr_id])
             if member.is_a?(CrystalV2::Compiler::Frontend::DefNode)
-              recv = member.receiver
-              if recv && (safe_slice_to_string(recv) || "") == "self"
-                method_name = (safe_slice_to_string(member.name) || "")
+              if def_receiver_is_self_from_node(member, @arena)
+                method_name = def_method_name_from_node(member, @arena) || ""
                 defined_class_method_full_names << "#{full_name}.#{method_name}"
               end
             end
@@ -22194,7 +22213,7 @@ module Crystal::HIR
               end
               # Check extend self for nested modules - methods without receiver are class methods if extend self
               is_class_method = if recv
-                                  (safe_slice_to_string(recv) || "") == "self"
+                                  def_receiver_is_self_from_node(member, @arena)
                                 else
                                   @module_extend_self.includes?(full_name)
                                 end
@@ -22231,7 +22250,14 @@ module Crystal::HIR
                               elsif method_name.ends_with?('?')
                                 TypeRef::BOOL
                               else
-                                infer_concrete_return_type_from_body(effective_member, nil, member_arena, node_expr_id: expr_id) || TypeRef::VOID
+                                # Registration must remain demand-driven. Eager
+                                # body walks here pull in fragile nested-module
+                                # helper bodies (for example Crystal::Once) while
+                                # the generated stage2 compiler is still only
+                                # collecting signatures. The demanded lowering
+                                # path will infer concrete returns when the
+                                # method is actually compiled.
+                                TypeRef::VOID
                               end
                 if params = effective_member.params
                   each_param(params) do |param|
@@ -24177,9 +24203,7 @@ module Crystal::HIR
                     has_block = true
                     next
                   end
-                  param_type = if ta = param.type_annotation
-                                 safe_str_guard(ta, "next")
-                                 ta_str = (safe_slice_to_string(ta) || "")
+                  param_type = if ta_str = parameter_type_annotation_string(param, member_arena)
                                  ref = annotation_type_ref(ta_str, class_name)
                                  # Forall type parameter resolution: when a method
                                  # has a parameter like Slice(U) (from `forall U`),

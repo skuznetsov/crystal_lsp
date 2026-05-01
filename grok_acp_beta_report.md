@@ -51,7 +51,12 @@ landed from Grok output alone. Its proposed no-prelude enum oracle used
 `run_safe` still fails at `Errno.value=` after source-backed receiver and
 parameter-return experiments, while lldb reaches later module registration.
 However, no stable-arena-id implementation has been tested yet, so this is a
-working hypothesis, not a verified root fix.
+working hypothesis, not a verified root fix. Follow-up local source review
+also refuted one mechanism in the Grok answer: `AstArena`, `VirtualArena`, and
+`PageArena` are classes in current source, not copied struct arenas. The useful
+part of the answer was the arena/source boundary direction; the concrete crash
+later localized to `safe_slice_to_string` calling `Slice#to_unsafe` before the
+generated-stage2 slice representation was proven safe.
 
 **Verdict:** useful. Use Grok here for architectural hypothesis compression and
 anchor collection, but require a local tiny oracle plus staged implementation
