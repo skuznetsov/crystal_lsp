@@ -14520,12 +14520,12 @@ module Crystal::HIR
       end
       each_param(params) do |param|
         next if named_only_separator?(param)
-        param_name = parameter_name_string(param, arena) || "_"
+        param_name = parameter_name_string(param, arena, false) || "_"
         is_ivar_param = param.is_instance_var || param_name.starts_with?('@')
         if is_ivar_param
           param_name = param_name.lstrip('@')
         end
-        param_type = if ta_s = parameter_type_annotation_string(param, arena)
+        param_type = if ta_s = parameter_type_annotation_string(param, arena, false)
                        annotation_type_ref(ta_s, owner_name)
                      elsif param.is_double_splat
                        type_ref_for_name("NamedTuple")
@@ -14570,7 +14570,7 @@ module Crystal::HIR
             ivar_index_by_name[ivar_name] = ivars.size - 1
             offset_ptr.value += field_storage_size(param_type)
           end
-          if owner_name && (type_name = parameter_type_annotation_string(param, arena))
+          if owner_name && (type_name = parameter_type_annotation_string(param, arena, false))
             resolved = resolve_type_alias_chain(resolve_type_name_in_context(type_name))
             if enum_name = resolve_enum_name(resolved)
               enum_map = @enum_ivar_types ||= {} of String => Hash(String, String)
@@ -20742,6 +20742,47 @@ module Crystal::HIR
       name
     end
 
+    private def def_header_has_instance_var_param?(
+      node : CrystalV2::Compiler::Frontend::DefNode,
+      arena : CrystalV2::Compiler::Frontend::ArenaLike? = @arena,
+    ) : Bool?
+      source = source_text_for_arena_or_file(arena)
+      return nil unless source
+
+      header = definition_header_text_from_source(node.span, source, [
+        "private abstract def ",
+        "protected abstract def ",
+        "abstract def ",
+        "private def ",
+        "protected def ",
+        "def ",
+      ])
+      return nil unless header
+
+      paren = header.index('(')
+      return header.includes?("@") unless paren
+
+      depth = 0
+      i = paren
+      while i < header.bytesize
+        ch = header.byte_at(i)
+        case ch
+        when '('.ord
+          depth += 1
+        when ')'.ord
+          depth -= 1
+          break if depth <= 0
+        when '@'.ord
+          # `@@` is a class var reference, not an ivar parameter shortcut.
+          next_ch = i + 1 < header.bytesize ? header.byte_at(i + 1) : 0
+          return true unless next_ch == '@'.ord
+        end
+        i += 1
+      end
+
+      false
+    end
+
     private def def_receiver_is_self_from_node(
       node : CrystalV2::Compiler::Frontend::DefNode,
       arena : CrystalV2::Compiler::Frontend::ArenaLike? = @arena,
@@ -20777,6 +20818,7 @@ module Crystal::HIR
     private def parameter_type_annotation_string(
       param : CrystalV2::Compiler::Frontend::Parameter,
       arena : CrystalV2::Compiler::Frontend::ArenaLike? = @arena,
+      fallback_to_slice : Bool = true,
     ) : String?
       if span = param.type_span
         if source = source_text_for_arena_or_file(arena || @arena)
@@ -20787,6 +20829,7 @@ module Crystal::HIR
         end
       end
 
+      return nil unless fallback_to_slice
       return nil unless type_slice = param.type_annotation
 
       if text = safe_slice_to_string(type_slice)
@@ -20799,6 +20842,7 @@ module Crystal::HIR
     private def parameter_name_string(
       param : CrystalV2::Compiler::Frontend::Parameter,
       arena : CrystalV2::Compiler::Frontend::ArenaLike? = @arena,
+      fallback_to_slice : Bool = true,
     ) : String?
       if span = param.name_span
         if source = source_text_for_arena_or_file(arena || @arena)
@@ -20809,6 +20853,7 @@ module Crystal::HIR
         end
       end
 
+      return nil unless fallback_to_slice
       return nil unless name_slice = param.name
 
       if text = safe_slice_to_string(name_slice)
@@ -21020,7 +21065,7 @@ module Crystal::HIR
             has_block = true
             next
           end
-          param_type = if ta_str = parameter_type_annotation_string(param, member_arena)
+          param_type = if ta_str = parameter_type_annotation_string(param, member_arena, false)
                          ref = annotation_type_ref(ta_str, type_name)
                          # Forall resolution: if annotation wasn't resolved and
                          # contains generic args with type-param-like names,
@@ -24221,7 +24266,7 @@ module Crystal::HIR
                     has_block = true
                     next
                   end
-                  param_type = if ta_str = parameter_type_annotation_string(param, member_arena)
+                  param_type = if ta_str = parameter_type_annotation_string(param, member_arena, false)
                                  ref = annotation_type_ref(ta_str, class_name)
                                  # Forall type parameter resolution: when a method
                                  # has a parameter like Slice(U) (from `forall U`),
@@ -24794,17 +24839,20 @@ module Crystal::HIR
           # This runs AFTER module mixin expansion so that ivars from included modules
           # are already registered, preventing duplicate registrations.
           class_body.each do |expr_id|
-              member = unwrap_visibility_member_in_arena(@arena[expr_id], @arena)
+            member = unwrap_visibility_member_in_arena(@arena[expr_id], @arena)
             next unless member.is_a?(CrystalV2::Compiler::Frontend::DefNode)
+            has_ivar_param = def_header_has_instance_var_param?(member, @arena)
+            next if has_ivar_param == false
             # Scan parameters for ivar shortcuts: def foo(@field : Type)
             if params = member.params
               each_param(params) do |param|
                 next unless param.is_instance_var
-                next unless (pname = param.name)
-                ivar_name = "@#{(safe_slice_to_string(pname) || "")}"
+                param_name = parameter_name_string(param, @arena, has_ivar_param.nil?)
+                next unless param_name
+                ivar_name = param_name.starts_with?('@') ? param_name : "@#{param_name}"
                 next if ivars.any? { |iv| iv.name == ivar_name }
-                if ta = param.type_annotation
-                  ivar_type = type_ref_for_name((safe_slice_to_string(ta) || ""))
+                if type_name = parameter_type_annotation_string(param, @arena, has_ivar_param.nil?)
+                  ivar_type = type_ref_for_name(type_name)
                   if ivar_type != TypeRef::VOID
                     offset = align_offset(offset, type_alignment(ivar_type, is_c_struct))
                     ivars << IVarInfo.new(ivar_name, ivar_type, offset)

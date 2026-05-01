@@ -3043,3 +3043,55 @@ next root remains inside full-prelude module/class registration around
 source-backed registration reads and concrete no-prelude oracles; do not revive
 the broad raw-slice guard.
 {F/G/R: 0.91/0.58/0.89} [verified]
+
+## LM-546 — Source-prefilter implicit ivar param scan advances CallStack registration
+
+Context: compiler/bootstrap/codegen, 2026-05-01, `codegen`.
+
+Verified:
+
+- The remaining `each_param(Array(Parameter), &block)` crash after LM-545 was
+  not in the primary method-signature registration path. Existing
+  `DEBUG_REG_CONCRETE_PHASE=CallStack` showed `Exception::CallStack`
+  registering all body defs, then crashing immediately after
+  `after_untyped_reassert`, inside the later implicit-ivar discovery pass.
+- That pass scanned every method's params looking for `def foo(@ivar : T)`.
+  Generated stage2 can expose corrupt `Parameter` flags for ordinary untyped
+  params, so trusting `param.is_instance_var` there over-demands stale
+  parameter fields. The source header is the authoritative cheap prefilter:
+  skip the param scan when the `def` header has no `@` parameter.
+- The fix adds `def_header_has_instance_var_param?`, keeps old fallback only
+  when source is unavailable, and reads real ivar-param names/types through
+  source-backed `Parameter` spans. It also makes registration/capture paths
+  explicitly source-only for parameter name/type extraction when an arena is
+  known.
+
+Evidence:
+
+- `crystal build src/crystal_v2.cr -o
+  /tmp/cv2_ivar_param_source_candidate --error-trace` passed.
+- Existing no-prelude guards passed:
+  `p2_enum_class_setter_return_infer_no_prelude.sh`,
+  `p2_nested_module_registration_no_prelude.sh`,
+  `p2_bootstrap_semantic_emit_oracle.sh`, and
+  `p2_visibility_private_accessor_no_prelude.sh`.
+- New guard
+  `regression_tests/p2_implicit_ivar_param_source_scan_no_prelude.sh
+  /tmp/cv2_ivar_param_source_candidate` passed, proving
+  `def initialize(@value : Int32)` still registers the field while a normal
+  untyped method remains present in the same class.
+- `scripts/run_safe.sh /tmp/cv2_ivar_param_source_candidate 300 4096
+  src/crystal_v2.cr -o /tmp/cv2_direct_ivar_param_source/cv2_s2` built
+  generated `cv2_s2` in ~161s with `[EXIT: 0]`.
+- With `DEBUG_REG_CONCRETE_PHASE=CallStack`, generated `cv2_s2` now reaches
+  `after_implicit_ivar_scan`, `after_final_info`,
+  `after_init_params_store`, and `after_new_register` before the next
+  segfault. Fresh lldb shows the new crash is in
+  `register_nested_module_in_current_arena` through a different `each_param`
+  block proc, not the old `register_concrete_class` implicit-ivar scan.
+
+Boundary: generated `s2` plain full-prelude smoke still fails. The frontier
+moved past `Exception::CallStack` class finalization to nested module
+registration after `after_new_register`; continue localizing the new
+`register_nested_module_in_current_arena` parameter block before trying `s3b`.
+{F/G/R: 0.92/0.61/0.90} [verified]

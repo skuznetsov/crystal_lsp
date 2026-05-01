@@ -52,6 +52,24 @@ segfaults during full-prelude module registration near
 `Exception::CallStack` / `each_param(Array(Parameter), &block)`, so this is not
 an `s2 -> s3` unlock yet.
 
+Stage2 implicit-ivar param scan checkpoint (2026-05-01): generated `cv2_s2`
+now advances past the previous `Exception::CallStack` implicit-ivar scan crash.
+Root fix: the post-mixin implicit ivar discovery pass no longer scans every
+method's parameter array looking for `param.is_instance_var`; it first checks
+the source `def` header for an `@` parameter and only falls back to old
+Parameter-field scanning if source is unavailable. Real `@param` names/types
+are read from source-backed parameter spans. Evidence:
+`crystal build src/crystal_v2.cr -o /tmp/cv2_ivar_param_source_candidate
+--error-trace`; existing p2 no-prelude guards; new
+`regression_tests/p2_implicit_ivar_param_source_scan_no_prelude.sh
+/tmp/cv2_ivar_param_source_candidate`; and `scripts/run_safe.sh
+/tmp/cv2_ivar_param_source_candidate 300 4096 src/crystal_v2.cr -o
+/tmp/cv2_direct_ivar_param_source/cv2_s2`, which builds generated `cv2_s2` in
+~161s. Boundary: generated `cv2_s2` plain `puts 42` smoke still segfaults, but
+`DEBUG_REG_CONCRETE_PHASE=CallStack` now reaches `after_new_register`; lldb
+shows the new frontier is a different `each_param` block inside
+`register_nested_module_in_current_arena`.
+
 Stage2 no-prelude semantic-corpus checkpoint (2026-05-01): generated `cv2_s2`
 now compiles and runs `regression_tests/bootstrap_semantic_corpus.cr
 --no-prelude` after the HIR inline-yield/proc-literal corridor and the MIR/LLVM
@@ -1389,16 +1407,14 @@ pending-budget oracle.
    generic `InlineNextContext` extension fixed neither local-state merging nor
    the reducer, so it was not kept. Add a proper CFG/local-state oracle before
    changing that broad path.
-2. Root-cause the remaining full-prelude module/class registration crash under
-   generated stage2. Current evidence: source-backed initializer-param capture
-   is green for `s1 -> cv2_s2`, but generated `cv2_s2` still dies on a plain
-   `puts 42` smoke around `Exception::CallStack` /
-   `each_param(Array(Parameter), &block)`. The helper already has
-   struct-as-pointer null-element guards, so first falsifiers should
-   distinguish a corrupt `params` array object from a bad yielded `Parameter`
-   element, stale parameter-name/type slices outside initializer capture, or
-   block transport. Do not special-case a method name; add/extend a no-prelude
-   oracle for param-array scanning before changing the general helper.
+2. Root-cause the remaining full-prelude nested-module registration crash under
+   generated stage2. Current evidence: source-backed initializer capture and
+   source-prefiltered implicit-ivar param scanning are green for
+   `s1 -> cv2_s2`, and `Exception::CallStack` now reaches
+   `after_new_register`; lldb shows the next crash is a different
+   `each_param` block inside `register_nested_module_in_current_arena`. Do not
+   special-case a method name; first localize that nested-module parameter block
+   and add a focused no-prelude oracle before changing the general helper.
 3. Run the generated-stage2 compiler on the broader fixed no-prelude corpus and
    add focused oracles for any new first failure.
 4. Compare `s1_bootstrap` and `s2b` on the fixed no-prelude corpus before
