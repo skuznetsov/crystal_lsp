@@ -30,6 +30,28 @@ Working policy:
 
 ## Current Checkpoint
 
+Stage2 source-backed initializer-parameter checkpoint (2026-05-01): class and
+module registration now avoid another stale frontend-slice boundary when
+capturing `initialize` params into ivars. `capture_initialize_params` reads
+parameter names and type annotations from `name_span` / `type_span` through the
+member/source arena before falling back to guarded slices, and its registration
+callers now pass the relevant arena explicitly. Evidence:
+`crystal build src/crystal_v2.cr -o /tmp/cv2_param_source_candidate
+--error-trace`; `regression_tests/p2_enum_class_setter_return_infer_no_prelude.sh
+/tmp/cv2_param_source_candidate`;
+`regression_tests/p2_nested_module_registration_no_prelude.sh
+/tmp/cv2_param_source_candidate`;
+`regression_tests/p2_bootstrap_semantic_emit_oracle.sh
+/tmp/cv2_param_source_candidate`;
+`regression_tests/p2_visibility_private_accessor_no_prelude.sh
+/tmp/cv2_param_source_candidate`; and `scripts/run_safe.sh
+/tmp/cv2_param_source_candidate 300 4096 src/crystal_v2.cr -o
+/tmp/cv2_direct_param_source_candidate/cv2_s2`, which builds generated
+`cv2_s2` in ~160s. Boundary: generated `cv2_s2` plain `puts 42` smoke still
+segfaults during full-prelude module registration near
+`Exception::CallStack` / `each_param(Array(Parameter), &block)`, so this is not
+an `s2 -> s3` unlock yet.
+
 Stage2 no-prelude semantic-corpus checkpoint (2026-05-01): generated `cv2_s2`
 now compiles and runs `regression_tests/bootstrap_semantic_corpus.cr
 --no-prelude` after the HIR inline-yield/proc-literal corridor and the MIR/LLVM
@@ -1367,12 +1389,16 @@ pending-budget oracle.
    generic `InlineNextContext` extension fixed neither local-state merging nor
    the reducer, so it was not kept. Add a proper CFG/local-state oracle before
    changing that broad path.
-2. Root-cause `each_param(Array(Parameter), &block)` under generated stage2.
-   The helper already has struct-as-pointer null-element guards, so first
-   falsifiers should distinguish a corrupt `params` array object from a bad
-   yielded `Parameter` element or block transport. Do not special-case a method
-   name; add/extend a no-prelude oracle for param-array scanning before changing
-   the general helper.
+2. Root-cause the remaining full-prelude module/class registration crash under
+   generated stage2. Current evidence: source-backed initializer-param capture
+   is green for `s1 -> cv2_s2`, but generated `cv2_s2` still dies on a plain
+   `puts 42` smoke around `Exception::CallStack` /
+   `each_param(Array(Parameter), &block)`. The helper already has
+   struct-as-pointer null-element guards, so first falsifiers should
+   distinguish a corrupt `params` array object from a bad yielded `Parameter`
+   element, stale parameter-name/type slices outside initializer capture, or
+   block transport. Do not special-case a method name; add/extend a no-prelude
+   oracle for param-array scanning before changing the general helper.
 3. Run the generated-stage2 compiler on the broader fixed no-prelude corpus and
    add focused oracles for any new first failure.
 4. Compare `s1_bootstrap` and `s2b` on the fixed no-prelude corpus before

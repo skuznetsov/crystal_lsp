@@ -2999,3 +2999,47 @@ Boundary: generated `s2` full-prelude plain smoke still fails. The next root is
 parameter-array iteration or block transport inside `each_param`, not arena
 body-id matching.
 {F/G/R: 0.90/0.58/0.88} [verified]
+
+## LM-545 — Source-backed initializer parameter capture is safe, but plain s2 smoke still crashes later
+
+Context: compiler/bootstrap/codegen, 2026-05-01, `codegen`.
+
+Verified:
+
+- The registration metadata corridor should not read `Parameter#name` and
+  `Parameter#type_annotation` slices directly when the registration code has a
+  member/source arena available. Extending `capture_initialize_params` to use
+  source-backed `name_span` / `type_span` extraction preserves the existing
+  initializer ivar capture behavior while avoiding another stale-slice read
+  boundary in class/module registration.
+- This is a root-cause-aligned arena/source fix, not a broad readable-address
+  guard. The previously tested universal raw-slice guard remains refuted
+  because it changed host no-prelude behavior and could produce corrupt method
+  names.
+- A generated `cv2_s2` still builds successfully after this change, so the
+  source-backed parameter extraction does not regress the current stage2 build
+  corridor.
+
+Evidence:
+
+- `crystal build src/crystal_v2.cr -o /tmp/cv2_param_source_candidate
+  --error-trace` passed.
+- `regression_tests/p2_enum_class_setter_return_infer_no_prelude.sh`,
+  `regression_tests/p2_nested_module_registration_no_prelude.sh`,
+  `regression_tests/p2_bootstrap_semantic_emit_oracle.sh`, and
+  `regression_tests/p2_visibility_private_accessor_no_prelude.sh` passed with
+  `/tmp/cv2_param_source_candidate`.
+- `scripts/run_safe.sh /tmp/cv2_param_source_candidate 300 4096
+  src/crystal_v2.cr -o /tmp/cv2_direct_param_source_candidate/cv2_s2` built
+  generated `cv2_s2` in ~160s with `[EXIT: 0]`.
+- The produced `cv2_s2` still fails the plain `puts 42` smoke in ~1s:
+  module registration reaches `module register idx=3/53`, prints
+  `[INFER_INDEX] method=initialize self=Exception::Exception::CallStack
+  obj= idxs=1`, then exits with segfault 139.
+
+Boundary: this commit is not a green generated-stage2 runtime checkpoint. The
+next root remains inside full-prelude module/class registration around
+`Exception::CallStack` and `each_param(Array(Parameter), &block)`. Continue with
+source-backed registration reads and concrete no-prelude oracles; do not revive
+the broad raw-slice guard.
+{F/G/R: 0.91/0.58/0.89} [verified]

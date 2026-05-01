@@ -14509,6 +14509,7 @@ module Crystal::HIR
       ivars : Array(IVarInfo),
       offset_ptr : Pointer(Int32),
       owner_name : String? = nil,
+      arena : CrystalV2::Compiler::Frontend::ArenaLike? = @arena,
     ) : Array({String, TypeRef})
       init_params = [] of {String, TypeRef}
       ivar_index_by_name = {} of String => Int32
@@ -14519,16 +14520,12 @@ module Crystal::HIR
       end
       each_param(params) do |param|
         next if named_only_separator?(param)
-        param_name = if nm = param.name
-                       safe_slice_to_string(nm) || "_"
-                     else
-                       "_"
-                     end
+        param_name = parameter_name_string(param, arena) || "_"
         is_ivar_param = param.is_instance_var || param_name.starts_with?('@')
         if is_ivar_param
           param_name = param_name.lstrip('@')
         end
-        param_type = if (ta = param.type_annotation) && (ta_s = safe_slice_to_string(ta))
+        param_type = if ta_s = parameter_type_annotation_string(param, arena)
                        annotation_type_ref(ta_s, owner_name)
                      elsif param.is_double_splat
                        type_ref_for_name("NamedTuple")
@@ -14573,8 +14570,7 @@ module Crystal::HIR
             ivar_index_by_name[ivar_name] = ivars.size - 1
             offset_ptr.value += field_storage_size(param_type)
           end
-          if owner_name && (ta = param.type_annotation)
-            type_name = (safe_slice_to_string(ta) || "")
+          if owner_name && (type_name = parameter_type_annotation_string(param, arena))
             resolved = resolve_type_alias_chain(resolve_type_name_in_context(type_name))
             if enum_name = resolve_enum_name(resolved)
               enum_map = @enum_ivar_types ||= {} of String => Hash(String, String)
@@ -15068,7 +15064,7 @@ module Crystal::HIR
                     if method_name == "initialize"
                       if init_capture && init_capture.source != :class
                         if params = member.params
-                          new_params = capture_initialize_params(params, ivars, pointerof(offset), class_name)
+                          new_params = capture_initialize_params(params, ivars, pointerof(offset), class_name, member_arena)
                           init_capture.params.clear
                           new_params.each { |param| init_capture.params << param }
                           init_capture.source = :include
@@ -20783,7 +20779,7 @@ module Crystal::HIR
       arena : CrystalV2::Compiler::Frontend::ArenaLike? = @arena,
     ) : String?
       if span = param.type_span
-        if source = source_for_arena(arena || @arena)
+        if source = source_text_for_arena_or_file(arena || @arena)
           if text = slice_source_for_span(span, source)
             stripped = strip_single_line_comments(text).strip
             return stripped unless stripped.empty?
@@ -20794,6 +20790,28 @@ module Crystal::HIR
       return nil unless type_slice = param.type_annotation
 
       if text = safe_slice_to_string(type_slice)
+        return text unless text.empty?
+      end
+
+      nil
+    end
+
+    private def parameter_name_string(
+      param : CrystalV2::Compiler::Frontend::Parameter,
+      arena : CrystalV2::Compiler::Frontend::ArenaLike? = @arena,
+    ) : String?
+      if span = param.name_span
+        if source = source_text_for_arena_or_file(arena || @arena)
+          if text = slice_source_for_span(span, source)
+            stripped = strip_single_line_comments(text).strip
+            return stripped unless stripped.empty?
+          end
+        end
+      end
+
+      return nil unless name_slice = param.name
+
+      if text = safe_slice_to_string(name_slice)
         return text unless text.empty?
       end
 
@@ -21289,13 +21307,13 @@ module Crystal::HIR
     ) : Nil
       register_type_method_from_def(def_node, class_name)
 
-      return unless String.new(def_node.name) == "initialize"
+      return unless (def_method_name_from_node(def_node, @arena) || "") == "initialize"
       return unless ivars && offset_ref
 
       if init_capture && init_capture.source == :none
         init_capture.source = :class
         if params = def_node.params
-          new_params = capture_initialize_params(params, ivars, offset_ref, class_name)
+          new_params = capture_initialize_params(params, ivars, offset_ref, class_name, @arena)
           init_capture.params.clear
           new_params.each { |param| init_capture.params << param }
         end
@@ -24372,7 +24390,7 @@ module Crystal::HIR
               if method_name == "initialize" && (init_capture.source == :none || init_capture.source == :copy_ctor)
                 is_first = init_capture.source == :none
                 if has_params
-                  new_params = capture_initialize_params(params_storage, ivars, pointerof(offset), class_name)
+                  new_params = capture_initialize_params(params_storage, ivars, pointerof(offset), class_name, member_arena)
                   class_type = type_ref_for_name(class_name)
                   is_copy_ctor = new_params.size == 1 && new_params[0][1] == class_type
                   if is_first
