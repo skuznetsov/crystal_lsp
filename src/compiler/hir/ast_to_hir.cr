@@ -6273,11 +6273,17 @@ module Crystal::HIR
       suffix : String,
     ) : String?
       match : String? = nil
+      ambiguous = false
       enum_info.each_key do |key|
-        next unless ends_with_namespaced_suffix?(key, suffix)
-        return nil if match
-        match = key
+        if ends_with_namespaced_suffix?(key, suffix)
+          if match
+            ambiguous = true
+          else
+            match = key
+          end
+        end
       end
+      return nil if ambiguous
       match
     end
 
@@ -15876,7 +15882,12 @@ module Crystal::HIR
       old_method = @current_method
       old_class = @current_class
       old_def = @current_def_node
-      resolved_arena = preferred_arena || resolve_arena_for_def(node, @arena)
+      resolved_arena : CrystalV2::Compiler::Frontend::ArenaLike =
+        if arena = preferred_arena
+          arena.as(CrystalV2::Compiler::Frontend::ArenaLike)
+        else
+          resolve_arena_for_def(node, @arena)
+        end
       if self_type_name
         sep = if recv = node.receiver
                 (safe_slice_to_string(recv) || "") == "self" ? "." : "#"
@@ -15885,8 +15896,9 @@ module Crystal::HIR
               end
         full_name = "#{self_type_name}#{sep}#{method_name}"
         if arena = @function_def_arenas[full_name]?
+          recorded_arena = arena.as(CrystalV2::Compiler::Frontend::ArenaLike)
           # Prefer the recorded arena when it matches this def.
-          resolved_arena = arena if arena_fits_def?(arena, node)
+          resolved_arena = recorded_arena if arena_fits_def?(recorded_arena, node)
         end
       end
 
@@ -20577,8 +20589,15 @@ module Crystal::HIR
           STDERR.puts "[SET_FTYPE_PRE] base=#{base_name} tail=#{tail_desc} arena_size=#{member_arena.size}"
         end
       end
+      explicit_return_type_name = if rt = effective_member.return_type
+                                    safe_slice_to_string(rt) || def_explicit_return_type_from_source(effective_member, member_arena)
+                                  elsif prefer_source_yield_scan
+                                    def_explicit_return_type_from_source(effective_member, member_arena)
+                                  else
+                                    nil
+                                  end
       enum_return_name : String? = nil
-      if (rt = effective_member.return_type) && (rt_s = safe_slice_to_string(rt))
+      if rt_s = explicit_return_type_name
         resolved_return = resolve_type_name_in_context(rt_s)
         if enum_name = resolve_enum_name(resolved_return)
           enum_return_name = enum_name
@@ -20603,7 +20622,7 @@ module Crystal::HIR
         end
       end
       safe_body_infer = arena_fits_def?(member_arena, effective_member)
-      return_type = if (rt = effective_member.return_type) && (rt_s = safe_slice_to_string(rt))
+      return_type = if rt_s = explicit_return_type_name
                       annotation_type_ref(rt_s, type_name)
                     elsif method_name.ends_with?('?')
                       provisional_query_return_type_for_registration(
@@ -20616,7 +20635,7 @@ module Crystal::HIR
                         safe_body_infer
                       )
                     else
-                      (safe_body_infer ? infer_concrete_return_type_from_body(effective_member, type_name, member_arena) : nil) || TypeRef::VOID
+                      (safe_body_infer && !query_has_block_or_yield ? infer_concrete_return_type_from_body(effective_member, type_name, member_arena) : nil) || TypeRef::VOID
                     end
       if is_class_method && return_type == TypeRef::VOID
         if enum_name = resolve_enum_name(type_name)

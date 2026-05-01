@@ -200,3 +200,22 @@ be verified anchors, not broad opinions.
   about 34s. Keep the regression guard, but do not reintroduce ad-hoc source
   inference narrowing without a CFG-level proof and full-source phase-stats
   comparison.
+
+- `register_type_method_from_def` now has a deliberately narrow source-backed
+  explicit-return fallback for enum/source-yield registration. A broad fallback
+  that asked `def_explicit_return_type_from_source` for every method in this
+  shared path regressed full-source self-host lowering to `ExprId out of
+  bounds`; the bounded enum-only variant is the currently verified corridor.
+  If this logic is generalized later, first add a source-header oracle covering
+  `forall`, annotations before `def`, one-line defs, visibility wrappers, and
+  methods with typed parameters but no return annotation.
+
+- Inlined iterator blocks still mishandle the combination of block-local
+  `next` and non-local `return`. A no-prelude reducer with nested `each_key`
+  style forwarding showed that a naive generic `InlineNextContext` continuation
+  does not preserve caller-local SSA state correctly; `match` can be polluted
+  by the fallthrough branch even when `next unless ...` should skip it. The
+  bootstrap fix therefore only rewrote the bootstrap-critical
+  `unique_enum_match_by_suffix` helper to avoid that pattern. The root fix
+  needs a CFG/local-state design for inlined block `next`, not another local
+  branch patch.

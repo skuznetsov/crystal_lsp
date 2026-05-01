@@ -2695,3 +2695,51 @@ Evidence:
 Boundary: this lands only the no-prelude guard and refutation record. It does
 not fix the current generated-stage2 semantic body-inference frontier.
 {F/G/R: 0.92/0.50/0.92} [verified]
+
+[LM-540|verified]: Generated stage2 now advances past the enum body-inference
+frontier; the next plain-smoke crash is in module/class registration.
+
+Findings:
+
+- The previous generated-stage2 plain smoke frontier was not one bug. First,
+  `infer_concrete_return_type_from_body` selected a nilable
+  `Nil | ArenaLike` monomorphization for its inner helper; explicitly typing
+  `resolved_arena` as `ArenaLike` and casting the recorded arena removed that
+  abort-stub shape.
+- After that, `Errno#message : String` still entered body inference in
+  generated `s2` because the enum registration path could lose the explicit
+  `return_type` field. Reusing `def_explicit_return_type_from_source` only for
+  the enum/source-yield registration corridor recovers the annotation without
+  reintroducing the broad-source fallback that previously regressed
+  full-source `STOP_AFTER_HIR` to `ExprId out of bounds`.
+- Once `Errno#message` is registered as `String`, the next failing enum method
+  is `Errno#unsafe_message`, an unannotated yield method. Body-return inference
+  has no caller block context there, so it must not eagerly walk the yield body;
+  the registration path now falls back to `Void` for unannotated yield/block
+  methods instead of inferring through the body.
+- A separate `unique_enum_match_by_suffix` trap was exposed by
+  `return nil if match` plus `next unless ...` inside a `Hash#each_key` block.
+  Rewriting that helper to avoid non-local block `return` and block `next`
+  removed the trap. The broader inlined-block `next` + non-local `return`
+  local-state bug remains open; a generic `InlineNextContext` experiment was
+  refuted by a no-prelude nested-iterator reducer and was not kept.
+
+Evidence:
+
+- `crystal build src/crystal_v2.cr -o /tmp/cv2_enum_yield_skip_candidate
+  --error-trace` passed.
+- `regression_tests/p2_prior_nil_guard_infer_no_prelude.sh`,
+  `regression_tests/p2_source_extern_signature_no_prelude.sh`, and
+  `regression_tests/p2_pending_budget_no_prelude.sh` passed with
+  `/tmp/cv2_enum_yield_skip_candidate`.
+- `scripts/build_bootstrap_stages.sh --stages 2 --out
+  /tmp/cv2_bs_s2_enum_yield_skip` built `s2` in ~225s and passed no-prelude
+  smoke. Plain smoke still fails, but lldb shows it now advances through all
+  enum registration and enum resolve before crashing in
+  `register_module_with_name -> register_concrete_class ->
+  infer_concrete_return_type_from_body_inner`.
+
+Boundary: this is verified progress, not a green bootstrap. The next work item
+is the module/class body-inference crash; do not claim `s2` plain smoke is
+fixed until that stage passes under `scripts/run_safe.sh`.
+{F/G/R: 0.91/0.58/0.90} [verified]

@@ -1276,17 +1276,24 @@ pending-budget oracle.
 
 ## Next Work
 
-1. Root-cause the generated-stage2 full-prelude plain-smoke frontier:
-   `infer_concrete_return_type_from_body_inner(Array(ExprId), String, String,
-   ArenaLike, Bool)` abort stub during `Errno` enum registration. First checks:
-   inspect whether method registration should force this helper body, whether
-   it is another broad `ArenaLike` helper boundary, or whether enum method
-   return inference should avoid eager body inference for this path.
-   Refuted branch: broad local-inference nil-guard narrowing is not the right
-   shortcut. A focused prior-guard `ExprId` no-prelude reducer is now covered
-   by `p2_prior_nil_guard_infer_no_prelude.sh`, and clean HEAD already passes
-   it; the broader dirty narrowing experiment regressed full-source
-   `STOP_AFTER_HIR` to `ExprId out of bounds`.
+1. Root-cause the generated-stage2 full-prelude plain-smoke frontier now past
+   enum registration. The enum body-inference corridor was advanced by:
+   typed `ArenaLike` resolution for
+   `infer_concrete_return_type_from_body_inner`, source-backed explicit return
+   recovery for enum methods whose self-hosted `return_type` field is lost, and
+   skipping body-return inference for unannotated yield/block enum methods
+   (for example `Errno#unsafe_message`). Current evidence:
+   `/tmp/cv2_bs_s2_enum_yield_skip` builds `s2` in ~225s and passes
+   no-prelude smoke; under lldb, plain smoke advances through `Errno`,
+   `WinError`, `WasiError`, enum resolve, aliases, macros, and fails next in
+   module/class registration via
+   `register_module_with_name -> register_concrete_class ->
+   infer_concrete_return_type_from_body_inner`.
+   Remaining known root pattern: `next` combined with non-local `return` inside
+   nested inlined iterator blocks is still semantically wrong; the attempted
+   generic `InlineNextContext` extension fixed neither local-state merging nor
+   the reducer, so it was not kept. Add a proper CFG/local-state oracle before
+   changing that broad path.
 2. Run the generated-stage2 compiler on the broader fixed no-prelude corpus and
    add focused oracles for any new first failure.
 3. Compare `s1_bootstrap` and `s2b` on the fixed no-prelude corpus before
