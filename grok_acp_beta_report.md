@@ -14,6 +14,63 @@
 
 ## Сессии
 
+### Session 30 — 2026-05-01 — IVarInfo optional lookup audit
+**Task:** read-only audit of a proposed `Array(IVarInfo)` optional lookup guard
+after lldb pointed at `infer_type_from_expr_inner` / `Array(IVarInfo)#size`.
+**Brief size:** narrow task file with current crash stack, exact candidate
+helper shape, and requested root-vs-symptom classification.
+**Latency:** returned within the local debugging window.
+**Output quality:** useful adversarial framing. Grok correctly classified the
+helper as containment rather than a complete root fix, warned about silent
+under-inference, and listed the first return-inference probe sites.
+**What worked:** concise root/symptom distinction; the "do not touch
+registration/layout loops" warning matched the local safety boundary.
+**What did not:** it did not see the later local lldb evidence that the helper
+moved the frontier to `String#sub(Regex)` in `resolve_type_literal_class_name`;
+local verification remained necessary.
+**Verdict:** useful as an adversary/triage sidecar, not as proof. Keep using
+Grok for bounded root-cause classification prompts when Codex token budget is
+low.
+
+### Operational note — 2026-05-01 — Codex token-budget mode
+**Context:** The project owner noted that the main Codex weekly token budget is
+low for the next several days and asked to offload more compact read-only
+analysis to Grok.
+
+**Policy:** Use Grok ACP more aggressively as a background sidecar for bounded
+source audits, root-cause hypothesis ranking, call-path search, and hostile
+reviews. Keep Grok read-only unless explicitly directed otherwise.
+
+**Guardrail:** Treat Grok output as candidate evidence only. Codex must still
+verify locally with `rg`, source reads, no-prelude reducers, `run_safe.sh`
+smokes, or lldb before accepting a claim or landing a fix.
+
+**Practical timeout:** Prefer direct
+`python3 ~/.grok/bin/grok_acp_delegate.py --cwd <repo> --task-file <file>
+--prompt-timeout 240 --request-timeout 30 --stream-limit-mb 8` for non-trivial
+compiler audits, and continue local falsifiers while Grok runs.
+
+### Session 29 — 2026-05-01 — Exception::CallStack / GC::Stats inference audit
+**Task:** read-only audit of the generated `s2` full-prelude `puts 42` crash
+after macro-expanded parameter recovery moved the frontier to
+`Exception::CallStack` / `infer_type_from_expr_inner`.
+**Brief size:** narrow task file with exact lldb frames, current WIP context,
+and requested root-cause ranking.
+**Latency:** timed out after 180s waiting for stdout.
+**Output quality:** no final answer before timeout.
+**What worked:** Grok executed many read/grep tool calls while Codex continued
+local falsifiers.
+**What did not:** it again reached a terminal-command phase and timed out
+without returning even a first-pass hypothesis.
+**Adversary check:** local evidence was stronger: `DEBUG_REG_CONCRETE_PHASE`
+localized the first stable crash to `Exception::CallStack#initialize` parameter
+registration; the source-param helper experiment then produced a generated s2
+helper stub and was rejected.
+**Verdict:** no evidence value for this step. For future low-token mode, use
+Grok only with a forced "answer first, tools second" prompt or switch to the
+proposed Grok 4.1 Fast structured wrapper.
+**Cost saved:** none.
+
 ### Session 2026-05-01 — Errno.value= generated-stage2 crash audit
 **Context:** Crystal V2 `codegen` branch. Generated `cv2_s2` builds and passes
 no-prelude smoke, but full-prelude plain smoke fails under `scripts/run_safe.sh`

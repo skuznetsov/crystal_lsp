@@ -3265,3 +3265,137 @@ Boundary: generated `s2` plain smoke is still not clean, and `s3b` should not
 be attempted yet. The current frontier is `Exception::CallStack#unlock` during
 module registration, not macro-generated record parameter recovery.
 {F/G/R: 0.92/0.62/0.89} [verified]
+
+## LM-550 — Exception::CallStack frontier splits into constant block inference and Parameter-field trust
+
+Context: compiler/bootstrap/codegen, 2026-05-01, `codegen`.
+
+Observed after LM-549:
+
+- `scripts/run_safe.sh /tmp/cv2_macro_param_source_candidate3 300 4096
+  src/crystal_v2.cr -o /tmp/cv2_direct_macro_param_source3/cv2_s2` built
+  generated `s2`; the remaining plain-smoke crash is in the generated compiler
+  while registering nested stdlib/compiler types for a trivial `puts 42`.
+- Clearing `@current_method` / `@current_method_is_class` around
+  `record_constant_definition` moved the diagnostic from
+  `[INFER_INDEX] method=unlock self=Exception::Exception::CallStack ...` to
+  `[INFER_INDEX] method= self=Exception::Exception::CallStack ...`. This
+  falsifies "SpinLock#unlock is the real callee" and confirms stale method
+  context leaked into registration-time constant inference.
+- Guarding registration-time constant type inference from expressions that
+  contain inline blocks/yield removes the `[INFER_INDEX]` on
+  `Exception::CallStack::CURRENT_DIR = Process::INITIAL_PWD.try { |dir|
+  Path[dir] }`. This confirms `CURRENT_DIR` is a real unsafe inference hazard:
+  constant registration is not a callsite and must not infer through block
+  bodies.
+- The smoke still crashes immediately after `Exception::CallStack` reaches
+  `concrete_before_body_loop`, so the constant inference guard is not a complete
+  fix.
+- `DEBUG_REG_CONCRETE_PHASE='Exception::Exception::CallStack'
+  DEBUG_REG_METHOD_PHASE='initialize'` localizes the next stable crash to body
+  idx 6, `def initialize(@callstack : Array(Void*) = CallStack.unwind)`, after
+  `params_present size=1` and the first `param_entry name=(nil)`.
+- A source-param helper experiment was rejected: it introduced a new generated
+  stage2 abort-stub for
+  `AstToHir#def_param_type_annotations_from_source(DefNode, ArenaLike)`.
+  Broadly switching the existing class method registration loop to
+  `parameter_type_annotation_string(..., true)` also did not move the frontier.
+
+Current interpretation:
+
+- There are at least two adjacent root patterns, not one bug:
+  registration-time expression inference is too eager for block-bearing
+  constants, and generated stage2 still exposes unsafe `Parameter` field access
+  for instance-var parameters in class method registration.
+- Do not reintroduce a new helper with an `ArenaLike` union signature in this
+  hot path without proving it is demanded/lowered in generated stage2. The
+  previous helper became a stub despite passing host build and no-prelude
+  guards.
+- The next falsifier should avoid broad source-param helper calls. Prefer a
+  minimal instrumentation around the existing parameter loop or a small
+  source-backed extraction path that reuses already-lowered helpers, then prove
+  it on `Exception::CallStack#initialize` before trying `s3b`.
+
+Evidence:
+
+- Host builds passed for the constant-inference guard candidates:
+  `/tmp/cv2_const_block_guard_candidate` and
+  `/tmp/cv2_param_fallback_candidate`.
+- Existing no-prelude guards passed for both candidates:
+  `p2_macro_extra_source_param_recovery_no_prelude.sh`,
+  `p2_implicit_ivar_param_source_scan_no_prelude.sh`,
+  `p2_initialize_return_void_no_prelude.sh`, and
+  `p2_bootstrap_semantic_emit_oracle.sh` where run.
+- Generated `s2` builds passed for the candidates under
+  `scripts/run_safe.sh ... 300 4096 src/crystal_v2.cr`.
+- Generated `s2` plain smoke remains red with `Segmentation fault: 11` at
+  `Exception::CallStack#initialize` parameter registration.
+
+Trust: {F/G/R: 0.86/0.55/0.83} [in-progress]
+
+## LM-551 — Stage2 smoke advances through CallStack params, then exposes type-literal Regex and nested Float frontiers
+
+Context: compiler/bootstrap/codegen, 2026-05-01, `codegen`.
+
+Verified/observed after LM-550:
+
+- `parameter_type_annotation_string` and `parameter_name_string` now honor
+  `fallback_to_slice=false` strictly. This prevents the class registration
+  method-param loop from reading stale raw `Parameter` slices after a
+  source-span extraction was explicitly requested.
+- `set_function_type_entry` now allows `Void` to replace a previous
+  `Unknown`/empty return entry. This preserves the existing invariant against
+  overwriting concrete return types with `Void`, while avoiding sticky
+  `Unknown` signatures such as `Exception::CallStack#initialize`.
+- A narrow `find_ivar_info` helper was added only for optional return-inference
+  ivar probes. It moved the lldb frontier away from `Array(IVarInfo)#size`,
+  but this is classified as containment, not a complete root fix: layout and
+  struct-as-pointer ABI drift can still create bad arrays elsewhere.
+- `resolve_type_literal_class_name` no longer uses `String#sub(Regex, "")` for
+  stripping `.class` / `.metaclass`. The generated `s2` compiler crashed inside
+  `String#bytesize -> String#sub_append -> String#sub(Regex, ...)` while
+  resolving type-literal annotations; suffix slicing removes that fragile
+  Regex/String path from a compiler hot path without changing semantics.
+- Broad param-cache source rewriting was refuted again. The host build, p2
+  guards, and generated `s2` build passed, but the produced `s2` crashed almost
+  immediately after `prelude exists` on a plain smoke. Do not revive that
+  approach without a smaller invariant and a produced-compiler smoke.
+- A targeted preseed for methods with instance-var parameters avoids
+  immediately overwriting source-backed param infos for `@ivar` initialize
+  signatures. It passes host/p2/generated-s2 build checks and, under detailed
+  tracing, moves past `Exception::CallStack#initialize` to
+  `Float::Float::ParsedNumberStringT`. Boundary: the no-filter generated `s2`
+  full-prelude smoke still segfaults quickly, so this is progress evidence, not
+  a final bootstrap fix.
+
+Evidence:
+
+- `crystal build src/crystal_v2.cr -o /tmp/cv2_ivar_param_preseed_candidate
+  --error-trace` passed.
+- Existing p2 no-prelude guards passed:
+  `p2_macro_extra_source_param_recovery_no_prelude.sh`,
+  `p2_implicit_ivar_param_source_scan_no_prelude.sh`,
+  `p2_initialize_return_void_no_prelude.sh`, and
+  `p2_bootstrap_semantic_emit_oracle.sh`.
+- `scripts/run_safe.sh /tmp/cv2_ivar_param_preseed_candidate 300 4096
+  src/crystal_v2.cr -o /tmp/cv2_ivar_param_preseed_s2/cv2_s2` built generated
+  `s2` in ~155s with `[EXIT: 0]`.
+- Plain generated `s2` full-prelude `puts 42` smoke remains red:
+  `scripts/run_safe.sh /tmp/cv2_ivar_param_preseed_s2/cv2_s2 60 4096
+  /tmp/cv2_ivar_param_preseed_s2/hello.cr -o ...` exits 139.
+- `CRYSTAL_V2_TRACE_CLASS_FRONTIER=1` on that produced compiler reaches nested
+  module/class registration and crashes at `Float::Float::ParsedNumberStringT`.
+
+Current interpretation:
+
+- The active root-cause pattern is still semantic registration doing too much
+  work on unstable generated-stage2 representations. The current subpatterns
+  are stale `Parameter` fields, sticky `Unknown` function signatures, fragile
+  compiler hot paths through stdlib Regex/String helpers, and duplicated nested
+  module qualification (`Float::Float::*`, `Iterator::`, `Indexable::`).
+- Next falsifier should target nested module/class qualification before more
+  ABI guards: `Float::FastFloat::ParsedNumberStringT` should not become
+  `Float::Float::ParsedNumberStringT`. Use no-prelude or small full-prelude
+  traces first; do not attempt `s3b` yet.
+
+Trust: {F/G/R: 0.87/0.58/0.86} [in-progress]
