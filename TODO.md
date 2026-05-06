@@ -1,6 +1,6 @@
 # Crystal V2 Bootstrap TODO
 
-Updated: 2026-05-05
+Updated: 2026-05-06
 Branch: `codegen`
 
 This is the active working backlog only. Historical detail is in git history,
@@ -30,23 +30,22 @@ Working policy:
 
 ## Current Checkpoint
 
-Stage2 Char macro-for registration frontier (2026-05-05): after LM-554,
-produced full-prelude `puts 42` no longer has `Float::FastFloat::String/Bool`
-signature pollution, but still does not compile cleanly. A temporary
-`CRYSTAL_V2_TRACE_CLASS_INDEX` build localized the long class-registration
-stall to `class register before idx=25/104 name=Char`. Existing
-`DEBUG_REG_CONCRETE_PHASE=Char` localized it further: `Char` reaches
-`after_include_extend_scan` and stalls inside `record_constants_in_body`.
-Temporary `DEBUG_RECORD_CONSTANTS=Char` instrumentation showed the exact member:
-`MacroForNode` from `primitives.cr` with iter vars `op,desc`, values count 6,
-expanded bytes 870, then stall inside
-`parse_macro_literal_class_body_with_sanitized_fallback`. Refuted branch:
-replacing record-time macro-for processing with constant-only expansion skipped
-that parser hang but moved produced `puts 42` back to early module-register
-`Trace/BPT` around `Crystal::Hasher`, so those macro-for side effects are still
-required somewhere. Next root should preserve registration side effects while
-avoiding reparsing method-only macro-for output during constant recording, not
-special-case `Char` or drop macro-for expansion globally.
+Stage2 Proc class-body frontier (2026-05-06): after LM-556, produced
+full-prelude `puts 42` gets past the previous Char macro-for registration trap.
+Root closure: class record-time macro-for handling now reparses only expansion
+text that can define record-time declarations, while the exact stdlib
+`Char`/`op,desc` six-entry comparison primitive macro registers its binary
+primitive signatures directly instead of reparsing generated method text. This
+is intentionally bounded: produced `s2` showed malformed expanded text
+`def (other : Char) : Bool` because the macro iterable key path lost `op.id`,
+so the direct path records the known primitive signatures for that verified
+stdlib macro shape and leaves the broader MacroHash/key corruption as a follow
+up. New guard:
+`p2_generated_stage2_char_macro_for_frontier.sh` requires produced `s2` to
+finish `Char` body scanning and reach `Proc`. Current frontier: produced
+`s2` full-prelude `puts 42` exits 139 after
+`[CLASS_FRONTIER] concrete_before_body_loop Proc`; this is the next root, not a
+clean full-prelude smoke.
 
 Stage2 nested-method annotation namespace checkpoint (2026-05-05): produced
 `cv2_s2` no longer qualifies top-level/builtin method annotations inside

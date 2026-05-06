@@ -1,6 +1,6 @@
 # LANDMARKS
 
-Updated: 2026-05-05
+Updated: 2026-05-06
 Context: compiler/bootstrap/stage2-stability
 
 This file is the active working set only. Historical landmarks before this
@@ -11,6 +11,35 @@ checkpoint remain recoverable from git history, especially:
   `d43826fdcc2277b6075026244764a84d0069d1a30b675642b603f3511b14a1e5`
 
 ## Active Bootstrap Gate
+
+[LM-556|verified]: Generated stage2 full-prelude `puts 42` now moves past the
+Char macro-for registration/body-scan trap and reaches the next `Proc`
+class-body frontier. Root pattern: class constant recording was using the full
+class macro-for registrar for method-only expansion text, and the produced
+stage2 macro iterable key path could also lose `op.id`, yielding malformed text
+such as `def (other : Char) : Bool`. The fix separates class record-time
+macro-for scanning from method registration, only reparses class macro
+expansions that can define record-time declarations, and registers the exact
+stdlib `Char` `op,desc` six-entry comparison primitive macro directly as six
+binary primitive signatures. Evidence: `CRYSTAL_CACHE_DIR=/private/tmp/cv2_cache_char_clean
+crystal build src/crystal_v2.cr -o /private/tmp/cv2_char_clean --error-trace`;
+`regression_tests/p2_qualified_module_namespace_no_prelude.sh
+/private/tmp/cv2_char_clean`;
+`regression_tests/p2_self_nested_module_registration_frontier.sh
+/private/tmp/cv2_char_clean`;
+`regression_tests/p2_full_prelude_generic_template_namespace_no_pollution.sh
+/private/tmp/cv2_char_clean`; `scripts/run_safe.sh /private/tmp/cv2_char_clean
+300 4096 src/crystal_v2.cr -o /private/tmp/cv2_char_clean_s2/cv2_s2`; and
+`regression_tests/p2_generated_stage2_char_macro_for_frontier.sh
+/private/tmp/cv2_char_clean_s2/cv2_s2`. Boundary: produced `s2` still exits
+139 on full-prelude `puts 42`, but the trace now shows
+`concrete_after_body_scan Char`, `concrete_after_new Char`, then
+`class_with_name_enter Proc` and `concrete_before_body_loop Proc`; the next root
+is `Proc` class body registration, not Char. Refuted variants: broad
+constant-only macro-for skipping regressed module registration around
+`Crystal::Hasher`; parser-first/textual primitive parsing failed in produced
+`s2` because the Char expansion already lost the operator name. {F/G/R:
+0.84/0.48/0.84} [verified]
 
 [LM-554|verified]: Generated stage2 CLI pre-scan no longer performs full
 constant registration for complex class/module body constants. Root pattern:
@@ -3663,3 +3692,58 @@ Current boundary:
   effects that the broad constant-only skip removed.
 
 Trust: {F/G/R: 0.82/0.52/0.82} [verified]
+
+## LM-556 — Char primitive macro-for registration moves frontier to Proc
+
+Context: compiler/bootstrap/codegen, 2026-05-06, `codegen`.
+
+Root cause and fix:
+
+- After LM-555, a class-only record-time macro-for split moved the stall out of
+  `record_constants_in_body("Char", ...)`, but the ordinary class body loop
+  still reached the same `Char` comparison primitive macro and attempted to
+  reparse method-only generated text.
+- A textual primitive-def fast path was not sufficient in produced `s2`:
+  diagnostic expansion showed `def (other : Char) : Bool`, so the macro
+  iterable key path had already lost `op.id` before parsing.
+- The final fix has two bounded parts. First, class record-time macro-for
+  handling only reparses expansion text that can define record-time
+  declarations (`class`, `struct`, `module`, `enum`, `alias`, class variables,
+  or constant assignments), leaving module macro-for registration unchanged.
+  Second, the exact stdlib `Char` `op,desc` six-entry comparison primitive macro
+  registers `Char#==`, `Char#!=`, `Char#<`, `Char#<=`, `Char#>`, and
+  `Char#>=` directly as `@[Primitive(:binary)]` signatures, with a fallback for
+  the produced path where operator IDs are empty.
+
+Evidence:
+
+- `CRYSTAL_CACHE_DIR=/private/tmp/cv2_cache_char_clean crystal build
+  src/crystal_v2.cr -o /private/tmp/cv2_char_clean --error-trace` passed.
+- Host guards passed:
+  `regression_tests/p2_qualified_module_namespace_no_prelude.sh
+  /private/tmp/cv2_char_clean`,
+  `regression_tests/p2_self_nested_module_registration_frontier.sh
+  /private/tmp/cv2_char_clean`, and
+  `regression_tests/p2_full_prelude_generic_template_namespace_no_pollution.sh
+  /private/tmp/cv2_char_clean`.
+- `scripts/run_safe.sh /private/tmp/cv2_char_clean 300 4096
+  src/crystal_v2.cr -o /private/tmp/cv2_char_clean_s2/cv2_s2` built produced
+  `s2` with `[EXIT: 0]`.
+- `regression_tests/p2_generated_stage2_char_macro_for_frontier.sh
+  /private/tmp/cv2_char_clean_s2/cv2_s2` passed. The underlying trace reached
+  `concrete_after_body_scan Char`, `concrete_after_new Char`, then
+  `class_with_name_enter Proc` and `concrete_before_body_loop Proc`.
+
+Refuted variants and boundary:
+
+- Broad constant-only macro-for skipping avoided the Char parser hang but
+  regressed produced full-prelude `puts 42` to an early module-register
+  `Trace/BPT` around `Crystal::Hasher`.
+- Parser-first and textual primitive signature parsing were refuted by the
+  produced expansion itself: `op.id` was already missing from the text.
+- This is a moved-frontier fix, not a full-prelude unlock. Produced `s2`
+  full-prelude `puts 42` currently exits 139 in the `Proc` class body loop; the
+  broader produced MacroHash/key corruption remains a follow-up root, but is no
+  longer blocking this specific stdlib Char primitive registration corridor.
+
+Trust: {F/G/R: 0.84/0.48/0.84} [verified]

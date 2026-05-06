@@ -22085,6 +22085,8 @@ module Crystal::HIR
       values = macro_for_iterable_values(node.iterable)
       return unless values
 
+      return if register_char_binary_primitive_macro_for?(class_name, iter_vars, values)
+
       source = source_for_arena(@arena)
       program = CrystalV2::Compiler::Frontend::Program.new(@arena, [] of ExprId)
       expander = CrystalV2::Compiler::Semantic::MacroExpander.new(
@@ -22112,47 +22114,274 @@ module Crystal::HIR
         parsed_arena, body_ids = parsed
         with_arena(parsed_arena) do
           body_ids.each do |expr_id|
-            expr_node = @arena[expr_id]
-            case expr_node
-            when CrystalV2::Compiler::Frontend::DefNode
-              register_class_macro_def_from_expansion(expr_node, class_name, ivars, offset_ref, init_capture)
-            when CrystalV2::Compiler::Frontend::MacroIfNode
-              process_macro_if_in_class(expr_node, class_name, ivars, offset_ref, init_capture)
-            when CrystalV2::Compiler::Frontend::MacroForNode
-              process_macro_for_in_class(expr_node, class_name, ivars, offset_ref, init_capture)
-            when CrystalV2::Compiler::Frontend::MacroLiteralNode
-              process_macro_literal_in_class(expr_node, class_name, ivars, offset_ref, init_capture)
-            when CrystalV2::Compiler::Frontend::ClassNode
-              nested_name = (safe_slice_to_string(expr_node.name) || "")
-              full_nested_name = "#{class_name}::#{nested_name}"
-              register_class_with_name(expr_node, full_nested_name)
-            when CrystalV2::Compiler::Frontend::EnumNode
-              nested_name = (safe_slice_to_string(expr_node.name) || "")
-              full_nested_name = "#{class_name}::#{nested_name}"
-              register_enum_with_name(expr_node, full_nested_name)
-            when CrystalV2::Compiler::Frontend::ModuleNode
-              nested_name = (safe_slice_to_string(expr_node.name) || "")
-              full_nested_name = "#{class_name}::#{nested_name}"
-              register_nested_module(expr_node, full_nested_name)
-            when CrystalV2::Compiler::Frontend::GetterNode
-              register_accessors_in_class(expr_node, class_name, ivars, offset_ref)
-            when CrystalV2::Compiler::Frontend::SetterNode
-              register_accessors_in_class(expr_node, class_name, ivars, offset_ref)
-            when CrystalV2::Compiler::Frontend::PropertyNode
-              register_accessors_in_class(expr_node, class_name, ivars, offset_ref)
-            when CrystalV2::Compiler::Frontend::CallNode
-              register_class_members_from_expansion(
-                class_name,
-                expr_id,
-                Set(String).new,
-                Set(String).new,
-                ivars,
-                offset_ref
-              )
-            end
+            process_class_macro_expansion_member(class_name, expr_id, ivars, offset_ref, init_capture)
           end
         end
       end
+    end
+
+    private def process_class_macro_expansion_member(
+      class_name : String,
+      expr_id : ExprId,
+      ivars : Array(IVarInfo)? = nil,
+      offset_ref : Pointer(Int32)? = nil,
+      init_capture : InitParamsCapture? = nil,
+    )
+      expr_node = @arena[expr_id]
+      case expr_node
+      when CrystalV2::Compiler::Frontend::DefNode
+        register_class_macro_def_from_expansion(expr_node, class_name, ivars, offset_ref, init_capture)
+      when CrystalV2::Compiler::Frontend::MacroIfNode
+        process_macro_if_in_class(expr_node, class_name, ivars, offset_ref, init_capture)
+      when CrystalV2::Compiler::Frontend::MacroForNode
+        process_macro_for_in_class(expr_node, class_name, ivars, offset_ref, init_capture)
+      when CrystalV2::Compiler::Frontend::MacroLiteralNode
+        process_macro_literal_in_class(expr_node, class_name, ivars, offset_ref, init_capture)
+      when CrystalV2::Compiler::Frontend::ClassNode
+        nested_name = (safe_slice_to_string(expr_node.name) || "")
+        full_nested_name = "#{class_name}::#{nested_name}"
+        register_class_with_name(expr_node, full_nested_name)
+      when CrystalV2::Compiler::Frontend::EnumNode
+        nested_name = (safe_slice_to_string(expr_node.name) || "")
+        full_nested_name = "#{class_name}::#{nested_name}"
+        register_enum_with_name(expr_node, full_nested_name)
+      when CrystalV2::Compiler::Frontend::ModuleNode
+        nested_name = (safe_slice_to_string(expr_node.name) || "")
+        full_nested_name = "#{class_name}::#{nested_name}"
+        register_nested_module(expr_node, full_nested_name)
+      when CrystalV2::Compiler::Frontend::GetterNode
+        register_accessors_in_class(expr_node, class_name, ivars, offset_ref)
+      when CrystalV2::Compiler::Frontend::SetterNode
+        register_accessors_in_class(expr_node, class_name, ivars, offset_ref)
+      when CrystalV2::Compiler::Frontend::PropertyNode
+        register_accessors_in_class(expr_node, class_name, ivars, offset_ref)
+      when CrystalV2::Compiler::Frontend::ConstantNode
+        record_constant_definition(class_name, expr_node, @arena)
+      when CrystalV2::Compiler::Frontend::AssignNode
+        register_class_assign_from_expansion(expr_id, expr_node, class_name)
+      when CrystalV2::Compiler::Frontend::CallNode
+        register_class_members_from_expansion(
+          class_name,
+          expr_id,
+          Set(String).new,
+          Set(String).new,
+          ivars,
+          offset_ref
+        )
+      end
+    end
+
+    private def register_char_binary_primitive_macro_for?(
+      class_name : String,
+      iter_vars : Array(String),
+      values : Array(CrystalV2::Compiler::Semantic::MacroValue),
+    ) : Bool
+      return false unless class_name == "Char"
+      return false unless iter_vars.size >= 2 && iter_vars[0] == "op" && iter_vars[1] == "desc"
+      return false if values.empty?
+
+      if values.size == 6 && !char_binary_macro_values_have_operator_ids?(values)
+        register_char_binary_primitive_methods(["==", "!=", "<", "<=", ">", ">="])
+        return true
+      end
+
+      param_types = [TypeRef::CHAR]
+      return_type = TypeRef::BOOL
+      registered = false
+
+      values.each do |value|
+        tuple = value.as?(CrystalV2::Compiler::Semantic::MacroTupleValue)
+        return false unless tuple
+        op_value = tuple.elements[0]?
+        return false unless op_value
+        method_name = op_value.to_id
+        return false unless method_name == "==" || method_name == "!=" ||
+                            method_name == "<" || method_name == "<=" ||
+                            method_name == ">" || method_name == ">="
+
+        base_name = "#{class_name}##{method_name}"
+        full_name = mangle_function_name(base_name, param_types)
+        @module.register_primitive(base_name, "binary")
+        register_function_type(full_name, return_type)
+        registered = true
+      end
+
+      registered
+    end
+
+    private def char_binary_macro_values_have_operator_ids?(values : Array(CrystalV2::Compiler::Semantic::MacroValue)) : Bool
+      values.each do |value|
+        tuple = value.as?(CrystalV2::Compiler::Semantic::MacroTupleValue)
+        return false unless tuple
+        op_value = tuple.elements[0]?
+        return false unless op_value
+        method_name = op_value.to_id
+        return false if method_name.empty?
+      end
+      true
+    end
+
+    private def register_char_binary_primitive_methods(method_names : Array(String)) : Nil
+      param_types = [TypeRef::CHAR]
+      return_type = TypeRef::BOOL
+      method_names.each do |method_name|
+        base_name = "Char##{method_name}"
+        full_name = mangle_function_name(base_name, param_types)
+        @module.register_primitive(base_name, "binary")
+        register_function_type(full_name, return_type)
+      end
+    end
+
+    private def record_constants_from_class_macro_for(
+      node : CrystalV2::Compiler::Frontend::MacroForNode,
+      class_name : String,
+    )
+      iter_vars = node.iter_vars.map { |name| String.new(name) }
+      return if iter_vars.empty?
+
+      values = macro_for_iterable_values(node.iterable)
+      return unless values
+
+      source = source_for_arena(@arena)
+      program = CrystalV2::Compiler::Frontend::Program.new(@arena, [] of ExprId)
+      expander = CrystalV2::Compiler::Semantic::MacroExpander.new(
+        program,
+        @arena,
+        CrystalV2::Runtime.target_flags,
+        recovery_mode: true,
+        macro_source: source,
+        macro_source_path: source_path_for(@arena)
+      )
+      owner_type = macro_owner_type_for(class_name)
+
+      expanded = String.build do |io|
+        values.each_with_index do |value, idx|
+          vars = {} of String => CrystalV2::Compiler::Semantic::MacroValue
+          assign_macro_iter_vars(vars, iter_vars, value, idx)
+          if body_output = expander.expand_literal(node.body, variables: vars, owner_type: owner_type)
+            io << body_output
+            io << "\n"
+          end
+        end
+      end
+
+      return unless class_macro_expansion_has_record_time_members?(expanded)
+
+      if parsed = parse_macro_literal_class_body_with_sanitized_fallback(expanded, "class_for_constants:#{class_name}")
+        parsed_arena, body_ids = parsed
+        with_arena(parsed_arena) do
+          body_ids.each do |expr_id|
+            record_class_record_time_member_from_expansion(class_name, expr_id)
+          end
+        end
+      end
+    end
+
+    private def record_class_record_time_member_from_expansion(class_name : String, expr_id : ExprId)
+      expr_node = @arena[expr_id]
+      case expr_node
+      when CrystalV2::Compiler::Frontend::BlockNode
+        expr_node.body.each do |child_id|
+          record_class_record_time_member_from_expansion(class_name, child_id)
+        end
+      when CrystalV2::Compiler::Frontend::MacroIfNode
+        process_macro_if_in_class(expr_node, class_name)
+      when CrystalV2::Compiler::Frontend::MacroForNode
+        record_constants_from_class_macro_for(expr_node, class_name)
+      when CrystalV2::Compiler::Frontend::MacroLiteralNode
+        process_macro_literal_in_class(expr_node, class_name)
+      when CrystalV2::Compiler::Frontend::ClassNode
+        nested_name = (safe_slice_to_string(expr_node.name) || "")
+        full_nested_name = "#{class_name}::#{nested_name}"
+        register_class_with_name(expr_node, full_nested_name)
+      when CrystalV2::Compiler::Frontend::EnumNode
+        nested_name = (safe_slice_to_string(expr_node.name) || "")
+        full_nested_name = "#{class_name}::#{nested_name}"
+        register_enum_with_name(expr_node, full_nested_name)
+      when CrystalV2::Compiler::Frontend::ModuleNode
+        nested_name = (safe_slice_to_string(expr_node.name) || "")
+        full_nested_name = "#{class_name}::#{nested_name}"
+        register_nested_module(expr_node, full_nested_name)
+      when CrystalV2::Compiler::Frontend::ConstantNode
+        record_constant_definition(class_name, expr_node, @arena)
+      when CrystalV2::Compiler::Frontend::AssignNode
+        register_class_assign_from_expansion(expr_id, expr_node, class_name)
+      end
+    end
+
+    private def class_macro_expansion_has_record_time_members?(code : String) : Bool
+      bytesize = code.bytesize
+      line_start = 0
+      while line_start < bytesize
+        line_end = line_start
+        while line_end < bytesize
+          byte = code.byte_at(line_end)
+          break if byte == 10_u8 || byte == 13_u8
+          line_end += 1
+        end
+
+        cursor = line_start
+        while cursor < line_end && whitespace_byte?(code.byte_at(cursor))
+          cursor += 1
+        end
+
+        if cursor < line_end && code.byte_at(cursor) != '#'.ord.to_u8
+          return true if class_body_line_starts_keyword?(code, cursor, line_end, "class")
+          return true if class_body_line_starts_keyword?(code, cursor, line_end, "struct")
+          return true if class_body_line_starts_keyword?(code, cursor, line_end, "module")
+          return true if class_body_line_starts_keyword?(code, cursor, line_end, "enum")
+          return true if class_body_line_starts_keyword?(code, cursor, line_end, "alias")
+          return true if cursor + 1 < line_end &&
+                         code.byte_at(cursor) == '@'.ord.to_u8 &&
+                         code.byte_at(cursor + 1) == '@'.ord.to_u8
+          return true if class_body_line_starts_constant_assignment?(code, cursor, line_end)
+        end
+
+        line_start = line_end + 1
+      end
+      false
+    end
+
+    private def class_body_line_starts_keyword?(code : String, cursor : Int32, line_end : Int32, keyword : String) : Bool
+      keyword_size = keyword.bytesize
+      after = cursor + keyword_size
+      return false if after >= line_end
+
+      idx = 0
+      while idx < keyword_size
+        return false unless code.byte_at(cursor + idx) == keyword.byte_at(idx)
+        idx += 1
+      end
+
+      whitespace_byte?(code.byte_at(after))
+    end
+
+    private def class_body_line_starts_constant_assignment?(code : String, cursor : Int32, line_end : Int32) : Bool
+      return false unless ascii_ident_start?(code.byte_at(cursor))
+      first = code.byte_at(cursor)
+      return false unless first >= 'A'.ord.to_u8 && first <= 'Z'.ord.to_u8
+
+      idx = cursor + 1
+      while idx < line_end
+        ch = code.byte_at(idx)
+        if ascii_ident_part?(ch)
+          idx += 1
+          next
+        end
+        if ch == ':'.ord.to_u8 && idx + 1 < line_end && code.byte_at(idx + 1) == ':'.ord.to_u8
+          idx += 2
+          next
+        end
+        break
+      end
+
+      while idx < line_end && whitespace_byte?(code.byte_at(idx))
+        idx += 1
+      end
+
+      return true if idx < line_end && code.byte_at(idx) == '='.ord.to_u8
+      return true if idx < line_end && code.byte_at(idx) == ':'.ord.to_u8
+      false
     end
 
     private def process_begin_macro_if_in_class(
@@ -22949,7 +23178,7 @@ module Crystal::HIR
           end
         when CrystalV2::Compiler::Frontend::MacroForNode
           if class_like_namespace?(owner_name)
-            process_macro_for_in_class(member, owner_name)
+            record_constants_from_class_macro_for(member, owner_name)
           else
             process_macro_for_in_module(member, owner_name)
           end
