@@ -3625,3 +3625,41 @@ Current boundary:
   registration after `class register idx=3/104`.
 
 Trust: {F/G/R: 0.88/0.58/0.87} [verified]
+
+## LM-555 — Char class registration stalls in record-time macro-for parsing
+
+Context: compiler/bootstrap/codegen, 2026-05-05, `codegen`.
+
+Observed frontier:
+
+- After LM-554, produced `s2` full-prelude `puts 42` still times out in class
+  registration, but the previous `Float::FastFloat::String` / `Bool` signature
+  pollution is gone.
+- A temporary `CRYSTAL_V2_TRACE_CLASS_INDEX` build showed the produced compiler
+  completed class registration through `Bool` and then stalled at
+  `class register before idx=25/104 name=Char`.
+- Existing `DEBUG_REG_CONCRETE_PHASE=Char` localized the stall to
+  `record_constants_in_body`: `Char` reaches `after_include_extend_scan` but not
+  `after_record_constants`.
+- Temporary `DEBUG_RECORD_CONSTANTS=Char` instrumentation localized the member:
+  `record_constants_in_body("Char", ...)` reaches a `MacroForNode` from
+  `primitives.cr` (`{% for op, desc in {...} %}` for `Char` comparison
+  primitives), extracts six values, expands 870 bytes of method-only output,
+  then stalls inside `parse_macro_literal_class_body_with_sanitized_fallback`.
+
+Refuted branch:
+
+- Replacing record-time `MacroForNode` handling with a constant-only expansion
+  path avoided the `Char` parser stall but made produced full-prelude `puts 42`
+  regress to an early module-register `Trace/BPT` around the `Crystal::Hasher`
+  area. Do not reuse that broad skip: the macro-for registration side effects
+  are still required before class registration completes.
+
+Current boundary:
+
+- The next fix must separate constant recording from method registration more
+  carefully: avoid reparsing method-only macro-for output during
+  `record_constants_in_body`, while preserving the class/member registration
+  effects that the broad constant-only skip removed.
+
+Trust: {F/G/R: 0.82/0.52/0.82} [verified]
