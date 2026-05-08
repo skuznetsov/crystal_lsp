@@ -79,3 +79,41 @@ LLVM finalizes output.
 
 That frontier belongs here, not in HIR name resolution or MIR static-call ABI,
 unless fresh evidence contradicts the split.
+
+## 7. Next Localization Recipe
+
+The next CLI/output fix attempt should start from this reducer:
+
+```crystal
+class Exception
+  class CallStack
+    def self.skip(path : String) : Nil
+    end
+  end
+end
+
+Exception::CallStack.skip("x")
+```
+
+Required first commands:
+
+```bash
+scripts/run_safe.sh <produced-s2> 60 4096 <reducer.cr> --no-prelude --emit llvm-ir --no-link -o <out>
+scripts/run_safe.sh <produced-s2> 60 4096 <reducer.cr> --no-prelude -o <bin>
+```
+
+The localization log for a claimed fix MUST state the last confirmed passing
+point and first failing point among:
+
+1. LLVM IR generation returns to CLI.
+2. Object emission starts.
+3. Object emission returns.
+4. Output file flush/close returns.
+5. Linker setup starts.
+6. Linker invocation returns.
+7. CLI compile function returns.
+8. Outer rescue observes or clears exception state.
+9. Process teardown completes.
+
+If a probe changes the frontier, record that as evidence decay and rerun the
+unprobed reducer before claiming the root.

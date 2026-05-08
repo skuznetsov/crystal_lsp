@@ -43,7 +43,7 @@ Each non-refuted row has a phase pressure:
 | ID | Claim | Source | Smallest Falsifier | Phase | Status |
 |----|-------|--------|--------------------|-------|--------|
 | G1 | Generic/container fixes must not use arbitrary depth caps. | `02-generic-template-registration.md` section 2 | Add a deep nested tuple/hash/array/proc oracle before changing demand or registration pruning code. Static diff review alone is not enough. | next-touch | [MISSING-FALSIFIER] |
-| G2 | Empty or repeated generic owner names such as `Iterator::` or `Indexable::Indexable::...` are invalid. | `02-generic-template-registration.md` section 3 | Add trace/IR guard that fails on empty owner suffixes or repeated adjacent owner segments in generated stage. | current | [MISSING-FALSIFIER] |
+| G2 | Empty or repeated generic owner names such as `Iterator::` or `Indexable::Indexable::...` are invalid. | `02-generic-template-registration.md` section 3 | Add trace/IR guard that fails on empty owner suffixes or repeated adjacent owner segments in generated stage. | next-touch | [MISSING-FALSIFIER] |
 | G3 | Generic template and instance keys must be semantic keys, not rendered strings. | `02-generic-template-registration.md` section 3 | Add key-rendering oracle that compares canonical key fields against rendered names for nested generic owners. | pre-s2-clean | [MISSING-FALSIFIER] |
 | G4 | Broad source-gated generic-template body scan is not an acceptable fix. | `02-generic-template-registration.md` section 5 | Reverted experiment regressed earlier around `Crystal::PointerLinkedList` / trace paths. | current | [REFUTED] |
 | G5 | Produced `s2` full-prelude `puts 42` must get past current generic/template registration frontier. | `TODO.md`, LM-559 | `CRYSTAL_V2_TRACE_CLASS_FRONTIER=1 scripts/run_safe.sh <produced-s2> 60 4096 /tmp/hello.cr -o /tmp/hello_bin`. | current | [FRONTIER] |
@@ -71,7 +71,7 @@ Each non-refuted row has a phase pressure:
 | ID | Claim | Source | Smallest Falsifier | Phase | Status |
 |----|-------|--------|--------------------|-------|--------|
 | C1 | Emit-only success does not prove normal binary output success. | `06-cli-output-contract.md` section 2 | Same reducer passes `--emit llvm-ir --no-link` but normal `-o <bin>` exits 139. | current | [FALSIFIABLE] |
-| C2 | Post-LLVM tail fixes must localize crash after LLVM finalization. | `06-cli-output-contract.md` section 4 | Tail fix lacks evidence separating object emission, file close, linker setup, return path, outer rescue, and teardown. | current | [MISSING-FALSIFIER] |
+| C2 | Post-LLVM tail fixes must localize crash after LLVM finalization. | `06-cli-output-contract.md` section 4 | Tail fix lacks the section 7 localization log separating object emission, file close, linker setup, return path, outer rescue, and teardown. | current | [MISSING-FALSIFIER] |
 | C3 | Binary-output fix must verify adjacent modes. | `06-cli-output-contract.md` section 5 | A commit claims binary-output fix with only `--emit llvm-ir --no-link` evidence. | current | [FALSIFIABLE] |
 
 ## 8. Refuted Branches

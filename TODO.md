@@ -46,6 +46,9 @@ semantic oracle rule, a concrete generic template key shape, a MIR static-call
 shape guard brief, and `docs/specs/06-cli-output-contract.md` for the active
 post-LLVM file-output/outer-rescue frontier. Do not treat `--emit llvm-ir`
 success as evidence for normal binary output.
+After LM-562, the CLI/output spec also contains the exact static-call reducer,
+adjacent emit-vs-binary commands, and the required localization log points for
+the next post-LLVM tail fix attempt.
 
 Stage2 static-call LLVM emission checkpoint (2026-05-08): after LM-559,
 produced `s2` no-prelude LLVM IR for `Exception::CallStack.skip("x")` now emits

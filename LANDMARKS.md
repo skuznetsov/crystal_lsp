@@ -4011,3 +4011,29 @@ Operational impact:
   change is explicitly limited to internal stage parity.
 
 Trust: {F/G/R: 0.84/0.70/0.84} [verified-docs]
+
+## LM-562 — Second hostile spec review tightened next-frontier usability
+
+Context: compiler/bootstrap/process, 2026-05-08, `codegen`.
+
+Review findings addressed:
+
+- `G2` in the falsifier matrix was incorrectly marked `current`. Empty or
+  repeated generic owner names are important, but they should block the next
+  generic-registration touch, not the active CLI/output frontier. It is now
+  `next-touch`.
+- `06-cli-output-contract.md` named the post-LLVM tail categories but did not
+  give the next agent an executable starting recipe. It now includes the
+  static-call reducer, adjacent `--emit llvm-ir --no-link` and normal binary
+  commands, and a nine-point localization log from LLVM return through process
+  teardown.
+
+Operational impact:
+
+- The next CLI/output attempt can begin directly from `06-cli-output-contract.md`
+  section 7.
+- A claimed tail fix must state last passing and first failing points; a probe
+  that changes the frontier must be treated as evidence decay and rerun
+  unprobed.
+
+Trust: {F/G/R: 0.85/0.72/0.85} [verified-docs]
