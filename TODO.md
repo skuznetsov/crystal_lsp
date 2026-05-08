@@ -53,6 +53,22 @@ After LM-563, the falsifier matrix no longer marks the full-prelude
 generic/template `puts 42` frontier as the active `current` row; it is a
 `pre-s2-clean` gate behind the no-prelude CLI/output tail.
 
+Stage2 CLI output tail checkpoint (2026-05-08): after LM-564, produced `s2`
+passes the no-prelude static-call reducer in both adjacent modes:
+`--emit llvm-ir --no-link` and normal binary output. CLI/cache-tail closure:
+binary mode now keeps LLVM IR generation in memory, writes the `.ll` file
+through raw `LibC` fd IO outside `LLVMIRGenerator`, and the LLVM cache hash
+path streams through raw `LibC.open/read/close` instead of `File.open`. The
+last C2 root was not static-call lowering and not the backend output sink
+alone: lldb showed the post-write crash entering
+`compile_llvm_ir -> file_sha256 -> Dir.open` and calling `__crystal_v2_raise`
+with a nil exception object in produced `s2`. The deeper nil-exception/Dir.open
+path remains a separate runtime/lowering risk, not solved by this CLI-tail fix.
+New guard: `p2_stage2_cli_output_tail_no_prelude.sh`, passed on host and
+produced `s2`. Boundary: this clears the active no-prelude CLI/output tail; the
+full-prelude generic/template `puts 42` row remains the next `pre-s2-clean`
+gate, not a solved smoke.
+
 Stage2 static-call LLVM emission checkpoint (2026-05-08): after LM-559,
 produced `s2` no-prelude LLVM IR for `Exception::CallStack.skip("x")` now emits
 the named static callee

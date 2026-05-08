@@ -4057,3 +4057,53 @@ Fix:
   the active CLI/output tail work.
 
 Trust: {F/G/R: 0.86/0.72/0.86} [verified-docs]
+
+## LM-564 — Produced stage2 normal CLI output clears the no-prelude tail
+
+Context: compiler/bootstrap/CLI-output, 2026-05-08, `codegen`.
+
+Verified outcome:
+
+- The static-call reducer from `docs/specs/06-cli-output-contract.md` now
+  passes both adjacent modes on host and produced `s2`: `--emit llvm-ir
+  --no-link` and normal binary output.
+- The normal binary path keeps LLVM IR generation in memory, writes the `.ll`
+  file through raw `LibC` fd IO outside `LLVMIRGenerator`, and hashes LLVM cache
+  inputs with raw `LibC.open/read/close` instead of `File.open`.
+
+Root evidence:
+
+- Before the fix, produced `s2` emitted valid no-prelude LLVM IR and `llc`
+  accepted it, but normal binary output exited 139 after the `.ll` write.
+- Cursor A2A review correctly pushed the next falsifier toward the tail after
+  file close, but local lldb evidence refined the root: `compile_llvm_ir`
+  reached `file_sha256`, which used `File.open`; the produced compiler entered
+  `Crystal::System::Dir.open` and called `__crystal_v2_raise` with `x0 = NULL`,
+  leading the outer rescue path to dereference a nil exception object.
+- Refuted branches: backend `generate_to(output)` split, resetting
+  `LLVMIRGenerator.@output`, a custom `RawFdOutput`, removing `ensure` around
+  close, and deleting the outer `CLI#compile` rescue. Those either did not move
+  the C2 guard or regressed the `s1 -> s2` gate.
+
+Evidence:
+
+- `crystal build src/crystal_v2.cr -o /private/tmp/cv2_cli_tail_final3_host
+  --error-trace`
+- `CRYSTAL_CACHE_DIR=/private/tmp/crystal_cache_cv2_cli_tail_final3
+  scripts/run_safe.sh /private/tmp/cv2_cli_tail_final3_host 600 4096
+  src/crystal_v2.cr -o /private/tmp/cv2_cli_tail_final3_s2/cv2_s2`
+- Host and produced `s2` guards:
+  `p2_stage2_cli_output_tail_no_prelude.sh`,
+  `p2_stage2_static_call_named_llvm_no_prelude.sh`,
+  `p2_type_literal_name_query_no_stub.sh`, and
+  `p2_qualified_module_namespace_no_prelude.sh`.
+- `git diff --check`
+
+Boundary:
+
+- This clears the active no-prelude CLI/output tail. It is not a full-prelude
+  `puts 42` claim, and it does not fix the deeper nil-exception path in
+  `Dir.open`/rescue lowering. The generic/template `pre-s2-clean` row remains
+  open.
+
+Trust: {F/G/R: 0.88/0.58/0.88} [verified]

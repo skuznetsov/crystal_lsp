@@ -598,13 +598,14 @@ module CrystalV2
         !env_get(name).nil?
       end
 
-      private def write_all_fd(fd : IO::FileDescriptor::Handle, bytes : Bytes) : Nil
+      private def write_all_fd(fd : IO::FileDescriptor::Handle, bytes : Bytes) : Int64
         offset = 0
         while offset < bytes.size
           written = LibC.write(fd, bytes.to_unsafe + offset, bytes.size - offset)
           raise "write failed on fd #{fd}" if written <= 0
           offset += written.to_i
         end
+        bytes.size.to_i64
       end
 
       private def copy_file_raw(src : String, dst : String) : Bool
@@ -2753,28 +2754,43 @@ module CrystalV2
           llvm_ir_bytes = llvm_ir.size.to_i64
           log(options, out_io, "  LLVM IR size: #{llvm_ir_bytes} bytes")
           File.write(ll_file, llvm_ir)
+          timings["llvm"] = (Time.instant - llvm_start).total_milliseconds if options.stats
+          timings["dbg_count_llvm_ir_bytes"] = llvm_ir_bytes.to_f if debug_profile
+          if options.stats
+            llvm_details = [] of String
+            if options.verbose
+              llvm_details << "bytes=#{llvm_ir_bytes}"
+              llvm_details << "emit=stdout"
+            end
+            emit_stage_timing(options, out_io, total_start, 5, "llvm", timings["llvm"]? || 0.0, llvm_details)
+          end
+
+          log(options, out_io, "  Wrote: #{ll_file}")
+          emit_timings(options, out_io, timings, total_start)
+          write_text(out_io, llvm_ir, newline: true)
+          return 0
         else
-          bootstrap_trace_puts "[STAGE2_TRACE] step5: File.open start"; STDERR.flush
-          # V2 BOOTSTRAP: File.open block crashes in stage2. Use lower-level LibC.
+          llvm_ir = llvm_gen.generate
+          if BootstrapEnv.enabled?("CRYSTAL_V2_TRACE_STDERR")
+            LibC.write(2, "[STAGE2_TRACE] step5: generate done\n".to_unsafe, 36_u64)
+          end
+
+          # V2 BOOTSTRAP: keep file IO out of LLVMIRGenerator. Produced stage2
+          # currently crashes when the backend returns through an external IO sink.
           LibC.unlink(ll_file.to_unsafe)
           fd = LibC.open(ll_file.to_unsafe, LibC::O_WRONLY | LibC::O_CREAT | LibC::O_TRUNC, 0o644)
           if fd < 0
             err_io.puts "Failed to open #{ll_file} for writing"
             return 1
           end
-          bootstrap_trace_puts "[STAGE2_TRACE] step5: fd opened = #{fd}"; STDERR.flush
-          ll_io = IO::FileDescriptor.new(fd)
-          bootstrap_trace_puts "[STAGE2_TRACE] step5: FileDescriptor created"; STDERR.flush
+
           begin
-            bootstrap_trace_puts "[STAGE2_TRACE] step5: generate(io) start"; STDERR.flush
-            llvm_gen.generate(ll_io)
-            bootstrap_trace_puts "[STAGE2_TRACE] step5: generate done"; STDERR.flush
+            llvm_ir_bytes = write_all_fd(fd, llvm_ir.to_slice)
           ensure
-            ll_io.flush
             LibC.close(fd)
           end
-          llvm_ir_bytes = File.size(ll_file)
-          log(options, out_io, "  LLVM IR size: #{llvm_ir_bytes} bytes")
+
+          log(options, out_io, "  LLVM IR size: #{llvm_ir_bytes} bytes") if options.verbose
         end
         timings["llvm"] = (Time.instant - llvm_start).total_milliseconds if options.stats
         timings["dbg_count_llvm_ir_bytes"] = llvm_ir_bytes.to_f if debug_profile
@@ -2787,13 +2803,7 @@ module CrystalV2
           emit_stage_timing(options, out_io, total_start, 5, "llvm", timings["llvm"]? || 0.0, llvm_details)
         end
 
-        log(options, out_io, "  Wrote: #{ll_file}")
-
-        if options.emit_llvm
-          emit_timings(options, out_io, timings, total_start)
-          write_text(out_io, llvm_ir, newline: true)
-          return 0
-        end
+        log(options, out_io, "  Wrote: #{ll_file}") if options.verbose
 
         # Save to pipeline cache on miss — fork to background so llc can start sooner
         if options.pipeline_cache && !pipeline_cache_file.empty?
@@ -3375,22 +3385,35 @@ module CrystalV2
       private def file_sha256(path : String) : String
         # V2 BOOTSTRAP: SHA256 depends on OpenSSL module methods that V2's RTA
         # doesn't discover (inherited Digest#update). Use FNV-1a hash instead.
-        # Stream the file instead of File.read(path): self-hosted stage2 can
-        # produce multi-gigabyte .ll files, and File.read overflows there.
+        # Stream through raw libc instead of File.open: produced stage2 can
+        # raise a nil exception in the File/Dir open path while entering the
+        # LLVM cache tail.
         hash = 0xcbf29ce484222325_u64
         buffer = Bytes.new(64 * 1024)
-        File.open(path) do |file|
-          loop do
-            bytes_read = file.read(buffer)
-            break if bytes_read <= 0
-            idx = 0
-            while idx < bytes_read
-              hash ^= buffer.unsafe_fetch(idx).to_u64
-              hash &*= 0x100000001b3_u64
-              idx += 1
-            end
+        fd = LibC.open(path.to_unsafe, LibC::O_RDONLY)
+        if fd < 0
+          hash ^= 0xff_u64
+          hash &*= 0x100000001b3_u64
+          return hash.to_s(16)
+        end
+
+        loop do
+          bytes_read = LibC.read(fd, buffer.to_unsafe, buffer.size)
+          if bytes_read < 0
+            hash ^= 0xfe_u64
+            hash &*= 0x100000001b3_u64
+            break
+          end
+          break if bytes_read == 0
+          idx = 0
+          bytes_count = bytes_read.to_i
+          while idx < bytes_count
+            hash ^= buffer.unsafe_fetch(idx).to_u64
+            hash &*= 0x100000001b3_u64
+            idx += 1
           end
         end
+        LibC.close(fd)
         hash.to_s(16)
       end
 

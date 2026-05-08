@@ -71,7 +71,7 @@ Each non-refuted row has a phase pressure:
 | ID | Claim | Source | Smallest Falsifier | Phase | Status |
 |----|-------|--------|--------------------|-------|--------|
 | C1 | Emit-only success does not prove normal binary output success. | `06-cli-output-contract.md` section 2 | Same reducer passes `--emit llvm-ir --no-link` but normal `-o <bin>` exits 139. | current | [FALSIFIABLE] |
-| C2 | Post-LLVM tail fixes must localize crash after LLVM finalization. | `06-cli-output-contract.md` section 4 | Tail fix lacks the section 7 localization log separating object emission, file close, linker setup, return path, outer rescue, and teardown. | current | [MISSING-FALSIFIER] |
+| C2 | Post-LLVM tail fixes must localize crash after LLVM finalization. | `06-cli-output-contract.md` section 4, LM-564 | `regression_tests/p2_stage2_cli_output_tail_no_prelude.sh <compiler>`; a future tail fix lacking the section 7 localization log is invalid evidence. | current | [FALSIFIABLE] |
 | C3 | Binary-output fix must verify adjacent modes. | `06-cli-output-contract.md` section 5 | A commit claims binary-output fix with only `--emit llvm-ir --no-link` evidence. | current | [FALSIFIABLE] |
 
 ## 8. Refuted Branches
