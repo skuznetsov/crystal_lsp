@@ -963,6 +963,12 @@ module CrystalV2
           ExprId.new(@block_index)
         end
 
+        # V2 bootstrap: use this instead of block.nil? — @has_block is a plain Bool
+        # whose check is not subject to the zombie nil-union bug in s2b.
+        def has_block? : Bool
+          @has_block
+        end
+
         def named_args : Array(NamedArgument)?
           return nil unless @has_named_args
           @named_args_storage

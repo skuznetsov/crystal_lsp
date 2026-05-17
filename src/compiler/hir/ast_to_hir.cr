@@ -32966,6 +32966,7 @@ module Crystal::HIR
       has_block : Bool = false,
       has_named_only : Bool = false,
     ) : String
+      return "" unless v2_string_readable?(base_name)
       if dollar = ascii_byte_index(base_name, '$'.ord.to_u8)
         base_name = base_name[0, dollar]
       end
@@ -65140,7 +65141,10 @@ module Crystal::HIR
       lookup_arg_types = lookup_callsite.try(&.types)
       if lookup_expected_param_count == 0
         if types = lookup_arg_types
-          lookup_expected_param_count = types.size
+          # V2 bootstrap: guard against null Array ptr from zero-initialized CallsiteArgs
+          if pointerof(types).as(Pointer(UInt64)).value != 0_u64
+            lookup_expected_param_count = types.size
+          end
         end
       end
       if debug_lookup_name && name.includes?(debug_lookup_name) && func_def
@@ -65610,7 +65614,14 @@ module Crystal::HIR
           best_name : String? = nil
           best_param_count = Int32::MAX
           best_score = Int32::MIN
-          requested_arity = lookup_callsite ? lookup_callsite.types.size : (name_parts.suffix ? suffix_param_count(name_parts.suffix.not_nil!) : nil)
+          requested_arity = if cs = lookup_callsite
+                               ts = cs.types
+                               # V2 bootstrap: CallsiteArgs may be zero-initialized (zombie union);
+                               # Array(TypeRef) ptr at offset 0 of struct may be null → guard before .size
+                               pointerof(ts).as(Pointer(UInt64)).value != 0_u64 ? ts.size : nil
+                             else
+                               name_parts.suffix ? suffix_param_count(name_parts.suffix.not_nil!) : nil
+                             end
           if callsite_by_arity && !callsite_by_arity.empty?
             overload_keys.each do |key|
               next unless key.starts_with?(mangled_prefix)
@@ -65835,7 +65846,11 @@ module Crystal::HIR
             all_included = Set(String).new
             visited_classes = Set(String).new
             current_class = owner
-            while current_class && !visited_classes.includes?(current_class)
+            # V2 bootstrap: read union payload at offset +4 (bytes 4-11) to detect null
+            # Strings. V2 union layout: {i32 type_id at offset 0, ptr payload at offset 4}.
+            # pointerof(var).as(Pointer(UInt64)).value reads bytes 0-7 = {type_id, payload_low32}
+            # which is always non-zero when type_id != 0. We must read bytes 4-11 = actual ptr.
+            while (pointerof(current_class).as(Pointer(UInt8)) + 4).as(Pointer(UInt64)).value != 0_u64 && !visited_classes.includes?(current_class)
               visited_classes << current_class
               if modules = @class_included_modules[current_class]?
                 modules.each { |m| all_included << m }
@@ -65849,6 +65864,8 @@ module Crystal::HIR
               # Get parent class
               parent = @class_info[current_class]?.try(&.parent_name) || @module.class_parents[current_class]?
               break unless parent
+              # V2 bootstrap: read union payload at offset +4 to detect null String
+              break if (pointerof(parent).as(Pointer(UInt8)) + 4).as(Pointer(UInt64)).value == 0_u64
               current_class = parent
             end
             if method_part && !all_included.empty?
@@ -69847,12 +69864,77 @@ module Crystal::HIR
       # wrapper and directly call IO#puts/print(Type) on STDOUT. This avoids the problem
       # where puts$splat is compiled once for the first call's type and reused incorrectly
       # for different types in the same program.
-      if receiver_id.nil? && (method_name == "puts" || method_name == "print") &&
-         call_args.size == 1 && block_expr.nil? && block_pass_expr.nil? &&
-         full_method_name.nil?
+      # V2 bootstrap: receiver_id.nil? is broken for UInt32? in s2b — nil union has non-zero
+      # type_id so "is 8-byte value nonzero" incorrectly returns true. Use `(x||0)==0` instead:
+      # for nil (broken nil-check), || short-circuits with unwrapped payload=0; for Some(n>0),
+      # || returns n. This correctly catches nil and zombie-nil without raw memory reads.
+      _puts_recv_nil = (receiver_id || 0_u32) == 0_u32
+      _puts_fmn_ok = full_method_name.nil? || full_method_name == method_name
+      # V2 bootstrap: block_expr.nil? is zombie-broken for ExprId? (struct-pointer union) in s2b.
+      # Use node.has_block? (reads @has_block : Bool directly, avoids nilable ExprId? zombie).
+      _puts_no_block = !node.has_block?
+      if env_has?("DEBUG_PUTS_INTERCEPT") && (method_name == "puts" || method_name == "print")
+        STDERR.puts "[PUTS_EARLY] recv_nil=#{_puts_recv_nil} fmn_ok=#{_puts_fmn_ok} no_block=#{_puts_no_block} method=#{method_name} call_args=#{call_args.size}"
+        # V2 bootstrap diagnostic: check if TypeRef constants have correct ids in s2b
+        STDERR.puts "[PUTS_CONST] VOID_id=#{TypeRef::VOID.id} INT32_id=#{TypeRef::INT32.id} STRING_id=#{TypeRef::STRING.id}"
+      end
+      if _puts_recv_nil && (method_name == "puts" || method_name == "print") &&
+         call_args.size == 1 && _puts_no_block &&
+         _puts_fmn_ok
+        # V2 bootstrap NumberNode fast path: use NumberKind.value (raw enum int) to select extern.
+        # Avoids TypeRef constant comparison entirely — TypeRef constants may be broken in s2b.
+        _puts_arg0_node = with_arena(call_arena) { @arena[call_args[0]] }
+        if _puts_arg0_node.is_a?(CrystalV2::Compiler::Frontend::NumberNode)
+          _puts_nk = _puts_arg0_node.kind.value  # 0=I8,1=I16,2=I32,3=I64,4=I128,5=U8,6=U16,7=U32,8=U64,9=U128,10=F32,11=F64
+          _puts_arg0_id = with_arena(call_arena) { lower_expr(ctx, call_args[0]) }
+          _puts_ext0 : String? = if _puts_nk == 2 || _puts_nk == 0 || _puts_nk == 1  # I32,I8,I16
+                                   method_name == "puts" ? "__crystal_v2_print_int32_ln" : "__crystal_v2_print_int32"
+                                 elsif _puts_nk == 3  # I64
+                                   method_name == "puts" ? "__crystal_v2_print_int64_ln" : "__crystal_v2_print_int64"
+                                 elsif _puts_nk == 7 || _puts_nk == 5 || _puts_nk == 6  # U32,U8,U16
+                                   method_name == "puts" ? "__crystal_v2_print_uint32_ln" : "__crystal_v2_print_uint32"
+                                 elsif _puts_nk == 8  # U64
+                                   method_name == "puts" ? "__crystal_v2_print_uint64_ln" : "__crystal_v2_print_uint64"
+                                 elsif _puts_nk == 10  # F32
+                                   method_name == "puts" ? "__crystal_v2_print_float32_ln" : "__crystal_v2_print_float32"
+                                 elsif _puts_nk == 11  # F64
+                                   method_name == "puts" ? "__crystal_v2_print_float64_ln" : "__crystal_v2_print_float64"
+                                 else
+                                   nil
+                                 end
+          if _puts_ext0_name = _puts_ext0
+            # Widen I8/I16 → I32, U8/U16 → U32 before the extern call
+            _puts_final_arg_id = if _puts_nk == 0 || _puts_nk == 1
+                                    _wc = Cast.new(ctx.next_id, TypeRef::INT32, _puts_arg0_id, TypeRef::INT32, safe: false)
+                                    ctx.emit(_wc); ctx.register_type(_wc.id, TypeRef::INT32); _wc.id
+                                  elsif _puts_nk == 5 || _puts_nk == 6
+                                    _wc = Cast.new(ctx.next_id, TypeRef::UINT32, _puts_arg0_id, TypeRef::UINT32, safe: false)
+                                    ctx.emit(_wc); ctx.register_type(_wc.id, TypeRef::UINT32); _wc.id
+                                  else
+                                    _puts_arg0_id
+                                  end
+            _puts_xcall = ExternCall.new(ctx.next_id, TypeRef::VOID, _puts_ext0_name, [_puts_final_arg_id])
+            ctx.emit(_puts_xcall)
+            ctx.register_type(_puts_xcall.id, TypeRef::NIL)
+            if env_has?("DEBUG_PUTS_INTERCEPT")
+              STDERR.puts "[PUTS_NUMFAST] kind=#{_puts_nk} extern=#{_puts_ext0_name}"
+            end
+            return _puts_xcall.id
+          end
+        end
         arg_type = with_arena(call_arena) { infer_type_from_expr(call_args[0], @current_class) }
+        if env_has?("DEBUG_PUTS_INTERCEPT")
+          _at_nil = arg_type.nil?
+          _at_id = arg_type ? arg_type.id : 9999_u32
+          _at_void = arg_type == TypeRef::VOID
+          STDERR.puts "[PUTS_BODY1] arg_type_nil=#{_at_nil} arg_type_id=#{_at_id} arg_type_void=#{_at_void}"
+        end
         # Fallback: if AST-level inference fails, try lowering context for local vars
-        if (arg_type.nil? || arg_type == TypeRef::VOID) && call_arena
+        _fb1_cond = (arg_type.nil? || arg_type == TypeRef::VOID) && call_arena
+        if env_has?("DEBUG_PUTS_INTERCEPT")
+          STDERR.puts "[PUTS_FB1] cond=#{_fb1_cond}"
+        end
+        if _fb1_cond
           arg_node = with_arena(call_arena) { @arena[call_args[0]] }
           if arg_node.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode)
             var_name = (safe_slice_to_string(arg_node.name) || "")
@@ -69863,12 +69945,31 @@ module Crystal::HIR
         end
         # Fallback 2: for method calls (arr.sum, arr.size, etc.) lower eagerly and check type
         eager_arg_id : ValueId? = nil
-        if (arg_type.nil? || arg_type == TypeRef::VOID) && call_arena
+        _fb2_cond = (arg_type.nil? || arg_type == TypeRef::VOID) && call_arena
+        if env_has?("DEBUG_PUTS_INTERCEPT")
+          _at1b_nil = arg_type.nil?
+          _at1b_id = arg_type ? arg_type.id : 9999_u32
+          _at1b_void = arg_type == TypeRef::VOID
+          STDERR.puts "[PUTS_FB2] cond=#{_fb2_cond} arg_nil=#{_at1b_nil} arg_id=#{_at1b_id} arg_void=#{_at1b_void}"
+        end
+        if _fb2_cond
           eager_arg_id = with_arena(call_arena) { lower_expr(ctx, call_args[0]) }
           arg_type = ctx.type_of(eager_arg_id)
+          if env_has?("DEBUG_PUTS_INTERCEPT")
+            _at_fb2_id = ctx.type_of(eager_arg_id).id
+            STDERR.puts "[PUTS_FB2_RESULT] eager_type_id=#{_at_fb2_id} arg_type_direct_id=#{arg_type ? arg_type.id : 9999_u32}"
+          end
+        end
+        if env_has?("DEBUG_PUTS_INTERCEPT")
+          _at2_nil = arg_type.nil?
+          _at2_id = arg_type ? arg_type.id : 9999_u32
+          STDERR.puts "[PUTS_BODY2] after_fallbacks arg_type_nil=#{_at2_nil} arg_type_id=#{_at2_id}"
         end
         if arg_type && arg_type != TypeRef::VOID
           type_suffix = type_name_for_mangling(arg_type)
+          if env_has?("DEBUG_PUTS_INTERCEPT")
+            STDERR.puts "[PUTS_BODY3] type_suffix=#{type_suffix}"
+          end
           if type_suffix != "Void" && type_suffix != "Unknown"
             is_union = type_suffix.includes?('|') || type_suffix.starts_with?("Union(")
             if is_union
@@ -70156,9 +70257,14 @@ module Crystal::HIR
       # This catches cases where the AST-level inference failed (e.g., top-level locals,
       # enum .value calls, comparison results). For primitive types (int/float/bool),
       # puts$splat wraps the value as a pointer → crashes. Redirect to IO#puts$<Type> directly.
-      if receiver_id.nil? && (method_name == "puts" || method_name == "print") &&
-         prepack_arg_types.size == 1 && block_expr.nil? && block_pass_expr.nil? &&
-         full_method_name.nil?
+      # V2 bootstrap: same (receiver_id || 0_u32) == 0_u32 and node.has_block? Bool tricks.
+      _post_recv_nil = (receiver_id || 0_u32) == 0_u32
+      _post_fmn_ok = full_method_name.nil? || full_method_name == method_name
+      _post_no_block = !node.has_block?
+      if _post_recv_nil &&
+         (method_name == "puts" || method_name == "print") &&
+         prepack_arg_types.size == 1 && _post_no_block &&
+         _post_fmn_ok
         _post_arg_type = prepack_arg_types[0]
         _post_is_primitive = signed_integer_type?(_post_arg_type) ||
                              unsigned_integer_type?(_post_arg_type) ||
@@ -71069,6 +71175,11 @@ module Crystal::HIR
           end
         end
       end
+      # Guard method_name before any string ops: in generated stage2, String fields
+      # can be null pointers under V2's heap-allocated struct ABI.
+      unless v2_string_readable?(method_name)
+        method_name = ""
+      end
       if debug_env_filter_match?("DEBUG_CALL_TRACE", method_name, method_name, full_method_name || "")
         type_ids = arg_types.map(&.id)
         type_names = arg_types.map { |t| get_type_name_from_ref(t) }
@@ -71224,6 +71335,9 @@ module Crystal::HIR
 	          top_level_bare_call_target = exact_top_level
 	        end
 	      end
+      # Third null guard: method_name may have been reassigned by source_method_name
+      # or recovered_method_name paths above; re-sanitize before all downstream string ops.
+      method_name = "" unless v2_string_readable?(method_name)
 	      if top_level_target = top_level_bare_call_target
 	        if !has_block_call && block_expr.nil? && block_pass_expr.nil?
 	          if env_has?("CRYSTAL_V2_TRACE_TOPLEVEL_CALL_SHAPE") &&
@@ -71251,7 +71365,14 @@ module Crystal::HIR
 	      end
       base_method_name = if full_method_name
                            full_method_name
-                         elsif receiver_id.nil? && (current = @current_class)
+                         elsif receiver_id.nil? && (current = @current_class) &&
+                               # V2 bootstrap: @current_class may be zombie-non-nil (type_id set but
+                               # null payload). In V2, `(current = @current_class)` stores the full
+                               # String? union in `current`'s alloca: {i32 type_id at 0, ptr payload at 4}.
+                               # Reading 8 bytes from offset 0 gives type_id+payload_low32 (always non-zero
+                               # when type_id != 0). We must read bytes 4-11 to get the actual String ptr.
+                               (pointerof(current).as(Pointer(UInt8)) + 4).as(Pointer(UInt64)).value != 0_u64 &&
+                               v2_string_readable?(current)
                            # Bare calls inside a class/module resolve to self.<method> only
                            # when that method exists; otherwise fall back to top-level.
                            resolved = if @current_method_is_class
@@ -71328,21 +71449,29 @@ module Crystal::HIR
                              method_name
                            end
                          end
+      # Guard base_method_name: in generated stage2 V2's alloca-phi scheme can
+      # leave the slot null when the elsif/else branch carries method_name across
+      # many block boundaries without an explicit store on every path.
+      unless v2_string_readable?(base_method_name)
+        base_method_name = v2_string_readable?(method_name) ? method_name : ""
+      end
       # Late fallback: if this is an unresolved class-method call on a type literal,
       # use meta-instance methods (e.g., Int32.to_s -> Class#to_s).
-      if receiver_id.nil? && base_method_name.includes?('.') &&
+      if receiver_id.nil? && v2_string_readable?(base_method_name) && base_method_name.includes?('.') &&
          !@function_defs.has_key?(base_method_name) && !class_method_overload_exists?(base_method_name)
         owner = method_owner(base_method_name)
         if owner && !owner.empty? && type_name_exists?(owner)
           owner_ref = type_ref_for_name(owner)
           meta_owner = module_type_ref?(owner_ref) ? "Module" : "Class"
           if meta_method = resolve_method_with_inheritance(meta_owner, method_name)
-            literal_id = lower_type_literal_from_name(ctx, owner)
-            ctx.mark_type_literal(literal_id)
-            receiver_id = literal_id
-            base_method_name = meta_method
-            full_method_name = meta_method
-            static_class_name = nil
+            if v2_string_readable?(meta_method)
+              literal_id = lower_type_literal_from_name(ctx, owner)
+              ctx.mark_type_literal(literal_id)
+              receiver_id = literal_id
+              base_method_name = meta_method
+              full_method_name = meta_method
+              static_class_name = nil
+            end
           end
         end
       end
@@ -71416,7 +71545,7 @@ module Crystal::HIR
                               mangle_function_name(base_method_name, arg_types, has_block_call)
                             end
 
-      if receiver_id && base_method_name.includes?('|') && base_method_name.includes?('#')
+      if receiver_id && v2_string_readable?(base_method_name) && base_method_name.includes?('|') && base_method_name.includes?('#')
         union_name = method_owner(base_method_name)
         if resolved = resolve_union_method_call(union_name, method_name, arg_types, has_block_call, has_named_args)
           if resolved.includes?('$')
@@ -72958,7 +73087,7 @@ module Crystal::HIR
         end
       end
 
-      if receiver_id && method_name.ends_with?('?')
+      if receiver_id && v2_string_readable?(method_name) && method_name.ends_with?('?')
         # For Hash#[]? and similar query methods, infer nilable return type.
         # Hash#[]? has an LLVM override that returns Nil | V union, so the call site
         # must also use the union type. Without this, `if val = h[key]?` treats val as
@@ -73002,7 +73131,7 @@ module Crystal::HIR
           end
         end
       end
-      if receiver_id && (method_name == "first" || method_name == "last" || method_name == "first?" || method_name == "last?")
+      if receiver_id && v2_string_readable?(method_name) && (method_name == "first" || method_name == "last" || method_name == "first?" || method_name == "last?")
         recv_type = ctx.type_of(receiver_id)
         recv_desc = @module.get_type_descriptor(recv_type)
         type_name = recv_desc ? recv_desc.name : get_type_name_from_ref(recv_type)
