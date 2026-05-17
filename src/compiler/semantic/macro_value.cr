@@ -559,7 +559,16 @@ module CrystalV2
           when Frontend::InstanceVarNode
             intern_name(node.name)
           when Frontend::TypeDeclarationNode
-            intern_name(node.name)
+            # Crystal: TypeDeclaration#id returns the full form "var : Type = default"
+            # so that record macro's "@#{field.id}".id produces "@var : Type = default"
+            type_n = intern_name(node.declared_type)
+            type_n = type_n[1..] if type_n.starts_with?(':')
+            id_result = "#{intern_name(node.name)} : #{type_n}"
+            if val_id = node.value
+              val_str = stringify_node(@arena[val_id])
+              id_result = "#{id_result} = #{val_str}" unless val_str.empty?
+            end
+            id_result
           when Frontend::GenericNode
             base_name = node_identifier_name(@arena[node.base_type]) || stringify_node(@arena[node.base_type])
             args = node.type_args.map do |arg_id|
@@ -616,7 +625,12 @@ module CrystalV2
         when Frontend::TypeDeclarationNode
           type_name = intern_name(node.declared_type)
           type_name = type_name[1..] if type_name.starts_with?(':')
-          "#{intern_name(node.name)} : #{type_name}"
+          sn_result = "#{intern_name(node.name)} : #{type_name}"
+          if sn_val_id = node.value
+            sn_val_str = stringify_node(@arena[sn_val_id])
+            sn_result = "#{sn_result} = #{sn_val_str}" unless sn_val_str.empty?
+          end
+          sn_result
           when Frontend::PathNode
             node_identifier_name(node) || ""
           when Frontend::MemberAccessNode
