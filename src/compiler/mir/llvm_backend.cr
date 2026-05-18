@@ -4007,19 +4007,29 @@ module Crystal::MIR
       # type_id to File, call block proc, then close.
       if name == "File$Dopen$$String_String_block"
         file_tid = @module.type_registry.get_by_name("File").try(&.id.to_i32) || 295
+        block_call = if return_type == "void"
+                       "  call void %p2(ptr %file)\n"
+                     else
+                       "  %block_result = call #{return_type} %p2(ptr %file)\n"
+                     end
+        return_line = if return_type == "void"
+                        "  ret void\n"
+                      else
+                        "  ret #{return_type} %block_result\n"
+                      end
         ir = "; File.open(String, String, &block) — dead-code-stub builtin override\n" \
-             "define ptr @#{name}(ptr %p0, ptr %p1, ptr %p2) {\n" \
+             "define #{return_type} @#{name}(ptr %p0, ptr %p1, ptr %p2) {\n" \
              "entry:\n" \
              "  %fdtup = call ptr @__crystal_v2_file_open(ptr %p0, ptr %p1)\n" \
              "  %fd = load i32, ptr %fdtup\n" \
              "  %file = call ptr @IO$CCFileDescriptor$Dnew$$Int32(i32 %fd)\n" \
              "  store i32 #{file_tid}, ptr %file\n" \
-             "  call void %p2(ptr %file)\n" \
+             "#{block_call}" \
              "  ; flush write buffer (safe — no event loop) then C close\n" \
              "  call ptr @File$Hflush(ptr %file)\n" \
              "  %fd2 = call i32 @IO$CCFileDescriptor$Hfd(ptr %file)\n" \
              "  call i32 @close(i32 %fd2)\n" \
-             "  ret ptr null\n" \
+             "#{return_line}" \
              "}\n"
         return ir
       end
@@ -10322,9 +10332,10 @@ module Crystal::MIR
       if mangled == "File$Dopen$$String_String_block"
         file_type = @module.type_registry.get_by_name("File")
         file_tid = file_type.try(&.id.to_i32) || 295
+        return_type = @type_mapper.llvm_type(func.return_type)
 
         emit_raw "; File.open(String, String, &block) — builtin override\n"
-        emit_raw "define ptr @#{mangled}(ptr %p0, ptr %p1, ptr %p2) {\n"
+        emit_raw "define #{return_type} @#{mangled}(ptr %p0, ptr %p1, ptr %p2) {\n"
         emit_raw "entry:\n"
         # Open file via low-level helper (handles C-string extraction + mode→flags)
         emit_raw "  %fdtup = call ptr @__crystal_v2_file_open(ptr %p0, ptr %p1)\n"
@@ -10333,13 +10344,21 @@ module Crystal::MIR
         emit_raw "  %file = call ptr @IO$CCFileDescriptor$Dnew$$Int32(i32 %fd)\n"
         # Patch type_id to File so that vdispatch cases for File dispatch correctly
         emit_raw "  store i32 #{file_tid}, ptr %file\n"
-        # Invoke the block proc: void %p2(ptr file)
-        emit_raw "  call void %p2(ptr %file)\n"
+        # Invoke the block proc and preserve File.open's block return value.
+        if return_type == "void"
+          emit_raw "  call void %p2(ptr %file)\n"
+        else
+          emit_raw "  %block_result = call #{return_type} %p2(ptr %file)\n"
+        end
         # Flush write buffer (safe — no event loop), then close via C syscall
         emit_raw "  call ptr @File$Hflush(ptr %file)\n"
         emit_raw "  %fd2 = call i32 @IO$CCFileDescriptor$Hfd(ptr %file)\n"
         emit_raw "  call i32 @close(i32 %fd2)\n"
-        emit_raw "  ret ptr null\n"
+        if return_type == "void"
+          emit_raw "  ret void\n"
+        else
+          emit_raw "  ret #{return_type} %block_result\n"
+        end
         emit_raw "}\n\n"
         return true
       end

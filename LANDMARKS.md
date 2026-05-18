@@ -4198,3 +4198,54 @@ Boundary:
   `CrystalV2::Compiler::CLI#file_sha256$String`; that is not solved here.
 
 Trust: {F/G/R: 0.86/0.56/0.86} [verified]
+
+## LM-567 — File.open block return semantics restored for produced LLVM calls
+
+Context: compiler/bootstrap/HIR+LLVM block-call return typing, 2026-05-18,
+`codegen`.
+
+Verified outcome:
+
+- `File.open(path, "w") { |file| file.puts "x"; "block-result" }` now returns
+  the block value to the caller instead of a `File`-typed/null value.
+- The focused guard compiles with the V2 compiler and the produced binary prints
+  `block-result` under `scripts/run_safe.sh`.
+- Generated LLVM for the focused repro now calls `IO#puts(String)` on the
+  `File.open` result instead of `IO#puts(File)`.
+
+Root evidence:
+
+- The first raw LLVM override fix made `File.open$String_String_block` return
+  `%block_result`, but the caller still emitted `IO#puts(File)`, proving the
+  remaining root was stale HIR call-return typing rather than only a null raw
+  return.
+- `File.open` is a delegated yield-return wrapper:
+  `open_internal(...) { |file| yield file }`; the old yield-return classifier
+  recognized only direct tail `yield` / direct begin-ensure passthrough.
+- The call site used the synthetic typed key `File.open$String_String_block`
+  while the source overload that proves yield-return was registered under the
+  default-expanded overload key. Return typing now checks block-overload
+  candidates, refreshes stale yield-name cache entries when yield functions are
+  added, and recomputes block return at block-to-proc materialization before the
+  final HIR `Call` is emitted.
+
+Evidence:
+
+- `CRYSTAL_CACHE_DIR=/private/tmp/cv2_fix_host_cache crystal build
+  src/crystal_v2.cr -o /private/tmp/cv2_fix_host --error-trace`
+- `regression_tests/p2_file_open_block_return.sh /private/tmp/cv2_fix_host`
+- `regression_tests/p2_record_macro_init_defaults.sh /private/tmp/cv2_fix_host`
+- `regression_tests/p2_qualified_module_namespace_no_prelude.sh
+  /private/tmp/cv2_fix_host`
+- LLVM adversary check on `/private/tmp/cv2_file_open_return_probe_final.ll`
+  showed `call void @IO$Hputs$$String(ptr %r59309, ptr %r59307)`.
+- `git diff --check`
+
+Boundary:
+
+- This does not claim exception-safe close for the raw `File.open` override.
+  The current override still closes only on the normal path.
+- The remaining hardcoded Fiber/Mutex/Formatter raw-layout assumptions from the
+  reviewed Claude range remain follow-up risks.
+
+Trust: {F/G/R: 0.84/0.62/0.86} [verified]

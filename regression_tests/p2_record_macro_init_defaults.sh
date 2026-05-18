@@ -6,8 +6,9 @@
 # This caused record's "def initialize(@format, @decimal_point)" to have no
 # defaults → required=2 → 1-arg named call missed → initialize$Symbol STUB.
 
-set -e
+set -euo pipefail
 COMPILER="${1:-bin/crystal_v2}"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMPDIR_LOCAL="$(mktemp -d)"
 trap 'rm -rf "$TMPDIR_LOCAL"' EXIT
 
@@ -34,5 +35,6 @@ opts1 = Float::FastFloat::ParseOptionsT(UInt8).new(format: Float::FastFloat::Cha
 puts "ok"
 CRYSTAL
 
-"$COMPILER" "$TMPDIR_LOCAL/test.cr" -o "$TMPDIR_LOCAL/test_bin" 2>&1
-"$TMPDIR_LOCAL/test_bin"
+"$ROOT_DIR/scripts/run_safe.sh" "$COMPILER" 60 2048 \
+  "$TMPDIR_LOCAL/test.cr" -o "$TMPDIR_LOCAL/test_bin"
+"$ROOT_DIR/scripts/run_safe.sh" "$TMPDIR_LOCAL/test_bin" 5 512

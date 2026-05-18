@@ -793,3 +793,22 @@ names such as `%3.ptr` / `%4.union_ptr`, fixed by using
 candidate, but local trace/MIR was required to identify the actual root and
 reject the post-block-helper prediction.
 **Cost saved:** moderate static-audit time; no replacement for local falsifier.
+
+### Session 30 — 2026-05-18 — Claude raw override hostile audit
+**Task:** read-only hostile audit of post-`b44e3b4d` fixes, focused on
+`File.open(String, String, &block)`, `p2_record_macro_init_defaults.sh`, and
+raw LLVM layout/type-id assumptions.
+**Brief size:** one bounded task file with exact files, known repro, and
+requested patch-shape/risk output.
+**Latency:** returned within the local investigation window.
+**Output quality:** useful but stale relative to the live patch. Grok correctly
+confirmed the original `File.open` normal-path return was lost (`ret ptr null`)
+and flagged the script's direct execution and the remaining hardcoded raw-layout
+risks. It did not reach the later HIR call-site type root after the raw override
+was changed locally.
+**Adversary check:** local LLVM proved the two-stage root: after `%block_result`
+was returned, the caller still emitted `IO#puts(File)`. The verified fix needed
+both HIR delegated yield-return typing and the raw override return preservation.
+**Verdict:** partial evidence value. Good hostile checklist and first falsifier;
+local HIR/LLVM evidence remained decisive.
+**Cost saved:** moderate audit time; not a replacement for focused repro IR.
