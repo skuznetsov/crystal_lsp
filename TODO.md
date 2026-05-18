@@ -1622,14 +1622,13 @@ pending-budget oracle.
    a lambda/map/reject block that lost captured `self` in generated stage2.
    The `body_ids_match_arena?` nilable-array frontier is also advanced by
    splitting the nilable wrapper from the non-nil `Array(ExprId)` arena-fit
-   scan and adding a raw low-pointer guard. Redirected lldb shows the new
-   frontier is `each_param(Array(Parameter), &block)` crashing while
-   `register_concrete_class` scans method params at module register idx=3.
-   Remaining known root pattern: `next` combined with non-local `return` inside
-   nested inlined iterator blocks is still semantically wrong; the attempted
-   generic `InlineNextContext` extension fixed neither local-state merging nor
-   the reducer, so it was not kept. Add a proper CFG/local-state oracle before
-   changing that broad path.
+   scan and adding a raw low-pointer guard. The later generated-s2 LLVM
+   frontiers around broad union/concrete comparison and `Pointer(T)` parameter
+   scalar classification are advanced by LM-568. Current produced-s2 build
+   still fails in generated fallback stubs: `Float32$Heach_key$$block(float
+   %arg0, ptr %arg1)` returns `ptr %arg0` even though `%arg0` is `float`.
+   Root-cause fallback stub return typing for primitive block adapters before
+   widening to s3b.
 2. Root-cause the remaining full-prelude nested-class return-inference crash
    under generated stage2. Current evidence: stale parameter slice frontiers are
    advanced through source-backed initializer capture, source-prefiltered

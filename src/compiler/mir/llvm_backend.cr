@@ -14890,7 +14890,7 @@ module Crystal::MIR
           param_mir = @module.type_registry.get(param_type)
           if param_mir
             k = param_mir.kind
-            is_heap = k.reference? || k.union? || k.array? || k.struct? || k.tuple?
+            is_heap = k.reference? || k.union? || k.array? || k.struct? || k.tuple? || k.pointer?
           else
             is_heap = false
           end
@@ -17431,8 +17431,11 @@ module Crystal::MIR
           concrete_type_ref = left_is_union ? right_type : left_type
 
           nil_vid = nil_variant_id_for_union_type(union_type_str)
+          concrete_id = left_is_union ? inst.right : inst.left
+          concrete_is_nil = nil_like_pointer_value?(concrete_id, concrete_val, concrete_type_ref)
+          concrete_vid = concrete_is_nil ? nil_vid : concrete_variant_id_for_union_type(union_type_str, concrete_type_ref, concrete_type_str)
 
-          if nil_vid != nil
+          if concrete_is_nil || concrete_vid
             base_name = name.lstrip('%')
 
             # Store union to stack and extract type_id
@@ -17441,26 +17444,29 @@ module Crystal::MIR
             emit "%#{base_name}.type_id_ptr = getelementptr #{union_type_str}, ptr %#{base_name}.union_ptr, i32 0, i32 0"
             emit "%#{base_name}.type_id = load i32, ptr %#{base_name}.type_id_ptr"
 
-            # Check if union holds nil
-            emit "%#{base_name}.is_nil = icmp eq i32 %#{base_name}.type_id, #{nil_vid}"
-
-            # Is the concrete side nil?
-            concrete_is_nil = concrete_val == "null" || concrete_type_ref == TypeRef::NIL
-
             if concrete_is_nil
               # nil == union or union == nil: result is whether union is nil.
               # Ordered comparisons against nil are unsupported in Crystal and
               # only survive here due to incomplete earlier narrowing; treat the
               # nil branch as false instead of fabricating a bogus compare.
-              if inst.op.eq?
-                emit "#{name} = icmp eq i32 %#{base_name}.type_id, #{nil_vid}"
-              elsif inst.op.ne?
-                emit "#{name} = icmp ne i32 %#{base_name}.type_id, #{nil_vid}"
+              if nil_vid
+                if inst.op.eq?
+                  emit "#{name} = icmp eq i32 %#{base_name}.type_id, #{nil_vid}"
+                elsif inst.op.ne?
+                  emit "#{name} = icmp ne i32 %#{base_name}.type_id, #{nil_vid}"
+                else
+                  emit "#{name} = add i1 0, 0"
+                end
               else
-                emit "#{name} = add i1 0, 0"
+                const_val = inst.op.ne? ? "1" : "0"
+                emit "#{name} = add i1 0, #{const_val}"
               end
             else
-              # Concrete non-nil vs nilable union: extract payload and compare
+              # Concrete non-nil vs union: first match the discriminator, then
+              # compare payload in the concrete type domain. This avoids choosing
+              # an arbitrary first union payload variant when broad generated-stage
+              # unions are compared to strings or other concrete values.
+              emit "%#{base_name}.type_match = icmp eq i32 %#{base_name}.type_id, #{concrete_vid.not_nil!}"
               emit "%#{base_name}.payload_ptr = getelementptr #{union_type_str}, ptr %#{base_name}.union_ptr, i32 0, i32 1"
 
               # Determine comparison type from concrete side
@@ -17511,15 +17517,12 @@ module Crystal::MIR
 
               emit "%#{base_name}.payload_cmp = #{cmp_op} #{cmp_type} #{left_cmp}, #{right_cmp}"
 
-              # If union is nil: eq→false, ne→true, ordered comparisons→false.
-              nil_result = if inst.op.eq?
-                             "0"
-                           elsif inst.op.ne?
-                             "1"
-                           else
-                             "0"
-                           end
-              emit "#{name} = select i1 %#{base_name}.is_nil, i1 #{nil_result}, i1 %#{base_name}.payload_cmp"
+              if inst.op.ne?
+                emit "%#{base_name}.type_mismatch = xor i1 %#{base_name}.type_match, 1"
+                emit "#{name} = or i1 %#{base_name}.type_mismatch, %#{base_name}.payload_cmp"
+              else
+                emit "#{name} = and i1 %#{base_name}.type_match, %#{base_name}.payload_cmp"
+              end
             end
 
             @value_types[inst.id] = TypeRef::BOOL
@@ -18864,6 +18867,52 @@ module Crystal::MIR
       if op == "inttoptr"
         @inttoptr_value_ids.add(inst.id)
       end
+    end
+
+    private def nil_like_pointer_value?(value_id : ValueId, value_ref : String, type_ref : TypeRef?) : Bool
+      return true if value_ref == "null"
+      return true if type_ref == TypeRef::NIL || type_ref == TypeRef::VOID
+
+      if const_val = @constant_values[value_id]?
+        return true if const_val == "null"
+        return true if const_val == "0" && type_ref == TypeRef::POINTER
+      end
+
+      return false unless type_ref == TypeRef::POINTER
+      return false unless @inttoptr_value_ids.includes?(value_id)
+
+      if def_inst = find_def_inst(value_id)
+        if def_inst.is_a?(Cast) && def_inst.kind == CastKind::IntToPtr
+          src_const = @constant_values[def_inst.value]?
+          return true if src_const == "0" || src_const == "null"
+        end
+      end
+
+      false
+    end
+
+    private def concrete_variant_id_for_union_type(
+      union_type_str : String,
+      concrete_type_ref : TypeRef?,
+      concrete_type_str : String,
+    ) : Int32?
+      return nil unless union_ref = find_type_ref_for_llvm_type(union_type_str)
+      return nil unless union_desc = @module.get_union_descriptor(union_ref)
+
+      if concrete_type_ref
+        if variant = union_desc.variants.find { |v| v.type_ref == concrete_type_ref }
+          return variant.type_ref.id.to_i32
+        end
+      end
+
+      if variant = union_desc.variants.find { |v|
+           v.full_name != "Nil" && v.full_name != "Void" &&
+             @type_mapper.llvm_type(v.type_ref) == concrete_type_str
+         }
+        return variant.type_ref.id.to_i32
+      end
+
+      nil
     end
 
     # Helper to get the phi incoming value reference, checking for predecessor loads first

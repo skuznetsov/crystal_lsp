@@ -812,3 +812,25 @@ both HIR delegated yield-return typing and the raw override return preservation.
 **Verdict:** partial evidence value. Good hostile checklist and first falsifier;
 local HIR/LLVM evidence remained decisive.
 **Cost saved:** moderate audit time; not a replacement for focused repro IR.
+
+### Session 31 — 2026-05-18 — each_param / inline-next sidecar audit
+**Task:** read-only audit of the generated-stage2 `each_param` frontier and the
+suspected inline `next` + caller-local state root pattern.
+**Brief size:** one bounded task file with exact TODO/LANDMARKS context and
+anchors in `src/compiler/hir/ast_to_hir.cr`.
+**Latency:** returned during the local rebuild/build loop.
+**Output quality:** useful for triage. Grok correctly summarized the same
+high-risk inline-yield/`next` paths and explained why a broad
+`InlineNextContext` patch would be insufficient without local-state/reducer
+merging. It did not identify the later produced-s2 LLVM backend failures.
+**Adversary check:** local falsifiers did not justify changing inline-next in
+this slice. A direct `times { next }` oracle was correct, an unannotated wrapper
+case isolated a separate block-param typing issue, and an annotated local-state
+case was already correct. The actionable local evidence instead came from
+produced-s2 `llc` failures in broad union/concrete comparison and `Pointer(T)`
+parameter classification.
+**Verdict:** partial evidence value. Good warning against symptom-patching the
+inline-next path; local generated LLVM remained decisive for the committed
+backend fixes.
+**Cost saved:** moderate audit time; no replacement for produced-stage build
+falsifiers.

@@ -4249,3 +4249,49 @@ Boundary:
   reviewed Claude range remain follow-up risks.
 
 Trust: {F/G/R: 0.84/0.62/0.86} [verified]
+
+## LM-568 — Stage2 LLVM backend no longer integerizes broad-union string payloads or Pointer(T) params
+
+Context: compiler/bootstrap/MIR LLVM backend, 2026-05-18, `codegen`.
+
+Verified outcome:
+
+- Union-vs-concrete comparisons now gate payload compares by the union
+  discriminator even when the union has no Nil variant. Generated-stage broad
+  unions such as `Array(String)#[]?` no longer choose the first non-Nil payload
+  variant (`Float32`) and emit invalid `load float` + integer arithmetic while
+  comparing to string literals.
+- Pointer-typed function parameters are no longer classified as packed
+  `inttoptr` scalars. `Pointer(T)` params now stay address-like, so loads such
+  as `value.value` in `Float::FastFloat#from_chars_advanced` emit `load T, ptr`
+  instead of `ptrtoint ptr %value to double`.
+
+Evidence:
+
+- `crystal build src/crystal_v2.cr -o /private/tmp/cv2_pointer_param_fix
+  --error-trace`
+- `regression_tests/p2_union_concrete_compare_type_guard.sh
+  /private/tmp/cv2_pointer_param_fix`
+- `regression_tests/p2_pointer_param_not_packed_scalar_no_prelude.sh
+  /private/tmp/cv2_pointer_param_fix`
+- `regression_tests/p2_qualified_module_namespace_no_prelude.sh
+  /private/tmp/cv2_pointer_param_fix`
+- `regression_tests/p2_file_open_block_return.sh /private/tmp/cv2_pointer_param_fix`
+- `regression_tests/p2_nilable_union_wrap_codegen_no_prelude.sh
+  /private/tmp/cv2_pointer_param_fix`
+- Produced-s2 builds advanced from invalid LLVM at
+  `nilable_integer_key_hash_payload_llvm_type` (`load float` then `add i64`) and
+  `Float::FastFloat::BinaryFormat_Float64#from_chars_advanced`
+  (`ptrtoint ptr %value to double`) to a later generated fallback-stub frontier:
+  `Float32#each_key(&block)` returns `ptr %arg0` while `%arg0` is `float`.
+
+Boundary:
+
+- This does not make produced `s2` green. The current generated-stage2
+  frontier is invalid fallback stub emission for primitive `each_key` adapter
+  blocks, first seen as `ret ptr %arg0` in
+  `Float32$Heach_key$$block(float %arg0, ptr %arg1)`.
+- The remaining `CrystalV2::Compiler::CLI#file_sha256$String` MIR optimizer
+  arithmetic-overflow diagnostic is still non-fatal and still present.
+
+Trust: {F/G/R: 0.84/0.58/0.86} [verified]
