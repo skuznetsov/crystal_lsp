@@ -904,3 +904,23 @@ calls `Value128.new(UInt128)` instead of returning an `inttoptr i128` cast.
 **Verdict:** useful partial sidecar. Good family-level signal, but local
 reducers and produced LLVM/backtrace checks were required to avoid a regression.
 **Cost saved:** moderate audit time; not authoritative for patch scope.
+
+### Session 35 — 2026-05-19 — `Indexable(T)#equals?` block target audit
+**Task:** read-only audit of the produced-s2
+`Indexable$LT$R$Hequals$Q$$Indexable_block` abort frontier and the proposed
+receiver-owned included-module block target rebase.
+**Brief size:** one bounded task file, ~1 KB, with exact diff shape, file anchor
+`src/compiler/hir/ast_to_hir.cr`, and requested root/risk/oracle output.
+**Latency:** no answer before the wrapper timeout; `grok_review` exited 124
+after its 300s cap.
+**Output quality:** no actionable Grok finding.
+**Adversary check:** Cursor's independent read-only audit flagged the main risk:
+a broad post-lookup rebase can manufacture receiver-owned block specializations
+and blow up the produced build. Local evidence confirmed that warning: the
+general unresolved-generic included-module block rebase fixed the host oracle
+but exceeded the 4096MB produced-s2 build cap. The accepted patch is narrowed to
+the verified `equals?` block family and the produced-s2 build returned to the
+baseline ~164s/4096MB envelope.
+**Verdict:** no evidence value from this Grok ACP run. The failed timeout is
+useful beta signal only.
+**Cost saved:** none.

@@ -110,6 +110,21 @@ separate `Indexable#equals?` block-stub frontier before IR emission. The
 full-prelude smoke into a pre-scan timeout, so prefer the untraced abort stub as
 the next primary frontier unless the trace path is being debugged directly.
 
+Stage2 included generic equality block checkpoint (2026-05-19): after LM-572,
+host full-prelude lowering for `Array(Int32)#==` emits the concrete receiver
+helper `Array(Int32)#equals?$Array(Int32)_block` instead of the generic
+`Indexable(T)#equals?$Indexable_block` abort stub. New guard:
+`p2_indexable_equals_block_receiver_rebase.sh`, passed on the host compiler.
+Produced `s2` builds successfully under the standard 300s/4096MB `run_safe`
+gate; the produced namespace guard still passes. A clean-vs-patched produced
+comparison shows the old `Indexable#equals?` abort is gone: clean produced `s2`
+aborts the static `new!` guard source at that stub, while patched produced `s2`
+gets past it and exposes a later segfault. Boundary: a broad generic
+included-module block rebase was refuted because it pushed the s2 build over the
+4096MB cap. The accepted fix is equality-family scoped, not a general
+block/proc closure. The current traced full-prelude `puts 42` frontier is now
+`Crystal::SpinLock`, segfaulting after `concrete_after_pass0`.
+
 Stage2 static-call LLVM emission checkpoint (2026-05-08): after LM-559,
 produced `s2` no-prelude LLVM IR for `Exception::CallStack.skip("x")` now emits
 the named static callee

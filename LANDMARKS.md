@@ -4495,3 +4495,65 @@ Boundary:
   the s2 build.
 
 Trust: {F/G/R: 0.84/0.55/0.86} [verified]
+
+## LM-572 — Included generic equality block calls rebase to concrete receiver helpers
+
+Context: compiler/bootstrap/HIR block-call target canonicalization, 2026-05-19,
+`codegen`.
+
+Verified outcome:
+
+- Full-prelude `Array(Int32)#==` no longer emits a call or abort stub for the
+  generic template helper
+  `Indexable$LT$R$Hequals$Q$$Indexable_block`.
+- Block-call canonicalization now preserves ordinary static value-owner
+  behavior, but for `equals?` block calls selected from an included unresolved
+  generic owner such as `Indexable(T)`, it retargets to the concrete receiver
+  block helper when the receiver's include chain contains the matching generic
+  module definition.
+- A broader version that applied this to all unresolved generic included-module
+  block calls was refuted: it fixed the local oracle but made the full s2 build
+  exceed the 4096 MB `run_safe` cap. The accepted fix is intentionally scoped to
+  the equality block family that exposed the frontier.
+
+Evidence:
+
+- `crystal build src/crystal_v2.cr -o /private/tmp/cv2_indexable_host_fix7
+  --error-trace`
+- `crystal tool format --check src/compiler/hir/ast_to_hir.cr`
+- `git diff --check`
+- `regression_tests/p2_indexable_equals_block_receiver_rebase.sh
+  /private/tmp/cv2_indexable_host_fix7`
+- `regression_tests/p2_generic_static_type_param_new_bang_no_prelude.sh
+  /private/tmp/cv2_indexable_host_fix7`
+- `regression_tests/p2_qualified_module_namespace_no_prelude.sh
+  /private/tmp/cv2_indexable_host_fix7`
+- `regression_tests/array_bool_join_module_super_repro.sh
+  /private/tmp/cv2_indexable_host_fix7`
+- `scripts/run_safe.sh /private/tmp/cv2_indexable_host_fix7 300 4096
+  src/crystal_v2.cr -o /private/tmp/cv2_indexable_s2_fix7/cv2_s2`
+  exited 0 after ~164s.
+- `regression_tests/p2_qualified_module_namespace_no_prelude.sh
+  /private/tmp/cv2_indexable_s2_fix7/cv2_s2`
+- Produced-s2 comparison: clean produced `s2` aborts the
+  `p2_generic_static_type_param_new_bang_no_prelude` source at
+  `STUB CALLED: Indexable$LT$R$Hequals$Q$$Indexable_block`; patched produced
+  `s2` gets past that abort and exposes a later segfault.
+- Produced-s2 full-prelude `puts 42` with
+  `CRYSTAL_V2_TRACE_CLASS_FRONTIER=1` now advances past the prior
+  `Float::FastFloat::ParsedNumberStringT` / `Indexable#equals?` frontier and
+  segfaults during `Crystal::SpinLock` registration after
+  `concrete_after_pass0`.
+
+Boundary:
+
+- This is not a general block/proc or generic-container closure. The broader
+  generic included-module block rebase is a known memory-regression branch.
+- The new full-prelude equality guard is host-path verified. Produced `s2`
+  reaches the next full-prelude registration/runtime crash before it can pass
+  the same guard end-to-end.
+- The remaining `CrystalV2::Compiler::CLI#file_sha256$String` MIR optimizer
+  arithmetic-overflow diagnostic is still non-fatal and still present during
+  the s2 build.
+
+Trust: {F/G/R: 0.82/0.48/0.86} [verified]
