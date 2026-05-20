@@ -1944,9 +1944,11 @@ module CrystalV2
           resolve_ms = 0.0
           infer_ms = 0.0
           requires_start = Time.instant
-          if load_requires && !use_project_symbols
+          if load_requires
             raw_requires = base_dir ? collect_require_paths(program, base_dir) : [] of String
             requires = filter_required_files(requirements: raw_requires, includes_compiler: uses_compiler_module)
+          end
+          if load_requires && !use_project_symbols
             requires.each do |req_path|
               debug("Loading dependency #{req_path} (shallow)") if ENV["LSP_DEBUG"]?
               if dep_state = load_dependency(req_path, recursive: recursive_requires, workspace: workspace, use_ast_cache: recursive_requires)
@@ -5019,6 +5021,7 @@ module CrystalV2
         # Warm dependency cache asynchronously to avoid first-click stalls on requires.
         private def warm_dependencies(doc_path : String, doc_state : DocumentState)
           return if doc_path.empty?
+          return if project_cached_foreground_document?(doc_path)
           return if @dependencies_warming.includes?(doc_path)
           @dependencies_warming.add(doc_path)
           spawn do
@@ -5035,6 +5038,12 @@ module CrystalV2
               @dependencies_warming.delete(doc_path)
             end
           end
+        end
+
+        private def project_cached_foreground_document?(doc_path : String) : Bool
+          return false unless @project_cache_loaded
+          return false unless @project.symbol_table
+          @project.files.has_key?(doc_path)
         end
 
         # Resolve definition for a string literal used in a require call (e.g., require "json")
@@ -5427,11 +5436,15 @@ module CrystalV2
 
           display_name = method_name
           resolved_symbol : Semantic::MethodSymbol? = nil
+          receiver_scoped_lookup = false
 
           if call_node
             inferred_name = method_name_for_call(call_node, arena)
             display_name = inferred_name if inferred_name && !inferred_name.empty?
-            resolved_symbol = resolve_call_method_symbol(call_node, doc_state)
+            receiver_scoped_lookup = receiver_scoped_call?(call_node, arena)
+            unless display_name == "new" && receiver_scoped_lookup
+              resolved_symbol = resolve_call_method_symbol(call_node, doc_state)
+            end
           end
 
           display_name ||= method_name
@@ -5447,17 +5460,35 @@ module CrystalV2
             visited << resolved_symbol
           end
 
+          constructor_lookup = display_name == "new"
+          if signatures.empty? && constructor_lookup && call_node && receiver_scoped_lookup
+            collect_constructor_signature_for_call(call_node, doc_state, signatures, visited, display_name)
+          end
+
           if symbol_table = doc_state.symbol_table
-            collect_method_signatures(symbol_table, lookup_name, signatures, visited, display_name)
+            collect_method_signatures(
+              symbol_table,
+              lookup_name,
+              signatures,
+              visited,
+              display_name,
+              fallback_to_method_index: !receiver_scoped_lookup
+            )
           end
 
           debug("Collected #{signatures.size} signatures for #{display_name}")
 
           label_name = display_name || lookup_name
-          constructor_lookup = display_name == "new"
 
           if signatures.empty? && constructor_lookup && (symbol_table = doc_state.symbol_table)
-            collect_method_signatures(symbol_table, "initialize", signatures, visited, display_name)
+            collect_method_signatures(
+              symbol_table,
+              "initialize",
+              signatures,
+              visited,
+              display_name,
+              fallback_to_method_index: !receiver_scoped_lookup
+            )
           end
 
           if signatures.empty? && doc_state.symbol_table.nil?
@@ -5486,6 +5517,195 @@ module CrystalV2
 
           debug("Returning signature help")
           send_response(id, sig_help.to_json)
+        end
+
+        private def receiver_scoped_call?(node : Frontend::CallNode, arena : Frontend::ArenaLike) : Bool
+          callee_id = node.callee
+          return false if callee_id.invalid?
+
+          callee = arena[callee_id]
+          return true if callee.is_a?(Frontend::MemberAccessNode) || callee.is_a?(Frontend::SafeNavigationNode)
+
+          if callee.is_a?(Frontend::PathNode)
+            segments = collect_path_segments(arena, callee)
+            return segments.size >= 2 && segments.last == "new"
+          end
+
+          false
+        rescue
+          false
+        end
+
+        private def collect_constructor_signature_for_call(
+          node : Frontend::CallNode,
+          doc_state : DocumentState,
+          signatures : Array(SignatureInformation),
+          visited : Set(Semantic::MethodSymbol),
+          display_name : String?,
+        )
+          return if collect_cached_constructor_signatures_for_call(node, doc_state, signatures, display_name)
+          return if collect_required_constructor_signature_for_call(node, doc_state, signatures, display_name)
+
+          receiver_class = constructor_receiver_class(node, doc_state)
+          return unless receiver_class
+
+          if method = find_constructor_symbol(receiver_class, doc_state.symbol_table) ||
+                      find_constructor_symbol(receiver_class, @prelude_state.try(&.symbol_table))
+            unless visited.includes?(method)
+              signatures << SignatureInformation.from_method(method, display_name)
+              visited << method
+            end
+            return
+          end
+
+          if path = receiver_class.file_path
+            if signature = find_method_signature_in_file(path, "initialize", display_name: display_name)
+              signatures << SignatureInformation.new(signature)
+            end
+          end
+        end
+
+        private def collect_cached_constructor_signatures_for_call(
+          node : Frontend::CallNode,
+          doc_state : DocumentState,
+          signatures : Array(SignatureInformation),
+          display_name : String?,
+        ) : Bool
+          segments = constructor_class_segments(node, doc_state)
+          return false unless segments && !segments.empty?
+
+          each_constructor_lookup_segments(doc_state, segments) do |candidate|
+            @project.files.each_value do |state|
+              next if state.symbol_summaries.empty?
+              next unless class_summary = find_summary_by_segments(state.symbol_summaries, candidate)
+              before = signatures.size
+              collect_method_summary_signatures(class_summary, "initialize", signatures, display_name || "new")
+              return true if signatures.size > before
+
+              if signature = find_method_signature_in_file(state.path, "initialize", display_name: display_name)
+                signatures << SignatureInformation.new(signature)
+                return true
+              end
+            end
+          end
+
+          false
+        end
+
+        private def collect_required_constructor_signature_for_call(
+          node : Frontend::CallNode,
+          doc_state : DocumentState,
+          signatures : Array(SignatureInformation),
+          display_name : String?,
+        ) : Bool
+          segments = constructor_class_segments(node, doc_state)
+          return false unless segments && !segments.empty?
+
+          type_name = segments.last
+          expected_file = "#{snake_case_type_name(type_name)}.cr"
+
+          doc_state.requires.each do |path|
+            next unless File.basename(path) == expected_file
+            next unless source_declares_type?(path, type_name)
+
+            if signature = find_method_signature_in_file(path, "initialize", display_name: display_name)
+              signatures << SignatureInformation.new(signature)
+              return true
+            end
+          end
+
+          false
+        end
+
+        private def snake_case_type_name(name : String) : String
+          String.build do |io|
+            name.each_char_with_index do |char, index|
+              if char.ascii_uppercase?
+                io << '_' if index > 0
+                io << char.downcase
+              else
+                io << char.downcase
+              end
+            end
+          end
+        end
+
+        private def source_declares_type?(path : String, type_name : String) : Bool
+          pattern = Regex.new("^\\s*(class|struct)\\s+#{Regex.escape(type_name)}\\b")
+          File.each_line(path) do |line|
+            return true if line.matches?(pattern)
+          end
+          false
+        rescue
+          false
+        end
+
+        private def each_constructor_lookup_segments(doc_state : DocumentState, segments : Array(String), &block : Array(String) ->)
+          yield segments
+
+          if compiler_context_document?(doc_state) && segments != COMPILER_MODULE_SEGMENTS && segments[0]? != COMPILER_MODULE_SEGMENTS[0]
+            yield COMPILER_MODULE_SEGMENTS + segments
+          end
+        end
+
+        private def find_summary_by_segments(summaries : Array(SymbolSummary), segments : Array(String)) : SymbolSummary?
+          return nil if segments.empty?
+
+          summaries.each do |summary|
+            next unless summary.name == segments.first
+            return summary if segments.size == 1
+
+            if found = find_summary_by_segments(summary.children || [] of SymbolSummary, segments[1..])
+              return found
+            end
+            if found = find_summary_by_segments(summary.class_children || [] of SymbolSummary, segments[1..])
+              return found
+            end
+          end
+
+          nil
+        end
+
+        private def collect_method_summary_signatures(
+          container : SymbolSummary,
+          method_name : String,
+          signatures : Array(SignatureInformation),
+          display_name : String,
+        )
+          (container.children || [] of SymbolSummary).each do |child|
+            append_method_summary_signature(child, method_name, signatures, display_name)
+          end
+          (container.class_children || [] of SymbolSummary).each do |child|
+            append_method_summary_signature(child, method_name, signatures, display_name)
+          end
+        end
+
+        private def append_method_summary_signature(
+          summary : SymbolSummary,
+          method_name : String,
+          signatures : Array(SignatureInformation),
+          display_name : String,
+        )
+          if summary.kind == "overload_set" && summary.name == method_name
+            (summary.children || [] of SymbolSummary).each do |child|
+              append_method_summary_signature(child, method_name, signatures, display_name)
+            end
+            return
+          end
+
+          return unless summary.kind == "method" && summary.name == method_name
+
+          label = if detail = summary.detail
+                    "#{display_name}#{detail}"
+                  else
+                    params = (summary.params || [] of String).join(", ")
+                    return_type = summary.return_type || "?"
+                    "#{display_name}(#{params}) : #{return_type}"
+                  end
+          parameters = summary.params.try do |params|
+            params.map { |param| ParameterInformation.new(param) }
+          end
+          signatures << SignatureInformation.new(label, parameters: parameters)
         end
 
         # Handle textDocument/documentSymbol request
@@ -6549,6 +6769,10 @@ module CrystalV2
             segments_from_expression(doc_state.program.arena, callee.object)
           when Frontend::SafeNavigationNode
             segments_from_expression(doc_state.program.arena, callee.object)
+          when Frontend::PathNode
+            segments = collect_path_segments(doc_state.program.arena, callee)
+            return nil unless segments.size >= 2 && segments.last == "new"
+            segments[0...-1]
           else
             nil
           end
@@ -6833,6 +7057,8 @@ module CrystalV2
           signatures : Array(SignatureInformation),
           visited = Set(Semantic::MethodSymbol).new,
           display_name : String? = nil,
+          *,
+          fallback_to_method_index : Bool = true,
         )
           # Search in current scope
           table.each_local_symbol do |name, symbol|
@@ -6864,7 +7090,7 @@ module CrystalV2
             collect_method_signatures(parent, method_name, signatures, visited, display_name)
           end
 
-          if signatures.empty?
+          if signatures.empty? && fallback_to_method_index
             if methods = @methods_by_name[method_name]?
               methods.each do |method|
                 next if visited.includes?(method)
@@ -8835,6 +9061,10 @@ module CrystalV2
             return symbol
           end
 
+          if symbol = resolve_compiler_relative_path_symbol(doc_state, segments)
+            return symbol
+          end
+
           ensure_dependencies_loaded(doc_state)
 
           doc_state.requires.each do |path|
@@ -8854,6 +9084,25 @@ module CrystalV2
           end
 
           nil
+        end
+
+        private def resolve_compiler_relative_path_symbol(doc_state : DocumentState, segments : Array(String)) : Semantic::Symbol?
+          return nil unless compiler_context_document?(doc_state)
+
+          table = doc_state.symbol_table
+          return nil unless table
+
+          resolve_path_symbol_in_table(table, COMPILER_MODULE_SEGMENTS + segments)
+        end
+
+        private def compiler_context_document?(doc_state : DocumentState) : Bool
+          if path = doc_state.path
+            expanded = File.expand_path(path)
+            root_prefix = COMPILER_ROOT.ends_with?(File::SEPARATOR) ? COMPILER_ROOT : "#{COMPILER_ROOT}#{File::SEPARATOR}"
+            return true if expanded == COMPILER_ROOT || expanded.starts_with?(root_prefix)
+          end
+
+          doc_state.text_document.text.includes?("include CrystalV2::Compiler")
         end
 
         private def definition_from_call(
@@ -8923,6 +9172,8 @@ module CrystalV2
             String.new(callee_node.member)
           when Frontend::SafeNavigationNode
             String.new(callee_node.member)
+          when Frontend::PathNode
+            collect_path_segments(arena, callee_node).last?
           else
             nil
           end

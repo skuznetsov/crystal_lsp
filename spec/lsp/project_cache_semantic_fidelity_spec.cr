@@ -163,4 +163,64 @@ describe "LSP project cache semantic fidelity" do
       FileUtils.rm_rf(root) if root
     end
   end
+
+  it "preserves require fallback paths for cached foreground documents" do
+    with_lsp_project_cache_env do
+      root = File.join(Dir.tempdir, "lsp_project_cache_requires_#{Random::Secure.hex(6)}")
+      src_dir = File.join(root, "src")
+      FileUtils.mkdir_p(src_dir)
+      File.write(File.join(root, "shard.yml"), "name: lsp_project_cache_requires\n")
+
+      helper_path = File.join(src_dir, "parser_like.cr")
+      helper_source = <<-CR
+      class LexerLike
+      end
+
+      class ParserLike
+        def initialize(lexer : LexerLike)
+        end
+
+        def parse_program : String
+          "ok"
+        end
+      end
+      CR
+      File.write(helper_path, helper_source)
+
+      main_path = File.join(src_dir, "main.cr")
+      main_source = <<-CR
+      require "./parser_like"
+
+      lexer = LexerLike.new
+      parser = ParserLike.new(lexer)
+      parser.parse_program
+      CR
+      File.write(main_path, main_source)
+
+      project = CrystalV2::Compiler::LSP::UnifiedProjectState.new
+      project.update_file(main_path, main_source)
+      CrystalV2::Compiler::LSP::ProjectCacheLoader.save_to_cache(project, root)
+
+      cached = CrystalV2::Compiler::LSP::Server.new(
+        IO::Memory.new,
+        IO::Memory.new,
+        CrystalV2::Compiler::LSP::ServerConfig.new(background_indexing: false, project_cache: true)
+      )
+      cached_uri = cached.spec_did_open_document(main_source, main_path)
+
+      lexer_line, lexer_char = lsp_line_char(main_source, "LexerLike.new")
+      lexer_definition = cached.spec_definition(cached_uri, lexer_line, lexer_char)
+      lexer_definition["result"].as_a.first["uri"].as_s.should contain("parser_like.cr")
+
+      signature_line, signature_char = lsp_line_char(main_source, "ParserLike.new(", at_end: true)
+      signature = cached.spec_signature_help(cached_uri, signature_line, signature_char)
+      signature["result"]["signatures"].as_a.size.should be >= 1
+
+      completion_line, completion_char = lsp_line_char(main_source, "parser.", at_end: true)
+      completion = cached.spec_completion(cached_uri, completion_line, completion_char)
+      completion["result"].as_a.map { |item| item["label"].as_s }.should contain("parse_program")
+    ensure
+      FileUtils.rm_rf(root) if root
+    end
+  end
 end

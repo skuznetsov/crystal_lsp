@@ -4780,6 +4780,72 @@ Boundary:
 
 Trust: {F/G/R: 0.86/0.46/0.88} [verified]
 
+## LM-610 — Warm LSP project-cache docs retain require fallback without background stalls
+
+Context: LSP project-cache semantic fidelity and warm-request latency,
+2026-05-20, `codegen`.
+
+Verified outcome:
+
+- Cached foreground documents now keep their filtered `require` paths even
+  when project-cache symbols are used for foreground analysis. This restores
+  on-demand fallback for symbols that are not present in the saved project
+  cache.
+- Warm project-cache foreground documents no longer start eager background
+  dependency warming. The require paths remain available for on-demand
+  definition/signature/completion fallback, but `didOpen` no longer schedules
+  a broad dependency parse that can delay the first hover.
+- Receiver-scoped constructor signature help now avoids the full
+  `resolve_call_method_symbol` dependency-load path first. It handles both
+  member-access and `PathNode` constructor calls such as
+  `Frontend::Parser.new`, tries cached constructor summaries and direct
+  required source files, and only then falls back to full symbol resolution.
+
+Root pattern:
+
+- The previous project-cache path preserved fast foreground analysis by
+  skipping dependency analysis, but it also dropped `doc_state.requires`.
+  That made warm cached documents semantically narrower than cold documents.
+- Restoring `requires` exposed a second scheduling bug: the existing
+  background warmer treated cached docs like uncached docs and eagerly parsed
+  every require after open.
+- Constructor signature help had a separate ordering bug: it resolved the
+  receiver symbol before checking lightweight constructor corridors, so a warm
+  `Frontend::Parser.new` request could load the whole dependency graph before
+  returning one signature.
+
+Evidence:
+
+- Focused regression:
+  `CRYSTAL_CACHE_DIR=/private/tmp/cv2_lsp_final_spec scripts/run_safe.sh
+  /Users/sergey/.local/bin/crystal 240 4096 spec
+  spec/lsp/project_cache_semantic_fidelity_spec.cr --error-trace`:
+  3 examples, 0 failures.
+- Full LSP suite:
+  `CRYSTAL_CACHE_DIR=/private/tmp/cv2_lsp_final_fullspec scripts/run_safe.sh
+  /Users/sergey/.local/bin/crystal 300 4096 spec spec/lsp --error-trace`:
+  236 examples, 0 failures.
+- Server and harness builds:
+  `src/lsp_main.cr -o /private/tmp/lsp_main_final_requires` and
+  `benchmarks/lsp_harness.cr -o /private/tmp/lsp_harness_final_requires`
+  both exited 0 through `scripts/run_safe.sh`.
+- Final warm default harness with a populated project cache:
+  `initialize` 118.5ms, first `server.cr` `didOpen` 263.1ms,
+  `hover handle_completion` 14.7ms, `definition handle_completion` 1 location,
+  `signature help Parser.new` 6.0ms / 1 signature,
+  bench `definition Lexer` 1 location, bench `signature help Parser.new`
+  1 signature, bench `completion parser.` 326 items.
+
+Remaining risk:
+
+- The first warm bench-file `definition Lexer` request can still pay a
+  dependency-load cost in the default no-AST-cache sequence; the latest warm
+  default run measured 495.5ms. This is now isolated from the restored
+  require-fallback correctness fix and should be handled as a follow-up
+  constructor/type-definition routing slice.
+
+Trust: {F/G/R: 0.88/0.54/0.88} [verified]
+
 ### LM-589 — LSP first-request latency now defers CPU-bound UnifiedProject updates
 
 Status: VERIFIED on `codegen`.
