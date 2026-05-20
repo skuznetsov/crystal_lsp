@@ -30,6 +30,19 @@ Working policy:
 
 ## Current Checkpoint
 
+Latest bootstrap frontier (LM-577, 2026-05-19): produced `s2` now passes the
+no-prelude constant-global LLVM guard
+`p2_constant_globals_no_prelude.sh`, plus the nearby macro-for, Regex-free
+unbound type-param, and qualified module namespace guards. The fixed root was
+the CLI constant-literal export path producing empty global names before
+`LLVMIRGenerator#emit_global_variables`; the path now avoids key/value block
+destructuring and checks empty owner/name invariants. A hostile-review
+expansion exposed a separate unfixed module-constant namespace gap:
+`module Foo; private COUNT = 2; end` is still emitted by produced `s2` as an
+`Object__classvar__Foo$CCCOUNT` global. The active full-prelude `puts 42`
+frontier is not closed: produced `s2` currently times out after top-level
+collection at `pre-scan class/module loops start` under a 120s safe gate.
+
 Spec-first bootstrap checkpoint (2026-05-08): `docs/specs/` now contains the
 first executable contract slice for Crystal V2, modeled after the DiamondDB
 spec-first workflow but scoped to compiler bootstrap rather than full language

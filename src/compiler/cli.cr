@@ -2504,7 +2504,8 @@ module CrystalV2
         bootstrap_trace_puts "[MIR_SETUP] constant_literals size=#{hir_converter.constant_literal_values.size}" if mir_setup_trace
         bootstrap_trace_puts "[MIR_SETUP] constant_literals scan start" if mir_setup_trace
         const_literal_idx = 0
-        hir_converter.constant_literal_values.each do |full_name, macro_value|
+        hir_converter.constant_literal_values.each_key do |full_name|
+          macro_value = hir_converter.constant_literal_values[full_name]
           if mir_setup_trace && const_literal_idx < 4
             bootstrap_trace_puts "[MIR_SETUP] constant_literal idx=#{const_literal_idx} key_class=#{full_name.class.name} key_bytes=#{full_name.bytesize} value_class=#{macro_value.class.name} is_num=#{macro_value.is_a?(CrystalV2::Compiler::Semantic::MacroNumberValue) ? 1 : 0} is_bool=#{macro_value.is_a?(CrystalV2::Compiler::Semantic::MacroBoolValue) ? 1 : 0}"
           end
@@ -2512,14 +2513,10 @@ module CrystalV2
           next unless macro_value.is_a?(CrystalV2::Compiler::Semantic::MacroNumberValue)
           # Skip float constants — they can't be stored as Int64 initial values
           next if macro_value.value.is_a?(Float64)
-          if idx = full_name.rindex("::")
-            owner = full_name[0, idx]
-            const_name = full_name[(idx + 2)..]
-          else
-            owner = "Object"
-            const_name = full_name
-          end
-          global_name = MIR::HIRToMIRLowering.class_var_global_name(owner, const_name)
+          owner_and_name = constant_owner_and_name(full_name)
+          owner = owner_and_name[0]
+          const_name = owner_and_name[1]
+          global_name = constant_class_var_global_name(owner, const_name)
           next if registered_globals.includes?(global_name)
           const_type = hir_converter.constant_types[full_name]? || HIR::TypeRef::INT32
           debug_info = hir_converter.global_debug_infos[global_name]?
@@ -2724,17 +2721,14 @@ module CrystalV2
 
         # Pass constant literal values for global initialization (e.g., Math::PI)
         const_init = {} of String => (Float64 | Int64)
-        hir_converter.constant_literal_values.each do |name, value|
+        hir_converter.constant_literal_values.each_key do |name|
+          value = hir_converter.constant_literal_values[name]
           if value.is_a?(CrystalV2::Compiler::Semantic::MacroNumberValue)
             # Convert constant name (Math::PI) to global name (Math__classvar__PI)
-            if idx = name.rindex("::")
-              owner = name[0, idx]
-              const_name = name[(idx + 2)..-1]
-            else
-              owner = "Object"
-              const_name = name
-            end
-            global_name = "#{owner}__classvar__#{const_name}"
+            owner_and_name = constant_owner_and_name(name)
+            owner = owner_and_name[0]
+            const_name = owner_and_name[1]
+            global_name = constant_class_var_global_name(owner, const_name)
             const_init[global_name] = value.value
           end
         end
@@ -2914,6 +2908,24 @@ module CrystalV2
         {% else %}
           keep_requested
         {% end %}
+      end
+
+      private def constant_class_var_global_name(owner : String, const_name : String) : String
+        raise "empty constant owner during class-var global registration" if owner.empty?
+        raise "empty constant name during class-var global registration" if const_name.empty?
+        String.build do |io|
+          io << owner
+          io << "__classvar__"
+          io << const_name
+        end
+      end
+
+      private def constant_owner_and_name(full_name : String) : Tuple(String, String)
+        if idx = full_name.rindex("::")
+          {full_name[0, idx], full_name[(idx + 2)..-1]}
+        else
+          {"Object", full_name}
+        end
       end
 
       private def command_args_display(command_args : Array(String)) : String

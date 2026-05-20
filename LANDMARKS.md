@@ -4836,3 +4836,75 @@ Boundary:
   the s2 build.
 
 Trust: {F/G/R: 0.88/0.44/0.88} [verified]
+
+## LM-577 — Constant globals avoid stage2-empty names during LLVM emission
+
+Context: compiler/bootstrap/CLI-to-MIR global registration, 2026-05-19,
+`codegen`.
+
+Verified outcome:
+
+- Produced `s2` no longer segfaults in LLVM global emission for no-prelude
+  numeric constants such as `private UNLOCKED = 0`.
+- The reduced produced crash was:
+  `LLVMIRGenerator#generate -> emit_global_variables`, where
+  `@module.globals.first.name` was the empty string even though HIR/MIR body
+  stores referenced `Object__classvar__UNLOCKED`.
+- Root corridor: the CLI constant-literal export path used
+  `constant_literal_values.each do |full_name, macro_value|` and then
+  reconstructed class-var global names from those yielded values. In produced
+  `s2`, this path could construct empty global names for non-empty constants.
+  The accepted fix avoids key/value block destructuring for constant literal
+  scans, uses one local constructor for constant class-var globals, and raises
+  on empty owner/name invariants instead of silently emitting malformed globals.
+- `HIRToMIRLowering#register_globals` was also hardened to avoid tuple block
+  destructuring when consuming `Array(Tuple(String, ...))` global entries.
+
+Evidence:
+
+- Clean produced `s2` from `c405b862` crashed on a no-prelude reducer with
+  top-level numeric constants using `--emit llvm-ir --no-link`.
+- The same reducer passed `CRYSTAL_V2_STOP_AFTER_MIR=1`, proving MIR lowering
+  was complete and the crash was in LLVM generation.
+- Temporary backend tracing localized the crash to `emit_global_variables`;
+  temporary CLI tracing showed the constant-literal export path produced an
+  empty global name for `UNLOCKED`.
+- `crystal build src/crystal_v2.cr -o /private/tmp/cv2_constglobal_final5_host
+  --error-trace`
+- `regression_tests/p2_constant_globals_no_prelude.sh
+  /private/tmp/cv2_constglobal_final5_host`
+- `scripts/run_safe.sh /private/tmp/cv2_constglobal_final5_host 300 4096
+  src/crystal_v2.cr -o /private/tmp/cv2_constglobal_final5_s2/cv2_s2`
+  exited 0 after ~163s.
+- `regression_tests/p2_constant_globals_no_prelude.sh
+  /private/tmp/cv2_constglobal_final5_s2/cv2_s2`
+- Produced `s2` also passed the nearby guards:
+  `p2_unbound_type_param_scan_no_regex_no_prelude.sh`,
+  `p2_module_macro_for_iter_var_names_no_prelude.sh`, and
+  `p2_qualified_module_namespace_no_prelude.sh`.
+
+Refuted branches:
+
+- Changing the shared `class_var_global_name` helper to `String.build` did not
+  fix the reducer.
+- Changing the shared helper to `String#+` moved the s2 build to an
+  `ExprId out of bounds` failure, so the accepted fix keeps the shared helper
+  unchanged and narrows the string-construction change to constant global export
+  with explicit owner/name invariant checks.
+
+Boundary:
+
+- This fixes the no-prelude constant-global LLVM crash, not the full-prelude
+  `puts 42` gate. Produced `s2` full-prelude `puts 42` currently times out
+  after top-level collection at `pre-scan class/module loops start` under a
+  120s safe gate.
+- The remaining `CrystalV2::Compiler::CLI#file_sha256$String` MIR optimizer
+  arithmetic-overflow diagnostic is still non-fatal and still present during
+  the s2 build.
+- A hostile-review expansion found a separate upstream HIR registration gap:
+  produced `s2` emits a no-prelude `module Foo; private COUNT = 2; end`
+  constant as `Object__classvar__Foo$CCCOUNT` while host emits
+  `Foo__classvar__COUNT`. This is not fixed here because the malformed owner
+  is already present before CLI constant-literal export.
+
+Trust: {F/G/R: 0.88/0.40/0.88} [verified]
