@@ -4780,6 +4780,83 @@ Boundary:
 
 Trust: {F/G/R: 0.86/0.46/0.88} [verified]
 
+### LM-580 — s2 registration hardening: parsed number macro values, alias suffix index, and tuple-key avoidance
+
+Status: verified for s1 -> s2 build and focused no-prelude guards on branch
+`codegen`.
+
+Verified outcome:
+
+- Host compiler builds successfully.
+- Produced `s2` builds successfully from the patched host. The known non-fatal
+  `CrystalV2::Compiler::CLI#file_sha256$String` MIR optimizer arithmetic
+  overflow diagnostic remains.
+- Produced `s2` passes the focused no-prelude guards:
+  `p2_macro_number_parsed_literals_no_prelude.sh`,
+  `p2_normalize_decl_cache_key_no_prelude.sh`,
+  `p2_short_type_index_first_no_prelude.sh`,
+  `p2_source_span_slice_bounds_no_prelude.sh`,
+  `p2_constant_globals_no_prelude.sh`, and
+  `p2_qualified_module_namespace_no_prelude.sh`.
+- Full-prelude produced `puts 42` still fails, but the current sampled frontier
+  is no longer the old constant pre-scan FastFloat stall, the
+  `resolve_alias_in_module_path` suffix-scan `memcmp` crash, or the
+  `normalize_declared_type_name` tuple-key equality crash. The latest
+  full-prelude smoke reached class registration and exited 139 after
+  `class register idx=51/112`.
+
+Root-boundary fixes:
+
+- `macro_value_for_expr(NumberNode)` now uses `NumberNode` parse-time numeric
+  fields instead of reparsing literal byte slices through generated
+  `String#to_f64?`. This keeps macro constant evaluation on the same parsed
+  numeric corridor as `lower_number`.
+- Unary macro folding preserves the legal `Int64::MIN` boundary instead of
+  overflowing by negating the already-represented minimum value.
+- `resolve_alias_in_module_path` now checks exact module hits and uses a
+  registration-time module suffix index instead of walking every
+  `@module_defs` key with `String#ends_with?`.
+- `@normalize_decl_cache` now uses string keys rather than tuple keys. Produced
+  `s2` was observed to miscompile tuple-key equality for both
+  `{String, String?, UInt64}` and `{String, String, UInt64}` in this hot cache.
+- `fast_resolve_type_name_for_signature` now avoids direct `Set(String)#first`
+  and uses a guarded helper, matching the existing `safe_set_includes?` pattern.
+
+Refuted/limited evidence:
+
+- Replacing `Pointer(UInt8)#memcmp` with a byte-loop only moved the crash into
+  the same bad pointer read; it was diagnostic, not a root fix.
+- Starting HIR hash iteration from `@first` did not fix the frontier and was
+  reverted.
+- A no-prelude guard that emitted LLVM IR for float globals exposed the existing
+  `Float::Printer::CachedPowers::Power#index` stub path, so the parsed-number
+  guard intentionally stops before codegen.
+
+Evidence:
+
+- `crystal build src/crystal_v2.cr -o /private/tmp/cv2_setfirst_host
+  --error-trace`
+- Host guards:
+  `p2_short_type_index_first_no_prelude.sh`,
+  `p2_macro_number_parsed_literals_no_prelude.sh`,
+  `p2_normalize_decl_cache_key_no_prelude.sh`,
+  `p2_source_span_slice_bounds_no_prelude.sh`,
+  `p2_constant_globals_no_prelude.sh`, and
+  `p2_qualified_module_namespace_no_prelude.sh` on
+  `/private/tmp/cv2_setfirst_host`.
+- Produced `s2` build:
+  `scripts/run_safe.sh /private/tmp/cv2_setfirst_host 300 4096
+  src/crystal_v2.cr -o /private/tmp/cv2_setfirst_s2/cv2_s2`, exited 0 after
+  ~154s.
+- Produced guards:
+  the same six no-prelude guards on `/private/tmp/cv2_setfirst_s2/cv2_s2`.
+- Full-prelude smoke sample:
+  `scripts/run_safe.sh /private/tmp/cv2_final_s2/cv2_s2 120 4096
+  /private/tmp/cv2_final_hello.cr -o /private/tmp/cv2_final_hello_bin`
+  exited 139 after `class register idx=51/112`.
+
+Trust: {F/G/R: 0.88/0.50/0.89} [verified]
+
 ## LM-576 — Unbound type-param scans avoid Regex match-data in self-hosted registration
 
 Context: compiler/bootstrap/HIR method annotation scan, 2026-05-19, `codegen`.

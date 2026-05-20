@@ -1,6 +1,6 @@
 # Crystal V2 Bootstrap TODO
 
-Updated: 2026-05-19
+Updated: 2026-05-20
 Branch: `codegen`
 
 This is the active working backlog only. Historical detail is in git history,
@@ -30,19 +30,19 @@ Working policy:
 
 ## Current Checkpoint
 
-Latest bootstrap frontier (LM-579, 2026-05-20): produced `s2` now carries two
-new HIR registration boundary hardenings. `slice_source_for_span` refuses
-implausible source sizes and spans outside the source window before calling
-`String#byte_slice`, and the Char primitive macro-for classifier no longer
-calls `to_id` until the tuple head is proven to be an id/string/symbol macro
-value. This moved the clean produced full-prelude `puts 42` smoke past the old
-untraced `pre-scan class/module loops start` timeout and through module
-registration; the active frontier is now a segfault during early class
-registration after `class register idx=3/112`. Boundary: this is not a clean
-full-prelude smoke yet. A diagnostic lldb run before the Char fix exposed a
-separate abort in `Float::Printer::CachedPowers::Power#to_id` through
-`char_binary_macro_values_have_operator_ids?`; after the fix, that abort is no
-longer the observed clean frontier.
+Latest bootstrap frontier (LM-580, 2026-05-20): produced `s2` builds cleanly
+under the safe wrapper and passes the focused no-prelude guards for parsed
+macro number literals, normalize-decl cache keys, short-type-index `Set#first`
+avoidance, source-span bounds, constant globals, and qualified nested module
+namespaces. Current hardening removed several produced-stage2 registration
+frontiers: macro number evaluation no longer reparses `NumberNode` byte slices
+through generated `String#to_f64?`, alias module suffix resolution no longer
+walks every `@module_defs` key with `String#ends_with?`, the normalize-decl
+cache no longer uses stage2-sensitive tuple keys, and the signature fast path
+does not call `Set(String)#first` directly. Boundary: full-prelude produced
+`puts 42` is still not clean; the latest sample exits 139 after
+`class register idx=51/112`. The non-fatal `CLI#file_sha256$String` MIR
+optimizer arithmetic-overflow diagnostic remains during produced `s2` builds.
 
 Spec-first bootstrap checkpoint (2026-05-08): `docs/specs/` now contains the
 first executable contract slice for Crystal V2, modeled after the DiamondDB
