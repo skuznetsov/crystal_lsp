@@ -991,3 +991,32 @@ source for diagnostics/navigation.
 **Verdict:** useful family-level sidecar, but local timing evidence overrode
 the ranked root hypothesis.
 **Cost saved:** modest audit time; not authoritative for patch scope.
+
+### Session 39 — 2026-05-20 — LSP prelude-cache rebuild audit
+**Task:** read-only Grok ACP audit of `rebuild_prelude_table_from_cache`,
+`SymbolSummaryUtils.add_summaries_to_table`, and cached prelude lookup paths
+after local traces showed background prelude cache load was fast but symbol
+table rebuild still cost roughly 190-250ms.
+**Brief size:** bounded inline ACP prompt naming only
+`src/compiler/lsp/server.cr` and `src/compiler/lsp/unified_project.cr`, with
+explicit instruction not to edit files and not to propose making prelude
+unavailable for foreground features.
+**Latency:** returned during local implementation, fast enough to affect the
+branch choice.
+**Output quality:** useful for triage, not sufficient as proof. Grok correctly
+identified the cache-hit hydration path as a full summary-tree materialization
+problem and proposed fusing the duplicate method-index walk. Local probes then
+showed method-range skipping and shared leaf method scopes did not materially
+reduce rebuild time, and the fused-walk candidate preserved correctness but
+did not improve the real harness enough to keep.
+**Adversary check:** local synthetic probes measured the cache summary shape
+directly: 147 cached prelude files, about 29.9k recursive summaries, about
+22.6k method summaries, and a baseline rebuild around 185-191ms. The accepted
+follow-up fix shifted away from prelude internals to a separate verified
+scheduler bug: stale project-cache maintenance could run between `initialize`
+and the first `didOpen`.
+**Verdict:** keep Grok for bounded read-only audits. It was useful as a
+root-family sidecar, but local measurement still had to reject the tempting
+optimization candidates.
+**Cost saved:** moderate audit/context time; not authoritative for final
+patch acceptance.

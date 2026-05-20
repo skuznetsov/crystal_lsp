@@ -5166,6 +5166,58 @@ Boundary:
 
 Trust: {F/G/R: 0.88/0.66/0.91} [verified]
 
+### LM-597 — LSP project-cache maintenance waits for first foreground document
+
+Status: VERIFIED for the stale-cache scheduler guard on `codegen`.
+
+A warm-cache LSP startup can still have invalid project-cache paths when a file
+changed since the previous save. Those invalid paths were scheduled as
+background work, but the spawned fiber could run `UnifiedProject` reparse or
+background project indexing before the server had read the client's first
+`textDocument/didOpen`. Because Crystal fibers are cooperative, that CPU-bound
+maintenance work could delay the first opened document even though it was not
+needed for the foreground document state.
+
+Accepted change:
+
+- Project-cache invalid reparse now waits for the existing project-update idle
+  window and also requires at least one opened document before doing CPU-bound
+  maintenance.
+- Background project indexing uses the same document-present idle boundary
+  before indexing a missing project file.
+- The existing forced flush path is unchanged for explicit project-update
+  flushes; this only moves opportunistic cache maintenance out of the startup
+  gap between `initialize` and the first `didOpen`.
+
+Evidence:
+
+- Focused regression spec:
+  `crystal build spec/lsp/did_change_integration_spec.cr -o
+  /tmp/lsp_did_change_project_maintenance_idle_spec --error-trace` and
+  `scripts/run_safe.sh /tmp/lsp_did_change_project_maintenance_idle_spec 120
+  1536 --no-color`, 5 examples, 0 failures.
+- Warm focused LSP harness with debug:
+  `LSP_DEBUG=1 scripts/run_safe.sh /tmp/lsp_harness_reparse_idle 120 1536
+  --server /tmp/lsp_main_project_maintenance_idle --file
+  src/compiler/lsp/server.cr -v`, passed with zero diagnostics. The stale-cache
+  maintenance no longer ran before the first `didOpen`; after warming the cache
+  there were no invalid paths.
+- Default LSP harness:
+  `scripts/run_safe.sh /tmp/lsp_harness_reparse_idle 120 1536 --server
+  /tmp/lsp_main_project_maintenance_idle`, passed with definition, signature,
+  and completion checks intact.
+
+Refuted / limited evidence:
+
+- Prelude-cache internals were measured but not changed. Skipping method range
+  cache entries, sharing cached leaf method scopes, and fusing the method-index
+  walk did not produce a meaningful real-harness improvement.
+- This is not a general warm-cache `didOpen` latency closure. The remaining
+  open cost is still dominated by prelude cache table rebuild/apply timing and
+  large-file document analysis.
+
+Trust: {F/G/R: 0.84/0.55/0.88} [verified]
+
 ## LM-583 — LSP foreground hover avoids workspace reference scans by default
 
 Status: verified for the focused LSP hover/cache/harness slice on `codegen`.

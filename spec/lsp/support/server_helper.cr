@@ -192,6 +192,10 @@ module CrystalV2::Compiler::LSP
       process_queued_project_update(uri, text, version)
     end
 
+    def spec_schedule_reparse_invalid_files(paths : Array(String))
+      schedule_reparse_invalid_files(paths)
+    end
+
     def spec_load_prelude_program(
       path : String,
       program_cache : Hash(String, CrystalV2::Compiler::Frontend::Program),

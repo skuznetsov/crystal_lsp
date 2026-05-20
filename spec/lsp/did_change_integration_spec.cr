@@ -113,4 +113,32 @@ describe CrystalV2::Compiler::LSP::Server do
   ensure
     FileUtils.rm_rf(dir) if dir
   end
+
+  it "defers invalid project-cache reparse until foreground is idle" do
+    dir = File.join(Dir.tempdir, "lsp_invalid_reparse_idle_#{Random::Secure.hex(6)}")
+    FileUtils.mkdir_p(dir)
+    path = File.join(dir, "stale.cr")
+    source = "value = 1\n"
+    File.write(path, source)
+
+    server = CrystalV2::Compiler::LSP::Server.new(
+      IO::Memory.new,
+      IO::Memory.new,
+      CrystalV2::Compiler::LSP::ServerConfig.new(background_indexing: false, project_cache: false, debounce_ms: 40)
+    )
+
+    server.spec_schedule_reparse_invalid_files([path])
+    sleep 80.milliseconds
+    server.spec_project_has_file?(path).should be_false
+
+    server.spec_did_open_document(source, path)
+
+    deadline = Time.instant + 1.second
+    until server.spec_project_has_file?(path) || Time.instant >= deadline
+      sleep 10.milliseconds
+    end
+    server.spec_project_has_file?(path).should be_true
+  ensure
+    FileUtils.rm_rf(dir) if dir
+  end
 end

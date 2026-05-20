@@ -632,6 +632,24 @@ module CrystalV2
           end
         end
 
+        private def wait_for_project_update_idle(require_document : Bool = false) : Nil
+          return if @force_project_update
+
+          delay_ms = @config.debounce_ms
+          if delay_ms <= 0
+            while require_document && @documents.empty?
+              sleep 50.milliseconds
+            end
+            return
+          end
+
+          until project_update_idle? && (!require_document || !@documents.empty?)
+            idle_ms = (Time.instant - @last_foreground_activity).total_milliseconds
+            remaining_ms = delay_ms - idle_ms
+            sleep Math.min(remaining_ms, 50.0).milliseconds
+          end
+        end
+
         private def resolve_path_symbol_in_table(table : Semantic::SymbolTable?, segments : Array(String)) : Semantic::Symbol?
           return nil unless table
 
@@ -2623,6 +2641,7 @@ module CrystalV2
               paths.each do |path|
                 next unless ProjectCache.cacheable_project_file?(path, root)
                 next if @project.files.has_key?(path)
+                wait_for_project_update_idle(require_document: true)
                 begin
                   source = File.read(path)
                   # Use fast-path: parse + symbols only, no type inference
@@ -2661,6 +2680,7 @@ module CrystalV2
             begin
               reparsed = 0
               invalid_paths.each do |path|
+                wait_for_project_update_idle(require_document: true)
                 next unless File.exists?(path)
                 begin
                   source = File.read(path)
