@@ -4779,3 +4779,60 @@ Boundary:
   the s2 build.
 
 Trust: {F/G/R: 0.86/0.46/0.88} [verified]
+
+## LM-576 — Unbound type-param scans avoid Regex match-data in self-hosted registration
+
+Context: compiler/bootstrap/HIR method annotation scan, 2026-05-19, `codegen`.
+
+Verified outcome:
+
+- Produced `s2` no longer crashes when class registration checks
+  include-derived method annotations such as `Array(T)` for unbound type
+  parameters.
+- The old produced crash was:
+  `Regex::MatchData#byte_end -> unbound_type_params_from_type_name ->
+  def_has_unbound_type_params? -> register_module_instance_methods_for ->
+  register_concrete_class`.
+- The root was `unbound_type_params_from_type_name` using
+  `type_name.scan(/[A-Z][A-Za-z0-9_]*/)`. Produced `s2` can crash in the Regex
+  match-data path while this registration helper scans type annotation text.
+- The fix replaces the Regex scan with a direct byte tokenizer for capitalized
+  identifier tokens, reusing the existing `ident_char?` predicate and matching
+  the local bootstrap pattern of avoiding Regex in hot self-hosted paths.
+
+Evidence:
+
+- At `b1e2423f`, produced `s2` exits 139 on a no-prelude reducer:
+  `module N; def foo(x : Array(T)) : Nil; end; end; class C; include N; end`.
+- lldb on that reducer shows
+  `Regex::MatchData#byte_end -> unbound_type_params_from_type_name ->
+  def_has_unbound_type_params? -> register_module_instance_methods_for`.
+- `crystal build src/crystal_v2.cr -o /private/tmp/cv2_unbound_tokens_host
+  --error-trace`
+- `crystal tool format --check src/compiler/hir/ast_to_hir.cr`
+- `git diff --check`
+- `regression_tests/p2_unbound_type_param_scan_no_regex_no_prelude.sh
+  /private/tmp/cv2_unbound_tokens_host`
+- `regression_tests/p2_module_macro_for_iter_var_names_no_prelude.sh
+  /private/tmp/cv2_unbound_tokens_host`
+- `regression_tests/p2_macro_included_proc_sink_self_capture_no_prelude.sh
+  /private/tmp/cv2_unbound_tokens_host`
+- `scripts/run_safe.sh /private/tmp/cv2_unbound_tokens_host 300 4096
+  src/crystal_v2.cr -o /private/tmp/cv2_unbound_tokens_s2/cv2_s2`
+  exited 0 after ~165s.
+- `regression_tests/p2_unbound_type_param_scan_no_regex_no_prelude.sh
+  /private/tmp/cv2_unbound_tokens_s2/cv2_s2`
+- Produced-s2 full-prelude `puts 42` moves past the old
+  `Regex::MatchData#byte_end` stack and completes module registration. It now
+  exits 133 during class registration around idx=3/112; lldb under the 60s
+  safe gate timed out before capturing that moved frontier.
+
+Boundary:
+
+- This is a targeted bootstrap hot-path rewrite, not a general Regex runtime
+  fix.
+- The remaining `CrystalV2::Compiler::CLI#file_sha256$String` MIR optimizer
+  arithmetic-overflow diagnostic is still non-fatal and still present during
+  the s2 build.
+
+Trust: {F/G/R: 0.88/0.44/0.88} [verified]

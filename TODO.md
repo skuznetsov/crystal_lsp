@@ -177,6 +177,20 @@ successfully under the standard 300s/4096MB gate. Boundary: full-prelude
 `puts 42` no longer reaches the `Hash(String, MacroValue)#key_hash` stack under
 the tested trace path; it now times out in pre-scan under 45s/120s gates.
 
+Stage2 unbound type-param scan checkpoint (2026-05-19): after LM-576,
+produced `s2` no longer crashes in `Regex::MatchData#byte_end` while checking
+include-derived method annotations such as `Array(T)` for unbound type
+parameters. Root closure: `unbound_type_params_from_type_name` used
+`String#scan(Regex)`, and produced `s2` can crash in the Regex match-data path
+during class/module registration. The replacement is a direct byte tokenizer
+for capitalized identifier tokens, matching the existing bootstrap rule to
+avoid Regex in hot self-hosted paths. New guard:
+`p2_unbound_type_param_scan_no_regex_no_prelude.sh`, passed on host and
+produced `s2`. Produced `s2` builds successfully under the standard
+300s/4096MB gate. Boundary: full-prelude `puts 42` now completes module
+registration and reaches class registration before exiting 133; lldb under the
+60s safe gate did not capture that moved class-register frontier.
+
 Stage2 static-call LLVM emission checkpoint (2026-05-08): after LM-559,
 produced `s2` no-prelude LLVM IR for `Exception::CallStack.skip("x")` now emits
 the named static callee
