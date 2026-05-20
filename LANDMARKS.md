@@ -4849,6 +4849,47 @@ Remaining risks:
 
 Trust: {F/G/R: 0.86/0.62/0.89} [verified]
 
+### LM-590 — Cache-backed prelude apply no longer repeats cached method registration
+
+Status: VERIFIED on `codegen`.
+
+The LSP background prelude cache path already rebuilds the prelude symbol table,
+restores cached expression types, and registers cached method lookup summaries
+before sending the loaded `PreludeState` to the main server loop. The foreground
+`apply_background_prelude` path then reloaded the same cache and repeated
+`register_cached_symbols`, which duplicated CPU work on the LSP foreground
+loop.
+
+Accepted change:
+
+- For cache-backed `PreludeState` values, `apply_background_prelude` now sets
+  the active prelude state and requests semantic-token refresh without
+  reloading the cache and registering cached summaries a second time.
+- Parsed/non-cache prelude states still use the existing register/save path.
+
+Evidence:
+
+- Debug probe after the change showed:
+  `Applying background-loaded prelude` and `Background prelude applied and
+  client notified` at the same timestamp, while cached table rebuild and cached
+  expression restore remained in the background load path.
+- Focused prelude/navigation specs:
+  `crystal build spec/lsp/hover_definition_prelude_spec.cr
+  spec/lsp/stdlib_navigation_spec.cr spec/lsp/stdlib_hover_spec.cr
+  spec/lsp/did_change_integration_spec.cr -o /tmp/lsp_prelude_fast_spec
+  --error-trace` and
+  `scripts/run_safe.sh /tmp/lsp_prelude_fast_spec 120 1536 --no-color`,
+  8 examples, 0 failures.
+
+Boundary:
+
+- This is a duplicate-work cleanup, not a full open-latency closure. The
+  remaining startup/open cost is dominated by synchronous project-cache load,
+  background prelude table rebuild/registration, and large-file legacy document
+  analysis.
+
+Trust: {F/G/R: 0.76/0.42/0.84} [verified]
+
 ## LM-583 — LSP foreground hover avoids workspace reference scans by default
 
 Status: verified for the focused LSP hover/cache/harness slice on `codegen`.

@@ -2156,11 +2156,15 @@ module CrystalV2
             @prelude_mtime = File.info(state.path).modification_time rescue nil
             @prelude_real_mtime = @prelude_mtime
 
-            # Re-register symbols
-            if cache = PreludeCache.load(File.dirname(state.path))
-              register_cached_symbols(cache)
-            else
-              register_prelude_symbols(state)
+            # Cached background loads already rebuild cached ranges/types and
+            # register cached lookup summaries before sending the state. Avoid
+            # repeating that CPU-bound cache work on the foreground LSP loop.
+            unless state.from_cache
+              if cache = PreludeCache.load(File.dirname(state.path))
+                register_cached_symbols(cache)
+              else
+                register_prelude_symbols(state)
+              end
             end
 
             # Save to cache for next startup
