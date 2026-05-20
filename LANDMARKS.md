@@ -5673,6 +5673,80 @@ WBA framing:
 
 Trust: {F/G/R: 0.86/0.64/0.90} [verified]
 
+### LM-605 — LSP background prelude load has a single in-flight owner
+
+Status: VERIFIED for the LSP startup/prelude scheduler slice on `codegen`.
+
+After LM-604, a scheduler-fairness experiment around cached prelude
+rehydration exposed a stronger root cause: while `@prelude_state` was still nil,
+`ensure_prelude_loaded` called `load_prelude_background` on every foreground
+request. Each call spawned another prelude cache load even though the first one
+was already in flight. Under debug tracing this produced many repeated
+`Background: prelude cache loaded` / `Background: SymbolTable rebuilt` entries
+and inflated point-request latency.
+
+Accepted change:
+
+- `load_prelude_background` now returns immediately when a prelude load is
+  already in flight or when a prelude state already exists.
+- `ensure_prelude_loaded` distinguishes "still loading" from "missing" and no
+  longer starts duplicate background loads during startup.
+- Added a focused regression that constructs a background-indexing LSP server,
+  calls the prelude ensure path repeatedly, and asserts that only one
+  `Background prelude loading started` event is emitted.
+
+Evidence:
+
+- Focused regression:
+  `scripts/run_safe.sh /Users/sergey/.local/bin/crystal 120 2048 spec
+  spec/lsp/background_prelude_loading_spec.cr --error-trace`, 1 example,
+  0 failures.
+- Full LSP suite:
+  `scripts/run_safe.sh /Users/sergey/.local/bin/crystal 240 4096 spec
+  spec/lsp --error-trace`, 230 examples, 0 failures.
+- LSP server/harness build sanity:
+  `scripts/run_safe.sh /Users/sergey/.local/bin/crystal 300 4096 build
+  src/lsp_main.cr -o /tmp/lsp_main_single_prelude --error-trace -D
+  without_openssl` and
+  `scripts/run_safe.sh /Users/sergey/.local/bin/crystal 240 4096 build
+  benchmarks/lsp_harness.cr -o /tmp/lsp_harness_single_prelude --error-trace`,
+  both exited 0.
+- Default harness through nested `run_safe` wrappers passed with zero
+  diagnostics, `crystal/indexing: 3x`, `crystal/indexed: 3x`, first hover
+  `6.6ms`, full semantic tokens `114.6ms`, formatting `73.8ms`, and first
+  initialize `195.4ms` in the sampled no-debug run.
+- Debug harness after the fix showed one prelude cache load, one symbol-table
+  rebuild, and one background-prelude apply.
+- Hygiene: `git diff --check`.
+
+Refuted branch:
+
+- Adding cooperative `Fiber.yield` inside cached prelude reconstruction without
+  first fixing the in-flight guard was refuted. It made the duplicate-load bug
+  obvious and worsened point-request timings by allowing many concurrently
+  spawned prelude loaders to interleave.
+
+Boundary:
+
+- This fixes duplicate background prelude scheduling. It does not claim that
+  project-cache loading on `initialize`, fallback no-cache prelude parsing, or
+  inner TypeIndex restoration loops are fully optimized.
+
+WBA framing:
+
+- Window/trigger: foreground requests observe `@prelude_state == nil` while
+  `@prelude_loading == true`.
+- Transport corridor: one background prelude state should move through the
+  channel to `apply_background_prelude`.
+- Boundary: partially rebuilt cache maps stay unpublished until the single
+  background load completes.
+- Legal move: reject duplicate load starts at the prelude-loader entry point
+  and treat foreground ensure calls as wait/observe while loading.
+- Potential decrease: active background prelude loaders are bounded from
+  request-count scale to one.
+
+Trust: {F/G/R: 0.88/0.62/0.91} [verified]
+
 ## LM-583 — LSP foreground hover avoids workspace reference scans by default
 
 Status: verified for the focused LSP hover/cache/harness slice on `codegen`.

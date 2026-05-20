@@ -2109,6 +2109,9 @@ module CrystalV2
 
         # Background prelude loading
         private def load_prelude_background
+          return if @prelude_loading
+          return if @prelude_state
+
           # Spawn background fiber to load prelude
           @prelude_loading = true
           channel = Channel(PreludeState?).new
@@ -3187,8 +3190,12 @@ module CrystalV2
 
         private def ensure_prelude_loaded
           unless prelude = @prelude_state
-            debug("Prelude missing; loading in background")
-            load_prelude_background
+            if @prelude_loading
+              debug("Prelude still loading in background")
+            else
+              debug("Prelude missing; loading in background")
+              load_prelude_background
+            end
             return
           end
 

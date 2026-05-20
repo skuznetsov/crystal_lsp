@@ -55,6 +55,13 @@ during produced `s2` builds. Refuted: adding readability guards inside the
 normalizer helpers fixed a no-prelude reducer but regressed full-prelude
 module registration, so do not reapply that branch blindly.
 
+LSP performance side checkpoint (LM-605, 2026-05-20): the background prelude
+loader now has a single in-flight owner. Repeated foreground requests while
+`@prelude_state` is still nil no longer spawn duplicate cache rebuilds. The
+focused regression and full LSP suite are green. Remaining LSP latency
+candidates are project-cache work on `initialize`, fallback no-cache prelude
+parsing, and any still-coarse TypeIndex/cache restoration loops.
+
 Spec-first bootstrap checkpoint (2026-05-08): `docs/specs/` now contains the
 first executable contract slice for Crystal V2, modeled after the DiamondDB
 spec-first workflow but scoped to compiler bootstrap rather than full language

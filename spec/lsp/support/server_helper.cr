@@ -213,6 +213,10 @@ module CrystalV2::Compiler::LSP
       load_prelude_program(path, program_cache, source_cache, diagnostics)
     end
 
+    def spec_ensure_prelude_loaded
+      ensure_prelude_loaded
+    end
+
     private def spec_reset_output
       return unless @output.responds_to?(:clear)
       @output.as(IO::Memory).clear
