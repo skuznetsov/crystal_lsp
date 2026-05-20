@@ -4890,6 +4890,63 @@ Boundary:
 
 Trust: {F/G/R: 0.76/0.42/0.84} [verified]
 
+### LM-591 — Debounced project updates now wait for foreground request idle
+
+Status: VERIFIED on `codegen`.
+
+After LM-589 moved `UnifiedProject update_file` onto the LSP debouncer, a
+broader request-burst harness found a remaining scheduler bug: the debouncer
+still fired by wall clock while the client was actively issuing foreground
+requests. In the reproduced burst, the second full semantic-token request hit
+the serialized token cache but measured about 2034ms because the queued
+project update woke between foreground requests and monopolized the cooperative
+scheduler.
+
+Accepted change:
+
+- The server records foreground activity at request/notification entry and
+  exit.
+- Queued UnifiedProject updates check that the foreground path has been idle
+  for the configured debounce interval before running.
+- If foreground activity is still recent, the project update requeues itself
+  instead of running.
+- Shutdown and explicit test flushes force pending project updates so cache
+  persistence remains deterministic.
+
+Regression guard:
+
+- `spec/lsp/did_change_integration_spec.cr` now checks that a queued project
+  update requeues and leaves project state untouched while foreground activity
+  is recent.
+
+Evidence:
+
+- Before this fix, broad harness on `src/compiler/lsp/server.cr` measured:
+  full semantic tokens 520.0ms and repeated cached full semantic tokens
+  2034.1ms.
+- After this fix, the same request burst measured:
+  hover 25.4ms, definition 0.8ms, references 0.4ms, completion 10.5ms,
+  document symbols 12.9ms, folding 8.4ms, visible semantic tokens 4.7ms,
+  full semantic tokens 177.8ms, cached full semantic tokens 41.5ms.
+- Debug log showed:
+  `Semantic tokens cache HIT`, then
+  `UnifiedProject update deferred: foreground activity still recent`, then
+  `UnifiedProject update_file` after the foreground burst.
+- Focused spec:
+  `crystal build spec/lsp/did_change_integration_spec.cr -o
+  /tmp/lsp_did_change_spec --error-trace` and
+  `scripts/run_safe.sh /tmp/lsp_did_change_spec 120 1536 --no-color`,
+  4 examples, 0 failures.
+
+Boundary:
+
+- Startup/open still has separate costs from synchronous project-cache load,
+  prelude table rebuild/registration, and large-file document analysis. This
+  landmark only closes queued project updates interrupting active foreground
+  request bursts.
+
+Trust: {F/G/R: 0.88/0.67/0.9} [verified]
+
 ## LM-583 — LSP foreground hover avoids workspace reference scans by default
 
 Status: verified for the focused LSP hover/cache/harness slice on `codegen`.

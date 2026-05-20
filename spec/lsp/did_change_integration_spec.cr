@@ -90,4 +90,27 @@ describe CrystalV2::Compiler::LSP::Server do
   ensure
     FileUtils.rm_rf(dir) if dir
   end
+
+  it "requeues UnifiedProject updates while foreground activity is recent" do
+    dir = File.join(Dir.tempdir, "lsp_project_update_idle_#{Random::Secure.hex(6)}")
+    FileUtils.mkdir_p(dir)
+    path = File.join(dir, "main.cr")
+    source = "value = 1\n"
+    File.write(path, source)
+
+    server = CrystalV2::Compiler::LSP::Server.new(
+      IO::Memory.new,
+      IO::Memory.new,
+      CrystalV2::Compiler::LSP::ServerConfig.new(background_indexing: false, project_cache: false, debounce_ms: 10_000)
+    )
+
+    uri = server.spec_file_uri(path)
+    server.spec_process_queued_project_update(uri, source, 1).should be_false
+
+    server.spec_project_update_pending?(uri).should be_true
+    server.spec_project_pending_version(uri).should eq(1)
+    server.spec_project_has_file?(path).should be_false
+  ensure
+    FileUtils.rm_rf(dir) if dir
+  end
 end

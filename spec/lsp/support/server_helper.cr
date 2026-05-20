@@ -165,7 +165,11 @@ module CrystalV2::Compiler::LSP
     end
 
     def spec_flush_project_updates
-      @debouncer.flush
+      flush_project_updates
+    end
+
+    def spec_process_queued_project_update(uri : String, text : String, version : Int32) : Bool
+      process_queued_project_update(uri, text, version)
     end
 
     def spec_load_prelude_program(

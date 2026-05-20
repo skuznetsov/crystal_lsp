@@ -518,6 +518,8 @@ module CrystalV2
         @indexing_message : String?
         @indexing_last_sent : Time::Instant?
         @semantic_token_cache : Hash(String, {Int32, String}) # URI -> {version, serialized response}
+        @last_foreground_activity : Time::Instant
+        @force_project_update : Bool
 
         def initialize(@input = STDIN, @output = STDOUT, config : ServerConfig = ServerConfig.load)
           @config = config
@@ -563,6 +565,8 @@ module CrystalV2
           @indexing_message = nil
           @indexing_last_sent = Time.instant
           @semantic_token_cache = {} of String => {Int32, String}
+          @last_foreground_activity = Time.instant
+          @force_project_update = false
           configure_project_update_debouncer
           start_inference_worker
 
@@ -575,22 +579,55 @@ module CrystalV2
 
         private def configure_project_update_debouncer
           @debouncer.on_process do |uri, text, version|
-            next unless doc_path = uri_to_path(uri)
-            project_start = Time.instant
-            begin
-              Frontend::Watchdog.enable!("UnifiedProject update_file timeout", 5.seconds)
-              project_diagnostics = @project.update_file(doc_path, text, version)
-              project_time = (Time.instant - project_start).total_milliseconds
-              debug("UnifiedProject update_file: #{project_time.round(2)}ms, #{project_diagnostics.size} diagnostics")
-              @project_cache_dirty = true
-              schedule_project_cache_save
-            rescue ex : Frontend::Watchdog::TimeoutError
-              debug("UnifiedProject update_file TIMEOUT: #{ex.message}")
-            ensure
-              Frontend::Watchdog.disable!
-            end
+            process_queued_project_update(uri, text, version)
           end
           @debouncer.start
+        end
+
+        private def mark_foreground_activity
+          @last_foreground_activity = Time.instant
+        end
+
+        private def project_update_idle? : Bool
+          return true if @force_project_update
+
+          delay_ms = @config.debounce_ms
+          return true if delay_ms <= 0
+
+          (Time.instant - @last_foreground_activity).total_milliseconds >= delay_ms
+        end
+
+        private def flush_project_updates
+          @force_project_update = true
+          @debouncer.flush
+        ensure
+          @force_project_update = false
+        end
+
+        private def process_queued_project_update(uri : String, text : String, version : Int32) : Bool
+          unless project_update_idle?
+            debug("UnifiedProject update deferred: foreground activity still recent")
+            @debouncer.queue(uri, text, version)
+            return false
+          end
+
+          return false unless doc_path = uri_to_path(uri)
+
+          project_start = Time.instant
+          begin
+            Frontend::Watchdog.enable!("UnifiedProject update_file timeout", 5.seconds)
+            project_diagnostics = @project.update_file(doc_path, text, version)
+            project_time = (Time.instant - project_start).total_milliseconds
+            debug("UnifiedProject update_file: #{project_time.round(2)}ms, #{project_diagnostics.size} diagnostics")
+            @project_cache_dirty = true
+            schedule_project_cache_save
+            true
+          rescue ex : Frontend::Watchdog::TimeoutError
+            debug("UnifiedProject update_file TIMEOUT: #{ex.message}")
+            false
+          ensure
+            Frontend::Watchdog.disable!
+          end
         end
 
         private def resolve_path_symbol_in_table(table : Semantic::SymbolTable?, segments : Array(String)) : Semantic::Symbol?
@@ -1510,93 +1547,103 @@ module CrystalV2
 
         # Handle JSON-RPC request
         private def handle_request(message : JSON::Any, id : JSON::Any)
+          mark_foreground_activity
           method = message["method"].as_s
           params = message["params"]?
 
-          with_guard("request #{method}") do
-            with_watchdog("request #{method}", id) do
-              case method
-              when "initialize"
-                handle_initialize(id, params)
-              when "shutdown"
-                handle_shutdown(id)
-              when "textDocument/hover"
-                handle_hover(id, params)
-              when "textDocument/definition"
-                handle_definition(id, params)
-              when "textDocument/typeDefinition"
-                handle_type_definition(id, params)
-              when "textDocument/completion"
-                handle_completion(id, params)
-              when "textDocument/signatureHelp"
-                handle_signature_help(id, params)
-              when "textDocument/documentSymbol"
-                handle_document_symbol(id, params)
-              when "textDocument/references"
-                handle_references(id, params)
-              when "textDocument/documentHighlight"
-                handle_document_highlight(id, params)
-              when "textDocument/inlayHint"
-                handle_inlay_hint(id, params)
-              when "textDocument/prepareRename"
-                handle_prepare_rename(id, params)
-              when "textDocument/rename"
-                handle_rename(id, params)
-              when "textDocument/foldingRange"
-                handle_folding_range(id, params)
-              when "textDocument/semanticTokens/full"
-                handle_semantic_tokens(id, params)
-              when "textDocument/semanticTokens/range"
-                handle_semantic_tokens_range(id, params)
-              when "textDocument/prepareCallHierarchy"
-                handle_prepare_call_hierarchy(id, params)
-              when "callHierarchy/incomingCalls"
-                handle_incoming_calls(id, params)
-              when "callHierarchy/outgoingCalls"
-                handle_outgoing_calls(id, params)
-              when "textDocument/codeAction"
-                handle_code_action(id, params)
-              when "textDocument/formatting"
-                handle_formatting(id, params)
-              when "textDocument/rangeFormatting"
-                handle_range_formatting(id, params)
-              when "workspace/symbol"
-                handle_workspace_symbol(id, params)
-              else
-                send_error(id, -32601, "Method not found: #{method}")
+          begin
+            with_guard("request #{method}") do
+              with_watchdog("request #{method}", id) do
+                case method
+                when "initialize"
+                  handle_initialize(id, params)
+                when "shutdown"
+                  handle_shutdown(id)
+                when "textDocument/hover"
+                  handle_hover(id, params)
+                when "textDocument/definition"
+                  handle_definition(id, params)
+                when "textDocument/typeDefinition"
+                  handle_type_definition(id, params)
+                when "textDocument/completion"
+                  handle_completion(id, params)
+                when "textDocument/signatureHelp"
+                  handle_signature_help(id, params)
+                when "textDocument/documentSymbol"
+                  handle_document_symbol(id, params)
+                when "textDocument/references"
+                  handle_references(id, params)
+                when "textDocument/documentHighlight"
+                  handle_document_highlight(id, params)
+                when "textDocument/inlayHint"
+                  handle_inlay_hint(id, params)
+                when "textDocument/prepareRename"
+                  handle_prepare_rename(id, params)
+                when "textDocument/rename"
+                  handle_rename(id, params)
+                when "textDocument/foldingRange"
+                  handle_folding_range(id, params)
+                when "textDocument/semanticTokens/full"
+                  handle_semantic_tokens(id, params)
+                when "textDocument/semanticTokens/range"
+                  handle_semantic_tokens_range(id, params)
+                when "textDocument/prepareCallHierarchy"
+                  handle_prepare_call_hierarchy(id, params)
+                when "callHierarchy/incomingCalls"
+                  handle_incoming_calls(id, params)
+                when "callHierarchy/outgoingCalls"
+                  handle_outgoing_calls(id, params)
+                when "textDocument/codeAction"
+                  handle_code_action(id, params)
+                when "textDocument/formatting"
+                  handle_formatting(id, params)
+                when "textDocument/rangeFormatting"
+                  handle_range_formatting(id, params)
+                when "workspace/symbol"
+                  handle_workspace_symbol(id, params)
+                else
+                  send_error(id, -32601, "Method not found: #{method}")
+                end
               end
             end
+          ensure
+            mark_foreground_activity
           end
         end
 
         # Handle JSON-RPC notification
         private def handle_notification(message : JSON::Any)
+          mark_foreground_activity
           method = message["method"].as_s
           params = message["params"]?
 
-          with_guard("notification #{method}") do
-            with_watchdog("notification #{method}") do
-              case method
-              when "initialized"
-                # Client confirms initialization
-                @initialized = true
-              when "textDocument/didOpen"
-                handle_did_open(params) if params
-              when "textDocument/didChange"
-                handle_did_change(params) if params
-              when "textDocument/didClose"
-                handle_did_close(params) if params
-              when "workspace/didChangeWatchedFiles"
-                handle_did_change_watched_files(params) if params
-              when "$/setTrace", "$/cancelRequest"
-                # VS Code client-internal notifications; ignore
-                debug("Ignoring client notification #{method}") if ENV["LSP_DEBUG"]?
-              when "exit"
-                exit(0)
-              else
-                log_error("Unknown notification: #{method}")
+          begin
+            with_guard("notification #{method}") do
+              with_watchdog("notification #{method}") do
+                case method
+                when "initialized"
+                  # Client confirms initialization
+                  @initialized = true
+                when "textDocument/didOpen"
+                  handle_did_open(params) if params
+                when "textDocument/didChange"
+                  handle_did_change(params) if params
+                when "textDocument/didClose"
+                  handle_did_close(params) if params
+                when "workspace/didChangeWatchedFiles"
+                  handle_did_change_watched_files(params) if params
+                when "$/setTrace", "$/cancelRequest"
+                  # VS Code client-internal notifications; ignore
+                  debug("Ignoring client notification #{method}") if ENV["LSP_DEBUG"]?
+                when "exit"
+                  exit(0)
+                else
+                  log_error("Unknown notification: #{method}")
+                end
               end
             end
+          ensure
+            mark_foreground_activity
           end
         end
 
@@ -1642,7 +1689,7 @@ module CrystalV2
         # Handle shutdown request
         private def handle_shutdown(id : JSON::Any)
           # Save project cache before shutdown
-          @debouncer.flush
+          flush_project_updates
           save_project_cache
           @debouncer.stop
           send_response(id, "null")
