@@ -5946,7 +5946,8 @@ module CrystalV2
             doc_state.identifier_symbols,
             doc_state.type_context,
             doc_state.symbol_table,
-            doc_state.path
+            doc_state.path,
+            line_offsets: doc_state.line_offsets
           )
 
           collect_ms = (Time.instant - start_time).total_milliseconds
@@ -5989,7 +5990,8 @@ module CrystalV2
             doc_state.type_context,
             doc_state.symbol_table,
             doc_state.path,
-            range
+            range,
+            doc_state.line_offsets
           )
 
           send_response(id, tokens.to_json)
@@ -10214,12 +10216,16 @@ module CrystalV2
             @symbol_table : Semantic::SymbolTable?,
             target_path : String? = nil,
             @visible_range : Range? = nil,
+            line_offsets : Array(Int32)? = nil,
           )
             @target_path = target_path ? File.expand_path(target_path) : nil
-            @line_offsets = [] of Int32
-            @line_offsets << 0
-            source.to_slice.each_with_index do |byte, idx|
-              @line_offsets << (idx + 1) if byte == '\n'.ord
+            @line_offsets = line_offsets || begin
+              offsets = [] of Int32
+              offsets << 0
+              source.to_slice.each_with_index do |byte, idx|
+                offsets << (idx + 1) if byte == '\n'.ord
+              end
+              offsets
             end
           end
 
@@ -10269,6 +10275,7 @@ module CrystalV2
           symbol_table : Semantic::SymbolTable? = nil,
           target_path : String? = nil,
           visible_range : Range? = nil,
+          line_offsets : Array(Int32)? = nil,
         ) : SemanticTokens
           profile = ENV["LSP_PROFILE_TOKENS"]?
           t0 = Time.instant
@@ -10282,7 +10289,8 @@ module CrystalV2
             type_context,
             symbol_table,
             target_path,
-            visible_range
+            visible_range,
+            line_offsets
           )
 
           t1 = Time.instant
@@ -10302,7 +10310,7 @@ module CrystalV2
           t2 = Time.instant
 
           # Single-pass lexical scan for keywords and string-like tokens
-          collect_lexical_tokens_single_pass(source, raw_tokens, visible_range)
+          collect_lexical_tokens_single_pass(source, raw_tokens, visible_range, context.line_offsets)
 
           t3 = Time.instant
 
@@ -10674,14 +10682,14 @@ module CrystalV2
         end
 
         # Single-pass lexical scan: collects keywords, strings, chars, regex and interpolations
-        private def collect_lexical_tokens_single_pass(source : String, tokens : Array(RawToken), visible_range : Range? = nil)
+        private def collect_lexical_tokens_single_pass(source : String, tokens : Array(RawToken), visible_range : Range? = nil, line_offsets : Array(Int32)? = nil)
           if range = visible_range
-            collect_lexical_tokens_for_range(source, tokens, range)
+            collect_lexical_tokens_for_range(source, tokens, range, line_offsets)
             return
           end
 
           lexer = Frontend::Lexer.new(source)
-          line_offsets = build_line_offsets(source)
+          line_offsets ||= build_line_offsets(source)
           current_line = 0
           lexer.each_token do |tok|
             # Keywords
@@ -10735,8 +10743,8 @@ module CrystalV2
           end
         end
 
-        private def collect_lexical_tokens_for_range(source : String, tokens : Array(RawToken), range : Range)
-          line_offsets = build_line_offsets(source)
+        private def collect_lexical_tokens_for_range(source : String, tokens : Array(RawToken), range : Range, line_offsets : Array(Int32)? = nil)
+          line_offsets ||= build_line_offsets(source)
           return if line_offsets.empty?
 
           start_line = range.start.line

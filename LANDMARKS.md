@@ -5553,6 +5553,65 @@ WBA framing:
 
 Trust: {F/G/R: 0.88/0.66/0.91} [verified]
 
+### LM-603 — LSP semantic-token collection reuses document line offsets
+
+Status: VERIFIED for the semantic-token hot-path slice on `codegen`.
+
+After LM-599, full semantic-token requests were still one of the visible
+foreground costs on `src/compiler/lsp/server.cr`. Source inspection showed a
+simple duplicated traversal: `DocumentState` already stores line offsets for
+the open document, but `collect_semantic_tokens` rebuilt offsets inside
+`SemanticTokenContext`, then the lexical token pass rebuilt them again.
+
+Accepted change:
+
+- `collect_semantic_tokens` accepts optional precomputed line offsets.
+- `handle_semantic_tokens` and `handle_semantic_tokens_range` pass
+  `doc_state.line_offsets`.
+- Existing tests and direct callers keep the old behavior by falling back to
+  local offset construction when no offsets are provided.
+
+Evidence:
+
+- Focused semantic-token specs:
+  `crystal build spec/lsp/semantic_tokens_spec.cr
+  spec/lsp/semantic_tokens_integration_spec.cr
+  spec/lsp/lsp_semantic_tokens_spec.cr -o
+  /tmp/lsp_semantic_line_offsets_specs --error-trace` and
+  `scripts/run_safe.sh /tmp/lsp_semantic_line_offsets_specs 120 1536
+  --no-color`, 35 examples, 0 failures.
+- Default LSP harness through nested `run_safe` wrappers passed with zero
+  diagnostics and measured full semantic tokens around `115.3-115.7ms` on
+  `src/compiler/lsp/server.cr` in the sampled runs.
+- Full LSP suite:
+  `crystal build spec/lsp/*_spec.cr -o /tmp/lsp_full_line_offsets_spec
+  --error-trace` and `scripts/run_safe.sh /tmp/lsp_full_line_offsets_spec 120
+  1536 --no-color`, 229 examples, 0 failures.
+- Hygiene:
+  `crystal tool format --check src/compiler/lsp/server.cr`.
+
+Boundary:
+
+- The wall-clock gain is modest and timing remains noisy. This is a redundant
+  traversal cleanup, not the larger didOpen/prelude scheduler fix. The next
+  bigger LSP frontier is still foreground-idle scheduling and indexing
+  notification coalescing.
+
+WBA framing:
+
+- Window/trigger: semantic-token requests for an already-open document rebuild
+  line offsets that are already stored in `DocumentState`.
+- Transport corridor: byte offsets from AST and lexer tokens map through the
+  same line-offset table into LSP token coordinates.
+- Boundary: token positions, ordering, range behavior, and public helper calls
+  must stay unchanged.
+- Legal move: carry the existing line-offset table into semantic-token
+  collection, with fallback construction for standalone callers.
+- Potential decrease: one or two full-source line-offset scans are removed from
+  the foreground semantic-token request.
+
+Trust: {F/G/R: 0.84/0.58/0.89} [verified]
+
 ## LM-583 — LSP foreground hover avoids workspace reference scans by default
 
 Status: verified for the focused LSP hover/cache/harness slice on `codegen`.
