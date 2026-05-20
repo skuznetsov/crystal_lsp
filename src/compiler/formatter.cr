@@ -59,6 +59,7 @@ module CrystalV2
 
           # Find next non-whitespace token
           next_token = find_next_non_whitespace(i + 1)
+          started_line = @at_line_start
 
           # Adjust indent BEFORE emitting indent for keywords that decrease it
           if @at_line_start && should_decrease_indent?(current)
@@ -67,7 +68,7 @@ module CrystalV2
 
           # Emit indentation if at line start
           if @at_line_start && current.kind != Frontend::Token::Kind::Newline
-            emit_indent
+            emit_line_prefix(current)
             @at_line_start = false
           end
 
@@ -80,7 +81,7 @@ module CrystalV2
           end
 
           # Adjust indent AFTER emitting keyword that increases indent
-          if should_increase_indent?(current, next_token)
+          if should_increase_indent?(current, next_token, started_line)
             @indent += 2
           end
 
@@ -107,7 +108,7 @@ module CrystalV2
         # Special case: Symbol after Identifier in type annotation context
         # Convert `:TypeName` to `: TypeName`
         if token.kind == Frontend::Token::Kind::Symbol &&
-           @previous_token.try(&.kind) == Frontend::Token::Kind::Identifier
+           @previous_token.try { |previous| variable_like_kind?(previous.kind) }
           span = token.span
           start_byte = span.start_offset
           end_byte = span.end_offset
@@ -117,7 +118,7 @@ module CrystalV2
           if original_text.starts_with?(':')
             @output << ':'
             @output << ' '
-            @output << original_text[1..-1]  # Type name without leading colon
+            @output << original_text[1..-1] # Type name without leading colon
             @last_was_newline = false
             return
           end
@@ -145,126 +146,174 @@ module CrystalV2
         @indent.times { @output << ' ' }
       end
 
+      private def emit_line_prefix(token : Frontend::Token)
+        line_start = token.span.start_offset
+        while line_start > 0 && @source.byte_at(line_start - 1) != '\n'.ord
+          line_start -= 1
+        end
+
+        prefix_len = token.span.start_offset - line_start
+        return if prefix_len == 0
+
+        if prefix_len > 0
+          prefix = @source.byte_slice(line_start, prefix_len)
+          if prefix.each_char.all? { |char| char == ' ' || char == '\t' }
+            @output << prefix
+            return
+          end
+        end
+
+        emit_indent
+      end
+
       private def emit_whitespace_after(current : Frontend::Token, next_token : Frontend::Token)
         # Skip whitespace before newlines or EOF
         return if next_token.kind == Frontend::Token::Kind::Newline
         return if next_token.kind == Frontend::Token::Kind::EOF
+        original_gap = original_gap_between(current, next_token)
 
         # Helper to check if need space after keyword
         # Note: 'puts' is an Identifier, not a keyword, so handled separately
         need_space_after = case current.kind
-        when Frontend::Token::Kind::Def, Frontend::Token::Kind::If,
-             Frontend::Token::Kind::Unless, Frontend::Token::Kind::While,
-             Frontend::Token::Kind::Until, Frontend::Token::Kind::Return,
-             Frontend::Token::Kind::Class, Frontend::Token::Kind::Module,
-             Frontend::Token::Kind::Struct, Frontend::Token::Kind::Elsif,
-             Frontend::Token::Kind::Else, Frontend::Token::Kind::Require,
-             Frontend::Token::Kind::Enum,
-             Frontend::Token::Kind::Include, Frontend::Token::Kind::Extend,
-             Frontend::Token::Kind::Private, Frontend::Token::Kind::Protected,
-             Frontend::Token::Kind::Alias, Frontend::Token::Kind::Case,
-             Frontend::Token::Kind::When,
-             Frontend::Token::Kind::Begin, Frontend::Token::Kind::Rescue,
-             Frontend::Token::Kind::Ensure
-          true
-        else
-          false
-        end
-
-        # Special case: identifier-like calls (puts, p, etc)
-        is_identifier_call = current.kind == Frontend::Token::Kind::Identifier &&
-                            next_token.kind != Frontend::Token::Kind::LParen &&
-                            next_token.kind != Frontend::Token::Kind::Colon &&
-                            next_token.kind != Frontend::Token::Kind::Symbol
+                           when Frontend::Token::Kind::Def, Frontend::Token::Kind::If,
+                                Frontend::Token::Kind::Unless, Frontend::Token::Kind::While,
+                                Frontend::Token::Kind::Until, Frontend::Token::Kind::Return,
+                                Frontend::Token::Kind::Class, Frontend::Token::Kind::Module,
+                                Frontend::Token::Kind::Struct, Frontend::Token::Kind::Elsif,
+                                Frontend::Token::Kind::Else, Frontend::Token::Kind::Require,
+                                Frontend::Token::Kind::Enum,
+                                Frontend::Token::Kind::Include, Frontend::Token::Kind::Extend,
+                                Frontend::Token::Kind::Private, Frontend::Token::Kind::Protected,
+                                Frontend::Token::Kind::Alias, Frontend::Token::Kind::Case,
+                                Frontend::Token::Kind::When,
+                                Frontend::Token::Kind::Begin, Frontend::Token::Kind::Rescue,
+                                Frontend::Token::Kind::Ensure
+                             true
+                           else
+                             false
+                           end
 
         case {current.kind, next_token.kind}
-        # No space before function call parens
         when {Frontend::Token::Kind::Identifier, Frontend::Token::Kind::LParen}
           # foo(x) - no space
 
-        # Type annotation: Identifier followed by Symbol (e.g., x:Int32)
-        # No space needed - emit_token splits Symbol into ": Type"
-        when {Frontend::Token::Kind::Identifier, Frontend::Token::Kind::Symbol}
+        when {Frontend::Token::Kind::Identifier, Frontend::Token::Kind::ColonColon},
+             {Frontend::Token::Kind::ColonColon, Frontend::Token::Kind::Identifier}
+          # Foo::Bar - no space
+
+        when {Frontend::Token::Kind::Identifier, Frontend::Token::Kind::Symbol},
+             {Frontend::Token::Kind::InstanceVar, Frontend::Token::Kind::Symbol},
+             {Frontend::Token::Kind::ClassVar, Frontend::Token::Kind::Symbol},
+             {Frontend::Token::Kind::GlobalVar, Frontend::Token::Kind::Symbol}
           # x:Int32 → "x" + (": Int32" from emit_token)
 
-        # Around type annotations ':'
-        # Space before ':' in type annotations
-        when {Frontend::Token::Kind::Identifier, Frontend::Token::Kind::Colon}
-          @output << ' '
-        # Space after ':' in type annotations
-        # (symbols like ':foo' are handled separately with no preceding identifier)
+        when {Frontend::Token::Kind::Identifier, Frontend::Token::Kind::Colon},
+             {Frontend::Token::Kind::InstanceVar, Frontend::Token::Kind::Colon},
+             {Frontend::Token::Kind::ClassVar, Frontend::Token::Kind::Colon},
+             {Frontend::Token::Kind::GlobalVar, Frontend::Token::Kind::Colon}
+          @output << original_gap
         when {Frontend::Token::Kind::Colon, _}
-          @output << ' '
-
-        # Around assignment '='
+          emit_original_gap_or_space(original_gap)
         when {_, Frontend::Token::Kind::Eq}
-          @output << ' '
+          emit_original_gap_or_space(original_gap)
         when {Frontend::Token::Kind::Eq, _}
-          @output << ' '
-
-        # Around binary operators
+          emit_original_gap_or_space(original_gap)
         when {_, Frontend::Token::Kind::Plus}, {_, Frontend::Token::Kind::Minus},
              {_, Frontend::Token::Kind::Star}, {_, Frontend::Token::Kind::Slash}
-          @output << ' '
+          @output << original_gap
         when {Frontend::Token::Kind::Plus, _}, {Frontend::Token::Kind::Minus, _},
              {Frontend::Token::Kind::Star, _}, {Frontend::Token::Kind::Slash, _}
-          @output << ' '
-
-        # Around comparison operators
+          @output << original_gap
         when {_, Frontend::Token::Kind::EqEq}, {_, Frontend::Token::Kind::NotEq},
              {_, Frontend::Token::Kind::Less}, {_, Frontend::Token::Kind::Greater},
              {_, Frontend::Token::Kind::LessEq}, {_, Frontend::Token::Kind::GreaterEq}
-          @output << ' '
+          emit_original_gap_or_space(original_gap)
+        when {_, Frontend::Token::Kind::Of}, {Frontend::Token::Kind::Of, _},
+             {_, Frontend::Token::Kind::Arrow}, {Frontend::Token::Kind::Arrow, _}
+          emit_original_gap_or_space(original_gap)
         when {Frontend::Token::Kind::EqEq, _}, {Frontend::Token::Kind::NotEq, _},
              {Frontend::Token::Kind::Less, _}, {Frontend::Token::Kind::Greater, _},
              {Frontend::Token::Kind::LessEq, _}, {Frontend::Token::Kind::GreaterEq, _}
-          @output << ' '
-
-        # After comma
+          emit_original_gap_or_space(original_gap)
         when {Frontend::Token::Kind::Comma, _}
-          @output << ' '
-
-        # No space after/before parens
+          if next_token.kind == Frontend::Token::Kind::Comment && original_gap.bytesize > 0
+            @output << original_gap
+          else
+            @output << ' '
+          end
         when {Frontend::Token::Kind::LParen, _}, {_, Frontend::Token::Kind::RParen}
           # (x) or x) - no space
 
-        # After closing paren before various tokens - add space
         when {Frontend::Token::Kind::RParen, Frontend::Token::Kind::Identifier}
           @output << ' '
-
-        # No space before dot (method call)
         when {_, Frontend::Token::Kind::Operator}
-          # ex.message - no space before dot
-
-        # Default: after keywords/identifier-calls add space (catch-all)
+          @output << original_gap unless original_text(next_token) == "."
         else
-          if (need_space_after || is_identifier_call) &&
-             next_token.kind != Frontend::Token::Kind::Newline &&
-             next_token.kind != Frontend::Token::Kind::EOF &&
-             next_token.kind != Frontend::Token::Kind::LParen &&
-             next_token.kind != Frontend::Token::Kind::RParen &&
-             next_token.kind != Frontend::Token::Kind::Comma &&
-             next_token.kind != Frontend::Token::Kind::Semicolon
+          if original_gap.bytesize > 0
+            @output << original_gap
+          elsif need_space_after &&
+                next_token.kind != Frontend::Token::Kind::Newline &&
+                next_token.kind != Frontend::Token::Kind::EOF &&
+                next_token.kind != Frontend::Token::Kind::LParen &&
+                next_token.kind != Frontend::Token::Kind::RParen &&
+                next_token.kind != Frontend::Token::Kind::Comma &&
+                next_token.kind != Frontend::Token::Kind::Semicolon
             @output << ' '
           end
         end
       end
 
-      private def should_increase_indent?(current : Frontend::Token, next_token : Frontend::Token?) : Bool
+      private def original_gap_between(current : Frontend::Token, next_token : Frontend::Token) : String
+        gap_start = current.span.end_offset
+        gap_end = next_token.span.start_offset
+        return "" if gap_end <= gap_start
+
+        @source.byte_slice(gap_start, gap_end - gap_start)
+      end
+
+      private def original_text(token : Frontend::Token) : String
+        @source.byte_slice(token.span.start_offset, token.span.end_offset - token.span.start_offset)
+      end
+
+      private def emit_original_gap_or_space(original_gap : String)
+        if original_gap.bytesize > 0
+          @output << original_gap
+        else
+          @output << ' '
+        end
+      end
+
+      private def should_increase_indent?(current : Frontend::Token, next_token : Frontend::Token?, started_line : Bool) : Bool
+        if current.kind == Frontend::Token::Kind::If ||
+           current.kind == Frontend::Token::Kind::Unless ||
+           current.kind == Frontend::Token::Kind::Rescue
+          # Modifier forms such as `return nil if x` and `foo rescue bar` do
+          # not have a matching `end`; treating them as block openers makes
+          # indentation drift across large files.
+          return started_line || @previous_token.try(&.kind) == Frontend::Token::Kind::Eq
+        end
+
         # Keywords that open blocks
         case current.kind
-        when Frontend::Token::Kind::Def, Frontend::Token::Kind::If,
-             Frontend::Token::Kind::Unless, Frontend::Token::Kind::While,
+        when Frontend::Token::Kind::Def,
+             Frontend::Token::Kind::While,
              Frontend::Token::Kind::Until, Frontend::Token::Kind::Class,
              Frontend::Token::Kind::Module, Frontend::Token::Kind::Struct,
              Frontend::Token::Kind::Elsif, Frontend::Token::Kind::Else,
              Frontend::Token::Kind::Enum, Frontend::Token::Kind::Case,
              Frontend::Token::Kind::Begin, Frontend::Token::Kind::When,
-             Frontend::Token::Kind::Rescue, Frontend::Token::Kind::Ensure
+             Frontend::Token::Kind::Ensure
           true
         else
           false
         end
+      end
+
+      private def variable_like_kind?(kind : Frontend::Token::Kind) : Bool
+        kind == Frontend::Token::Kind::Identifier ||
+          kind == Frontend::Token::Kind::InstanceVar ||
+          kind == Frontend::Token::Kind::ClassVar ||
+          kind == Frontend::Token::Kind::GlobalVar
       end
 
       private def should_decrease_indent?(current : Frontend::Token) : Bool

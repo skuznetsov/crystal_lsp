@@ -5218,6 +5218,74 @@ Refuted / limited evidence:
 
 Trust: {F/G/R: 0.84/0.55/0.88} [verified]
 
+### LM-598 — LSP formatter preserves stable large documents
+
+Status: VERIFIED for the formatter/LSP formatting reliability slice on
+`codegen`.
+
+The LSP formatter was still expensive and risky on real source files because
+the token formatter treated skipped whitespace as disposable. On
+`src/compiler/lsp/server.cr`, formatting expanded the file from 486,822 bytes
+to 4,737,482 bytes before the first fix, then continued to produce large
+whole-file replacement spans through independent whitespace bugs. The root
+pattern was not the LSP minimal-edit algorithm; it was a formatter boundary
+violation: a partial token formatter was synthesizing indentation and spacing
+for syntax it could not fully model.
+
+Accepted change:
+
+- Line starts now preserve the original source prefix instead of reindenting
+  every line from the formatter's partial block model.
+- Existing non-newline gaps are preserved by default and by operator-like
+  rules where the formatter cannot safely distinguish all roles.
+- Namespace paths keep `::` tight, variable-like type symbols keep `: Type`,
+  named arguments keep `name: value`, bare splats keep `*,`, block pipes and
+  indexers keep `|h, k| h[k]`, aligned inline comments keep their alignment,
+  and line-continuation backslashes keep their source gap.
+- The formatter still performs the narrow proven edit for compact assignment
+  spacing such as `x=1` -> `x = 1`.
+
+Evidence:
+
+- Direct large-file measurement through `run_safe`:
+  `Formatter.format(File.read("src/compiler/lsp/server.cr"))` now returns the
+  original bytes exactly (`source_bytes=486822`, `formatted_bytes=486822`,
+  `equal=true`) instead of producing a large replacement.
+- Focused formatter guard:
+  `crystal build spec/formatter_spec.cr -o /tmp/formatter_spec --error-trace`
+  and `scripts/run_safe.sh /tmp/formatter_spec 60 1536 --no-color`, 6
+  examples, 0 failures.
+- LSP formatting integration:
+  `crystal build spec/lsp/formatting_integration_spec.cr -o
+  /tmp/lsp_formatting_spec --error-trace` and
+  `scripts/run_safe.sh /tmp/lsp_formatting_spec 120 1536 --no-color`, 9
+  examples, 0 failures.
+- Full LSP suite:
+  `crystal build spec/lsp/*_spec.cr -o /tmp/lsp_full_formatter_spec
+  --error-trace` and `scripts/run_safe.sh /tmp/lsp_full_formatter_spec 120
+  1536 --no-color`, 228 examples, 0 failures.
+- Hygiene:
+  `crystal tool format --check src/compiler/formatter.cr spec/formatter_spec.cr`
+  and `git diff --check`.
+
+WBA framing:
+
+- Window/trigger: LSP formatting on a stable large source file returned a huge
+  replacement or spent time serializing one.
+- Transport corridor: token gaps and line prefixes cross from lexer spans into
+  LSP edit generation.
+- Boundary: a lightweight token formatter may insert locally proven missing
+  spaces, but it must not synthesize indentation/alignment for syntax it does
+  not fully understand.
+- Legal move: preserve source gaps/prefixes unless a narrow token-pair rule is
+  proven safe; use exact byte-equality on a real LSP source file as the
+  collapse check.
+- Potential decrease: replacement span and response size drop from whole-file
+  scale to `null` for already stable source, while retaining focused `x=1`
+  formatting.
+
+Trust: {F/G/R: 0.89/0.60/0.91} [verified]
+
 ## LM-583 — LSP foreground hover avoids workspace reference scans by default
 
 Status: verified for the focused LSP hover/cache/harness slice on `codegen`.
