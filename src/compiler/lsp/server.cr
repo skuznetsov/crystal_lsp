@@ -1882,7 +1882,7 @@ module CrystalV2
           build_expr_index : Bool = true,
           parse_ms : Float64 = 0.0,
         ) : {Array(Diagnostic), Frontend::Program, Semantic::TypeContext?, Hash(Frontend::ExprId, Semantic::Symbol)?, Semantic::SymbolTable?, Array(String), DocumentIndex?}
-          debug("Analyzing document: #{source.lines.size} lines, #{source.size} bytes")
+          debug { "Analyzing document: #{source.lines.size} lines, #{source.size} bytes" }
           ensure_prelude_loaded
           notify_indexing("Indexing… loading document") if @config.background_indexing
 
@@ -4578,8 +4578,10 @@ module CrystalV2
             end
           end
           span = node.span
-          snippet = extract_snippet(doc_state.text_document.text, span)
-          debug("Definition node class=#{node.class} span=#{span.start_line}:#{span.start_column}-#{span.end_line}:#{span.end_column} snippet='#{snippet}'")
+          debug do
+            snippet = extract_snippet(doc_state.text_document.text, span)
+            "Definition node class=#{node.class} span=#{span.start_line}:#{span.start_column}-#{span.end_line}:#{span.end_column} snippet='#{snippet}'"
+          end
 
           # Suppress hover type for require string literals (only navigate via definition)
           if node.is_a?(Frontend::StringNode) && require_string_literal?(doc_state, expr_id)
@@ -4804,12 +4806,14 @@ module CrystalV2
             end
           end
 
-          debug("Definition offset=#{offset}")
           text = doc_state.text_document.text
-          context_start = Math.max(0, offset - 12)
-          context_end = Math.min(text.bytesize, offset + 16)
-          context_slice = text.byte_slice(context_start, context_end - context_start)
-          debug("Definition context='#{context_slice}'")
+          debug("Definition offset=#{offset}")
+          debug do
+            context_start = Math.max(0, offset - 12)
+            context_end = Math.min(text.bytesize, offset + 16)
+            context_slice = text.byte_slice(context_start, context_end - context_start)
+            "Definition context='#{context_slice}'"
+          end
 
           # Find expression at position
           expr_id = expr_id || find_expr_at_position(doc_state, line, character, offset)
@@ -9792,12 +9796,23 @@ module CrystalV2
         end
 
         # Log debug message to stderr if LSP_DEBUG is set
+        private def debug(&)
+          return unless debug_enabled?
+
+          debug(yield)
+        end
+
         private def debug(message : String)
-          return unless ENV["LSP_DEBUG"]? || @config.debug_log_path
+          return unless debug_enabled?
+
           io = @log_output || STDERR
           ts = Time.local
           io.puts("[LSP DEBUG] #{ts.to_s("%H:%M:%S.%3N")} #{message}")
           io.flush
+        end
+
+        private def debug_enabled? : Bool
+          !!(ENV["LSP_DEBUG"]? || @config.debug_log_path)
         end
 
         # Log error to stderr
@@ -11731,7 +11746,7 @@ module CrystalV2
             json = formatting_response_json(original_source, formatted_source)
             @formatting_cache[uri] = {version, json}
 
-            debug("Formatted: #{original_source.lines.size} lines → #{formatted_source.lines.size} lines")
+            debug { "Formatted: #{original_source.lines.size} lines → #{formatted_source.lines.size} lines" }
             send_response(id, json)
           rescue ex
             debug("Formatting error: #{ex.message}")

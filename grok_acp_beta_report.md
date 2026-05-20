@@ -1020,3 +1020,29 @@ root-family sidecar, but local measurement still had to reject the tempting
 optimization candidates.
 **Cost saved:** moderate audit/context time; not authoritative for final
 patch acceptance.
+
+### Session 40 — 2026-05-20 — LSP post-LM-600 root-cause audit
+**Task:** read-only Grok ACP audit of the remaining LSP latency/reliability
+frontier after LM-600, constrained to `LANDMARKS.md` LM-589..LM-600 and
+`src/compiler/lsp/server.cr`, `src/compiler/lsp/unified_project.cr`,
+`src/compiler/lsp/project_cache.cr`, and `benchmarks/lsp_harness.cr`.
+**Brief size:** bounded task file under `/tmp/cv2_agent_tasks`, requesting
+candidate root-cause improvements with code anchors and falsifiers.
+**Latency:** returned while local verification was running. The convenience
+`grok_worker` wrapper rejected CLI-style flags because it expects only a task
+file; direct `grok_acp_delegate.py` invocation with `PATH` adjusted worked.
+**Output quality:** useful as root-family sidecar. Grok identified stale
+`@cached_expr_types` invalidation after edits, uninterruptible background CPU
+bursts after one-time idle checks, and project-cache save jitter as plausible
+next root causes. These were not adopted without local proof.
+**Adversary check:** local measurement first found and verified a smaller
+foreground hot-path bug: disabled debug logging still eagerly evaluated large
+source snippets/line counts. The landed patch made expensive debug payloads
+lazy and reduced first hover on `src/compiler/lsp/server.cr` from about
+`23.7ms` to `5.9ms` in the default harness, while the full LSP suite stayed
+green.
+**Verdict:** useful. Keep Grok for bounded read-only pattern audits, but local
+falsifiers still decide patch scope. The stale expression-type cache and
+background-scheduler families should be revisited as separate slices.
+**Cost saved:** modest context/audit time; not authoritative for final patch
+acceptance.

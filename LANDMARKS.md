@@ -5429,6 +5429,69 @@ WBA framing:
 
 Trust: {F/G/R: 0.87/0.68/0.89} [verified]
 
+### LM-601 — LSP debug payloads are lazy on foreground hot paths
+
+Status: VERIFIED for the focused LSP hover/open slice on `codegen`.
+
+After LM-600, the default harness still showed point requests as mostly fast,
+but first hover on `src/compiler/lsp/server.cr` could sit around 20-30ms even
+when debug logging was disabled. Source inspection found several expensive
+debug payloads still evaluated eagerly before `debug(message)` returned:
+large-source line counts, hover snippets, and definition context slices. The
+hover snippet was especially visible because it extracts source text for the
+enclosing `Server` class span.
+
+Accepted change:
+
+- `debug` now has a block form that evaluates only when `LSP_DEBUG` or
+  `LSP_DEBUG_LOG` is enabled.
+- Hot-path debug payloads that scan/slice large source text now use the lazy
+  form.
+- Existing eager `debug("literal/interpolated cheap metadata")` call sites are
+  left alone in this slice.
+
+Evidence:
+
+- Baseline default LSP harness after LM-600, through nested `run_safe`
+  wrappers, measured first hover on `src/compiler/lsp/server.cr` at `23.7ms`,
+  first full semantic tokens at `126.3ms`, and formatting at `78.3ms`.
+- After the lazy-debug patch, the same harness measured first hover at `5.9ms`,
+  semantic tokens at `118.5ms`, and formatting at `76.9ms`, with zero
+  diagnostics.
+- Full LSP suite:
+  `crystal build spec/lsp/*_spec.cr -o /tmp/lsp_full_lazy_debug_spec
+  --error-trace` and `scripts/run_safe.sh /tmp/lsp_full_lazy_debug_spec 120
+  1536 --no-color`, 228 examples, 0 failures.
+- LSP server build sanity:
+  `scripts/run_safe.sh /Users/sergey/.local/bin/crystal 300 4096 build
+  src/lsp_main.cr -o /tmp/lsp_main_lazy_debug --error-trace -D
+  without_openssl`, exited 0.
+- Hygiene:
+  `crystal tool format --check src/compiler/lsp/server.cr`.
+
+Boundary:
+
+- This is not the main didOpen/prelude-cache closure. Subagent and Grok
+  sidecars both pointed at broader remaining root families: foreground-idle
+  scheduling around prelude/cache work, stale expression-type cache invalidation
+  after edits, and redundant line-offset construction in semantic-token
+  collection. Those remain separate candidate slices.
+
+WBA framing:
+
+- Window/trigger: disabled debug logging still paid source slicing/scanning
+  costs in foreground request handlers.
+- Transport corridor: debug metadata is carried from document source into the
+  logging sink only when debugging is enabled.
+- Boundary: protocol responses, diagnostics, and actual debug output must stay
+  unchanged when logging is enabled.
+- Legal move: add lazy block-based debug evaluation and apply it only to
+  expensive payloads.
+- Potential decrease: request-path source slicing/scanning drops when debug is
+  off, without changing LSP semantics.
+
+Trust: {F/G/R: 0.84/0.54/0.88} [verified]
+
 ## LM-583 — LSP foreground hover avoids workspace reference scans by default
 
 Status: verified for the focused LSP hover/cache/harness slice on `codegen`.
