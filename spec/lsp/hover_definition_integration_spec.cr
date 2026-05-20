@@ -98,4 +98,44 @@ describe CrystalV2::Compiler::LSP::Server do
   ensure
     FileUtils.rm_rf(dir) if dir
   end
+
+  it "returns AST document symbols without depending on semantic symbol tables" do
+    dir = File.join(Dir.tempdir, "lsp_doc_symbols_#{Random::Secure.hex(6)}")
+    FileUtils.mkdir_p(dir)
+    path = File.join(dir, "main.cr")
+    source = <<-CR
+    module Outer
+      COUNT = 1
+
+      class Thing
+        property value : Int32
+
+        def run(value : Int32) : Int32
+          value
+        end
+      end
+    end
+    CR
+    File.write(path, source)
+
+    server = CrystalV2::Compiler::LSP::Server.new(
+      IO::Memory.new,
+      IO::Memory.new,
+      CrystalV2::Compiler::LSP::ServerConfig.new(background_indexing: false, project_cache: false)
+    )
+    uri = server.spec_store_document(source, dir, path)
+    server.spec_document_symbol_cache_size(uri).should eq(5)
+
+    response = server.spec_document_symbols(uri)
+    symbols = response["result"].as_a
+    symbols.size.should eq(1)
+    outer = symbols.first
+    outer["name"].as_s.should eq("Outer")
+    outer_children = outer["children"].as_a
+    outer_children.map { |child| child["name"].as_s }.should eq(["COUNT", "Thing"])
+    thing_children = outer_children[1]["children"].as_a
+    thing_children.map { |child| child["name"].as_s }.should eq(["value", "run"])
+  ensure
+    FileUtils.rm_rf(dir) if dir
+  end
 end

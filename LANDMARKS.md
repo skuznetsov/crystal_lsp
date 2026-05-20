@@ -4891,6 +4891,80 @@ Evidence:
 
 Trust: {F/G/R: 0.83/0.42/0.88} [verified]
 
+## LM-585 — LSP document symbols use AST snapshots and harness request filtering
+
+Status: verified for focused LSP document-symbol correctness and harness
+measurement on `codegen`.
+
+Change:
+
+- `DocumentState` now carries AST-derived document symbols built when a
+  document or dependency snapshot is parsed. `textDocument/documentSymbol`
+  serves that snapshot before falling back to the older semantic-symbol-table
+  path.
+- The AST document-symbol path covers modules, classes/structs, unions, enums
+  with enum members, defs, macro defs, libs, funs, aliases, constants,
+  annotation definitions, and accessor declarations without requiring semantic
+  symbol tables.
+- The LSP harness now treats inbound messages with both `method` and `id` as
+  server-initiated JSON-RPC requests, responds with `null`, and keeps waiting
+  for the client request id. This prevents server request ids such as
+  `workspace/semanticTokens/refresh` from being mistaken for benchmarked
+  client responses.
+- Harness timings now include a `didOpen settled` row after diagnostics arrive,
+  and document-symbol summaries report recursive symbol count plus payload
+  bytes instead of only top-level symbol count.
+- The harness clears per-URI diagnostics before `didOpen`, waits for a matching
+  or newer diagnostics version, and stashes non-integer JSON-RPC response ids by
+  serialized id instead of dropping them as notifications.
+
+WBA framing:
+
+- Window/trigger: `textDocument/documentSymbol` returned an empty result when
+  the semantic symbol table did not contain the expected shape, and the harness
+  could misclassify server-initiated requests as benchmark responses.
+- Transport corridor: parse-time AST structure is transported with the
+  immutable document snapshot; request-time documentSymbol should only serialize
+  the cached structural outline.
+- Boundary: hover, references, semantic tokens, and dependency warmup keep their
+  existing state boundaries; server-initiated JSON-RPC requests are answered by
+  the harness without stealing client response ids.
+- Legal move: cache only AST structural symbols on the document snapshot and
+  preserve the semantic fallback for documents without an AST outline.
+- Potential decrease: removes the empty-document-symbol bad corner and reduces
+  request-time work to cached outline serialization.
+
+Evidence:
+
+- `crystal tool format --check src/compiler/lsp/server.cr
+  spec/lsp/support/server_helper.cr
+  spec/lsp/hover_definition_integration_spec.cr benchmarks/lsp_harness.cr`
+- `git diff --check`
+- `crystal build src/lsp_main.cr -o bin/crystal_v2_lsp --error-trace`
+- Focused LSP spec binary through safe runner:
+  `crystal build spec/lsp/hover_definition_integration_spec.cr
+  spec/lsp/hover_definition_indexing_spec.cr
+  spec/lsp/references_integration_spec.cr
+  spec/lsp/ast_cache_dependency_integration_spec.cr -o <tmp> --error-trace`
+  then `scripts/run_safe.sh <tmp> 60 1024 --no-color`: 6 examples, 0 failures.
+- Safe wrapped harness on `src/compiler/lsp/server.cr` exited 0 with
+  `errors=0`, `document symbols` reporting 500 recursive symbols, 1 top-level
+  symbol, and 104963 response bytes; representative documentSymbol timing was
+  ~268ms.
+- Safe wrapped harness on a small temp Crystal file exited 0 with
+  `errors=0`, `document symbols` reporting 5 recursive symbols, 1 top-level
+  symbol, 943 response bytes, and ~0.4ms documentSymbol timing.
+
+Known limits:
+
+- This slice fixes correctness and measurement for document symbols; it does
+  not claim large-file documentSymbol is sub-100ms. The current evidence points
+  to payload serialization/parsing size as the next bottleneck.
+- The full `spec/lsp/*_spec.cr` suite still has known pre-existing
+  semantic-token/inlay-position failures from LM-583.
+
+Trust: {F/G/R: 0.84/0.42/0.88} [verified]
+
 ### LM-580 — s2 registration hardening: parsed number macro values, alias suffix index, and tuple-key avoidance
 
 Status: verified for s1 -> s2 build and focused no-prelude guards on branch

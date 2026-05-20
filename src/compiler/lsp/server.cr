@@ -111,6 +111,7 @@ module CrystalV2
         getter path : String?
         getter index : DocumentIndex?
         getter line_offsets : Array(Int32)
+        getter document_symbols : Array(DocumentSymbol)
 
         def initialize(
           @text_document : TextDocumentItem,
@@ -122,6 +123,7 @@ module CrystalV2
           @index : DocumentIndex? = nil,
           @line_offsets : Array(Int32) = [] of Int32,
           path : String? = nil,
+          @document_symbols : Array(DocumentSymbol) = [] of DocumentSymbol,
         )
           @path = path ? File.expand_path(path) : nil
         end
@@ -425,7 +427,8 @@ module CrystalV2
                 task.requires,
                 ds.index,
                 line_offsets: ds.line_offsets,
-                path: task.path
+                path: task.path,
+                document_symbols: ds.document_symbols
               )
               @documents[uri] = new_state
             elsif ds = @dependency_documents[uri]?
@@ -438,7 +441,8 @@ module CrystalV2
                 task.requires,
                 ds.index,
                 line_offsets: ds.line_offsets,
-                path: task.path
+                path: task.path,
+                document_symbols: ds.document_symbols
               )
               @dependency_documents[uri] = new_state
             end
@@ -755,7 +759,7 @@ module CrystalV2
                 requires = cached.requires
                 index = build_document_index(program, path, build_expr_index: false)
                 line_offsets = build_line_offsets(source)
-                dep_state = DocumentState.new(text_doc, program, type_context, identifier_symbols, symbol_table, requires, index, line_offsets, path: path)
+                dep_state = DocumentState.new(text_doc, program, type_context, identifier_symbols, symbol_table, requires, index, line_offsets, path: path, document_symbols: collect_ast_document_symbols(program, path))
                 @dependency_documents[uri] = dep_state
                 workspace.try { |ws| ws.cache[path] = dep_state }
                 ensure_dependencies_loaded(dep_state, workspace: workspace) if recursive
@@ -790,7 +794,7 @@ module CrystalV2
 
           text_doc = TextDocumentItem.new(uri: uri, language_id: "crystal", version: 0, text: source)
           line_offsets = build_line_offsets(source)
-          dep_state = DocumentState.new(text_doc, program, type_context, identifier_symbols, symbol_table, requires, index, line_offsets, path: path)
+          dep_state = DocumentState.new(text_doc, program, type_context, identifier_symbols, symbol_table, requires, index, line_offsets, path: path, document_symbols: collect_ast_document_symbols(program, path))
 
           @dependency_documents[uri] = dep_state
           workspace.cache[path] = dep_state if workspace
@@ -1670,7 +1674,7 @@ module CrystalV2
 
           # Store document state (legacy)
           line_offsets = build_line_offsets(text)
-          @documents[uri] = DocumentState.new(doc, program, type_context, identifier_symbols, symbol_table, requires, index, line_offsets, path: doc_path)
+          @documents[uri] = DocumentState.new(doc, program, type_context, identifier_symbols, symbol_table, requires, index, line_offsets, path: doc_path, document_symbols: collect_ast_document_symbols(program, doc_path))
           register_document_symbols(uri, @documents[uri])
           warm_dependencies(doc_path, @documents[uri]) if doc_path
 
@@ -3558,7 +3562,7 @@ module CrystalV2
 
           doc = TextDocumentItem.new(uri: uri, language_id: language_id, version: version, text: new_text)
           line_offsets = build_line_offsets(new_text)
-          @documents[uri] = DocumentState.new(doc, program, type_context, identifier_symbols, symbol_table, requires, index, line_offsets, path: doc_path)
+          @documents[uri] = DocumentState.new(doc, program, type_context, identifier_symbols, symbol_table, requires, index, line_offsets, path: doc_path, document_symbols: collect_ast_document_symbols(program, doc_path))
           register_document_symbols(uri, @documents[uri])
           @semantic_token_cache.delete(uri) # Invalidate cache on content change
           warm_dependencies(doc_path, @documents[uri]) if doc_path
@@ -5245,6 +5249,12 @@ module CrystalV2
           doc_state = @documents[uri]?
           return send_response(id, "[]") unless doc_state
 
+          ast_symbols = doc_state.document_symbols
+          unless ast_symbols.empty?
+            debug("Returning #{ast_symbols.size} AST document symbols")
+            return send_response(id, ast_symbols.to_json)
+          end
+
           # Get symbol table
           symbol_table = doc_state.symbol_table
           return send_response(id, "[]") unless symbol_table
@@ -5252,6 +5262,112 @@ module CrystalV2
           symbols = collect_document_symbols(symbol_table, doc_state.program)
           debug("Returning #{symbols.size} document symbols")
           send_response(id, symbols.to_json)
+        end
+
+        private def collect_ast_document_symbols(program : Frontend::Program, path : String?) : Array(DocumentSymbol)
+          symbols = [] of DocumentSymbol
+          program.roots.each do |root_id|
+            append_ast_document_symbol(program, path, root_id, symbols)
+          end
+          symbols
+        end
+
+        private def append_ast_document_symbol(
+          program : Frontend::Program,
+          path : String?,
+          expr_id : Frontend::ExprId,
+          output : Array(DocumentSymbol),
+        ) : Nil
+          return if expr_id.invalid?
+          return unless expr_in_document?(program, expr_id, path)
+
+          arena = program.arena
+          node = arena[expr_id]
+
+          if symbol = document_symbol_from_ast_node(node)
+            children = [] of DocumentSymbol
+            each_child_expr(arena, expr_id) do |child_id|
+              append_ast_document_symbol(program, path, child_id, children)
+            end
+            symbol.children = children unless children.empty?
+            output << symbol
+          else
+            each_child_expr(arena, expr_id) do |child_id|
+              append_ast_document_symbol(program, path, child_id, output)
+            end
+          end
+        rescue ex
+          debug("AST document symbol collection skipped node #{expr_id.index}: #{ex.message}") if ENV["LSP_DEBUG"]?
+        end
+
+        private def document_symbol_from_ast_node(node : Frontend::TypedNode) : DocumentSymbol?
+          case node
+          when Frontend::ModuleNode
+            ast_document_symbol(String.new(node.name), SymbolKind::Module.value, node.span)
+          when Frontend::ClassNode
+            kind = node.is_struct ? SymbolKind::Struct.value : SymbolKind::Class.value
+            ast_document_symbol(String.new(node.name), kind, node.span)
+          when Frontend::UnionNode
+            ast_document_symbol(String.new(node.name), SymbolKind::Class.value, node.span)
+          when Frontend::EnumNode
+            symbol = ast_document_symbol(String.new(node.name), SymbolKind::Enum.value, node.span)
+            enum_children = node.members.map do |member|
+              member_range = Range.from_span(member.name_span)
+              DocumentSymbol.new(String.new(member.name), SymbolKind::EnumMember.value, member_range, member_range)
+            end
+            symbol.children = enum_children unless enum_children.empty?
+            symbol
+          when Frontend::DefNode
+            name = String.new(node.name)
+            ast_document_symbol(name, SymbolKind::Method.value, node.span)
+          when Frontend::MacroDefNode
+            ast_document_symbol(String.new(node.name), SymbolKind::Function.value, node.span)
+          when Frontend::LibNode
+            ast_document_symbol(String.new(node.name), SymbolKind::Module.value, node.span)
+          when Frontend::FunNode
+            ast_document_symbol(String.new(node.name), SymbolKind::Function.value, node.span)
+          when Frontend::AliasNode
+            ast_document_symbol(String.new(node.name), SymbolKind::Constant.value, node.span)
+          when Frontend::ConstantNode
+            ast_document_symbol(String.new(node.name), SymbolKind::Constant.value, node.span)
+          when Frontend::AnnotationDefNode
+            ast_document_symbol(String.new(node.name), SymbolKind::Class.value, node.span)
+          when Frontend::GetterNode
+            accessor_document_symbol(node.specs, SymbolKind::Property.value, node.span)
+          when Frontend::SetterNode
+            accessor_document_symbol(node.specs, SymbolKind::Property.value, node.span)
+          when Frontend::PropertyNode
+            accessor_document_symbol(node.specs, SymbolKind::Property.value, node.span)
+          else
+            nil
+          end
+        end
+
+        private def accessor_document_symbol(specs : Array(Frontend::AccessorSpec), kind : Int32, span : Frontend::Span) : DocumentSymbol?
+          return nil if specs.empty?
+
+          if specs.size == 1
+            spec = specs.first
+            name = String.new(spec.name)
+            name += "?" if spec.predicate
+            range = Range.from_span(spec.name_span)
+            DocumentSymbol.new(name, kind, range, range)
+          else
+            symbol = ast_document_symbol("accessors", kind, span)
+            children = specs.map do |spec|
+              name = String.new(spec.name)
+              name += "?" if spec.predicate
+              range = Range.from_span(spec.name_span)
+              DocumentSymbol.new(name, kind, range, range)
+            end
+            symbol.children = children
+            symbol
+          end
+        end
+
+        private def ast_document_symbol(name : String, kind : Int32, span : Frontend::Span, detail : String? = nil) : DocumentSymbol
+          range = Range.from_span(span)
+          DocumentSymbol.new(name, kind, range, range, detail)
         end
 
         private def collect_document_symbols(

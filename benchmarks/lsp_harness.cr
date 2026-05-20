@@ -176,7 +176,7 @@ module CrystalV2
           @queue = Channel(JSON::Any | Symbol).new
           @notifications = Hash(String, NotificationStats).new
           @results = [] of Result
-          @stash = Hash(Int32, JSON::Any).new
+          @stash = Hash(String, JSON::Any).new
           @next_id = 1
           @diagnostics_by_uri = Hash(String, DiagnosticsEntry).new
         end
@@ -316,6 +316,7 @@ module CrystalV2
 
           text = File.read(spec.path)
           uri = file_uri(spec.path)
+          @diagnostics_by_uri.delete(uri)
 
           notification(
             "textDocument/didOpen",
@@ -328,6 +329,8 @@ module CrystalV2
               },
             }
           )
+          ready_ms = await_document_ready(uri, spec.version)
+          @results << Result.new("didOpen settled", "textDocument/didOpen", :ok, ready_ms, "diagnostics received")
 
           spec.actions.each do |action|
             handle_action(action, text, uri)
@@ -505,6 +508,37 @@ module CrystalV2
           send_payload(payload)
         end
 
+        private def await_document_ready(uri : String, version : Int32) : Float64
+          started = Time.instant
+          timeout_span = @timeout.seconds
+
+          loop do
+            if entry = diagnostics_by_uri[uri]?
+              if entry.version.nil? || entry.version.not_nil! >= version
+                return (Time.instant - started).total_milliseconds
+              end
+            end
+
+            message = receive_with_timeout(timeout_span)
+            case message
+            when JSON::Any
+              if message["method"]? && message["id"]?
+                respond_to_server_request(message)
+              elsif id_any = message["id"]?
+                if key = id_key(id_any)
+                  @stash[key] = message
+                else
+                  handle_notification_message(message)
+                end
+              else
+                handle_notification_message(message)
+              end
+            when Symbol
+              raise "LSP server closed stream" if message == :eof
+            end
+          end
+        end
+
         private def write_json(json : JSON::Builder, params : Hash | NamedTuple | Array | JSON::Any | Bool | Int::Signed | Int::Unsigned | Float32 | Float64 | String | Nil)
           case params
           when Hash
@@ -548,7 +582,8 @@ module CrystalV2
         end
 
         private def await_response(id : Int32)
-          if (pending = @stash.delete(id))
+          wait_key = id.to_s
+          if (pending = @stash.delete(wait_key))
             return pending
           end
 
@@ -558,13 +593,15 @@ module CrystalV2
             message = receive_with_timeout(timeout_span)
             case message
             when JSON::Any
-              if id_any = message["id"]?
-                if id_value = id_any.as_i?
-                  msg_id = id_value.to_i32
-                  if msg_id == id
+              if message["method"]? && message["id"]?
+                respond_to_server_request(message)
+                next
+              elsif id_any = message["id"]?
+                if key = id_key(id_any)
+                  if key == wait_key
                     return message
                   else
-                    @stash[msg_id] = message
+                    @stash[key] = message
                   end
                 else
                   handle_notification_message(message)
@@ -576,6 +613,36 @@ module CrystalV2
               raise "LSP server closed stream" if message == :eof
             end
           end
+        end
+
+        private def id_key(id : JSON::Any) : String?
+          raw = id.raw
+          case raw
+          when Int64, String
+            raw.to_s
+          when Nil
+            nil
+          else
+            id.to_json
+          end
+        end
+
+        private def respond_to_server_request(message : JSON::Any)
+          id = message["id"]
+          method = message["method"]?.try(&.as_s) || "unknown"
+          payload = JSON.build do |json|
+            json.object do
+              json.field "jsonrpc", "2.0"
+              json.field "id" do
+                id.to_json(json)
+              end
+              json.field "result" do
+                json.null
+              end
+            end
+          end
+          STDERR.puts "[server request #{method}] responding null" if @verbose
+          send_payload(payload)
         end
 
         private def receive_with_timeout(timeout_span : Time::Span)
@@ -683,7 +750,9 @@ module CrystalV2
             "#{sigs.size} signatures"
           when "textDocument/documentSymbol"
             arr = safe_array(result)
-            arr.empty? ? "0 symbols" : "#{arr.size} symbols"
+            total = count_document_symbols(arr)
+            bytes = result ? result.to_json.bytesize : 0
+            arr.empty? ? "0 symbols" : "#{total} symbols (#{arr.size} top, #{bytes} bytes)"
           when "textDocument/foldingRange"
             arr = safe_array(result)
             arr.empty? ? "0 folds" : "#{arr.size} folds"
@@ -734,6 +803,16 @@ module CrystalV2
           json.try(&.as_a) || [] of JSON::Any
         rescue TypeCastError
           [] of JSON::Any
+        end
+
+        private def count_document_symbols(symbols : Array(JSON::Any)) : Int32
+          total = 0
+          symbols.each do |symbol|
+            total += 1
+            children = symbol["children"]?.try(&.as_a?) || [] of JSON::Any
+            total += count_document_symbols(children) unless children.empty?
+          end
+          total
         end
 
         private def json_null?(json : JSON::Any?) : Bool

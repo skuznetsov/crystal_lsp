@@ -31,7 +31,8 @@ module CrystalV2::Compiler::LSP
         requires,
         index,
         build_line_offsets(source),
-        path
+        path: path,
+        document_symbols: collect_ast_document_symbols(program, path)
       )
       @documents[text_doc.uri] = doc_state
       register_document_symbols(text_doc.uri, doc_state)
@@ -76,6 +77,21 @@ module CrystalV2::Compiler::LSP
       spec_read_last_response
     end
 
+    def spec_document_symbols(uri : String) : JSON::Any
+      params = JSON.parse(%({"textDocument":{"uri":#{uri.to_json}}}))
+      id = JSON.parse("7")
+      spec_reset_output
+      handle_document_symbol(id, params)
+      spec_read_last_response
+    end
+
+    def spec_document_symbol_cache_size(uri : String) : Int32
+      doc_state = @documents[uri]?
+      return 0 unless doc_state
+
+      count_document_symbol_tree(doc_state.document_symbols)
+    end
+
     def spec_inlay_hints(uri : String, start_line : Int32, start_char : Int32, end_line : Int32, end_char : Int32) : JSON::Any
       params = JSON.parse(%({"textDocument":{"uri":#{uri.to_json}},"range":{"start":{"line":#{start_line},"character":#{start_char}},"end":{"line":#{end_line},"character":#{end_char}}}}))
       id = JSON.parse("4")
@@ -106,6 +122,17 @@ module CrystalV2::Compiler::LSP
 
     def spec_collect_folding_ranges(program : CrystalV2::Compiler::Frontend::Program)
       collect_folding_ranges(program)
+    end
+
+    private def count_document_symbol_tree(symbols : Array(DocumentSymbol)) : Int32
+      total = 0
+      symbols.each do |symbol|
+        total += 1
+        if children = symbol.children
+          total += count_document_symbol_tree(children)
+        end
+      end
+      total
     end
 
     def spec_location_for_symbol(symbol : CrystalV2::Compiler::Semantic::Symbol)
