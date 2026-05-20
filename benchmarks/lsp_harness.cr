@@ -118,38 +118,37 @@ module CrystalV2
 
       DEFAULT_SCENARIO = [
         FileScenario.new(
-          "crystal_v2/debug_tests/check_lexer.cr",
+          "src/compiler/lsp/server.cr",
           "crystal",
           1,
           [
-            ActionSpec.point("hover Frontend::Lexer", "textDocument/hover", PositionSpec.new("Frontend::Lexer")),
-            ActionSpec.point("hover block param", "textDocument/hover", PositionSpec.new("param.name", 1, NeedleMode::Start, 2)),
-            ActionSpec.point("definition Frontend::Lexer", "textDocument/definition", PositionSpec.new("Frontend::Lexer")),
+            ActionSpec.point("hover handle_completion", "textDocument/hover", PositionSpec.new("def handle_completion", 1, NeedleMode::Start, 4)),
+            ActionSpec.point("definition handle_completion", "textDocument/definition", PositionSpec.new("handle_completion(id, params)", 1, NeedleMode::Start, 2)),
             ActionSpec.point(
-              "references def_node",
+              "references handle_completion",
               "textDocument/references",
-              PositionSpec.new("def_node", 2),
+              PositionSpec.new("def handle_completion", 1, NeedleMode::Start, 4),
               context: {"includeDeclaration" => JSON::Any.new(true)}
             ),
             ActionSpec.point("completion after parser.", "textDocument/completion", PositionSpec.new("parser.", 1, NeedleMode::End)),
             ActionSpec.point("signature help Parser.new", "textDocument/signatureHelp", PositionSpec.new("Frontend::Parser.new(", 1, NeedleMode::End)),
-            ActionSpec.point("prepare rename def_node", "textDocument/prepareRename", PositionSpec.new("def_node", 1)),
-            ActionSpec.rename("rename def_node → method_info", "textDocument/rename", PositionSpec.new("def_node", 1), "method_info"),
+            ActionSpec.point("prepare rename handle_completion", "textDocument/prepareRename", PositionSpec.new("def handle_completion", 1, NeedleMode::Start, 4)),
+            ActionSpec.rename("rename handle_completion to handle_completion_probe", "textDocument/rename", PositionSpec.new("def handle_completion", 1, NeedleMode::Start, 4), "handle_completion_probe"),
             ActionSpec.document("document symbols", "textDocument/documentSymbol"),
             ActionSpec.document("folding ranges", "textDocument/foldingRange"),
             ActionSpec.document("semantic tokens", "textDocument/semanticTokens/full"),
             ActionSpec.range("inlay hints (full doc)", "textDocument/inlayHint", RangeSpec.full),
             ActionSpec.range(
-              "code actions (param block)",
+              "code actions (handle_completion)",
               "textDocument/codeAction",
-              RangeSpec.new(false, PositionSpec.new("  if params = def_node.params", 1, NeedleMode::Start, 2), nil, 28)
+              RangeSpec.new(false, PositionSpec.new("def handle_completion", 1, NeedleMode::Start, 4), nil, 28)
             ),
             ActionSpec.document("formatting", "textDocument/formatting"),
             ActionSpec.range("range formatting (full doc)", "textDocument/rangeFormatting", RangeSpec.full),
           ]
         ),
         FileScenario.new(
-          "crystal_v2/src/compiler/lsp/server.cr",
+          "src/compiler/lsp/server.cr",
           "crystal",
           1,
           [
@@ -157,7 +156,7 @@ module CrystalV2
           ]
         ),
         FileScenario.new(
-          "crystal_v2/benchmarks/bench_parser_single.cr",
+          "benchmarks/bench_parser_single.cr",
           "crystal",
           1,
           [

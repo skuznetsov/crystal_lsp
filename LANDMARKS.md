@@ -4947,6 +4947,38 @@ Boundary:
 
 Trust: {F/G/R: 0.88/0.67/0.9} [verified]
 
+### LM-592 — LSP harness default scenario uses current repo paths
+
+Status: VERIFIED on `codegen`.
+
+The LSP harness default scenario still referenced stale `crystal_v2/...`
+paths, including `crystal_v2/debug_tests/check_lexer.cr`, which no longer
+exists in this checkout. Running the default harness therefore failed before
+it could exercise the LSP server and could be misread as an LSP regression.
+
+Accepted change:
+
+- The default scenario now uses current repo-relative paths:
+  `src/compiler/lsp/server.cr` and `benchmarks/bench_parser_single.cr`.
+- The default needles were updated to symbols that exist in those files.
+
+Evidence:
+
+- `crystal tool format --check benchmarks/lsp_harness.cr`
+- `crystal build benchmarks/lsp_harness.cr -o
+  /tmp/lsp_harness_default_fixed --error-trace`
+- `scripts/run_safe.sh /tmp/lsp_harness_default_fixed 180 1536
+  --server="/usr/bin/env RUN_SAFE_PASSTHROUGH_STDIO=1 scripts/run_safe.sh
+  bin/crystal_v2_lsp 180 1536" --timeout=20` exited 0.
+
+Observed follow-up frontier:
+
+- Default harness now runs and shows formatting/rangeFormatting on
+  `src/compiler/lsp/server.cr` around 365-371ms, which is the next measurable
+  foreground LSP latency candidate.
+
+Trust: {F/G/R: 0.84/0.58/0.9} [verified]
+
 ## LM-583 — LSP foreground hover avoids workspace reference scans by default
 
 Status: verified for the focused LSP hover/cache/harness slice on `codegen`.
