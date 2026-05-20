@@ -5815,6 +5815,104 @@ WBA framing:
 
 Trust: {F/G/R: 0.88/0.58/0.90} [verified]
 
+### LM-607 — LSP AST-cache mode still uses the prelude summary cache
+
+Status: VERIFIED for the opt-in LSP AST-cache startup/prelude-cache slice on
+`codegen`.
+
+After LM-606, a targeted warm-start audit split the remaining candidates. The
+one-file warm harness refuted project-cache load as the dominant current
+`initialize` cost: with a valid cache, `try_load_project_cache` reported
+`cache=~2.9ms`, and disabling `LSP_PROJECT_CACHE` made `didOpen` fall back to
+dependency analysis and grow to about `2533ms`. The stronger root was that
+`prelude_cache_enabled?` returned false whenever `LSP_AST_CACHE=1`, so the
+AST-cache mode could skip a valid prelude summary cache and enter the full
+prelude parse path.
+
+Accepted change:
+
+- Prelude summary cache remains enabled when `LSP_AST_CACHE=1`; AST cache still
+  handles eligible foreground/dependency AST parsing, but it no longer disables
+  the faster prelude symbol-summary cache.
+- Background prelude cache hydration now rebuilds symbol ranges, type strings,
+  expression-type maps, and prelude method locations into local maps. Those
+  maps are merged into server state only when the completed `PreludeState` is
+  applied.
+- The background cached-prelude path yields between independent cached files
+  while rebuilding local unpublished maps, avoiding partial cache publication
+  and preserving foreground scheduling.
+- Added a focused regression that seeds a valid temp prelude summary cache and
+  asserts that an `ast_cache: true` server loads prelude from that cache instead
+  of parsing prelude files.
+
+Evidence:
+
+- Focused prelude AST-cache regression:
+  `XDG_CACHE_HOME=/private/tmp/cv2_lsp_prelude_cache_spec_xdg
+  CRYSTAL_CACHE_DIR=/private/tmp/cv2_lsp_prelude_cache_spec scripts/run_safe.sh
+  /Users/sergey/.local/bin/crystal 120 2048 spec
+  spec/lsp/ast_cache_prelude_integration_spec.cr --error-trace`, 2 examples,
+  0 failures.
+- Related AST-cache specs:
+  `XDG_CACHE_HOME=/private/tmp/cv2_lsp_prelude_cache_specs_xdg
+  CRYSTAL_CACHE_DIR=/private/tmp/cv2_lsp_prelude_cache_specs scripts/run_safe.sh
+  /Users/sergey/.local/bin/crystal 180 4096 spec
+  spec/lsp/ast_cache_prelude_integration_spec.cr
+  spec/lsp/ast_cache_foreground_integration_spec.cr
+  spec/lsp/ast_cache_roundtrip_spec.cr
+  spec/lsp/ast_cache_dependency_integration_spec.cr --error-trace`, 6
+  examples, 0 failures.
+- Full LSP suite:
+  `XDG_CACHE_HOME=/private/tmp/cv2_lsp_prelude_cache_full_xdg
+  CRYSTAL_CACHE_DIR=/private/tmp/cv2_lsp_prelude_cache_fullspec
+  scripts/run_safe.sh /Users/sergey/.local/bin/crystal 240 4096 spec spec/lsp
+  --error-trace`, 233 examples, 0 failures.
+- LSP server build:
+  `CRYSTAL_CACHE_DIR=/private/tmp/cv2_lsp_prelude_cache_build
+  scripts/run_safe.sh /Users/sergey/.local/bin/crystal 300 4096 build
+  src/lsp_main.cr -o /private/tmp/lsp_main_prelude_cache --error-trace -D
+  without_openssl`, exited 0.
+- Warm no-debug harness on `src/compiler/lsp/server.cr` with
+  `LSP_AST_CACHE=1` reported `initialize ~106ms`, `didOpen ~133ms`, and zero
+  diagnostics. The same default no-AST-cache path reported `initialize ~102ms`
+  and `didOpen ~251ms`.
+
+Refuted branches:
+
+- Treating project-cache load as the active one-file warm-start bottleneck was
+  refuted by `cache=~2.9ms` and by `LSP_PROJECT_CACHE=0` worsening foreground
+  `didOpen` to about `2533ms`.
+- A pure cooperative-yield patch without respecting the unpublished-cache
+  boundary would be unsafe: background cache hydration mutates lookup maps used
+  by foreground requests. The accepted implementation carries local maps in the
+  completed prelude state and publishes them at apply time.
+
+Boundary:
+
+- This does not enable `LSP_AST_CACHE=1` by default. LM-606 still records
+  existing signature/completion deltas under AST-cache mode. The remaining
+  default-path latency is foreground parse/name-resolution work when AST cache
+  is not enabled.
+
+WBA framing:
+
+- Window/trigger: `LSP_AST_CACHE=1` startup with a valid prelude summary cache,
+  plus background cached-prelude hydration that has independent per-file cache
+  units.
+- Transport corridor: prelude summary/type/method cache data moves through
+  local unpublished maps into a completed `PreludeState`, then into server
+  lookup state at apply time.
+- Boundary: foreground requests must not observe partially rebuilt prelude
+  cache maps; AST-cache mode must not invalidate the prelude summary-cache
+  contract.
+- Legal move: keep prelude summary cache enabled for AST-cache mode and yield
+  only while rebuilding local unpublished maps.
+- Potential decrease: full-prelude parse work under `LSP_AST_CACHE=1` is
+  replaced by summary-cache hydration, and foreground scheduling is no longer
+  tied to one CPU-bound unpublished cache loop.
+
+Trust: {F/G/R: 0.88/0.60/0.90} [verified]
+
 ## LM-583 — LSP foreground hover avoids workspace reference scans by default
 
 Status: verified for the focused LSP hover/cache/harness slice on `codegen`.

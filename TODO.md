@@ -61,9 +61,15 @@ loader now has a single in-flight owner. Repeated foreground requests while
 focused regression and full LSP suite are green. After LM-606, opt-in
 `LSP_AST_CACHE=1` also reuses AST cache for unchanged foreground documents; keep
 it opt-in until the existing ast-cache signature/completion deltas are resolved.
-Remaining LSP latency candidates are project-cache work on `initialize`,
-fallback no-cache prelude parsing, and any still-coarse TypeIndex/cache
-restoration loops.
+After LM-607, `LSP_AST_CACHE=1` composes with the prelude summary cache instead
+of forcing a fallback full-prelude parse, and background prelude cache
+hydration publishes rebuilt cache maps only after the cache state is complete.
+Refuted for the current one-file warm harness: project-cache load itself is not
+the dominant `initialize` cost (`cache=~2.9ms`), and disabling project cache
+pushes dependency analysis back into foreground `didOpen`. Remaining LSP latency
+candidates are foreground parse/name-resolution work on the default no-AST-cache
+path and any broader TypeIndex/cache restoration loops on large real project
+caches.
 
 Spec-first bootstrap checkpoint (2026-05-08): `docs/specs/` now contains the
 first executable contract slice for Crystal V2, modeled after the DiamondDB

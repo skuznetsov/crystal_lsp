@@ -19,6 +19,45 @@ describe "LSP AST cache prelude loading" do
     end
   end
 
+  it "keeps the prelude summary cache enabled with AST cache enabled" do
+    dir = File.join(Dir.tempdir, "lsp_ast_prelude_summary_#{Random::Secure.hex(6)}")
+    cache_home = File.join(dir, "cache")
+    log = File.join(dir, "server.log")
+    FileUtils.mkdir_p(cache_home)
+
+    prev_cache_home = ENV["XDG_CACHE_HOME"]?
+    ENV["XDG_CACHE_HOME"] = cache_home
+
+    stdlib_path = File.dirname(CrystalV2::Compiler::LSP::Server::PRELUDE_PATH)
+    cache = CrystalV2::Compiler::LSP::PreludeCache.new(
+      [] of CrystalV2::Compiler::LSP::CachedSymbolInfo,
+      CrystalV2::Compiler::LSP::PreludeCache.compute_stdlib_hash(stdlib_path)
+    )
+    cache.save
+
+    CrystalV2::Compiler::LSP::Server.new(
+      IO::Memory.new,
+      IO::Memory.new,
+      CrystalV2::Compiler::LSP::ServerConfig.new(
+        background_indexing: false,
+        project_cache: false,
+        ast_cache: true,
+        debug_log_path: log
+      )
+    )
+
+    log_text = File.read(log)
+    log_text.should contain("Prelude loaded from cache")
+    log_text.should_not contain("Analyzing prelude file")
+  ensure
+    if prev_cache_home
+      ENV["XDG_CACHE_HOME"] = prev_cache_home
+    else
+      ENV.delete("XDG_CACHE_HOME")
+    end
+    FileUtils.rm_rf(dir) if dir
+  end
+
   it "reuses AST cache when reloading a prelude dependency" do
     dir = File.join(Dir.tempdir, "lsp_ast_prelude_#{Random::Secure.hex(6)}")
     FileUtils.mkdir_p(dir)

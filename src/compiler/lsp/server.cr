@@ -154,6 +154,10 @@ module CrystalV2
         getter diagnostics : Array(Diagnostic)
         getter symbol_origins : Hash(Semantic::Symbol, PreludeSymbolOrigin)
         getter from_cache : Bool
+        getter cached_symbol_ranges : Hash(String, Hash(String, Range))?
+        getter cached_symbol_types : Hash(String, Hash(String, String))?
+        getter cached_expr_types : Hash(String, Hash(Int32, String))?
+        getter cached_method_index : Hash(String, Location)?
 
         def initialize(
           @path : String,
@@ -162,6 +166,10 @@ module CrystalV2
           @diagnostics : Array(Diagnostic),
           @symbol_origins : Hash(Semantic::Symbol, PreludeSymbolOrigin),
           @from_cache : Bool = false,
+          @cached_symbol_ranges : Hash(String, Hash(String, Range))? = nil,
+          @cached_symbol_types : Hash(String, Hash(String, String))? = nil,
+          @cached_expr_types : Hash(String, Hash(Int32, String))? = nil,
+          @cached_method_index : Hash(String, Location)? = nil,
         )
         end
       end
@@ -2128,7 +2136,7 @@ module CrystalV2
         end
 
         private def prelude_cache_enabled? : Bool
-          !@config.ast_cache
+          true
         end
 
         # Background prelude loading
@@ -2170,9 +2178,14 @@ module CrystalV2
               cache_ms = (Time.instant - start_time).total_milliseconds.round(2)
               debug("Background: prelude cache loaded in #{cache_ms}ms (#{cache.symbols.size} symbols, #{cache.files.size} files)")
 
+              cached_symbol_ranges = Hash(String, Hash(String, Range)).new
+              cached_symbol_types = Hash(String, Hash(String, String)).new
+              cached_expr_types = Hash(String, Hash(Int32, String)).new
+              cached_method_index = Hash(String, Location).new
+
               # Use files with full summaries if available, otherwise fall back to legacy symbols
               table = if cache.files.any?
-                        rebuild_prelude_table_from_cache(cache)
+                        rebuild_prelude_table_from_cache(cache, cached_symbol_ranges, cached_symbol_types, cooperative: true)
                       elsif cache.symbols.any?
                         SymbolReconstructor.rebuild_table(cache)
                       else
@@ -2183,14 +2196,14 @@ module CrystalV2
 
               # Restore expression types from TypeIndex (for hover fallback)
               if type_index = cache.type_index
-                restore_prelude_expr_types(type_index, cache.files)
-                debug("Background: restored #{@cached_expr_types.size} files with expr types from TypeIndex")
+                restore_prelude_expr_types(type_index, cache.files, cached_expr_types, cooperative: true)
+                debug("Background: restored #{cached_expr_types.size} files with expr types from TypeIndex")
               else
                 debug("Background: no TypeIndex in cache")
               end
 
               # Register symbols for LSP lookups
-              register_cached_symbols(cache)
+              register_cached_symbols(cache, cached_method_index, cooperative: true)
 
               dummy_arena = Frontend::AstArena.new
               dummy_program = Frontend::Program.new(dummy_arena, [] of Frontend::ExprId)
@@ -2201,7 +2214,11 @@ module CrystalV2
                 table,
                 [] of Diagnostic,
                 {} of Semantic::Symbol => PreludeSymbolOrigin,
-                true # from_cache
+                true, # from_cache
+                cached_symbol_ranges,
+                cached_symbol_types,
+                cached_expr_types,
+                cached_method_index
               )
             end
           end
@@ -2263,6 +2280,11 @@ module CrystalV2
               else
                 register_prelude_symbols(state)
               end
+            else
+              merge_cached_symbol_ranges(state.cached_symbol_ranges)
+              merge_cached_symbol_types(state.cached_symbol_types)
+              merge_cached_expr_types(state.cached_expr_types)
+              merge_cached_method_index(state.cached_method_index)
             end
 
             # Save to cache for next startup
@@ -2294,13 +2316,17 @@ module CrystalV2
 
           # Reconstruct SymbolTable from cache
           rebuild_start = Time.instant
+          cached_symbol_ranges = Hash(String, Hash(String, Range)).new
+          cached_symbol_types = Hash(String, Hash(String, String)).new
           table = if cache.files.any?
-                    rebuild_prelude_table_from_cache(cache)
+                    rebuild_prelude_table_from_cache(cache, cached_symbol_ranges, cached_symbol_types)
                   elsif cache.symbols.any?
                     SymbolReconstructor.rebuild_table(cache)
                   else
                     Semantic::SymbolTable.new
                   end
+          merge_cached_symbol_ranges(cached_symbol_ranges)
+          merge_cached_symbol_types(cached_symbol_types)
           rebuild_ms = (Time.instant - rebuild_start).total_milliseconds.round(2)
           debug("SymbolTable rebuilt in #{rebuild_ms}ms")
 
@@ -2322,7 +2348,7 @@ module CrystalV2
 
           # Restore expression types from TypeIndex (for hover fallback)
           if type_index = cache.type_index
-            restore_prelude_expr_types(type_index, cache.files)
+            restore_prelude_expr_types(type_index, cache.files, @cached_expr_types)
           end
 
           # Register symbols for LSP lookups
@@ -2333,7 +2359,13 @@ module CrystalV2
           false
         end
 
-        private def rebuild_prelude_table_from_cache(cache : PreludeCache) : Semantic::SymbolTable
+        private def rebuild_prelude_table_from_cache(
+          cache : PreludeCache,
+          ranges_store : Hash(String, Hash(String, Range)),
+          types_store : Hash(String, Hash(String, String)),
+          *,
+          cooperative : Bool = false,
+        ) : Semantic::SymbolTable
           table = Semantic::SymbolTable.new
 
           cache.files.each do |file_state|
@@ -2342,9 +2374,10 @@ module CrystalV2
               table,
               summaries,
               file_state.path,
-              @cached_symbol_ranges,
-              @cached_symbol_types
+              ranges_store,
+              types_store
             )
+            Fiber.yield if cooperative
 
             # Expression types are loaded from TypeIndex (handled in ProjectCacheLoader)
           end
@@ -2353,7 +2386,13 @@ module CrystalV2
         end
 
         # Restore expression types from prelude TypeIndex into @cached_expr_types
-        private def restore_prelude_expr_types(type_index : Semantic::TypeIndex, files : Array(CachedFileState))
+        private def restore_prelude_expr_types(
+          type_index : Semantic::TypeIndex,
+          files : Array(CachedFileState),
+          target : Hash(String, Hash(Int32, String)),
+          *,
+          cooperative : Bool = false,
+        )
           files.each do |file_state|
             path = file_state.path
             if file_index = type_index.file_index(path)
@@ -2371,8 +2410,37 @@ module CrystalV2
                   end
                 end
               end
-              @cached_expr_types[path] = expr_map unless expr_map.empty?
+              target[path] = expr_map unless expr_map.empty?
             end
+            Fiber.yield if cooperative
+          end
+        end
+
+        private def merge_cached_symbol_ranges(ranges : Hash(String, Hash(String, Range))?)
+          return unless ranges
+          ranges.each do |path, values|
+            @cached_symbol_ranges[path] = values
+          end
+        end
+
+        private def merge_cached_symbol_types(types : Hash(String, Hash(String, String))?)
+          return unless types
+          types.each do |path, values|
+            @cached_symbol_types[path] = values
+          end
+        end
+
+        private def merge_cached_expr_types(expr_types : Hash(String, Hash(Int32, String))?)
+          return unless expr_types
+          expr_types.each do |path, values|
+            @cached_expr_types[path] = values
+          end
+        end
+
+        private def merge_cached_method_index(method_index : Hash(String, Location)?)
+          return unless method_index
+          method_index.each do |key, location|
+            @prelude_method_index[key] = location
           end
         end
 
@@ -2539,11 +2607,17 @@ module CrystalV2
           end
         end
 
-        private def register_cached_symbols(cache : PreludeCache)
+        private def register_cached_symbols(
+          cache : PreludeCache,
+          method_index : Hash(String, Location) = @prelude_method_index,
+          *,
+          cooperative : Bool = false,
+        )
           if cache.files.any?
             cache.files.each do |file_state|
               summaries = file_state.summaries # Binary parsing, cached
-              register_cached_summary_methods(summaries, file_state.path, "")
+              register_cached_summary_methods(summaries, file_state.path, "", method_index)
+              Fiber.yield if cooperative
             end
           else
             cache.symbols.each do |info|
@@ -2562,8 +2636,9 @@ module CrystalV2
                             else
                               info.name
                             end
-                @prelude_method_index[cache_key] = location
+                method_index[cache_key] = location
               end
+              Fiber.yield if cooperative
             end
           end
         end
@@ -2572,6 +2647,7 @@ module CrystalV2
           summaries : Array(SymbolSummary),
           path : String,
           container : String,
+          method_index : Hash(String, Location) = @prelude_method_index,
         )
           summaries.each do |summary|
             if summary.kind == "method" && summary.start_line && summary.start_col
@@ -2580,7 +2656,7 @@ module CrystalV2
               finish_col = summary.start_col.not_nil! + summary.name.size
               end_pos = Position.new(summary.start_line.not_nil!, finish_col)
               cache_key = container.empty? ? summary.name : "#{container}.#{summary.name}"
-              @prelude_method_index[cache_key] = Location.new(uri, Range.new(start_pos, end_pos))
+              method_index[cache_key] = Location.new(uri, Range.new(start_pos, end_pos))
             end
 
             next unless children = summary.children
@@ -2588,7 +2664,7 @@ module CrystalV2
             unless summary.kind == "method"
               next_container = container.empty? ? summary.name : "#{container}::#{summary.name}"
             end
-            register_cached_summary_methods(children, path, next_container)
+            register_cached_summary_methods(children, path, next_container, method_index)
           end
         end
 

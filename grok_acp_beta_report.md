@@ -1070,3 +1070,29 @@ so repeated local harness runs can overstate stale-cache behavior in this
 sandbox.
 **Verdict:** failed interaction. Do not treat this Grok run as evidence.
 **Cost saved:** none.
+
+### Session 42 — 2026-05-20 — LSP project-cache/TypeIndex warm-start audit
+**Task:** read-only Grok ACP audit after LM-606, constrained to
+`TODO.md`, `LANDMARKS.md` LM-596..LM-606, and LSP startup/cache files. The
+prompt asked for the next likely latency root around `initialize`,
+project-cache load, prelude fallback parsing, and TypeIndex restoration.
+**Brief size:** bounded inline ACP prompt using `grok_acp_delegate.py` with
+`grok-4.3`, no edit permission, and exact files/functions named.
+**Latency:** returned while local build and harness probes were running.
+**Output quality:** useful as a candidate list, but not authoritative. Grok
+correctly pointed at synchronous project-cache materialization, fallback
+prelude parsing under AST-cache mode, and coarse TypeIndex restoration as the
+right root families. Local falsifiers then split them: the one-file warm
+project-cache load was only about `2.9ms`, and disabling project cache made
+foreground `didOpen` much worse; the actionable root was the AST-cache mode
+disabling the prelude summary cache.
+**Adversary check:** local harness runs with `LSP_DEBUG=1` and a writable
+`XDG_CACHE_HOME` showed `LSP_AST_CACHE=1` could enter full-prelude parsing
+despite a valid prelude summary cache. The accepted fix keeps the prelude
+summary cache enabled with AST cache and publishes background-rebuilt cache
+maps only after the completed prelude state is applied.
+**Verdict:** useful. Grok was good for root-family enumeration, but local
+measurement rejected its strongest project-cache hypothesis for the current
+warm one-file harness.
+**Cost saved:** moderate audit/context time; final patch scope still came from
+local falsifiers.
