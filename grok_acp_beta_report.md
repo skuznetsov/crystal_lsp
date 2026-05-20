@@ -947,3 +947,21 @@ variables, or detected bare implicit-receiver calls.
 **Verdict:** no Grok evidence value. The timeout is useful beta signal; Cursor
 and local lldb/reducer checks supplied the actual evidence.
 **Cost saved:** none.
+
+### Session 37 — 2026-05-20 — pre-scan/class-registration frontier audit
+**Task:** read-only audit of the produced-s2 full-prelude frontier after
+`puts 42` appeared to stop around `pre-scan class/module loops start`.
+**Brief size:** bounded inline prompt with exact files
+`src/compiler/cli.cr` and `src/compiler/hir/ast_to_hir.cr`, requested
+root-cause hypotheses and small falsifiers.
+**Latency:** no useful answer; the local `grok` CLI exited with
+`Internal error: "max_turns exceeded: limit is 2, but got 6 messages"`.
+**Output quality:** no actionable Grok finding.
+**Adversary check:** GPT Spark independently confirmed that the coarse marker
+precedes class/module pre-scan loops and suggested per-index falsifiers. Local
+evidence was decisive: produced `bootstrap_trace_puts` was not reliable, sparse
+temporary `stage2_debug` localization moved the frontier, and clean verification
+showed the accepted HIR hardening moves the smoke past pre-scan/module
+registration to early class registration.
+**Verdict:** no Grok evidence value from this run; useful beta signal only.
+**Cost saved:** none.

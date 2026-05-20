@@ -4972,3 +4972,87 @@ Boundary:
   non-fatal during produced `s2` builds.
 
 Trust: {F/G/R: 0.90/0.42/0.90} [verified]
+
+## LM-579 — Source-span slicing and Char macro operator-id checks hardened
+
+Context: compiler/bootstrap/HIR registration boundaries, 2026-05-20,
+`codegen`.
+
+Verified outcome:
+
+- Produced `s2` no longer remains at the old clean full-prelude
+  `pre-scan class/module loops start` timeout under the tested 90s safe gate.
+  The clean `puts 42` smoke reaches `pre-scan constants done`, completes lib,
+  enum, alias, macro, and module registration, then segfaults during early
+  class registration after `class register idx=3/112`.
+- The source-span helper now refuses implausible source strings and spans that
+  extend outside the source before allocating with `String#byte_slice`.
+- The Char primitive macro-for classifier now extracts operator ids only from
+  `MacroIdValue`, `MacroStringValue`, or `MacroSymbolValue`, instead of
+  dispatching `to_id` on an unproven tuple head.
+
+WBA framing:
+
+- Window/trigger: lldb stopped in `String#byte_slice` via
+  `slice_source_for_span -> constant_literal_value_from_source` while HIR
+  registration was reading constant source text; a later diagnostic lldb run
+  stopped in `Float::Printer::CachedPowers::Power#to_id` via
+  `char_binary_macro_values_have_operator_ids?`.
+- Transport corridor: parser spans and macro iterable values cross from
+  frontend/macro evaluation into HIR registration before demanded lowering.
+- Boundary: source snippets must be sliced only from certified source windows,
+  and Char operator-id shortcuts must not call id conversion on arbitrary macro
+  values or self-hosted drift objects.
+- Legal moves: reject invalid source windows and use structured macro-value
+  cases for operator-id extraction.
+- Potential decrease: removes two registration-time bad corners without
+  broadening generic/proc/container demand or adding nesting-depth caps.
+
+Evidence:
+
+- `git diff --check`
+- `crystal build src/crystal_v2.cr -o /private/tmp/cv2_clean_hirfix_host
+  --error-trace`
+- Host guards:
+  `regression_tests/p2_source_span_slice_bounds_no_prelude.sh
+  /private/tmp/cv2_clean_hirfix_host` and
+  `regression_tests/p2_constant_globals_no_prelude.sh
+  /private/tmp/cv2_clean_hirfix_host`
+- Produced `s2` build:
+  `scripts/run_safe.sh /private/tmp/cv2_clean_hirfix_host 300 4096
+  src/crystal_v2.cr -o /private/tmp/cv2_clean_hirfix_s2/cv2_s2`, exited 0
+  after ~154s.
+- Produced guards:
+  `p2_source_span_slice_bounds_no_prelude.sh`,
+  `p2_constant_globals_no_prelude.sh`, and
+  `p2_qualified_module_namespace_no_prelude.sh` on
+  `/private/tmp/cv2_clean_hirfix_s2/cv2_s2`.
+- Clean produced full-prelude smoke:
+  `scripts/run_safe.sh /private/tmp/cv2_clean_hirfix_s2/cv2_s2 90 4096
+  /private/tmp/cv2_clean_hirfix_hello.cr -o
+  /private/tmp/cv2_clean_hirfix_hello_bin` exited 139 after reaching class
+  registration.
+
+Refuted/limited evidence:
+
+- `CRYSTAL_V2_TRACE_STDERR`/`bootstrap_trace_puts` is not reliable for
+  produced-s2 localization here; it can emit blank lines and materially perturb
+  timing.
+- Temporary `stage2_debug` pre-scan/module-name instrumentation was useful for
+  localization, but it changed the frontier and was removed from the patch.
+- The existing `p2_generated_stage2_char_macro_for_frontier.sh` guard now times
+  out under its trace-heavy path and is not accepted as evidence for this
+  slice.
+- Batch lldb on the clean patch times out under the wrapper before reaching the
+  moved class-register crash, so the current clean frontier is anchored by
+  `run_safe` trace, not a fresh clean backtrace.
+
+Boundary:
+
+- This is a moved-frontier/root-boundary hardening, not a closed
+  full-prelude smoke. The next target is the early class-registration segfault
+  after `class register idx=3/112`.
+- The non-fatal `CrystalV2::Compiler::CLI#file_sha256$String` MIR optimizer
+  arithmetic-overflow diagnostic remains during produced `s2` builds.
+
+Trust: {F/G/R: 0.86/0.46/0.88} [verified]

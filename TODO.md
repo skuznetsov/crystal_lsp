@@ -30,19 +30,19 @@ Working policy:
 
 ## Current Checkpoint
 
-Latest bootstrap frontier (LM-578, 2026-05-20): produced `s2` now passes the
-widened no-prelude constant-global LLVM guard
-`p2_constant_globals_no_prelude.sh`, including
-`module Foo; private COUNT = 2; end` emitting `Foo__classvar__COUNT` and not
-`Object__classvar__Foo$CCCOUNT`. The WBA-style legal move was to carry
-structured constant owner/name metadata from HIR registration into CLI constant
-global export instead of reparsing rendered names with self-hosted String
-helpers. Refuted local move: replacing `String#rindex("::")` with a byte-scan
-helper passed host but regressed produced `s2` build to `ExprId out of bounds:
-1600485477`, so string-split patching is not boundary-safe here. The active
-full-prelude `puts 42` frontier is not closed: produced `s2` currently times
-out after top-level collection at `pre-scan class/module loops start` under a
-120s safe gate.
+Latest bootstrap frontier (LM-579, 2026-05-20): produced `s2` now carries two
+new HIR registration boundary hardenings. `slice_source_for_span` refuses
+implausible source sizes and spans outside the source window before calling
+`String#byte_slice`, and the Char primitive macro-for classifier no longer
+calls `to_id` until the tuple head is proven to be an id/string/symbol macro
+value. This moved the clean produced full-prelude `puts 42` smoke past the old
+untraced `pre-scan class/module loops start` timeout and through module
+registration; the active frontier is now a segfault during early class
+registration after `class register idx=3/112`. Boundary: this is not a clean
+full-prelude smoke yet. A diagnostic lldb run before the Char fix exposed a
+separate abort in `Float::Printer::CachedPowers::Power#to_id` through
+`char_binary_macro_values_have_operator_ids?`; after the fix, that abort is no
+longer the observed clean frontier.
 
 Spec-first bootstrap checkpoint (2026-05-08): `docs/specs/` now contains the
 first executable contract slice for Crystal V2, modeled after the DiamondDB
