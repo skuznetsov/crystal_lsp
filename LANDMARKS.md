@@ -5747,6 +5747,74 @@ WBA framing:
 
 Trust: {F/G/R: 0.88/0.62/0.91} [verified]
 
+### LM-606 — Opt-in LSP AST cache reuses unchanged foreground documents
+
+Status: VERIFIED for the opt-in `LSP_AST_CACHE=1` foreground-open path on
+`codegen`.
+
+After LM-605, the remaining warm `didOpen` cost on
+`src/compiler/lsp/server.cr` was dominated by foreground parsing. A standalone
+parser probe measured parser construction/token preload around `41ms`,
+`parse_program` around `93ms`, and total parse time around `133-135ms` for the
+large LSP server file. Existing AST-cache integration covered prelude and
+dependencies, but foreground `didOpen` / `didChange` always reparsed the
+current buffer.
+
+Accepted change:
+
+- `didOpen` and `didChange` may use `load_or_parse_disk_program` for a
+  foreground document only when AST cache is enabled for that path and the open
+  editor buffer exactly matches the file on disk.
+- Unsaved foreground edits parse the editor buffer normally and never reuse a
+  disk AST cache entry.
+- Added focused foreground AST-cache integration specs for unchanged reopen and
+  unsaved-edit rejection.
+
+Evidence:
+
+- Focused foreground AST-cache regression:
+  `XDG_CACHE_HOME=/private/tmp/cv2_lsp_fg_ast_spec_xdg3
+  CRYSTAL_CACHE_DIR=/private/tmp/cv2_lsp_fg_ast_spec3 scripts/run_safe.sh
+  /Users/sergey/.local/bin/crystal 120 2048 spec
+  spec/lsp/ast_cache_foreground_integration_spec.cr --error-trace`, 2
+  examples, 0 failures.
+- Full LSP suite:
+  `XDG_CACHE_HOME=/private/tmp/cv2_lsp_full_xdg
+  CRYSTAL_CACHE_DIR=/private/tmp/cv2_lsp_fg_ast_fullspec2 scripts/run_safe.sh
+  /Users/sergey/.local/bin/crystal 240 4096 spec spec/lsp --error-trace`, 232
+  examples, 0 failures.
+- LSP server/harness build sanity with `src/lsp_main.cr` and
+  `benchmarks/lsp_harness.cr` both exited 0 under `scripts/run_safe.sh`.
+- Warm harness with `LSP_AST_CACHE=1` moved repeated foreground `didOpen` for
+  `src/compiler/lsp/server.cr` from the baseline `~253ms` / `~249ms` to
+  `~143ms` / `~135ms` on the patched build, with zero diagnostics.
+- Default no-`LSP_AST_CACHE` second warm run stayed at `~251ms` first
+  `didOpen`, so the new foreground cache path remains opt-in.
+- Hygiene: `crystal tool format --check
+  src/compiler/lsp/server.cr
+  spec/lsp/ast_cache_foreground_integration_spec.cr` and `git diff --check`.
+
+Refuted/default boundary:
+
+- This does not enable AST cache by default. The baseline
+  `LSP_AST_CACHE=1` run already had signature/completion summary deltas versus
+  the default path, so this patch only broadens the existing opt-in cache path
+  where the editor buffer is proven identical to disk.
+
+WBA framing:
+
+- Window/trigger: an opened foreground buffer is byte-identical to its disk
+  file and has an eligible AST-cache entry.
+- Transport corridor: disk/source-mtime AST cache moves into foreground LSP
+  analysis instead of reparsing the same bytes.
+- Boundary: unsaved editor buffers must not cross the disk-AST boundary.
+- Legal move: load the cached disk program only after file size and full byte
+  equality checks against the current editor buffer.
+- Potential decrease: foreground parse work for unchanged cached files drops
+  from full parse cost to cache-load cost while preserving buffer semantics.
+
+Trust: {F/G/R: 0.88/0.58/0.90} [verified]
+
 ## LM-583 — LSP foreground hover avoids workspace reference scans by default
 
 Status: verified for the focused LSP hover/cache/harness slice on `codegen`.

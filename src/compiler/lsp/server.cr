@@ -737,6 +737,16 @@ module CrystalV2
           File.info?(path).try(&.modification_time.to_unix_ns.to_i64)
         end
 
+        private def foreground_ast_cache_eligible?(path : String, source : String) : Bool
+          return false unless ast_cache_enabled_for_path?(path)
+          info = File.info?(path)
+          return false unless info
+          return false unless info.size == source.bytesize
+          File.read(path) == source
+        rescue
+          false
+        end
+
         private def load_or_parse_disk_program(
           path : String,
           source : String,
@@ -1738,13 +1748,27 @@ module CrystalV2
 
           # Legacy: Analyze and store document (will be removed after full migration)
           doc = TextDocumentItem.new(uri: uri, language_id: language_id, version: version, text: text)
-          diagnostics, program, type_context, identifier_symbols, symbol_table, requires, index = analyze_document(
-            text,
-            base_dir,
-            doc_path,
-            recursive_requires: recursive_dependency_load_in_foreground?,
-            workspace: DependencyWorkspace.new
-          )
+          diagnostics, program, type_context, identifier_symbols, symbol_table, requires, index = if doc_path && foreground_ast_cache_eligible?(doc_path, text)
+                                                                                                    parser_diagnostics = [] of Frontend::Diagnostic
+                                                                                                    parsed_program, _ast_cache_hit = load_or_parse_disk_program(doc_path, text, parser_diagnostics, cache_label: "foreground document")
+                                                                                                    analyze_parsed_document(
+                                                                                                      text,
+                                                                                                      parsed_program,
+                                                                                                      parser_diagnostics,
+                                                                                                      base_dir,
+                                                                                                      doc_path,
+                                                                                                      recursive_requires: recursive_dependency_load_in_foreground?,
+                                                                                                      workspace: DependencyWorkspace.new
+                                                                                                    )
+                                                                                                  else
+                                                                                                    analyze_document(
+                                                                                                      text,
+                                                                                                      base_dir,
+                                                                                                      doc_path,
+                                                                                                      recursive_requires: recursive_dependency_load_in_foreground?,
+                                                                                                      workspace: DependencyWorkspace.new
+                                                                                                    )
+                                                                                                  end
 
           # Store document state (legacy)
           line_offsets = build_line_offsets(text)
@@ -3634,13 +3658,27 @@ module CrystalV2
           invalidate_changed_document_caches(uri, doc_path)
 
           # Legacy analysis (will be removed)
-          diagnostics, program, type_context, identifier_symbols, symbol_table, requires, index = analyze_document(
-            new_text,
-            base_dir,
-            doc_path,
-            recursive_requires: recursive_dependency_load_in_foreground?,
-            workspace: DependencyWorkspace.new
-          )
+          diagnostics, program, type_context, identifier_symbols, symbol_table, requires, index = if doc_path && foreground_ast_cache_eligible?(doc_path, new_text)
+                                                                                                    parser_diagnostics = [] of Frontend::Diagnostic
+                                                                                                    parsed_program, _ast_cache_hit = load_or_parse_disk_program(doc_path, new_text, parser_diagnostics, cache_label: "foreground document")
+                                                                                                    analyze_parsed_document(
+                                                                                                      new_text,
+                                                                                                      parsed_program,
+                                                                                                      parser_diagnostics,
+                                                                                                      base_dir,
+                                                                                                      doc_path,
+                                                                                                      recursive_requires: recursive_dependency_load_in_foreground?,
+                                                                                                      workspace: DependencyWorkspace.new
+                                                                                                    )
+                                                                                                  else
+                                                                                                    analyze_document(
+                                                                                                      new_text,
+                                                                                                      base_dir,
+                                                                                                      doc_path,
+                                                                                                      recursive_requires: recursive_dependency_load_in_foreground?,
+                                                                                                      workspace: DependencyWorkspace.new
+                                                                                                    )
+                                                                                                  end
 
           doc = TextDocumentItem.new(uri: uri, language_id: language_id, version: version, text: new_text)
           line_offsets = build_line_offsets(new_text)
