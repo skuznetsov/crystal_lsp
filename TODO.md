@@ -76,17 +76,20 @@ location.
 After LM-610, warm project-cache foreground docs preserve filtered `require`
 paths for on-demand semantic fallback without re-enabling eager background
 dependency warming. After LM-611, the remaining first-hit bench-file default
-no-AST-cache dependency-load cost is closed for the current harness:
+no-AST-cache dependency-load cost was closed for the current harness:
 `definition Lexer` stays around 0.5-1.2ms, `signature help Parser.new` stays
 sub-millisecond to low-millisecond, and `completion parser.` stays around
 9-12ms with source-backed private/protected method labels instead of collapsing
-to the shallow 11-item cache summary or loading the dependency graph.
+to the shallow 11-item cache summary or loading the dependency graph. After
+LM-612, `LSP_AST_CACHE` is enabled by default with `LSP_AST_CACHE=0` and
+config `ast_cache: false` opt-outs; warm default `server.cr` open is now about
+150ms in the harness while the focused cache semantic-fidelity spec and full
+LSP suite stay green.
 Refuted for the current one-file warm harness: project-cache load itself is not
 the dominant `initialize` cost (`cache=~2.9ms`), and disabling project cache
 pushes dependency analysis back into foreground `didOpen`. Remaining LSP latency
-and fidelity candidates are foreground parse/name-resolution work on the
-default no-AST-cache path and deciding whether the opt-in AST cache is mature
-enough to enable by default after its remaining fidelity risks are closed.
+and fidelity candidates are foreground name-resolution/indexing work after the
+AST cache corridor has supplied a parsed foreground arena.
 
 Spec-first bootstrap checkpoint (2026-05-08): `docs/specs/` now contains the
 first executable contract slice for Crystal V2, modeled after the DiamondDB

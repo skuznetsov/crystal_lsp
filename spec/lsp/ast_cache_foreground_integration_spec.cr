@@ -5,6 +5,41 @@ require "random/secure"
 require "./support/server_helper"
 
 describe "LSP AST cache foreground document loading" do
+  it "enables AST cache by default and keeps env/config opt-outs" do
+    dir = File.join(Dir.tempdir, "lsp_ast_config_#{Random::Secure.hex(6)}")
+    FileUtils.mkdir_p(dir)
+
+    prev_ast_cache = ENV["LSP_AST_CACHE"]?
+    prev_config = ENV["CRYSTALV2_LSP_CONFIG"]?
+
+    ENV.delete("LSP_AST_CACHE")
+    ENV.delete("CRYSTALV2_LSP_CONFIG")
+    CrystalV2::Compiler::LSP::ServerConfig.load.ast_cache.should be_true
+
+    ENV["LSP_AST_CACHE"] = "0"
+    CrystalV2::Compiler::LSP::ServerConfig.load.ast_cache.should be_false
+
+    config_path = File.join(dir, "lsp.json")
+    File.write(config_path, %({"ast_cache":false}))
+    ENV.delete("LSP_AST_CACHE")
+    ENV["CRYSTALV2_LSP_CONFIG"] = config_path
+    CrystalV2::Compiler::LSP::ServerConfig.load.ast_cache.should be_false
+  ensure
+    if prev_ast_cache
+      ENV["LSP_AST_CACHE"] = prev_ast_cache
+    else
+      ENV.delete("LSP_AST_CACHE")
+    end
+
+    if prev_config
+      ENV["CRYSTALV2_LSP_CONFIG"] = prev_config
+    else
+      ENV.delete("CRYSTALV2_LSP_CONFIG")
+    end
+
+    FileUtils.rm_rf(dir) if dir
+  end
+
   it "reuses AST cache when reopening an unchanged foreground document" do
     dir = File.join(Dir.tempdir, "lsp_ast_foreground_#{Random::Secure.hex(6)}")
     cache_home = File.join(dir, "cache")

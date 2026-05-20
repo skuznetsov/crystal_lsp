@@ -207,7 +207,7 @@ module CrystalV2
           @debounce_ms : Int32 = 300,                      # Default 300ms debounce
           @background_indexing : Bool = true,              # Default: load prelude in background
           @project_cache : Bool = true,                    # Default: cache project state to disk
-          @ast_cache : Bool = false,                       # Default: staged rollout behind explicit flag
+          @ast_cache : Bool = true,                        # Default: reuse validated AST cache, opt out with LSP_AST_CACHE=0
           @hover_reference_count : Bool = false,           # Keep hover on the low-latency path by default
           @compiler_flags : Set(String) = Set(String).new, # Additional -D flags
         )
@@ -224,7 +224,7 @@ module CrystalV2
           background_indexing = ENV["LSP_BACKGROUND_INDEXING"]? != "0"
           # Project cache enabled by default, can be disabled via env or config
           project_cache = ENV["LSP_PROJECT_CACHE"]? != "0"
-          ast_cache = ENV["LSP_AST_CACHE"]? == "1"
+          ast_cache = ENV["LSP_AST_CACHE"]? != "0"
           hover_reference_count = ENV["LSP_HOVER_REFERENCE_COUNT"]? == "1"
           # Compiler flags from environment (comma-separated) or config
           compiler_flags = Set(String).new
@@ -242,31 +242,31 @@ module CrystalV2
                      end
               if hash = data.as_h?
                 debug_path ||= hash["debug_log_path"]?.try(&.as_s?)
-                if value = hash["parser_recovery_mode"]?.try(&.as_bool?)
+                unless (value = hash["parser_recovery_mode"]?.try(&.as_bool?)).nil?
                   recovery_mode = value
                 end
-                if value = hash["best_effort_inference"]?.try(&.as_bool?)
+                unless (value = hash["best_effort_inference"]?.try(&.as_bool?)).nil?
                   best_effort_inference = value
                 end
-                if value = hash["prelude_symbol_only"]?.try(&.as_bool?)
+                unless (value = hash["prelude_symbol_only"]?.try(&.as_bool?)).nil?
                   prelude_symbol_only = value
                 end
-                if value = hash["real_prelude"]?.try(&.as_bool?)
+                unless (value = hash["real_prelude"]?.try(&.as_bool?)).nil?
                   real_prelude = value
                 end
                 if value = hash["debounce_ms"]?.try(&.as_i?)
                   debounce_ms = value
                 end
-                if value = hash["background_indexing"]?.try(&.as_bool?)
+                unless (value = hash["background_indexing"]?.try(&.as_bool?)).nil?
                   background_indexing = value
                 end
-                if value = hash["project_cache"]?.try(&.as_bool?)
+                unless (value = hash["project_cache"]?.try(&.as_bool?)).nil?
                   project_cache = value
                 end
-                if value = hash["ast_cache"]?.try(&.as_bool?)
+                unless (value = hash["ast_cache"]?.try(&.as_bool?)).nil?
                   ast_cache = value
                 end
-                if value = hash["hover_reference_count"]?.try(&.as_bool?)
+                unless (value = hash["hover_reference_count"]?.try(&.as_bool?)).nil?
                   hover_reference_count = value
                 end
                 # Parse compiler_flags as array of strings

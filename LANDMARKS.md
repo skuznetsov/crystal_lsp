@@ -4929,6 +4929,86 @@ WBA framing:
 
 Trust: {F/G/R: 0.89/0.55/0.90} [verified]
 
+## LM-612 — LSP AST cache is the default foreground cache corridor
+
+Context: LSP warm foreground open latency and cache rollout safety,
+2026-05-20, `codegen`.
+
+Verified outcome:
+
+- `ServerConfig.load` now enables AST cache by default. Operators can opt out
+  with `LSP_AST_CACHE=0` or config `{"ast_cache": false}`.
+- The config loader now applies explicit `false` boolean values for all LSP
+  boolean config keys. The previous `if value = ...` pattern skipped false
+  values, so config-level opt-outs were ineffective.
+- Existing AST-cache foreground safety remains intact: unchanged reopened
+  foreground documents can reuse disk AST, while unsaved foreground edits keep
+  the edited text instead of reusing the stale disk AST.
+- Warm default process-level harness now uses the AST-cache corridor without
+  requiring an env flag.
+
+Root pattern:
+
+- After LM-611 removed first-hit dependency-load spikes, `LSP_AST_CACHE=1`
+  no longer had the earlier signature/completion deltas in the default harness
+  and still cut warm foreground open cost roughly in half for `server.cr`.
+- The only rollout blocker found by the new guard was not cache semantics but
+  config parsing: explicit false booleans in config files were ignored.
+
+Evidence:
+
+- Focused AST-cache foreground/config spec:
+  `CRYSTAL_CACHE_DIR=/private/tmp/cv2_lsp_ast_default_foreground_spec2
+  scripts/run_safe.sh /Users/sergey/.local/bin/crystal 240 4096 spec
+  spec/lsp/ast_cache_foreground_integration_spec.cr --error-trace`: 3
+  examples, 0 failures.
+- Focused project-cache semantic-fidelity spec:
+  `CRYSTAL_CACHE_DIR=/private/tmp/cv2_lsp_ast_default_semantic_spec
+  scripts/run_safe.sh /Users/sergey/.local/bin/crystal 240 4096 spec
+  spec/lsp/project_cache_semantic_fidelity_spec.cr --error-trace`: 3
+  examples, 0 failures.
+- Full LSP suite:
+  `CRYSTAL_CACHE_DIR=/private/tmp/cv2_lsp_ast_default_fullspec
+  scripts/run_safe.sh /Users/sergey/.local/bin/crystal 300 4096 spec spec/lsp
+  --error-trace`: 237 examples, 0 failures.
+- Server and harness builds:
+  `src/lsp_main.cr -o /private/tmp/lsp_main_ast_default` and
+  `benchmarks/lsp_harness.cr -o /private/tmp/lsp_harness_ast_default` both
+  exited 0 through `scripts/run_safe.sh`.
+- Warm default harness with no `LSP_AST_CACHE` env:
+  `initialize` 105.7ms, first `server.cr` `didOpen` 149.9ms,
+  `hover handle_completion` 8.9ms, `definition handle_completion` 1 location,
+  `signature help Parser.new` 6.1ms / 1 signature, bench
+  `definition Lexer` 1.1ms / 1 location, bench
+  `signature help Parser.new` 0.5ms / 1 signature, bench
+  `completion parser.` 10.6ms / 330 unique method labels.
+
+Boundary:
+
+- This flips the default cache corridor, not the project-cache semantic model.
+  AST cache still requires recovery mode, matching on-disk source content for
+  foreground reuse, cache header/version/compiler/source-mtime validation, and
+  an explicit opt-out path.
+- The remaining LSP performance candidate is foreground name-resolution /
+  indexing work after a fast AST load, not parser AST construction itself.
+
+WBA framing:
+
+- Window/trigger: unchanged foreground files reopened after the first server
+  instance has emitted a valid AST cache entry.
+- Transport corridor: validated binary AST cache transports the parsed arena
+  and roots across server instances, while source text, semantic state, and
+  project summaries are recomputed or restored through their own boundaries.
+- Boundary: cached AST is legal only under compiler fingerprint, cache
+  version, source mtime, and exact foreground source-content checks; unsaved
+  edits stay outside the cache corridor.
+- Legal move: make the validated corridor default and preserve env/config
+  opt-out for rollback.
+- Potential decrease: foreground parse work drops from the warm open path while
+  semantic request fidelity remains guarded by LM-611 and the LSP suite.
+
+Trust: {F/G/R: 0.90/0.58/0.90} [verified]
+
 ### LM-589 — LSP first-request latency now defers CPU-bound UnifiedProject updates
 
 Status: VERIFIED on `codegen`.
