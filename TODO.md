@@ -131,13 +131,20 @@ LSP-only lexical overlay. On `ast_to_hir.cr`, the lexer-oracle path measured
 about 550.5ms collection / 314.1ms lexical, while the default byte scanner
 measured about 315.1ms collection / 117.8ms lexical with the focused
 semantic-token fixtures and full LSP suite green.
+After LM-625, unchanged disk-backed foreground opens can use the loaded
+project cache after AST-cache parsing instead of rerunning foreground
+name-resolution on `didOpen`; full semantic analysis is materialized lazily
+for precision features that need a current-AST identifier map. On
+`ast_to_hir.cr`, a stable-binary isolated profile measured warm default
+`didOpen` at about 548.0ms versus about 999.5ms with
+`LSP_FAST_PROJECT_OPEN=0` on the same warm cache.
 Refuted for the current one-file warm harness: project-cache load itself is not
 the dominant `initialize` cost (`cache=~2.9ms`), and disabling project cache
 pushes dependency analysis back into foreground `didOpen`; lazy-on-first
 `ExprSpanIndex` makes first hover worse for the current one-file warm harness.
-Remaining LSP latency and fidelity candidates are first-open foreground
-name-resolution/indexing work after the AST cache corridor has supplied a
-parsed foreground arena and JSON/client handling for the first full
+Remaining LSP latency and fidelity candidates are AST-cache load cost for huge
+foreground files, first precision-request materialization when the cached open
+has no identifier map, and JSON/client handling for the first full
 semantic-token response before a client has a current delta result id.
 
 Spec-first bootstrap checkpoint (2026-05-08): `docs/specs/` now contains the

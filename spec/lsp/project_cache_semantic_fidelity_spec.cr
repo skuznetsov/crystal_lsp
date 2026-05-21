@@ -228,4 +228,50 @@ describe "LSP project cache semantic fidelity" do
       FileUtils.rm_rf(root) if root
     end
   end
+
+  it "serves semantic tokens before cached foreground identifier materialization" do
+    with_lsp_project_cache_env do
+      root = File.join(Dir.tempdir, "lsp_project_cache_tokens_#{Random::Secure.hex(6)}")
+      src_dir = File.join(root, "src")
+      FileUtils.mkdir_p(src_dir)
+      File.write(File.join(root, "shard.yml"), "name: lsp_project_cache_tokens\n")
+
+      path = File.join(src_dir, "main.cr")
+      source = <<-CR
+      class Service
+        def handle(value : Int32) : Int32
+          value
+        end
+
+        def dispatch
+          handle(1)
+        end
+      end
+      CR
+      File.write(path, source)
+
+      project = CrystalV2::Compiler::LSP::UnifiedProjectState.new
+      project.update_file(path, source)
+      CrystalV2::Compiler::LSP::ProjectCacheLoader.save_to_cache(project, root)
+
+      cached = CrystalV2::Compiler::LSP::Server.new(
+        IO::Memory.new,
+        IO::Memory.new,
+        CrystalV2::Compiler::LSP::ServerConfig.new(background_indexing: false, project_cache: true)
+      )
+      cached_uri = cached.spec_did_open_document(source, path)
+      cached.spec_identifier_symbols_built?(cached_uri).should be_false
+
+      tokens = cached.spec_semantic_tokens(cached_uri)
+      tokens["result"]["data"].as_a.should_not be_empty
+      cached.spec_identifier_symbols_built?(cached_uri).should be_false
+
+      definition_line, definition_char = lsp_line_char(source, "handle(1")
+      definition = cached.spec_definition(cached_uri, definition_line, definition_char)
+      definition["result"].as_a.size.should eq(1)
+      cached.spec_identifier_symbols_built?(cached_uri).should be_true
+    ensure
+      FileUtils.rm_rf(root) if root
+    end
+  end
 end

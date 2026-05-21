@@ -6407,6 +6407,48 @@ Adversary notes:
 
 Trust: {F/G/R: 0.86/0.48/0.87} [verified]
 
+### LM-625 - Cached foreground opens skip redundant name resolution
+
+Warm `didOpen` for an unchanged disk-backed document now uses the already
+loaded project cache to build the foreground `DocumentState` after the AST
+cache supplies the parsed arena. This path is gated by the exact disk text
+check, valid project-cache mtime, parser-clean AST, and disabled semantic
+diagnostics. It reuses cached symbols and expression types, leaves
+`identifier_symbols` unset, and materializes full foreground semantic analysis
+only when precision features such as hover, definition, references, inlay
+hints, or call hierarchy need the current-AST identifier map.
+
+Evidence:
+
+- Focused regression:
+  `scripts/run_safe.sh /Users/sergey/.local/bin/crystal 180 4096 spec
+  spec/lsp/hover_definition_indexing_spec.cr
+  spec/lsp/project_cache_semantic_fidelity_spec.cr --error-trace` ->
+  5 examples, 0 failures.
+- Full LSP suite:
+  `scripts/run_safe.sh /Users/sergey/.local/bin/crystal 300 4096 spec
+  spec/lsp --error-trace` -> 249 examples, 0 failures.
+- Stable-binary timing on `src/compiler/hir/ast_to_hir.cr` with isolated
+  `XDG_CACHE_HOME`: cold cache `didOpen` remained about 2662.7ms; warm default
+  cache-backed `didOpen` was about 548.0ms; the same warm cache with
+  `LSP_FAST_PROJECT_OPEN=0` was about 999.5ms.
+- The warm log showed `Loading foreground document ... from AST cache` followed
+  by `Using project cache for foreground open ... (identifier_symbols=false)`.
+
+Adversary notes:
+
+- This does not fake `ExprId -> Symbol` maps across parser sessions. Cached
+  opens leave `identifier_symbols` absent until full semantic analysis runs
+  against the current parsed AST.
+- The existing indexing soft-fail contract is preserved for documents that
+  genuinely lack a symbol table; the regression for hover during indexing
+  remains green.
+- Grok ACP reviewed the hypothesis as a read-only sidecar and flagged the same
+  invariant: identifier maps are per-parse-session and must not be restored
+  unless they are rebuilt for the current AST.
+
+Trust: {F/G/R: 0.87/0.48/0.88} [verified]
+
 ## LM-583 — LSP foreground hover avoids workspace reference scans by default
 
 Status: verified for the focused LSP hover/cache/harness slice on `codegen`.

@@ -817,6 +817,44 @@ module CrystalV2
           {program, false}
         end
 
+        private def fast_project_foreground_open_enabled? : Bool
+          ENV["LSP_FAST_PROJECT_OPEN"]? != "0"
+        end
+
+        private def valid_cached_project_file_state(path : String) : FileAnalysisState?
+          return nil unless fast_project_foreground_open_enabled?
+          return nil if semantic_diagnostics_enabled?
+          return nil unless @project_cache_loaded
+          state = @project.files[path]?
+          return nil unless state
+          return nil if state.symbol_summaries.empty?
+
+          file_info = File.info?(path)
+          return nil unless file_info
+          cached_mtime = state.mtime.try(&.to_unix)
+          return nil unless cached_mtime && file_info.modification_time.to_unix == cached_mtime
+
+          state
+        end
+
+        private def cached_foreground_project_analysis(
+          path : String,
+          program : Frontend::Program,
+          parser_diagnostics : Array(Frontend::Diagnostic),
+        ) : {Array(Diagnostic), Frontend::Program, Semantic::TypeContext?, Hash(Frontend::ExprId, Semantic::Symbol)?, Semantic::SymbolTable?, Array(String), DocumentIndex?}?
+          return nil unless state = valid_cached_project_file_state(path)
+          return nil unless parser_diagnostics.empty?
+
+          type_context = build_type_context_from_cache(path) || Semantic::TypeContext.new
+          @cached_expr_type_compatible_paths.add(path) if @cached_expr_types[path]?
+          identifier_symbols = @project.identifier_symbols_for_file(path)
+          symbol_table = @project.symbols_for_file(path)
+          requires = state.requires
+          index = build_document_index(program, path, build_expr_index: false)
+          debug("Using project cache for foreground open #{path} (identifier_symbols=#{!!identifier_symbols})")
+          {[] of Diagnostic, program, type_context, identifier_symbols, symbol_table, requires, index}
+        end
+
         private def save_ast_cache_program(
           path : String,
           program : Frontend::Program,
@@ -1805,7 +1843,7 @@ module CrystalV2
           diagnostics, program, type_context, identifier_symbols, symbol_table, requires, index = if doc_path && foreground_ast_cache_eligible?(doc_path, text)
                                                                                                     parser_diagnostics = [] of Frontend::Diagnostic
                                                                                                     parsed_program, _ast_cache_hit = load_or_parse_disk_program(doc_path, text, parser_diagnostics, cache_label: "foreground document")
-                                                                                                    analyze_parsed_document(
+                                                                                                    cached_foreground_project_analysis(doc_path, parsed_program, parser_diagnostics) || analyze_parsed_document(
                                                                                                       text,
                                                                                                       parsed_program,
                                                                                                       parser_diagnostics,
@@ -4781,12 +4819,6 @@ module CrystalV2
           debug("Hover request: line=#{line}, char=#{character}")
           debug("Prelude state: #{current_prelude_label}")
 
-          if indexing_in_progress?(doc_state)
-            debug("Hover skipped: indexing in progress")
-            placeholder = Hover.new(contents: MarkupContent.new("Indexing…", markdown: true))
-            return send_response(id, placeholder.to_json)
-          end
-
           # Skip hover if cursor is in a comment
           if comment_position?(doc_state, line, character)
             debug("Hover skipped: cursor in comment")
@@ -4803,6 +4835,14 @@ module CrystalV2
               debug("Hover completed in #{elapsed_ms_since(started_at)}ms -> hit(method-decl)")
               return
             end
+          end
+
+          doc_state = ensure_foreground_semantic_analysis(uri, doc_state)
+
+          if indexing_in_progress?(doc_state)
+            debug("Hover skipped: indexing in progress")
+            placeholder = Hover.new(contents: MarkupContent.new("Indexing…", markdown: true))
+            return send_response(id, placeholder.to_json)
           end
 
           expr_id = find_expr_at_position(doc_state, line, character)
@@ -5166,6 +5206,7 @@ module CrystalV2
 
           doc_state = @documents[uri]?
           return send_response(id, "null") unless doc_state
+          doc_state = ensure_foreground_semantic_analysis(uri, doc_state)
 
           character = clamp_character(doc_state.text_document.text, line, character)
 
@@ -5299,6 +5340,47 @@ module CrystalV2
           return false unless @project_cache_loaded
           return false unless @project.symbol_table
           @project.files.has_key?(doc_path)
+        end
+
+        private def ensure_foreground_semantic_analysis(uri : String, doc_state : DocumentState) : DocumentState
+          return doc_state if doc_state.identifier_symbols
+          return doc_state unless doc_state.symbol_table
+          return doc_state unless path = doc_state.path
+
+          base_dir = File.dirname(path)
+          diagnostics, program, type_context, identifier_symbols, symbol_table, requires, index = analyze_parsed_document(
+            doc_state.text_document.text,
+            doc_state.program,
+            [] of Frontend::Diagnostic,
+            base_dir,
+            path,
+            recursive_requires: recursive_dependency_load_in_foreground?,
+            workspace: DependencyWorkspace.new,
+            build_expr_index: false,
+            publish_indexing: false,
+            allow_cached_expr_types: true
+          )
+
+          refreshed = DocumentState.new(
+            doc_state.text_document,
+            program,
+            type_context,
+            identifier_symbols,
+            symbol_table,
+            requires,
+            index,
+            doc_state.line_offsets,
+            path: path,
+            document_symbols: doc_state.document_symbols
+          )
+          @documents[uri] = refreshed
+          @document_diagnostics[uri] = diagnostics
+          register_document_symbols(uri, refreshed)
+          debug("Foreground semantic analysis materialized for #{path}")
+          refreshed
+        rescue ex
+          debug("Foreground semantic analysis materialization failed for #{uri}: #{ex.message}")
+          doc_state
         end
 
         # Resolve definition for a string literal used in a require call (e.g., require "json")
@@ -6314,6 +6396,7 @@ module CrystalV2
 
           doc_state = @documents[uri]?
           return send_response(id, "null") unless doc_state
+          doc_state = ensure_foreground_semantic_analysis(uri, doc_state)
 
           # Find expression at position
           expr_id = find_expr_at_position(doc_state, line, character)
@@ -6429,6 +6512,7 @@ module CrystalV2
 
           doc_state = @documents[uri]?
           return send_response(id, "[]") unless doc_state
+          doc_state = ensure_foreground_semantic_analysis(uri, doc_state)
 
           type_context = doc_state.type_context
           identifier_symbols = doc_state.identifier_symbols
@@ -6765,6 +6849,7 @@ module CrystalV2
 
           doc_state = @documents[uri]?
           return send_response(id, "null") unless doc_state
+          doc_state = ensure_foreground_semantic_analysis(uri, doc_state)
 
           # Find symbol at position
           expr_id = find_expr_at_position(doc_state, line, character)

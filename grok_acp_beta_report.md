@@ -1167,3 +1167,27 @@ trigger the declaration fast path. Focused and full LSP specs passed under
 Grok prompts should explicitly forbid executing any Crystal command except via
 `scripts/run_safe.sh`.
 **Cost saved:** none.
+
+### Session 46 — 2026-05-21 — LSP cached foreground-open audit
+**Task:** read-only Grok ACP audit of the hypothesis that warm foreground
+`didOpen` for `src/compiler/hir/ast_to_hir.cr` should reuse loaded project
+cache state after AST-cache parsing instead of rerunning full foreground
+name-resolution.
+**Brief size:** bounded repo-local task file at
+`tmp/grok_lsp_cache_open_task.md`, naming only `src/compiler/lsp/server.cr`,
+`src/compiler/lsp/project_cache.cr`, `src/compiler/lsp/unified_project.cr`,
+and `spec/lsp/support/server_helper.cr`, with no edit permission.
+**Latency:** returned while local implementation and verification were already
+in progress.
+**Output quality:** useful. Grok identified the same root invariant as the
+local analysis: project cache restores symbol summaries and cached expression
+types but not safe `ExprId -> Symbol` identifier maps, because those maps are
+per parsed arena. It also listed the LSP features that degrade when
+`identifier_symbols` is nil.
+**Adversary check:** local patch preserves that invariant by leaving
+`identifier_symbols` absent on the fast cached open, then materializing real
+foreground semantic analysis for precision requests. Focused project-cache and
+indexing regressions plus the full LSP suite passed under `scripts/run_safe.sh`.
+**Verdict:** useful sidecar. It did not drive acceptance, but it validated the
+main boundary condition and helped avoid a fake identifier-map cache restore.
+**Cost saved:** moderate review time.
