@@ -12944,41 +12944,7 @@ current_token.kind == Token::Kind::Identifier &&
           # If named args present, or '[]?' variant, lower to CallNode target.[](args..., named:)
           question_follows = false
           if current_token.kind == Token::Kind::Question
-            # Look ahead: if a ':' appears before any delimiter at depth 0, treat as ternary.
-            # Track depth: if we encounter ':' at depth 0, it could be outer ternary's else branch.
-            scan_idx = @index + 1
-            colon_before_delim = false
-            scan_paren_depth = 0
-            scan_bracket_depth = 0
-            scan_brace_depth = 0
-            while scan_idx < @tokens.size
-              tok = @tokens[scan_idx]
-              case tok.kind
-              when Token::Kind::LParen   then scan_paren_depth += 1
-              when Token::Kind::RParen   then scan_paren_depth -= 1
-              when Token::Kind::LBracket then scan_bracket_depth += 1
-              when Token::Kind::RBracket then scan_bracket_depth -= 1
-              when Token::Kind::LBrace   then scan_brace_depth += 1
-              when Token::Kind::RBrace   then scan_brace_depth -= 1
-              when Token::Kind::Colon
-                # Only treat ':' as ternary if we're at depth 0 AND not already inside an outer ternary
-                if scan_paren_depth == 0 && scan_bracket_depth == 0 && scan_brace_depth == 0
-                  # Check if there's something substantial between ? and : (more than just whitespace)
-                  # If scan_idx == @index + 1, it's just `? :` - unlikely to be ternary with []?
-                  has_content = (scan_idx > @index + 1)
-                  colon_before_delim = has_content
-                end
-                break
-              when Token::Kind::Comma, Token::Kind::Newline, Token::Kind::Semicolon, Token::Kind::End, Token::Kind::EOF,
-                   Token::Kind::Question
-                # Delimiters at depth 0 stop scanning
-                break if scan_paren_depth == 0 && scan_bracket_depth == 0 && scan_brace_depth == 0
-              end
-              # Stop if depth goes negative (unbalanced)
-              break if scan_paren_depth < 0 || scan_bracket_depth < 0 || scan_brace_depth < 0
-              scan_idx += 1
-            end
-            question_follows = !colon_before_delim
+            question_follows = index_question_postfix_chain_follows? || !index_question_is_ternary_start?
           end
 
           if named_b.size > 0 || question_follows
@@ -13017,36 +12983,7 @@ current_token.kind == Token::Kind::Identifier &&
         private def handle_index_question_postfix(left : ExprId) : ExprId
           return left if left.invalid?
           return left unless current_token.kind == Token::Kind::Question
-          # Look ahead: if a ':' appears before a delimiter at depth 0 with content, this is ternary.
-          # Track depth to handle nested brackets/parens correctly.
-          scan_idx = @index + 1
-          colon_before_delim = false
-          scan_paren_depth = 0
-          scan_bracket_depth = 0
-          scan_brace_depth = 0
-          while scan_idx < @tokens.size
-            tok = @tokens[scan_idx]
-            case tok.kind
-            when Token::Kind::LParen   then scan_paren_depth += 1
-            when Token::Kind::RParen   then scan_paren_depth -= 1
-            when Token::Kind::LBracket then scan_bracket_depth += 1
-            when Token::Kind::RBracket then scan_bracket_depth -= 1
-            when Token::Kind::LBrace   then scan_brace_depth += 1
-            when Token::Kind::RBrace   then scan_brace_depth -= 1
-            when Token::Kind::Colon
-              if scan_paren_depth == 0 && scan_bracket_depth == 0 && scan_brace_depth == 0
-                has_content = (scan_idx > @index + 1)
-                colon_before_delim = has_content
-              end
-              break
-            when Token::Kind::Comma, Token::Kind::Newline, Token::Kind::Semicolon, Token::Kind::End, Token::Kind::EOF,
-                 Token::Kind::Question
-              break if scan_paren_depth == 0 && scan_bracket_depth == 0 && scan_brace_depth == 0
-            end
-            break if scan_paren_depth < 0 || scan_bracket_depth < 0 || scan_brace_depth < 0
-            scan_idx += 1
-          end
-          return left if colon_before_delim
+          return left if !index_question_postfix_chain_follows? && index_question_is_ternary_start?
           node = @arena[left]
           return left unless node.is_a?(IndexNode)
           question = current_token
@@ -13066,6 +13003,53 @@ current_token.kind == Token::Kind::Identifier &&
               nil
             )
           )
+        end
+
+        # `obj[key]?.foo` is unambiguously a nilable indexer followed by a
+        # postfix chain. Without this early check, a surrounding ternary's `:`
+        # can be mistaken for the `?` after `]`.
+        private def index_question_postfix_chain_follows? : Bool
+          return false unless current_token.kind == Token::Kind::Question
+
+          next_token = peek_next_non_space_or_comment
+          case next_token.kind
+          when Token::Kind::AmpDot, Token::Kind::LParen, Token::Kind::LBrace, Token::Kind::Do
+            true
+          when Token::Kind::Operator
+            slice_eq?(next_token.slice, ".")
+          else
+            false
+          end
+        end
+
+        private def index_question_is_ternary_start? : Bool
+          scan_idx = @index + 1
+          colon_before_delim = false
+          scan_paren_depth = 0
+          scan_bracket_depth = 0
+          scan_brace_depth = 0
+          while scan_idx < @tokens.size
+            tok = @tokens[scan_idx]
+            case tok.kind
+            when Token::Kind::LParen   then scan_paren_depth += 1
+            when Token::Kind::RParen   then scan_paren_depth -= 1
+            when Token::Kind::LBracket then scan_bracket_depth += 1
+            when Token::Kind::RBracket then scan_bracket_depth -= 1
+            when Token::Kind::LBrace   then scan_brace_depth += 1
+            when Token::Kind::RBrace   then scan_brace_depth -= 1
+            when Token::Kind::Colon
+              if scan_paren_depth == 0 && scan_bracket_depth == 0 && scan_brace_depth == 0
+                colon_before_delim = scan_idx > @index + 1
+              end
+              break
+            when Token::Kind::Comma, Token::Kind::Newline, Token::Kind::Semicolon, Token::Kind::End, Token::Kind::EOF,
+                 Token::Kind::Question
+              break if scan_paren_depth == 0 && scan_bracket_depth == 0 && scan_brace_depth == 0
+            end
+            break if scan_paren_depth < 0 || scan_bracket_depth < 0 || scan_brace_depth < 0
+            scan_idx += 1
+          end
+          colon_before_delim
         end
 
         private def parse_member_access(receiver : ExprId) : ExprId

@@ -7516,3 +7516,44 @@ Adversary notes:
   client-side parse/transport cost identified in LM-619.
 
 Trust: {F/G/R: 0.84/0.43/0.86} [verified]
+
+### LM-621 - Nilable indexer postfix chains no longer block large-file AST caching
+
+The parser now treats `obj[key]?.foo` as an unambiguous nilable indexer when
+the `?` after `]` is immediately followed by a postfix chain. Previously, the
+`[]?` disambiguator scanned ahead until it found a surrounding ternary's `:`,
+so `table[key]?.try { ... }` inside a ternary true branch produced recoverable
+`unexpected Question` diagnostics. On `src/compiler/hir/ast_to_hir.cr`, those
+two diagnostics prevented the foreground AST cache from being saved.
+
+Evidence:
+
+- `scripts/run_safe.sh /Users/sergey/.local/bin/crystal 120 4096 spec
+  spec/parser/parser_index_block_spec.cr --error-trace` -> 3 examples,
+  0 failures.
+- `scripts/run_safe.sh /Users/sergey/.local/bin/crystal 180 4096 spec
+  spec/parser/parser_ternary_spec.cr spec/parser/parser_index_block_spec.cr
+  --error-trace` -> 6 examples, 0 failures.
+- `scripts/run_safe.sh /Users/sergey/.local/bin/crystal 180 4096 eval
+  'require "./src/compiler/frontend/parser"; ...'` on
+  `src/compiler/hir/ast_to_hir.cr` -> `ast_to_hir parser diagnostics=0`.
+- `scripts/run_safe.sh /Users/sergey/.local/bin/crystal 240 4096 spec
+  spec/parser --error-trace` -> 2183 examples, 0 failures, 1 existing pending.
+- Temporary stable-binary LSP profile with isolated `XDG_CACHE_HOME`: first run
+  had `cache_before_hit=false`, `first_did_open_ms=2525.2`, and
+  `cache_after_hit=true`; the second run had `cache_before_hit=true`,
+  logged `Loading foreground document ... ast_to_hir.cr from AST cache`, and
+  dropped `first_did_open_ms` to `1140.1`.
+
+Adversary notes:
+
+- The positive regression covers `table[key]?.try { ... }` inside a ternary
+  true branch, the original failure shape.
+- The negative regression keeps `table[key] ? yes : no` as a real ternary with
+  an `IndexNode` condition, so the fix does not blindly consume every `?`
+  after `]`.
+- This improves fresh opens only after the stable LSP executable has created
+  the AST cache once. It does not remove the remaining name-resolution or
+  semantic-token full-response costs.
+
+Trust: {F/G/R: 0.87/0.46/0.89} [verified]

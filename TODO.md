@@ -109,7 +109,13 @@ measured runs. After LM-620, exact-text reopen also restores already-computed
 semantic-token and formatting response JSON; a direct profile on `server.cr`
 showed reopened formatting served at about 0ms, while reopened semantic tokens
 avoid server collection/serialization and are then dominated by large-response
-JSON parsing.
+JSON parsing. After LM-621, the parser accepts nilable indexer postfix chains
+such as `table[key]?.try { ... }` inside ternary true branches, removing the two
+recoverable parser diagnostics from `src/compiler/hir/ast_to_hir.cr` that
+blocked foreground AST-cache persistence. A stable-binary isolated LSP profile
+created the AST cache on the first run and then loaded `ast_to_hir.cr` from it
+on the second run, dropping measured first `didOpen` from about 2.5s to about
+1.14s for that file.
 Refuted for the current one-file warm harness: project-cache load itself is not
 the dominant `initialize` cost (`cache=~2.9ms`), and disabling project cache
 pushes dependency analysis back into foreground `didOpen`; lazy-on-first
