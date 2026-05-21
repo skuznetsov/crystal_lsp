@@ -7356,3 +7356,45 @@ Adversary notes:
   comments.
 
 Trust: {F/G/R: 0.82/0.45/0.84} [verified]
+
+### LM-617 - Refuted lazy-on-first-position expression index
+
+A follow-up experiment tried to keep LM-614's lazy `didOpen` behavior while
+building `ExprSpanIndex` on the first positional lookup (`hover`, `definition`,
+etc.) and storing it back into `DocumentState`.
+
+Outcome:
+
+- The focused regression passed, but the warm harness refuted the tradeoff for
+  the current one-file scenario: first `hover handle_completion` on
+  `src/compiler/lsp/server.cr` got worse, around 39ms, because the hover paid
+  expression-index construction before answering.
+- Reverting the experiment restored the current cheaper fallback shape:
+  `didOpen` stays lazy and first hover remains a tree-walk cost of roughly
+  25-30ms on the large file.
+
+Evidence:
+
+- Refuted patch was not committed.
+- `scripts/run_safe.sh /Users/sergey/.local/bin/crystal 120 4096 tool format
+  --check src/compiler/lsp/server.cr spec/lsp/hover_definition_integration_spec.cr`
+- `scripts/run_safe.sh /Users/sergey/.local/bin/crystal 240 4096 spec
+  spec/lsp/hover_definition_integration_spec.cr --error-trace` -> 5 examples,
+  0 failures.
+- Rebuilt `src/lsp_main.cr` and `benchmarks/lsp_harness.cr`; warm run with the
+  experiment measured `hover handle_completion` around 39ms, while `didOpen`
+  remained around 136ms.
+- `scripts/run_safe.sh /Users/sergey/.local/bin/crystal 300 4096 spec
+  spec/lsp --error-trace` -> 240 examples, 0 failures during the experiment,
+  but performance evidence rejected the branch.
+
+Decision:
+
+- Do not reintroduce lazy-on-first-position `ExprSpanIndex` unless a future
+  workload has repeated same-document positional queries where the first-query
+  tax is acceptable and measured.
+- The next hover root should be a narrower lookup fast path for declaration-name
+  positions or another way to avoid the full-tree walk without building the
+  whole child index on demand.
+
+Trust: {F/G/R: 0.78/0.36/0.86} [refuted]
