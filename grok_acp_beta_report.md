@@ -1143,3 +1143,27 @@ Focused semantic-token specs and full `spec/lsp` stayed green.
 **Verdict:** useful. Grok contributed a concrete zero-copy subpatch; local
 measurement and the second audit set the final bounded scope.
 **Cost saved:** moderate audit time; final acceptance remained local.
+
+### Session 45 — 2026-05-21 — LSP declaration-hover fast-path audit
+**Task:** read-only Grok ACP hostile audit of the uncommitted declaration-header
+hover fast path in `src/compiler/lsp/server.cr` and its regression in
+`spec/lsp/hover_definition_integration_spec.cr`.
+**Brief size:** bounded task file at
+`/private/tmp/cv2_lsp_grok_hover_review.md`, asking whether the patch was a
+root-cause fix, whether the textual `def` prefilter could false-positive, and
+what guard test was missing.
+**Latency:** too slow for the local acceptance path. Spark was also unavailable
+because the GPT-5.3-Codex-Spark quota was exhausted.
+**Output quality:** failed as evidence. Grok inspected the diff and surrounding
+code, but then attempted to run `crystal spec
+spec/lsp/hover_definition_integration_spec.cr ...` directly instead of using
+`scripts/run_safe.sh`, violating the repository safety protocol. The session
+was terminated and its conclusions were not used for acceptance.
+**Adversary check:** local review independently added the useful guard Grok was
+being asked to look for: a string literal containing `def run(...)` must not
+trigger the declaration fast path. Focused and full LSP specs passed under
+`scripts/run_safe.sh`.
+**Verdict:** failed interaction. Do not treat this Grok run as evidence; future
+Grok prompts should explicitly forbid executing any Crystal command except via
+`scripts/run_safe.sh`.
+**Cost saved:** none.

@@ -98,14 +98,19 @@ semantic tokens around 122-126ms with server-side collection around 66ms and
 JSON serialization around 14ms. After LM-616, the formatter stores only
 non-whitespace tokens while preserving comments/newlines and uses direct
 one-token lookahead; steady direct formatting of `server.cr` is about 68-70ms
-instead of about 73ms.
+instead of about 73ms. After LM-618, declaration-header hover bypasses the
+generic foreground AST walk while keeping the foreground expression index lazy;
+warm harness `hover handle_completion` now hits the method-declaration fast
+path in about 1.5ms server-side and about 5.4ms client-side.
 Refuted for the current one-file warm harness: project-cache load itself is not
 the dominant `initialize` cost (`cache=~2.9ms`), and disabling project cache
-pushes dependency analysis back into foreground `didOpen`. Remaining LSP latency
-and fidelity candidates are foreground name-resolution/indexing work after the
-AST cache corridor has supplied a parsed foreground arena, plus the remaining
-semantic-token cost outside the collector slice (response JSON size,
-client/transport parse, or protocol strategy such as range/delta).
+pushes dependency analysis back into foreground `didOpen`; lazy-on-first
+`ExprSpanIndex` makes first hover worse for the current one-file warm harness.
+Remaining LSP latency and fidelity candidates are non-declaration foreground
+name-resolution/indexing work after the AST cache corridor has supplied a
+parsed foreground arena, plus the remaining semantic-token cost outside the
+collector slice (response JSON size, client/transport parse, or protocol
+strategy such as range/delta).
 
 Spec-first bootstrap checkpoint (2026-05-08): `docs/specs/` now contains the
 first executable contract slice for Crystal V2, modeled after the DiamondDB

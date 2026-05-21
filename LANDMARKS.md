@@ -7398,3 +7398,47 @@ Decision:
   whole child index on demand.
 
 Trust: {F/G/R: 0.78/0.36/0.86} [refuted]
+
+### LM-618 - Declaration-header hover bypasses the foreground tree walk
+
+Hover on a parsed method declaration header now answers from the local
+declaration corridor before entering the generic `find_expr_at_position` path.
+The fast path first uses the registered `MethodSymbol` when present, and falls
+back to a parsed local `DefNode` only when the cursor line is a plausible
+`def` header. This keeps the foreground expression index lazy while avoiding
+the large-file AST walk for declaration-header hover positions such as the LSP
+harness target on `private def handle_completion`.
+
+Evidence:
+
+- The focused regression covers hover on the method name and on the `def`
+  header prefix, asserts both return `def run(value : Int32) : Int32`, and
+  checks the foreground expression index remains unbuilt. It also checks that a
+  string literal containing `def run(...)` does not trigger the declaration
+  signature.
+- `scripts/run_safe.sh /Users/sergey/.local/bin/crystal 120 4096 tool format
+  --check src/compiler/lsp/server.cr spec/lsp/hover_definition_integration_spec.cr`
+- `scripts/run_safe.sh /Users/sergey/.local/bin/crystal 240 4096 spec
+  spec/lsp/hover_definition_integration_spec.cr --error-trace` -> 5 examples,
+  0 failures.
+- `scripts/run_safe.sh /Users/sergey/.local/bin/crystal 300 4096 spec
+  spec/lsp --error-trace` -> 240 examples, 0 failures.
+- Rebuilt `src/lsp_main.cr` and `benchmarks/lsp_harness.cr`; with a fresh temp
+  cache the cold harness showed server-side `Hover declaration fast path:
+  handle_completion` and `hit(method-decl)` in about 3.6ms. The warm harness
+  reported `hover handle_completion` at 5.4ms client-side and server-side
+  `hit(method-decl)` in about 1.5ms. Before this slice, warm hover on the same
+  target was about 25-30ms server-side because it landed on the enclosing
+  `Server` class through the generic tree walk.
+
+Adversary notes:
+
+- This is intentionally a declaration-header fast path, not a general hover
+  index. Ordinary expression/member/call hovers still use the existing symbol
+  and type paths.
+- The textual `def` prefilter is not trusted by itself; it only gates a parsed
+  `DefNode` scan, and the regression includes a fake `def` string literal.
+- The cold harness can still show large initialize/open costs from prelude and
+  foreground analysis; this landmark only closes the declaration-hover slice.
+
+Trust: {F/G/R: 0.86/0.42/0.88} [verified]

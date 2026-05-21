@@ -178,6 +178,7 @@ describe CrystalV2::Compiler::LSP::Server do
     source = <<-CR
     module Outer
       VALUE = 1
+      FAKE_DEF = "not a def run(value) header"
 
       class Thing
         def run(value : Int32) : Int32
@@ -196,6 +197,34 @@ describe CrystalV2::Compiler::LSP::Server do
       CrystalV2::Compiler::LSP::ServerConfig.new(background_indexing: false, project_cache: false)
     )
     uri = server.spec_did_open_document(source, path)
+    server.spec_document_expr_index_built?(uri).should be_false
+
+    method_offset = source.index("run(value : Int32)").not_nil!
+    method_line = source[0, method_offset].count('\n')
+    method_char = method_offset - (source.rindex('\n', method_offset) || -1) - 1
+
+    method_hover = server.spec_hover(uri, method_line, method_char)
+    method_hover["result"].should_not be_nil
+    method_hover["result"]["contents"]["value"].as_s.should contain("def run(value : Int32) : Int32")
+    server.spec_document_expr_index_built?(uri).should be_false
+
+    def_offset = source.index("def run(value : Int32)").not_nil! + 1
+    def_line = source[0, def_offset].count('\n')
+    def_char = def_offset - (source.rindex('\n', def_offset) || -1) - 1
+
+    def_hover = server.spec_hover(uri, def_line, def_char)
+    def_hover["result"].should_not be_nil
+    def_hover["result"]["contents"]["value"].as_s.should contain("def run(value : Int32) : Int32")
+    server.spec_document_expr_index_built?(uri).should be_false
+
+    fake_offset = source.index("def run(value) header").not_nil!
+    fake_line = source[0, fake_offset].count('\n')
+    fake_char = fake_offset - (source.rindex('\n', fake_offset) || -1) - 1
+
+    fake_hover = server.spec_hover(uri, fake_line, fake_char)
+    unless fake_hover["result"].raw.nil?
+      fake_hover["result"]["contents"]["value"].as_s.should_not contain("def run(value : Int32) : Int32")
+    end
     server.spec_document_expr_index_built?(uri).should be_false
 
     value_offset = source.index("value + VALUE").not_nil!

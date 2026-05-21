@@ -4683,6 +4683,18 @@ module CrystalV2
             return send_response(id, "null")
           end
 
+          if hover_offset
+            if method_signature = method_declaration_signature_at_offset(doc_state, hover_offset)
+              method_name, signature = method_signature
+              debug("Hover declaration fast path: #{method_name}")
+              contents = MarkupContent.new("```crystal\n#{signature}\n```", markdown: true)
+              hover = Hover.new(contents: contents)
+              send_response(id, hover.to_json)
+              debug("Hover completed in #{elapsed_ms_since(started_at)}ms -> hit(method-decl)")
+              return
+            end
+          end
+
           expr_id = find_expr_at_position(doc_state, line, character)
           if expr_id.nil? && (alt_offset = position_to_offset(doc_state, line, character - 1))
             expr_id = find_expr_at_position(doc_state, line, character - 1, alt_offset)
@@ -4901,6 +4913,135 @@ module CrystalV2
           debug("Hover failed after #{elapsed_ms_since(started_at)}ms: #{ex.message}")
           log_error("Hover failed: #{ex.message}")
           send_response(id, "null")
+        end
+
+        private def method_declaration_signature_at_offset(doc_state : DocumentState, offset : Int32) : {String, String}?
+          if method_symbol = method_declaration_symbol_at_offset(doc_state, offset)
+            if signature = method_signature_for(method_symbol, doc_state)
+              return {method_symbol.name, signature}
+            end
+          end
+
+          if node = local_def_header_node_at_offset(doc_state, offset)
+            if signature = format_def_signature(node, doc_state.text_document.text)
+              return {String.new(node.name), signature}
+            end
+          end
+
+          nil
+        end
+
+        private def method_declaration_symbol_at_offset(doc_state : DocumentState, offset : Int32) : Semantic::MethodSymbol?
+          methods = @program_methods[program_key(doc_state.program)]?
+          return nil unless methods
+
+          source = doc_state.text_document.text
+          methods.each do |method|
+            next if method.node_id.invalid?
+            node = doc_state.program.arena[method.node_id]
+            next unless node.is_a?(Frontend::DefNode)
+            if def_header_contains_offset?(source, node, offset)
+              return method
+            end
+          end
+
+          nil
+        end
+
+        private def local_def_header_node_at_offset(doc_state : DocumentState, offset : Int32) : Frontend::DefNode?
+          source = doc_state.text_document.text
+          return nil unless maybe_def_header_line_at_offset?(source, offset)
+
+          arena = doc_state.program.arena
+          stack = [] of Frontend::ExprId
+          doc_state.program.roots.each do |root_id|
+            next if root_id.invalid?
+            next unless expr_in_document?(doc_state.program, root_id, doc_state.path)
+            stack << root_id
+          end
+
+          while expr_id = stack.pop?
+            node = arena[expr_id]
+            if node.is_a?(Frontend::DefNode) && def_header_contains_offset?(source, node, offset)
+              return node
+            end
+
+            each_child_expr(arena, expr_id) do |child_id|
+              stack << child_id unless child_id.invalid?
+            end
+          end
+
+          nil
+        rescue
+          nil
+        end
+
+        private def maybe_def_header_line_at_offset?(source : String, offset : Int32) : Bool
+          return false if offset < 0 || offset >= source.bytesize
+
+          line_start = offset
+          while line_start > 0 && source.byte_at(line_start - 1) != '\n'.ord
+            line_start -= 1
+          end
+
+          line_end = offset
+          while line_end < source.bytesize
+            break if source.byte_at(line_end) == '\n'.ord
+            line_end += 1
+          end
+
+          first_token = line_start
+          while first_token < line_end
+            byte = source.byte_at(first_token)
+            break unless byte == ' '.ord || byte == '\t'.ord
+            first_token += 1
+          end
+          return false if offset < first_token
+
+          source.byte_slice(line_start, line_end - line_start).includes?("def ")
+        rescue
+          false
+        end
+
+        private def def_header_contains_offset?(source : String, node : Frontend::DefNode, offset : Int32) : Bool
+          start_offset = node.span.start_offset
+          return false if start_offset < 0 || start_offset >= source.bytesize
+
+          line_start = start_offset
+          while line_start > 0 && source.byte_at(line_start - 1) != '\n'.ord
+            line_start -= 1
+          end
+
+          line_end = start_offset
+          while line_end < source.bytesize
+            byte = source.byte_at(line_end)
+            break if byte == '\n'.ord || byte == ';'.ord
+            line_end += 1
+          end
+          return false if offset < line_start || offset >= line_end
+
+          first_token = line_start
+          while first_token < line_end
+            byte = source.byte_at(first_token)
+            break unless byte == ' '.ord || byte == '\t'.ord
+            first_token += 1
+          end
+          return false if offset < first_token
+
+          name = node.name
+          return false if name.empty?
+          segment_size = line_end - line_start
+          return false if segment_size <= 0
+
+          segment = source.to_slice[line_start, segment_size]
+          relative = bytes_index(segment, name)
+          return false unless relative
+
+          name_start = line_start + relative
+          name_end = name_start + name.size
+          offset < name_end
+        rescue
+          false
         end
 
         # Handle textDocument/definition request
