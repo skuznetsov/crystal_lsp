@@ -1840,20 +1840,26 @@ module CrystalV2
           end
 
           # Legacy: Analyze and store document (will be removed after full migration)
+          used_cached_foreground_project_analysis = false
           diagnostics, program, type_context, identifier_symbols, symbol_table, requires, index = if doc_path && foreground_ast_cache_eligible?(doc_path, text)
                                                                                                     parser_diagnostics = [] of Frontend::Diagnostic
                                                                                                     parsed_program, _ast_cache_hit = load_or_parse_disk_program(doc_path, text, parser_diagnostics, cache_label: "foreground document")
-                                                                                                    cached_foreground_project_analysis(doc_path, parsed_program, parser_diagnostics) || analyze_parsed_document(
-                                                                                                      text,
-                                                                                                      parsed_program,
-                                                                                                      parser_diagnostics,
-                                                                                                      base_dir,
-                                                                                                      doc_path,
-                                                                                                      recursive_requires: recursive_dependency_load_in_foreground?,
-                                                                                                      workspace: DependencyWorkspace.new,
-                                                                                                      build_expr_index: false,
-                                                                                                      allow_cached_expr_types: false
-                                                                                                    )
+                                                                                                    if cached = cached_foreground_project_analysis(doc_path, parsed_program, parser_diagnostics)
+                                                                                                      used_cached_foreground_project_analysis = true
+                                                                                                      cached
+                                                                                                    else
+                                                                                                      analyze_parsed_document(
+                                                                                                        text,
+                                                                                                        parsed_program,
+                                                                                                        parser_diagnostics,
+                                                                                                        base_dir,
+                                                                                                        doc_path,
+                                                                                                        recursive_requires: recursive_dependency_load_in_foreground?,
+                                                                                                        workspace: DependencyWorkspace.new,
+                                                                                                        build_expr_index: false,
+                                                                                                        allow_cached_expr_types: false
+                                                                                                      )
+                                                                                                    end
                                                                                                   else
                                                                                                     analyze_document(
                                                                                                       text,
@@ -1881,7 +1887,7 @@ module CrystalV2
           # path is ready. update_file is CPU-bound, so running it immediately
           # in a spawned fiber can still monopolize Crystal's cooperative
           # scheduler and delay the next request.
-          @debouncer.queue(uri, text, version) if doc_path
+          @debouncer.queue(uri, text, version) if doc_path && !used_cached_foreground_project_analysis
         end
 
         # Handle textDocument/didClose notification

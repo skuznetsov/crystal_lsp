@@ -6449,6 +6449,46 @@ Adversary notes:
 
 Trust: {F/G/R: 0.87/0.48/0.88} [verified]
 
+### LM-626 - Cached foreground opens skip redundant project updates
+
+After LM-625 accepts an unchanged disk-backed document from project cache,
+`didOpen` no longer queues the same text for debounced
+`UnifiedProject.update_file`. That update was redundant: the project cache had
+already validated the file mtime and supplied the foreground symbols/types,
+while the queued update did not refresh the live `DocumentState`. On
+`src/compiler/hir/ast_to_hir.cr`, this removed the post-open maintenance tail
+that previously made shutdown or the next idle window pay another full project
+analysis.
+
+Evidence:
+
+- Focused regression:
+  `scripts/run_safe.sh /Users/sergey/.local/bin/crystal 180 4096 spec
+  spec/lsp/project_cache_semantic_fidelity_spec.cr --error-trace` ->
+  4 examples, 0 failures.
+- Full LSP suite:
+  `scripts/run_safe.sh /Users/sergey/.local/bin/crystal 300 4096 spec
+  spec/lsp --error-trace` -> 249 examples, 0 failures.
+- Stable-binary timing on `src/compiler/hir/ast_to_hir.cr` with isolated
+  `XDG_CACHE_HOME`: warm cache-backed `didOpen` stayed about 529.3ms, while
+  shutdown dropped to about 12.8ms. The warm log showed the cached foreground
+  open and no `UnifiedProject update_file` line.
+- Formatting and diff hygiene:
+  `scripts/run_safe.sh /Users/sergey/.local/bin/crystal 180 4096 tool format
+  --check src/compiler/lsp/server.cr spec/lsp/support/server_helper.cr
+  spec/lsp/project_cache_semantic_fidelity_spec.cr` -> exit 0;
+  `git diff --check` -> exit 0.
+
+Adversary notes:
+
+- The skip is tied to the exact foreground project-cache analysis path, not to
+  every `didOpen`. Normal non-cached opens and changed buffers still enqueue
+  project maintenance.
+- This is a background/maintenance reduction, not an AST-load improvement. The
+  remaining warm open still pays AST-cache deserialization for huge files.
+
+Trust: {F/G/R: 0.88/0.45/0.88} [verified]
+
 ## LM-583 — LSP foreground hover avoids workspace reference scans by default
 
 Status: verified for the focused LSP hover/cache/harness slice on `codegen`.

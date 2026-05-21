@@ -261,6 +261,7 @@ describe "LSP project cache semantic fidelity" do
       )
       cached_uri = cached.spec_did_open_document(source, path)
       cached.spec_identifier_symbols_built?(cached_uri).should be_false
+      cached.spec_project_update_pending?(cached_uri).should be_false
 
       tokens = cached.spec_semantic_tokens(cached_uri)
       tokens["result"]["data"].as_a.should_not be_empty

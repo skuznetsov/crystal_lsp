@@ -138,6 +138,10 @@ for precision features that need a current-AST identifier map. On
 `ast_to_hir.cr`, a stable-binary isolated profile measured warm default
 `didOpen` at about 548.0ms versus about 999.5ms with
 `LSP_FAST_PROJECT_OPEN=0` on the same warm cache.
+After LM-626, that same cached foreground-open path no longer queues a
+redundant debounced `UnifiedProject.update_file` for unchanged text; warm
+`ast_to_hir.cr` `didOpen` stayed about 529.3ms while shutdown dropped from the
+old ~1.7s maintenance tail to about 12.8ms.
 Refuted for the current one-file warm harness: project-cache load itself is not
 the dominant `initialize` cost (`cache=~2.9ms`), and disabling project cache
 pushes dependency analysis back into foreground `didOpen`; lazy-on-first

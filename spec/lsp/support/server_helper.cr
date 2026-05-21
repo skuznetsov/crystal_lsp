@@ -120,6 +120,10 @@ module CrystalV2::Compiler::LSP
       @documents[uri]?.try(&.identifier_symbols) != nil
     end
 
+    def spec_project_update_pending?(uri : String) : Bool
+      @debouncer.pending?(uri)
+    end
+
     def spec_semantic_tokens(uri : String) : JSON::Any
       params = JSON.parse(%({"textDocument":{"uri":#{uri.to_json}}}))
       id = JSON.parse("12")
