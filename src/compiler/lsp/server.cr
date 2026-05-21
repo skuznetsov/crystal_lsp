@@ -845,12 +845,34 @@ module CrystalV2
           return nil unless state = valid_cached_project_file_state(path)
           return nil unless parser_diagnostics.empty?
 
+          cached_foreground_project_analysis_for_state(path, program, state)
+        end
+
+        private def cached_lightweight_foreground_project_analysis(
+          path : String,
+        ) : {Array(Diagnostic), Frontend::Program, Semantic::TypeContext?, Hash(Frontend::ExprId, Semantic::Symbol)?, Semantic::SymbolTable?, Array(String), DocumentIndex?}?
+          return nil unless state = valid_cached_project_file_state(path)
+          return nil unless state.diagnostics.empty?
+          return nil unless mtime_ns = source_mtime_ns(path)
+          return nil unless AstCache.current_header?(path, mtime_ns)
+
+          program = Frontend::Program.new(Frontend::AstArena.new, [] of Frontend::ExprId)
+          cached_foreground_project_analysis_for_state(path, program, state, build_index: false)
+        end
+
+        private def cached_foreground_project_analysis_for_state(
+          path : String,
+          program : Frontend::Program,
+          state : FileAnalysisState,
+          *,
+          build_index : Bool = true,
+        ) : {Array(Diagnostic), Frontend::Program, Semantic::TypeContext?, Hash(Frontend::ExprId, Semantic::Symbol)?, Semantic::SymbolTable?, Array(String), DocumentIndex?}
           type_context = build_type_context_from_cache(path) || Semantic::TypeContext.new
           @cached_expr_type_compatible_paths.add(path) if @cached_expr_types[path]?
           identifier_symbols = @project.identifier_symbols_for_file(path)
           symbol_table = @project.symbols_for_file(path)
           requires = state.requires
-          index = build_document_index(program, path, build_expr_index: false)
+          index = build_index ? build_document_index(program, path, build_expr_index: false) : DocumentIndex.new
           debug("Using project cache for foreground open #{path} (identifier_symbols=#{!!identifier_symbols})")
           {[] of Diagnostic, program, type_context, identifier_symbols, symbol_table, requires, index}
         end
@@ -1842,23 +1864,28 @@ module CrystalV2
           # Legacy: Analyze and store document (will be removed after full migration)
           used_cached_foreground_project_analysis = false
           diagnostics, program, type_context, identifier_symbols, symbol_table, requires, index = if doc_path && foreground_ast_cache_eligible?(doc_path, text)
-                                                                                                    parser_diagnostics = [] of Frontend::Diagnostic
-                                                                                                    parsed_program, _ast_cache_hit = load_or_parse_disk_program(doc_path, text, parser_diagnostics, cache_label: "foreground document")
-                                                                                                    if cached = cached_foreground_project_analysis(doc_path, parsed_program, parser_diagnostics)
+                                                                                                    if cached = cached_lightweight_foreground_project_analysis(doc_path)
                                                                                                       used_cached_foreground_project_analysis = true
                                                                                                       cached
                                                                                                     else
-                                                                                                      analyze_parsed_document(
-                                                                                                        text,
-                                                                                                        parsed_program,
-                                                                                                        parser_diagnostics,
-                                                                                                        base_dir,
-                                                                                                        doc_path,
-                                                                                                        recursive_requires: recursive_dependency_load_in_foreground?,
-                                                                                                        workspace: DependencyWorkspace.new,
-                                                                                                        build_expr_index: false,
-                                                                                                        allow_cached_expr_types: false
-                                                                                                      )
+                                                                                                      parser_diagnostics = [] of Frontend::Diagnostic
+                                                                                                      parsed_program, _ast_cache_hit = load_or_parse_disk_program(doc_path, text, parser_diagnostics, cache_label: "foreground document")
+                                                                                                      if cached = cached_foreground_project_analysis(doc_path, parsed_program, parser_diagnostics)
+                                                                                                        used_cached_foreground_project_analysis = true
+                                                                                                        cached
+                                                                                                      else
+                                                                                                        analyze_parsed_document(
+                                                                                                          text,
+                                                                                                          parsed_program,
+                                                                                                          parser_diagnostics,
+                                                                                                          base_dir,
+                                                                                                          doc_path,
+                                                                                                          recursive_requires: recursive_dependency_load_in_foreground?,
+                                                                                                          workspace: DependencyWorkspace.new,
+                                                                                                          build_expr_index: false,
+                                                                                                          allow_cached_expr_types: false
+                                                                                                        )
+                                                                                                      end
                                                                                                     end
                                                                                                   else
                                                                                                     analyze_document(
@@ -5348,10 +5375,84 @@ module CrystalV2
           @project.files.has_key?(doc_path)
         end
 
+        private def foreground_ast_loaded?(doc_state : DocumentState) : Bool
+          !doc_state.program.roots.empty?
+        end
+
+        private def ensure_foreground_ast_loaded(uri : String, doc_state : DocumentState) : DocumentState
+          return doc_state if foreground_ast_loaded?(doc_state)
+          return doc_state unless path = doc_state.path
+          return doc_state unless foreground_ast_cache_eligible?(path, doc_state.text_document.text)
+
+          parser_diagnostics = [] of Frontend::Diagnostic
+          program, _ast_cache_hit = load_or_parse_disk_program(
+            path,
+            doc_state.text_document.text,
+            parser_diagnostics,
+            cache_label: "foreground document"
+          )
+
+          if parser_diagnostics.empty?
+            refreshed = DocumentState.new(
+              doc_state.text_document,
+              program,
+              doc_state.type_context,
+              doc_state.identifier_symbols,
+              doc_state.symbol_table,
+              doc_state.requires,
+              build_document_index(program, path, build_expr_index: false),
+              doc_state.line_offsets,
+              path: path,
+              document_symbols: doc_state.document_symbols
+            )
+            @documents[uri] = refreshed
+            register_document_symbols(uri, refreshed)
+            debug("Foreground AST materialized for #{path}")
+            return refreshed
+          end
+
+          base_dir = File.dirname(path)
+          diagnostics, analyzed_program, type_context, identifier_symbols, symbol_table, requires, index = analyze_parsed_document(
+            doc_state.text_document.text,
+            program,
+            parser_diagnostics,
+            base_dir,
+            path,
+            recursive_requires: recursive_dependency_load_in_foreground?,
+            workspace: DependencyWorkspace.new,
+            build_expr_index: false,
+            publish_indexing: false,
+            allow_cached_expr_types: false
+          )
+
+          refreshed = DocumentState.new(
+            doc_state.text_document,
+            analyzed_program,
+            type_context,
+            identifier_symbols,
+            symbol_table,
+            requires,
+            index,
+            doc_state.line_offsets,
+            path: path,
+            document_symbols: doc_state.document_symbols
+          )
+          @documents[uri] = refreshed
+          @document_diagnostics[uri] = diagnostics
+          register_document_symbols(uri, refreshed)
+          debug("Foreground AST materialization fell back to parsed analysis for #{path}")
+          refreshed
+        rescue ex
+          debug("Foreground AST materialization failed for #{uri}: #{ex.message}")
+          doc_state
+        end
+
         private def ensure_foreground_semantic_analysis(uri : String, doc_state : DocumentState) : DocumentState
+          doc_state = ensure_foreground_ast_loaded(uri, doc_state)
           return doc_state if doc_state.identifier_symbols
           return doc_state unless doc_state.symbol_table
           return doc_state unless path = doc_state.path
+          return doc_state unless foreground_ast_loaded?(doc_state)
 
           base_dir = File.dirname(path)
           diagnostics, program, type_context, identifier_symbols, symbol_table, requires, index = analyze_parsed_document(
@@ -5669,6 +5770,7 @@ module CrystalV2
 
           # Check if we're completing after a dot (member access)
           dot_context = check_dot_context(doc_state.text_document.text, line, character)
+          doc_state = ensure_foreground_semantic_analysis(uri, doc_state) if dot_context
 
           # Extract prefix at cursor position
           prefix = extract_prefix_at_position(doc_state.text_document.text, line, character)
@@ -5758,6 +5860,7 @@ module CrystalV2
 
           doc_state = @documents[uri]?
           return send_response(id, "null") unless doc_state
+          doc_state = ensure_foreground_ast_loaded(uri, doc_state)
 
           # Find call context: look backwards for opening paren
           call_info = find_call_context(doc_state.text_document.text, line, character)
@@ -6101,6 +6204,7 @@ module CrystalV2
 
           doc_state = @documents[uri]?
           return send_response(id, "[]") unless doc_state
+          doc_state = ensure_foreground_ast_loaded(uri, doc_state)
 
           ast_symbols = ensure_ast_document_symbols(uri, doc_state)
           unless ast_symbols.empty?
@@ -6565,6 +6669,7 @@ module CrystalV2
 
           doc_state = @documents[uri]?
           return send_response(id, "null") unless doc_state
+          doc_state = ensure_foreground_semantic_analysis(uri, doc_state)
 
           # Find expression at position
           expr_id = find_expr_at_position(doc_state, line, character)
@@ -6625,6 +6730,7 @@ module CrystalV2
 
           doc_state = @documents[uri]?
           return send_response(id, "null") unless doc_state
+          doc_state = ensure_foreground_semantic_analysis(uri, doc_state)
 
           # Find expression at position
           expr_id = find_expr_at_position(doc_state, line, character)
@@ -6674,6 +6780,7 @@ module CrystalV2
 
           doc_state = @documents[uri]?
           return send_response(id, "[]") unless doc_state
+          doc_state = ensure_foreground_ast_loaded(uri, doc_state)
 
           # Collect folding ranges from AST
           ranges = collect_folding_ranges(doc_state.program)
@@ -6717,6 +6824,7 @@ module CrystalV2
           end
 
           start_time = Time.instant
+          doc_state = ensure_foreground_ast_loaded(uri, doc_state)
 
           # Collect semantic tokens from AST
           tokens = collect_semantic_tokens(
@@ -6818,6 +6926,7 @@ module CrystalV2
 
           doc_state = @documents[uri]?
           return send_response(id, SemanticTokens.new(data: [] of Int32).to_json) unless doc_state
+          doc_state = ensure_foreground_ast_loaded(uri, doc_state)
 
           tokens = collect_semantic_tokens(
             doc_state.program,

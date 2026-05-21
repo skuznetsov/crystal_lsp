@@ -1,6 +1,6 @@
 # Crystal V2 Bootstrap TODO
 
-Updated: 2026-05-20
+Updated: 2026-05-21
 Branch: `codegen`
 
 This is the active working backlog only. Historical detail is in git history,
@@ -142,14 +142,23 @@ After LM-626, that same cached foreground-open path no longer queues a
 redundant debounced `UnifiedProject.update_file` for unchanged text; warm
 `ast_to_hir.cr` `didOpen` stayed about 529.3ms while shutdown dropped from the
 old ~1.7s maintenance tail to about 12.8ms.
+After LM-627, warm cached foreground opens for unchanged disk-backed files also
+skip AST-cache deserialization on `didOpen`; the open stores project-cache
+summaries in a lightweight empty-AST document state and materializes the AST,
+or full foreground semantic analysis, only when the first request needs it.
+On `ast_to_hir.cr`, an isolated safe-wrapper timing probe measured lazy cached
+`didOpen` at about 280.8ms average versus about 1149.1ms with
+`LSP_FAST_PROJECT_OPEN=0` on the same warm cache. Focused first-request guards
+cover semantic tokens, signature help, prepare rename, document symbols, and
+folding ranges after a lightweight open.
 Refuted for the current one-file warm harness: project-cache load itself is not
 the dominant `initialize` cost (`cache=~2.9ms`), and disabling project cache
 pushes dependency analysis back into foreground `didOpen`; lazy-on-first
 `ExprSpanIndex` makes first hover worse for the current one-file warm harness.
-Remaining LSP latency and fidelity candidates are AST-cache load cost for huge
-foreground files, first precision-request materialization when the cached open
-has no identifier map, and JSON/client handling for the first full
-semantic-token response before a client has a current delta result id.
+Remaining LSP latency and fidelity candidates are first precision-request
+materialization when the cached open has no identifier map, member-completion
+precision gaps on lightweight opens, and JSON/client handling for the first
+full semantic-token response before a client has a current delta result id.
 
 Spec-first bootstrap checkpoint (2026-05-08): `docs/specs/` now contains the
 first executable contract slice for Crystal V2, modeled after the DiamondDB

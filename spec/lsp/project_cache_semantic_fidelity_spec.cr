@@ -247,12 +247,21 @@ describe "LSP project cache semantic fidelity" do
           handle(1)
         end
       end
+
+      service = Service.new
+      service.handle(1)
       CR
       File.write(path, source)
 
       project = CrystalV2::Compiler::LSP::UnifiedProjectState.new
       project.update_file(path, source)
       CrystalV2::Compiler::LSP::ProjectCacheLoader.save_to_cache(project, root)
+      prewarm = CrystalV2::Compiler::LSP::Server.new(
+        IO::Memory.new,
+        IO::Memory.new,
+        CrystalV2::Compiler::LSP::ServerConfig.new(background_indexing: false, project_cache: false, ast_cache: true)
+      )
+      prewarm.spec_did_open_document(source, path)
 
       cached = CrystalV2::Compiler::LSP::Server.new(
         IO::Memory.new,
@@ -261,16 +270,114 @@ describe "LSP project cache semantic fidelity" do
       )
       cached_uri = cached.spec_did_open_document(source, path)
       cached.spec_identifier_symbols_built?(cached_uri).should be_false
+      cached.spec_document_ast_loaded?(cached_uri).should be_false
       cached.spec_project_update_pending?(cached_uri).should be_false
 
       tokens = cached.spec_semantic_tokens(cached_uri)
       tokens["result"]["data"].as_a.should_not be_empty
+      cached.spec_document_ast_loaded?(cached_uri).should be_true
       cached.spec_identifier_symbols_built?(cached_uri).should be_false
 
       definition_line, definition_char = lsp_line_char(source, "handle(1")
       definition = cached.spec_definition(cached_uri, definition_line, definition_char)
       definition["result"].as_a.size.should eq(1)
       cached.spec_identifier_symbols_built?(cached_uri).should be_true
+    ensure
+      FileUtils.rm_rf(root) if root
+    end
+  end
+
+  it "materializes cached lightweight opens for first precision requests" do
+    with_lsp_project_cache_env do
+      root = File.join(Dir.tempdir, "lsp_project_cache_precision_#{Random::Secure.hex(6)}")
+      src_dir = File.join(root, "src")
+      FileUtils.mkdir_p(src_dir)
+      File.write(File.join(root, "shard.yml"), "name: lsp_project_cache_precision\n")
+
+      helper_path = File.join(src_dir, "helper.cr")
+      helper_source = <<-CR
+      class Helper
+        def value(scale : Int32) : Int32
+          scale
+        end
+      end
+      CR
+      File.write(helper_path, helper_source)
+
+      path = File.join(src_dir, "main.cr")
+      source = <<-CR
+      require "./helper"
+
+      class Entry
+        def self.run
+          helper = Helper.new
+          helper.value(2)
+        end
+      end
+      CR
+      File.write(path, source)
+
+      project = CrystalV2::Compiler::LSP::UnifiedProjectState.new
+      project.update_file(helper_path, helper_source)
+      project.update_file(path, source)
+      CrystalV2::Compiler::LSP::ProjectCacheLoader.save_to_cache(project, root)
+      prewarm = CrystalV2::Compiler::LSP::Server.new(
+        IO::Memory.new,
+        IO::Memory.new,
+        CrystalV2::Compiler::LSP::ServerConfig.new(background_indexing: false, project_cache: false, ast_cache: true)
+      )
+      prewarm.spec_did_open_document(source, path)
+
+      rename_server = CrystalV2::Compiler::LSP::Server.new(
+        IO::Memory.new,
+        IO::Memory.new,
+        CrystalV2::Compiler::LSP::ServerConfig.new(background_indexing: false, project_cache: true)
+      )
+      rename_uri = rename_server.spec_did_open_document(source, path)
+      rename_server.spec_document_ast_loaded?(rename_uri).should be_false
+
+      rename_line, rename_char = lsp_line_char(source, "Entry")
+      prepare_rename = rename_server.spec_prepare_rename(rename_uri, rename_line, rename_char)
+      prepare_rename["result"].should_not be_nil
+      rename_server.spec_document_ast_loaded?(rename_uri).should be_true
+      rename_server.spec_identifier_symbols_built?(rename_uri).should be_true
+
+      signature_server = CrystalV2::Compiler::LSP::Server.new(
+        IO::Memory.new,
+        IO::Memory.new,
+        CrystalV2::Compiler::LSP::ServerConfig.new(background_indexing: false, project_cache: true)
+      )
+      signature_uri = signature_server.spec_did_open_document(source, path)
+      signature_server.spec_document_ast_loaded?(signature_uri).should be_false
+
+      signature_line, signature_char = lsp_line_char(source, "value(", at_end: true)
+      signature = signature_server.spec_signature_help(signature_uri, signature_line, signature_char)
+      signature["result"]["signatures"].as_a.size.should be >= 1
+      signature_server.spec_document_ast_loaded?(signature_uri).should be_true
+
+      symbols_server = CrystalV2::Compiler::LSP::Server.new(
+        IO::Memory.new,
+        IO::Memory.new,
+        CrystalV2::Compiler::LSP::ServerConfig.new(background_indexing: false, project_cache: true)
+      )
+      symbols_uri = symbols_server.spec_did_open_document(source, path)
+      symbols_server.spec_document_ast_loaded?(symbols_uri).should be_false
+
+      symbols = symbols_server.spec_document_symbols(symbols_uri)
+      symbols["result"].as_a.map { |entry| entry["name"].as_s }.should contain("Entry")
+      symbols_server.spec_document_ast_loaded?(symbols_uri).should be_true
+
+      folding_server = CrystalV2::Compiler::LSP::Server.new(
+        IO::Memory.new,
+        IO::Memory.new,
+        CrystalV2::Compiler::LSP::ServerConfig.new(background_indexing: false, project_cache: true)
+      )
+      folding_uri = folding_server.spec_did_open_document(source, path)
+      folding_server.spec_document_ast_loaded?(folding_uri).should be_false
+
+      folding = folding_server.spec_folding_ranges(folding_uri)
+      folding["result"].as_a.should_not be_empty
+      folding_server.spec_document_ast_loaded?(folding_uri).should be_true
     ensure
       FileUtils.rm_rf(root) if root
     end

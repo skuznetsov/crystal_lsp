@@ -6489,6 +6489,55 @@ Adversary notes:
 
 Trust: {F/G/R: 0.88/0.45/0.88} [verified]
 
+### LM-627 - Cached foreground opens defer AST-cache deserialization
+
+Warm `didOpen` for an unchanged disk-backed document can now build its
+foreground `DocumentState` from project-cache summaries without immediately
+deserializing the AST cache. The lightweight path is gated by exact disk text,
+valid project-cache state, disabled semantic diagnostics, and a current AST
+cache header for the same compiler fingerprint and source mtime. It stores an
+empty-AST `Program` only for the initial open; handlers that need the AST
+materialize it on demand, and precision handlers that need identifier maps run
+foreground semantic analysis against the loaded AST.
+
+Evidence:
+
+- Focused regressions:
+  `scripts/run_safe.sh /Users/sergey/.local/bin/crystal 180 4096 spec
+  spec/lsp/project_cache_semantic_fidelity_spec.cr --error-trace` ->
+  5 examples, 0 failures. The new checks cover semantic tokens, signature help,
+  prepare rename, document symbols, and folding ranges as first requests after a
+  lightweight cached open.
+- Full LSP suite:
+  `scripts/run_safe.sh /Users/sergey/.local/bin/crystal 300 4096 spec
+  spec/lsp --error-trace` -> 250 examples, 0 failures.
+- Isolated timing on `src/compiler/hir/ast_to_hir.cr` through
+  `scripts/run_safe.sh /Users/sergey/.local/bin/crystal 300 8192 eval ...`:
+  lazy cached `didOpen` samples were `322.6,269.3,269.9,269.5,272.9ms`
+  (`avg=280.8ms`), while the same warm cache with
+  `LSP_FAST_PROJECT_OPEN=0` was `1118.1,1165.9,1163.4ms` (`avg=1149.1ms`).
+- Formatting and diff hygiene:
+  `scripts/run_safe.sh /Users/sergey/.local/bin/crystal 120 4096 tool format
+  --check src/compiler/lsp/server.cr spec/lsp/support/server_helper.cr
+  spec/lsp/project_cache_semantic_fidelity_spec.cr` -> exit 0;
+  `git diff --check` -> exit 0.
+
+Adversary notes:
+
+- This is not a parser or diagnostic shortcut for dirty buffers. If the text is
+  not exactly the disk file, if the AST-cache header is stale, or if the
+  project cache is invalid, the server falls back to the previous parse/analyze
+  path.
+- The lightweight path does not restore fake identifier maps. Completion,
+  hover, definition, rename, inlay hints, and call hierarchy can materialize
+  foreground semantic analysis when they need current-AST symbol mappings.
+- Grok's read-only audit usefully pushed the AST-walker coverage set, but its
+  claim that the cached expression-type compatibility marker is skipped was
+  locally refuted: the marker is set in the shared cached-analysis helper used
+  by both parsed and lightweight cached opens.
+
+Trust: {F/G/R: 0.89/0.47/0.89} [verified]
+
 ## LM-583 — LSP foreground hover avoids workspace reference scans by default
 
 Status: verified for the focused LSP hover/cache/harness slice on `codegen`.

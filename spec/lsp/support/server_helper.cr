@@ -105,6 +105,14 @@ module CrystalV2::Compiler::LSP
       spec_read_last_response
     end
 
+    def spec_folding_ranges(uri : String) : JSON::Any
+      params = JSON.parse(%({"textDocument":{"uri":#{uri.to_json}}}))
+      id = JSON.parse("13")
+      spec_reset_output
+      handle_folding_range(id, params)
+      spec_read_last_response
+    end
+
     def spec_document_symbol_cache_size(uri : String) : Int32
       doc_state = @documents[uri]?
       return 0 unless doc_state
@@ -118,6 +126,10 @@ module CrystalV2::Compiler::LSP
 
     def spec_identifier_symbols_built?(uri : String) : Bool
       @documents[uri]?.try(&.identifier_symbols) != nil
+    end
+
+    def spec_document_ast_loaded?(uri : String) : Bool
+      @documents[uri]?.try { |state| !state.program.roots.empty? } || false
     end
 
     def spec_project_update_pending?(uri : String) : Bool

@@ -1191,3 +1191,29 @@ indexing regressions plus the full LSP suite passed under `scripts/run_safe.sh`.
 **Verdict:** useful sidecar. It did not drive acceptance, but it validated the
 main boundary condition and helped avoid a fake identifier-map cache restore.
 **Cost saved:** moderate review time.
+
+### Session 47 — 2026-05-21 — LSP lazy-AST cached-open audit
+**Task:** read-only Grok CLI audit of the uncommitted lazy-AST cached-open
+patch in `src/compiler/lsp/server.cr` and the project-cache semantic-fidelity
+regressions.
+**Brief size:** direct `grok --cwd ... -p` prompt restricted to the current
+diff, with explicit instructions not to edit files or run Crystal commands.
+**Latency:** first attempt failed with an internal `max_turns exceeded` error
+before returning findings. A second attempt with a larger turn cap returned
+after local focused/full specs and timing work were already underway.
+**Output quality:** mixed but useful. Grok correctly pushed on missing coverage
+for first-request AST walkers, which led to direct guards for document symbols
+and folding ranges in addition to semantic tokens, signature help, and prepare
+rename. It also raised rescue-path and diagnostic-boundary risks that were
+locally reviewed. One concrete claim was wrong: it said the cached expression
+type compatibility marker is skipped on the lightweight path, but local code
+inspection showed the marker is set in the shared cached-analysis helper used
+by both parsed and lightweight cached opens.
+**Adversary check:** focused and full LSP specs passed under
+`scripts/run_safe.sh`, and an isolated timing probe verified lazy cached
+`didOpen` on `ast_to_hir.cr` at about 280.8ms average versus about 1149.1ms
+with `LSP_FAST_PROJECT_OPEN=0`.
+**Verdict:** useful sidecar for coverage pressure, not reliable enough for
+unverified code-path claims.
+**Cost saved:** small to moderate review time; local verification remained the
+acceptance source.
