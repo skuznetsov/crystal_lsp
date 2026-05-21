@@ -135,8 +135,15 @@ module CrystalV2
         getter text : String
         getter language_id : String
         getter path : String?
+        getter semantic_tokens_json : String?
+        getter formatting_json : String?
 
-        def initialize(@state : DocumentState, @diagnostics : Array(Diagnostic))
+        def initialize(
+          @state : DocumentState,
+          @diagnostics : Array(Diagnostic),
+          @semantic_tokens_json : String? = nil,
+          @formatting_json : String? = nil,
+        )
           doc = state.text_document
           @text = doc.text
           @language_id = doc.language_id
@@ -1855,7 +1862,9 @@ module CrystalV2
           return unless state
 
           diagnostics = @document_diagnostics[uri]? || [] of Diagnostic
-          @closed_document_cache[uri] = ClosedDocumentCacheEntry.new(state, diagnostics)
+          semantic_tokens_json = @semantic_token_cache[uri]?.try(&.[1])
+          formatting_json = @formatting_cache[uri]?.try(&.[1])
+          @closed_document_cache[uri] = ClosedDocumentCacheEntry.new(state, diagnostics, semantic_tokens_json, formatting_json)
           trim_closed_document_cache
         end
 
@@ -1885,6 +1894,12 @@ module CrystalV2
           @documents[uri] = reopened
           register_document_symbols(uri, reopened)
           @document_diagnostics[uri] = entry.diagnostics
+          if semantic_tokens_json = entry.semantic_tokens_json
+            @semantic_token_cache[uri] = {doc.version, semantic_tokens_json}
+          end
+          if formatting_json = entry.formatting_json
+            @formatting_cache[uri] = {doc.version, formatting_json}
+          end
           debug("Restored closed document analysis for #{uri}")
           entry
         end

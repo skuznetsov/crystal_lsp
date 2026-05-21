@@ -104,6 +104,45 @@ describe CrystalV2::Compiler::LSP::Server do
     FileUtils.rm_rf(dir) if dir
   end
 
+  it "restores exact-text response caches after close and reopen" do
+    dir = File.join(Dir.tempdir, "lsp_reopen_response_cache_#{Random::Secure.hex(6)}")
+    FileUtils.mkdir_p(dir)
+    path = File.join(dir, "main.cr")
+    source = <<-CR
+    class Thing
+      def run(value : Int32) : Int32
+        value + 1
+      end
+    end
+    CR
+    File.write(path, source)
+
+    server = CrystalV2::Compiler::LSP::Server.new(
+      IO::Memory.new,
+      IO::Memory.new,
+      CrystalV2::Compiler::LSP::ServerConfig.new(background_indexing: false, project_cache: false)
+    )
+
+    uri = server.spec_did_open_document(source, path)
+    first_tokens = server.spec_semantic_tokens(uri)
+    first_formatting = server.spec_formatting(uri)
+    first_tokens["result"]["data"].as_a.should_not be_empty
+    server.spec_semantic_token_cache_version(uri).should eq(1)
+    server.spec_formatting_cache_version(uri).should eq(1)
+
+    server.spec_did_close(uri)
+    server.spec_semantic_token_cache_version(uri).should be_nil
+    server.spec_formatting_cache_version(uri).should be_nil
+
+    server.spec_did_open_document(source, path)
+    server.spec_semantic_token_cache_version(uri).should eq(1)
+    server.spec_formatting_cache_version(uri).should eq(1)
+    server.spec_semantic_tokens(uri).should eq(first_tokens)
+    server.spec_formatting(uri).should eq(first_formatting)
+  ensure
+    FileUtils.rm_rf(dir) if dir
+  end
+
   it "invalidates cached expression types before re-analyzing didChange text" do
     dir = File.join(Dir.tempdir, "lsp_did_change_cached_types_#{Random::Secure.hex(6)}")
     FileUtils.mkdir_p(dir)

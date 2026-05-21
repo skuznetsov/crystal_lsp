@@ -152,6 +152,10 @@ module CrystalV2::Compiler::LSP
       @formatting_cache[uri]?.try(&.[0])
     end
 
+    def spec_semantic_token_cache_version(uri : String) : Int32?
+      @semantic_token_cache[uri]?.try(&.[0])
+    end
+
     def spec_set_cached_expr_type(path : String, expr_index : Int32, type_name : String)
       (@cached_expr_types[path] ||= Hash(Int32, String).new)[expr_index] = type_name
     end

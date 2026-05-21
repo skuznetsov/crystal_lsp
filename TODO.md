@@ -105,7 +105,11 @@ path in about 1.5ms server-side and about 5.4ms client-side. After LM-619,
 exact-text reopen restores recently closed document analysis and diagnostics
 inside the same server process; the repeated harness `server.cr` open used by
 the call-hierarchy scenario dropped from about 130-140ms to 13-31ms in the
-measured runs.
+measured runs. After LM-620, exact-text reopen also restores already-computed
+semantic-token and formatting response JSON; a direct profile on `server.cr`
+showed reopened formatting served at about 0ms, while reopened semantic tokens
+avoid server collection/serialization and are then dominated by large-response
+JSON parsing.
 Refuted for the current one-file warm harness: project-cache load itself is not
 the dominant `initialize` cost (`cache=~2.9ms`), and disabling project cache
 pushes dependency analysis back into foreground `didOpen`; lazy-on-first

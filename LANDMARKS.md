@@ -7477,3 +7477,42 @@ Adversary notes:
 - The cache is bounded to eight documents and does not survive process restart.
 
 Trust: {F/G/R: 0.84/0.44/0.87} [verified]
+
+### LM-620 - Exact-text reopen preserves cached LSP responses
+
+The closed-document cache from LM-619 now also carries already-computed
+semantic-token and formatting JSON responses. On an exact-text reopen, those
+responses are restored under the new document version, so a client reopening
+the same file does not force the server to recompute full semantic tokens or
+whole-document formatting before the text changes.
+
+Evidence:
+
+- The regression opens a document, computes semantic tokens and formatting,
+  closes it, reopens the exact same text, and verifies both response caches are
+  restored and return identical responses.
+- `scripts/run_safe.sh /Users/sergey/.local/bin/crystal 120 4096 tool format
+  --check src/compiler/lsp/server.cr spec/lsp/support/server_helper.cr
+  spec/lsp/did_change_integration_spec.cr`
+- `scripts/run_safe.sh /Users/sergey/.local/bin/crystal 240 4096 spec
+  spec/lsp/did_change_integration_spec.cr --error-trace` -> 8 examples,
+  0 failures.
+- `scripts/run_safe.sh /Users/sergey/.local/bin/crystal 300 4096 spec
+  spec/lsp --error-trace` -> 242 examples, 0 failures.
+- A temporary in-process profile on `src/compiler/lsp/server.cr` measured
+  first semantic-token request at about 164ms and first formatting at about
+  92ms. After exact close/reopen, formatting was served from cache at about
+  0ms; semantic tokens no longer paid server collection/serialization, with
+  the remaining about 46ms attributable to parsing the large cached JSON
+  response in the helper path.
+
+Adversary notes:
+
+- This is an in-process exact-text optimization only; it does not change cache
+  persistence or reuse responses after edits.
+- Response JSON is re-versioned to the reopened document version, so the
+  existing version-keyed response cache remains coherent.
+- The semantic-token response is still large; this does not solve the
+  client-side parse/transport cost identified in LM-619.
+
+Trust: {F/G/R: 0.84/0.43/0.86} [verified]
