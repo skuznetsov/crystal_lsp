@@ -5317,6 +5317,38 @@ module CrystalV2
           nil
         end
 
+        private def fast_member_completion_receiver_at_offset(source : String, offset : Int32) : {String, Int32}?
+          return nil if source.empty?
+          pos = offset - 1
+          pos = source.bytesize - 1 if pos >= source.bytesize
+          return nil if pos < 0
+
+          while pos >= 0 && identifier_char?(source.byte_at(pos))
+            pos -= 1
+          end
+
+          return nil unless pos >= 0 && source.byte_at(pos) == '.'.ord
+
+          receiver_bounds = identifier_bounds_at_offset(source, pos - 1)
+          return nil unless receiver_bounds
+          receiver_start, receiver_end = receiver_bounds
+          return nil if receiver_start >= receiver_end
+
+          receiver_name = source.byte_slice(receiver_start, receiver_end - receiver_start)
+          receiver_first = receiver_name[0]?
+          return nil unless receiver_first && (receiver_first.lowercase? || receiver_first == '_')
+
+          receiver_previous = previous_non_space_offset(source, receiver_start)
+          if receiver_previous
+            previous = source.byte_at(receiver_previous)
+            return nil if previous == '.'.ord || previous == ':'.ord || previous == '@'.ord
+          end
+
+          {receiver_name, receiver_start}
+        rescue
+          nil
+        end
+
         private def identifier_bounds_at_offset(source : String, offset : Int32) : {Int32, Int32}?
           return nil if source.empty?
           pos = offset
@@ -5409,6 +5441,13 @@ module CrystalV2
         private def find_method_signature_for_receiver_type(doc_state : DocumentState, type_name : String, method_name : String) : String?
           return nil unless path = resolved_type_file_path(doc_state, type_name)
           find_method_signature_in_path(path, method_name)
+        end
+
+        private def collect_method_completions_for_receiver_type(doc_state : DocumentState, type_name : String, items : Array(CompletionItem)) : Nil
+          return unless path = resolved_type_file_path(doc_state, type_name)
+          seen = Set(String).new
+          items.each { |item| seen << item.label }
+          collect_methods_from_required_source(path, type_name.split("::").last, items, seen)
         end
 
         # Handle textDocument/definition request
@@ -5973,7 +6012,6 @@ module CrystalV2
 
           # Check if we're completing after a dot (member access)
           dot_context = check_dot_context(doc_state.text_document.text, line, character)
-          doc_state = ensure_foreground_semantic_analysis(uri, doc_state) if dot_context
 
           # Extract prefix at cursor position
           prefix = extract_prefix_at_position(doc_state.text_document.text, line, character)
@@ -5984,42 +6022,57 @@ module CrystalV2
           items = [] of CompletionItem
 
           if dot_context
+            offset = position_to_offset(doc_state, line, character)
+            if offset
+              if receiver = fast_member_completion_receiver_at_offset(doc_state.text_document.text, offset)
+                receiver_name, receiver_offset = receiver
+                if receiver_type = textual_assignment_type_before_offset(doc_state.text_document.text, receiver_name, receiver_offset)
+                  collect_method_completions_for_receiver_type(doc_state, receiver_type, items)
+                  debug("Member completion text fast path: #{receiver_type} items=#{items.size}")
+                end
+              end
+            end
+
+            doc_state = ensure_foreground_semantic_analysis(uri, doc_state) if items.empty?
+
             debug("Member completion branch")
             # Member completion - find receiver type and suggest methods
-            receiver_expr_id = find_receiver_expression(doc_state, line, character)
-            debug("receiver_expr_id=#{receiver_expr_id.inspect}")
-            if receiver_expr_id
-              receiver_type = nil
-              type_context = doc_state.type_context
+            if items.empty?
+              receiver_expr_id = find_receiver_expression(doc_state, line, character)
+              debug("receiver_expr_id=#{receiver_expr_id.inspect}")
+              if receiver_expr_id
+                receiver_type = nil
+                type_context = doc_state.type_context
 
-              if type_context
-                receiver_type = type_context.get_type(receiver_expr_id)
-                receiver_type = nil if primitive_type?(receiver_type)
+                if type_context
+                  receiver_type = type_context.get_type(receiver_expr_id)
+                  receiver_type = nil if primitive_type?(receiver_type)
 
-                if receiver_type.nil?
-                  if identifier_symbols = doc_state.identifier_symbols
-                    if symbol = identifier_symbols[receiver_expr_id]?
-                      unless symbol.node_id.invalid?
-                        alt_type = type_context.get_type(symbol.node_id)
-                        receiver_type = alt_type unless primitive_type?(alt_type)
+                  if receiver_type.nil?
+                    if identifier_symbols = doc_state.identifier_symbols
+                      if symbol = identifier_symbols[receiver_expr_id]?
+                        unless symbol.node_id.invalid?
+                          alt_type = type_context.get_type(symbol.node_id)
+                          receiver_type = alt_type unless primitive_type?(alt_type)
+                        end
                       end
                     end
                   end
                 end
-              end
 
-              fallback_segments = nil
-              if receiver_type.nil?
-                receiver_type, fallback_segments = infer_receiver_type_from_assignments(doc_state, receiver_expr_id)
-              end
+                fallback_segments = nil
+                if receiver_type.nil?
+                  receiver_type, fallback_segments = infer_receiver_type_from_assignments(doc_state, receiver_expr_id)
+                end
 
-              if receiver_type
-                collect_methods_for_type(receiver_type, doc_state, items)
-                debug("Collected #{items.size} methods")
-              elsif fallback_segments
-                collect_methods_from_dependencies(doc_state, fallback_segments, items)
-              else
-                debug("Unable to determine receiver type for completion")
+                if receiver_type
+                  collect_methods_for_type(receiver_type, doc_state, items)
+                  debug("Collected #{items.size} methods")
+                elsif fallback_segments
+                  collect_methods_from_dependencies(doc_state, fallback_segments, items)
+                else
+                  debug("Unable to determine receiver type for completion")
+                end
               end
             end
           else

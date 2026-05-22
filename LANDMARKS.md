@@ -6698,6 +6698,42 @@ Adversary notes:
 
 Trust: {F/G/R: 0.88/0.43/0.88} [verified]
 
+### LM-632 - Constructor-assigned member completion avoids first semantic materialization
+
+After lazy cached opens, member completion can now use the same narrow
+constructor-assigned local receiver corridor as LM-631. For `helper =
+Helper.new` followed by `helper.`, completion extracts the local receiver from
+the dot window, resolves the earlier constructor assignment to a concrete class
+source file, and collects method names from that file without materializing the
+foreground AST or identifier map. If receiver extraction, assignment parsing,
+or type/file resolution fails, completion falls back to the existing semantic
+path.
+
+Evidence:
+
+- Focused cached-open regression:
+  `scripts/run_safe.sh /Users/sergey/.local/bin/crystal 180 4096 spec
+  spec/lsp/project_cache_semantic_fidelity_spec.cr --error-trace` ->
+  5 examples, 0 failures. The completion check for `helper.` still returns
+  `value` and now keeps `spec_document_ast_loaded? == false`.
+- Full LSP suite:
+  `scripts/run_safe.sh /Users/sergey/.local/bin/crystal 300 4096 spec
+  spec/lsp --error-trace` -> 254 examples, 0 failures.
+- Formatting and diff hygiene:
+  `scripts/run_safe.sh /Users/sergey/.local/bin/crystal 120 4096 tool format
+  --check src/compiler/lsp/server.cr
+  spec/lsp/project_cache_semantic_fidelity_spec.cr` -> exit 0;
+  `git diff --check` -> exit 0.
+
+Adversary notes:
+
+- The fast path only emits items when a concrete receiver type source file is
+  resolved. It does not scan all requires for same-named methods.
+- This does not remove AST materialization for signature help, document
+  symbols, folding, rename, or more complex member receivers.
+
+Trust: {F/G/R: 0.88/0.43/0.88} [verified]
+
 ## LM-583 — LSP foreground hover avoids workspace reference scans by default
 
 Status: verified for the focused LSP hover/cache/harness slice on `codegen`.

@@ -179,6 +179,9 @@ After LM-631, cached lightweight opens also serve hover and definition for
 constructor-assigned member calls such as `helper = Helper.new` followed by
 `helper.value(2)` without foreground AST materialization, as long as the
 receiver type resolves to a concrete source file.
+After LM-632, the same constructor-assigned local receiver corridor also serves
+member completion for `helper.` without foreground AST materialization when the
+receiver type resolves to a concrete source file.
 
 Spec-first bootstrap checkpoint (2026-05-08): `docs/specs/` now contains the
 first executable contract slice for Crystal V2, modeled after the DiamondDB

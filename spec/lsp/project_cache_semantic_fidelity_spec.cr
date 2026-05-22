@@ -422,7 +422,7 @@ describe "LSP project cache semantic fidelity" do
       completion_line, completion_char = lsp_line_char(source, "helper.", at_end: true)
       completion = completion_server.spec_completion(completion_uri, completion_line, completion_char)
       completion["result"].as_a.map { |item| item["label"].as_s }.should contain("value")
-      completion_server.spec_document_ast_loaded?(completion_uri).should be_true
+      completion_server.spec_document_ast_loaded?(completion_uri).should be_false
 
       symbols_server = CrystalV2::Compiler::LSP::Server.new(
         IO::Memory.new,
