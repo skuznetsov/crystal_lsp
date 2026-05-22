@@ -4,7 +4,17 @@ Use this path when you want to try Crystal V2 today. The LSP server is the
 stable user-facing surface; the compiler/codegen pipeline is still beta and
 not yet a production Crystal compiler replacement.
 
-## 1. Build LSP Server
+## 1. Install or Build LSP Server
+
+The extension first looks for `crystal2` on `PATH` and runs
+`crystal2 tool lsp`. To override discovery, set:
+
+```json
+{
+  "crystalv2.lsp.serverPath": "/path/to/crystal2",
+  "crystalv2.lsp.serverArgs": ["tool", "lsp"]
+}
+```
 
 ```bash
 cd /path/to/crystal_v2

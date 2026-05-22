@@ -187,6 +187,10 @@ the resolved method signature without foreground AST materialization.
 After LM-634, cached lightweight opens also serve `textDocument/documentSymbol`
 from persisted `SymbolSummary` rows without foreground AST materialization,
 but only when the open buffer exactly matches the unchanged cached file.
+After LM-635, the VS Code extension no longer hardcodes a repo-relative LSP
+binary path: settings override discovery, configured paths must be executable,
+and the default path is `crystal2 tool lsp` with fallbacks to `crystal_v2` and
+standalone `crystal_v2_lsp`.
 
 Spec-first bootstrap checkpoint (2026-05-08): `docs/specs/` now contains the
 first executable contract slice for Crystal V2, modeled after the DiamondDB

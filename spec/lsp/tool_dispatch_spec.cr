@@ -10,6 +10,13 @@ describe CrystalV2::Compiler::LSP::ToolDispatch do
     CrystalV2::Compiler::LSP::ToolDispatch.child_args(args).should eq(["--stdio", "--log=trace"])
   end
 
+  it "accepts crystal tools lsp as an alias" do
+    args = ["tools", "lsp", "--stdio"]
+
+    CrystalV2::Compiler::LSP::ToolDispatch.tool_lsp?(args).should be_true
+    CrystalV2::Compiler::LSP::ToolDispatch.child_args(args).should eq(["--stdio"])
+  end
+
   it "does not treat other compiler invocations as LSP tool mode" do
     CrystalV2::Compiler::LSP::ToolDispatch.tool_lsp?(["src/main.cr"]).should be_false
     CrystalV2::Compiler::LSP::ToolDispatch.tool_lsp?(["lsp"]).should be_false

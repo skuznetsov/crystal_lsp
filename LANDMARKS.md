@@ -6804,6 +6804,40 @@ Adversary notes:
 
 Trust: {F/G/R: 0.87/0.44/0.88} [verified]
 
+### LM-635 - VS Code extension discovers `crystal2` without hardcoded repo paths
+
+The VS Code extension no longer defaults to a repo-relative
+`../bin/crystal_v2_lsp` path. If `crystalv2.lsp.serverPath` is configured, that
+path overrides all discovery and must point to an executable file or the
+extension reports an error and does not start the language client. Without an
+explicit setting, the extension tries `crystal2 tool lsp`, then
+`crystal_v2 tool lsp`, then standalone `crystal_v2_lsp` from `PATH`. The
+compiler-side dispatcher also accepts `tools lsp` as a compatibility alias for
+`tool lsp`.
+
+Evidence:
+
+- JavaScript syntax:
+  `node --check vscode-extension/extension.js` -> exit 0.
+- Tool-dispatch regression:
+  `scripts/run_safe.sh crystal 180 4096 spec spec/lsp/tool_dispatch_spec.cr`
+  -> 5 examples, 0 failures.
+- Full LSP suite before the final JS-only missing-path hardening:
+  `scripts/run_safe.sh crystal 300 4096 spec spec/lsp` -> 255 examples,
+  0 failures.
+- Formatting and diff hygiene:
+  `crystal tool format --check src/compiler/lsp/tool_dispatch.cr
+  spec/lsp/tool_dispatch_spec.cr` -> exit 0; `git diff --check` -> exit 0.
+
+Adversary notes:
+
+- Settings are authoritative: PATH discovery and `CRYSTAL_V2_LSP_SERVER` are
+  skipped when `crystalv2.lsp.serverPath` is set.
+- Missing configured paths fail closed before `LanguageClient.start()`, so VS
+  Code does not attempt to spawn a nonexistent LSP server.
+
+Trust: {F/G/R: 0.86/0.45/0.87} [verified]
+
 ## LM-583 — LSP foreground hover avoids workspace reference scans by default
 
 Status: verified for the focused LSP hover/cache/harness slice on `codegen`.

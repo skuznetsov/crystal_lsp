@@ -165,12 +165,14 @@ crystal build src/crystal_v2.cr -o bin/crystal_v2 --error-trace
 bin/crystal_v2 tool lsp
 ```
 
-The VS Code extension lives in `vscode-extension/`. By default it launches
-`../bin/crystal_v2_lsp`; alternatively configure:
+The VS Code extension lives in `vscode-extension/`. By default it discovers
+`crystal2` on `PATH` and launches `crystal2 tool lsp`. If that is not
+available it tries `crystal_v2 tool lsp`, then `crystal_v2_lsp`. The extension
+settings override discovery:
 
 ```json
 {
-  "crystalv2.lsp.serverPath": "/path/to/crystal_v2/bin/crystal_v2",
+  "crystalv2.lsp.serverPath": "/path/to/crystal2",
   "crystalv2.lsp.serverArgs": ["tool", "lsp"]
 }
 ```

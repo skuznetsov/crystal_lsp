@@ -34,7 +34,7 @@ being fixed.
 
 ## Installation
 
-### Step 1: Build LSP Server
+### Step 1: Install or Build an LSP Server
 
 ```bash
 cd /path/to/crystal_v2
@@ -43,12 +43,16 @@ cd /path/to/crystal_v2
 
 This creates the executable `bin/crystal_v2_lsp`.
 
-The extension uses `../bin/crystal_v2_lsp` by default. To run through the
-compiler tool command instead, configure:
+By default the extension discovers `crystal2` on `PATH` and launches
+`crystal2 tool lsp`, so the original `crystal` compiler can remain installed
+side by side. If `crystal2` is not available it tries `crystal_v2 tool lsp`,
+then `crystal_v2_lsp`.
+
+Extension settings override discovery:
 
 ```json
 {
-  "crystalv2.lsp.serverPath": "/path/to/crystal_v2/bin/crystal_v2",
+  "crystalv2.lsp.serverPath": "/path/to/crystal2",
   "crystalv2.lsp.serverArgs": ["tool", "lsp"]
 }
 ```

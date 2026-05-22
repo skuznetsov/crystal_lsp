@@ -7,7 +7,7 @@ module CrystalV2
         SERVER_ENV = "CRYSTAL_V2_LSP_SERVER"
 
         def tool_lsp?(args : Array(String)) : Bool
-          args.size >= 2 && args[0] == "tool" && args[1] == "lsp"
+          args.size >= 2 && (args[0] == "tool" || args[0] == "tools") && args[1] == "lsp"
         end
 
         def child_args(args : Array(String)) : Array(String)
