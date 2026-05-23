@@ -30,30 +30,29 @@ Working policy:
 
 ## Current Checkpoint
 
-Latest bootstrap frontier (LM-581, 2026-05-20): produced `s2` builds cleanly
-under the safe wrapper and passes the focused no-prelude guards for parsed
-macro number literals, normalize-decl cache keys, short-type-index `Set#first`
-avoidance, source-span bounds, constant globals, qualified nested module
-namespaces, cacheless `type_param_like?`, and optional type-param map joins.
-Current hardening removed two produced-stage2 registration/container
-frontiers: `type_param_like?` no longer uses a non-essential
-`Hash(String, Bool)` cache before cheap lexical checks, and generic
-specialization no longer joins an `Array(String?)` produced by optional
-type-param-map lookups. After LM-582, host HIR also preserves no-block
-included-module overload semantics for nested iterators:
-`Array(String)#each` now returns
-`Indexable(T)::ItemIterator(Array(String), String)` instead of poisoning later
-calls as `Nil#next`/`Pointer#next`. Boundary: full-prelude produced `puts 42`
-is still not clean. With `/private/tmp/cv2_return_guard_s2/cv2_s2`, a
-full-prelude `puts 42` smoke reached `lower_main: exprs=16` and timed out
-under a 60s safe wrapper, while the full-prelude nested iterator regression
-still exits 139 during early module registration. Treat the next root as
-unresolved produced-stage2 source/name/string-lifetime instability around
-module registration and lower-main, not a parser-first bug. The non-fatal
-`CLI#file_sha256$String` MIR optimizer arithmetic-overflow diagnostic remains
-during produced `s2` builds. Refuted: adding readability guards inside the
-normalizer helpers fixed a no-prelude reducer but regressed full-prelude
-module registration, so do not reapply that branch blindly.
+Latest bootstrap frontier (LM-624/625, 2026-05-23): produced `s2` builds
+cleanly under the safe wrapper and passes focused no-prelude guards for
+qualified nested module namespaces, `skip_file` require scanning, and
+`typeof(Enumerable.element_type(...))` annotation normalization. The latest
+hardening removed two generated-stage2 crash roots: `skip_file` macro
+directive scanning no longer calls Regex-backed `String#sub` while recursively
+loading requires, and fixed `element_type` prefix tables no longer use
+`Array(String)#find`/`any?` block scans in HIR or semantic type-expression
+resolution. LLVM emission also avoids a nilable `@current_func_params[i]?`
+fetch in `current_func_param_index?`, which had allowed produced `s2` to
+dispatch `Parameter#index` to an unrelated `#index` method after union
+narrowing.
+
+Boundary: full-prelude produced `puts 42` is still not clean. With
+`/tmp/cv2_param_index_s2/cv2_s2`, the smoke reaches `lower_main: exprs=15` and
+times out under a 360s safe wrapper at about 646MB RSS instead of crashing
+during prelude parse, module/class registration, or `typeof(element_type)`
+normalization. Treat the next root as a lower-main progress/time frontier, not
+a parser-first bug. The non-fatal `CLI#file_sha256$String` MIR optimizer
+arithmetic-overflow diagnostic remains during produced `s2` builds. Refuted:
+adding readability guards inside normalizer helpers fixed a no-prelude reducer
+but regressed full-prelude module registration; do not reapply that branch
+blindly.
 
 LSP performance side checkpoint (LM-605, 2026-05-20): the background prelude
 loader now has a single in-flight owner. Repeated foreground requests while

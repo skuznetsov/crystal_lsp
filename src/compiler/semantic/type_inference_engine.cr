@@ -6206,10 +6206,6 @@ module CrystalV2
           nil
         end
 
-        TYPE_EXPR_ELEMENT_PREFIXES = ["Enumerable.element_type", "::Enumerable.element_type", "Indexable.element_type",
-                                      "::Indexable.element_type", "Iterator.element_type", "::Iterator.element_type",
-                                      "Iterable.element_type", "::Iterable.element_type"] of String
-
         private def resolve_special_type_expr_string(name : String) : Type?
           expr = name.strip
 
@@ -6292,7 +6288,7 @@ module CrystalV2
         end
 
         private def resolve_element_type_expression_type(expr : String) : Type?
-          prefix = TYPE_EXPR_ELEMENT_PREFIXES.find { |entry| expr.starts_with?(entry) }
+          prefix = type_expr_element_prefix(expr)
           return nil unless prefix
 
           rest = expr[prefix.size, expr.bytesize - prefix.size].strip
@@ -6319,6 +6315,18 @@ module CrystalV2
 
           return nil unless source_type
           element_type_from_type(source_type)
+        end
+
+        private def type_expr_element_prefix(expr : String) : String?
+          return "Enumerable.element_type" if expr.starts_with?("Enumerable.element_type")
+          return "::Enumerable.element_type" if expr.starts_with?("::Enumerable.element_type")
+          return "Indexable.element_type" if expr.starts_with?("Indexable.element_type")
+          return "::Indexable.element_type" if expr.starts_with?("::Indexable.element_type")
+          return "Iterator.element_type" if expr.starts_with?("Iterator.element_type")
+          return "::Iterator.element_type" if expr.starts_with?("::Iterator.element_type")
+          return "Iterable.element_type" if expr.starts_with?("Iterable.element_type")
+          return "::Iterable.element_type" if expr.starts_with?("::Iterable.element_type")
+          nil
         end
 
         private def element_type_from_type(type : Type) : Type?

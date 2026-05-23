@@ -6364,6 +6364,81 @@ WBA framing:
 
 Trust: {F/G/R: 0.88/0.50/0.89} [verified]
 
+### LM-624 - Generated-stage2 require scanning avoids Regex-backed skip_file suffix extraction
+
+Produced `s2` full-prelude `puts 42` no longer crashes before `prelude parsed`
+while scanning `skip_file` macro directives in required stdlib files. The
+crash was not a parser frontier: LLDB showed `String#sub(Regex, ...)` under
+`CLI#each_macro_literal_raw_text_window` while processing
+`src/stdlib/io/encoding.cr`. The fix keeps the same `skip_file` directive
+semantics but extracts the suffix with byte slicing instead of Regex-backed
+`String#sub`, removing Regex/String block machinery from recursive require
+scanning.
+
+Evidence:
+
+- `scripts/run_safe.sh /Users/sergey/.local/bin/crystal 360 8192 build
+  src/crystal_v2.cr -o /tmp/cv2_skipfile_regex_host --error-trace` -> exit 0.
+- `scripts/run_safe.sh /tmp/cv2_skipfile_regex_host 360 4096
+  src/crystal_v2.cr -o /tmp/cv2_skipfile_regex_s2/cv2_s2` -> exit 0.
+- `regression_tests/p2_require_scan_skip_file_no_regex_no_prelude.sh
+  /tmp/cv2_skipfile_regex_s2/cv2_s2` -> exit 0.
+- The previous produced-stage2 full-prelude smoke reached `prelude exists` and
+  crashed before `prelude parsed`; after the change it reached HIR
+  registration/lowering, exposing the next `typeof(element_type)` frontier.
+
+Boundary: this is a require-scanner bootstrap hardening, not a general Regex
+or parser fix.
+
+Trust: {F/G/R: 0.90/0.56/0.90} [verified]
+
+### LM-625 - typeof element_type prefix scans avoid Array/block lookup in generated stage2
+
+Produced `s2` no longer crashes in
+`AstToHir#resolve_element_type_expression(String)` when registering a method
+annotation containing `typeof(Enumerable.element_type(Array(Int32)))`. LLDB and
+disassembly showed the old fixed `ELEMENT_TYPE_PREFIXES.find { ... }` lowered
+to an `Array(String)` block scan whose generated-stage2 loop cursor was read as
+a null pointer before `Array#unsafe_fetch`. This matches the older LM-535
+pattern: fixed string tables in bootstrap compiler hot paths must not rely on
+`Array#find`/block machinery until the broader generated-stage2 collection
+lowering issue is fixed.
+
+The fix removes the fixed prefix arrays from HIR and semantic type-expression
+resolution, spelling the same prefix set as direct `starts_with?` checks. HIR
+also uses the existing ASCII byte classifier instead of `Char#uppercase?` in
+this path. A related LLVM emission frontier was exposed after the prefix crash
+was cleared: `current_func_param_index?` used a nilable `@current_func_params[i]?`
+fetch, and produced `s2` dispatched `Parameter#index` to an unrelated
+`#index` method. The helper now uses the existing size guard plus
+`unsafe_fetch`, preserving the concrete `Parameter` receiver.
+
+Evidence:
+
+- `scripts/run_safe.sh /Users/sergey/.local/bin/crystal 360 8192 build
+  src/crystal_v2.cr -o /tmp/cv2_param_index_host --error-trace` -> exit 0.
+- `scripts/run_safe.sh /tmp/cv2_param_index_host 360 4096
+  src/crystal_v2.cr -o /tmp/cv2_param_index_s2/cv2_s2` -> exit 0.
+- Before the prefix fix, the def-only no-prelude oracle crashed with exit 139
+  in `resolve_element_type_expression`; after the fix,
+  `regression_tests/p2_typeof_element_type_prefix_no_array_scan_no_prelude.sh
+  /tmp/cv2_param_index_s2/cv2_s2` -> exit 0.
+- `regression_tests/p2_require_scan_skip_file_no_regex_no_prelude.sh
+  /tmp/cv2_param_index_s2/cv2_s2` -> exit 0.
+- `regression_tests/p2_qualified_module_namespace_no_prelude.sh
+  /tmp/cv2_param_index_s2/cv2_s2` -> exit 0.
+- Full-prelude produced `puts 42` with `/tmp/cv2_param_index_s2/cv2_s2`
+  reached `lower_main: exprs=15` and timed out under the 360s safe wrapper at
+  about 646MB RSS, rather than crashing during prelude parse, registration, or
+  `typeof(element_type)` normalization.
+
+Boundary: this is not proof that general `Array#find`, block lowering, or
+nilable union narrowing is fixed. It removes two such generated-stage2-hostile
+constructs from bootstrap-critical compiler paths and leaves the next frontier
+as lower-main progress/time.
+
+Trust: {F/G/R: 0.91/0.58/0.91} [verified]
+
 ### LM-650 - Semantic tokens traverse case branches and full Crystal keyword set
 
 Semantic coloring now follows `CaseNode` branches before sorting/deduping token

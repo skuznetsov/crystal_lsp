@@ -4912,7 +4912,7 @@ module CrystalV2
             tag = tag.lstrip('-').lstrip('~').rstrip('-').rstrip('~').strip
 
             if tag.starts_with?("skip_file")
-              cond_text = tag.sub(/^skip_file/, "").strip
+              cond_text = macro_tag_suffix(tag, "skip_file")
               return true if cond_text.empty?
 
               if cond_text.starts_with?("if ")
@@ -4940,6 +4940,12 @@ module CrystalV2
         end
 
         false
+      end
+
+      private def macro_tag_suffix(tag : String, keyword : String) : String
+        keyword_size = keyword.bytesize
+        return "" if tag.bytesize <= keyword_size
+        tag.byte_slice(keyword_size, tag.bytesize - keyword_size).strip
       end
 
       private def collect_macro_literal_exprs(
@@ -5619,7 +5625,7 @@ module CrystalV2
             tag = tag.lstrip('-').lstrip('~').rstrip('-').rstrip('~').strip
 
             if tag.starts_with?("skip_file")
-              cond_text = tag.sub(/^skip_file/, "").strip
+              cond_text = macro_tag_suffix(tag, "skip_file")
               skip = if cond_text.starts_with?("if ")
                        evaluate_macro_condition_text(cond_text.lchop("if").strip, flags)
                      elsif cond_text.starts_with?("unless ")

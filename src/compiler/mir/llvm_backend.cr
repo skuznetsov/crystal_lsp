@@ -2601,9 +2601,8 @@ module Crystal::MIR
     private def current_func_param_index?(id : ValueId) : Bool
       i = 0
       while i < @current_func_params.size
-        if param = @current_func_params[i]?
-          return true if param.index == id
-        end
+        param = @current_func_params.unsafe_fetch(i)
+        return true if param.index == id
         i += 1
       end
       false

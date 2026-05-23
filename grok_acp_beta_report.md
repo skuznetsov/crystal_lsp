@@ -1231,3 +1231,24 @@ stopped after local verification completed.
 focused/full LSP specs passed under `scripts/run_safe.sh`.
 **Verdict:** failed/no-signal interaction. Do not count this run as evidence.
 **Cost saved:** none.
+
+### Session 49 — 2026-05-23 — Bootstrap generic-template frontier audit
+**Task:** read-only Grok ACP sidecar audit for the produced-stage2 full-prelude
+`puts 42` frontier after qualified nested module namespaces were fixed.
+**Brief size:** bounded prompt with the current crash frontier and requested
+anchors in `src/compiler/hir/ast_to_hir.cr`, especially generic template
+registration and nested type recording.
+**Latency:** no useful audit result. The first ACP attempt used too small a
+turn cap and stopped after startup/tool handshaking. The retry failed with a
+403 requiring a SuperGrok Heavy subscription.
+**Output quality:** no signal. No Grok claim was used for local reasoning or
+acceptance.
+**Adversary check:** local LLDB and no-prelude oracles independently localized
+the next roots to generated-stage2-hostile `String#sub(Regex)` in require
+scanning, fixed `Array(String)#find`/`any?` prefix scans in
+`typeof(element_type)` resolution, and a nilable parameter fetch in LLVM
+emission.
+**Verdict:** failed interaction. Grok is unavailable for this repo while the
+subscription gate returns 403; prefer Spark/other subagents for sidecar grunt
+work.
+**Cost saved:** none.
