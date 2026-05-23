@@ -7000,8 +7000,9 @@ stopped at `to_i8`, then missed because there was no following `(`.
 When the source-text lookup still cannot find a real `def` because Crystal's
 numeric conversion methods are generated, hover uses a narrow synthetic
 signature for generated integer conversion bangs such as `to_i8!`:
-`def to_i8! : Int8`. Definition does not synthesize a fake source location for
-those generated methods.
+`def to_i8! : Int8`. At this landmark, definition did not synthesize a fake
+source location for those generated methods; LM-641 later routes them to the
+real primitive template.
 
 Evidence:
 
@@ -7028,6 +7029,49 @@ Adversary notes:
   source `def` exists.
 
 Trust: {F/G/R: 0.87/0.43/0.90} [verified]
+
+### LM-641 - LSP text navigation covers macro constants and generated primitive anchors
+
+The LSP server now has a lexical constant fast path for uppercase identifiers
+that semantic analysis leaves unresolved in macro argument lists. Hover and
+definition for `Float64` in `Number.expand_div [Float64], Float64` resolve
+through the existing source-text constant locator, so hover shows
+`struct Float64` and go-to-definition opens `float.cr`.
+
+Generated numeric bang conversions also gained a real definition anchor:
+`to_i8!` still hovers with the synthetic signature from LM-640, but definition
+now routes to the primitive template line in `primitives.cr`:
+`def {{name.id}}! : {{type}}`.
+
+Evidence:
+
+- Focused regression covers `Number.expand_div [Float64], Float64`: hover
+  returns `struct Float64`, and definition points to `/float.cr`.
+- Focused regression now also checks generated `to_i8!` definition points to
+  `/primitives.cr`.
+- Real LSP stdio harness against
+  `/Users/sergey/Projects/Crystal/crystal/src/int.cr` returned
+  `struct Float64` plus definition `/float.cr` for the macro argument, and
+  `def to_i8! : Int8` plus definition `/primitives.cr` for `value.to_i8!`.
+- `./build_lsp_debug.sh` rebuilt `bin/crystal_v2_lsp` successfully.
+- `scripts/run_safe.sh crystal 180 4096 spec
+  spec/lsp/hover_definition_integration_spec.cr` -> 10 examples, 0 failures.
+- `scripts/run_safe.sh crystal 300 4096 spec spec/lsp` -> 260 examples,
+  0 failures.
+
+Adversary notes:
+
+- This does not make all macro-generated methods navigable. The generated
+  method anchor is limited to the already-synthesized integer conversion bang
+  family and points at the real template, not a fabricated file location.
+- The constant path reuses the bounded text locator and avoids dependency graph
+  loading on hover.
+- LTP/WBA shape: trigger is an uppercase identifier or generated conversion
+  suffix in a shallow request window; transport carries the name to an existing
+  source-text locator/template anchor; potential decreases from unresolved
+  request to stable source anchor without invalidating semantic fallback.
+
+Trust: {F/G/R: 0.88/0.44/0.90} [verified]
 
 ## LM-583 — LSP foreground hover avoids workspace reference scans by default
 

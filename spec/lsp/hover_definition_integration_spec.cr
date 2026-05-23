@@ -249,6 +249,39 @@ describe CrystalV2::Compiler::LSP::Server do
     call_line, call_char = lsp_line_char(source, "to_i8!", delta: 3)
     call_hover = server.spec_hover(uri, call_line, call_char)
     call_hover["result"]["contents"]["value"].as_s.should contain("def to_i8! : Int8")
+
+    call_definition = server.spec_definition(uri, call_line, call_char)
+    location = call_definition["result"].as_a.first
+    location["uri"].as_s.should end_with("/primitives.cr")
+  ensure
+    FileUtils.rm_rf(dir) if dir
+  end
+
+  it "hovers and defines stdlib type constants in macro argument lists" do
+    dir = File.join(Dir.tempdir, "lsp_hover_macro_constant_#{Random::Secure.hex(6)}")
+    FileUtils.mkdir_p(dir)
+    path = File.join(dir, "main.cr")
+    source = <<-CR
+    struct Number
+      Number.expand_div [Float64], Float64
+    end
+    CR
+    File.write(path, source)
+
+    server = CrystalV2::Compiler::LSP::Server.new(
+      IO::Memory.new,
+      IO::Memory.new,
+      CrystalV2::Compiler::LSP::ServerConfig.new(background_indexing: false, project_cache: false)
+    )
+    uri = server.spec_store_document(source, dir, path)
+
+    const_line, const_char = lsp_line_char(source, "], Float64", delta: 4)
+    hover = server.spec_hover(uri, const_line, const_char)
+    hover["result"]["contents"]["value"].as_s.should contain("struct Float64")
+
+    definition = server.spec_definition(uri, const_line, const_char)
+    location = definition["result"].as_a.first
+    location["uri"].as_s.should end_with("/float.cr")
   ensure
     FileUtils.rm_rf(dir) if dir
   end

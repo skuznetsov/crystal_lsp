@@ -216,6 +216,11 @@ After LM-640, hover also recognizes bare zero-argument member calls whose method
 name ends in `!`/`?`. The real `int.cr` `value.to_i8!` request now returns
 `def to_i8! : Int8`; because that numeric conversion is generated, hover uses
 a narrow synthetic signature rather than inventing a fake definition location.
+After LM-641, definition for that generated conversion points at the real
+primitive template in `primitives.cr`, and uppercase stdlib constants in macro
+argument lists use a lexical source-text path. The real `int.cr`
+`Number.expand_div [Float64], Float64` request now hovers as `struct Float64`
+and defines to `float.cr`.
 
 Spec-first bootstrap checkpoint (2026-05-08): `docs/specs/` now contains the
 first executable contract slice for Crystal V2, modeled after the DiamondDB

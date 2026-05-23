@@ -4892,6 +4892,17 @@ module CrystalV2
                 end
               end
             end
+
+            if constant_name = fast_constant_name_at_offset(doc_state.text_document.text, hover_offset)
+              if signature = find_constant_declaration_signature_by_text(doc_state, constant_name)
+                debug("Hover constant text fast path: #{constant_name}")
+                contents = MarkupContent.new("```crystal\n#{signature}\n```", markdown: true)
+                hover = Hover.new(contents: contents)
+                send_response(id, hover.to_json)
+                debug("Hover completed in #{elapsed_ms_since(started_at)}ms -> hit(constant-text)")
+                return
+              end
+            end
           end
 
           doc_state = ensure_foreground_semantic_analysis(uri, doc_state)
@@ -5429,6 +5440,29 @@ module CrystalV2
           {start_offset, end_offset}
         end
 
+        private def fast_constant_name_at_offset(source : String, offset : Int32) : String?
+          bounds = identifier_bounds_at_offset(source, offset)
+          bounds ||= identifier_bounds_at_offset(source, offset - 1) if offset > 0
+          return nil unless bounds
+
+          start_offset, end_offset = bounds
+          return nil if start_offset >= end_offset
+
+          name = source.byte_slice(start_offset, end_offset - start_offset)
+          first = name[0]?
+          return nil unless first && first.uppercase?
+
+          previous_offset = previous_non_space_offset(source, start_offset)
+          if previous_offset
+            previous = source.byte_at(previous_offset)
+            return nil if previous == '.'.ord || previous == '@'.ord
+          end
+
+          name
+        rescue
+          nil
+        end
+
         private def method_name_bounds_at_offset(source : String, offset : Int32) : {Int32, Int32}?
           bounds = identifier_bounds_at_offset(source, offset)
           return nil unless bounds
@@ -5587,17 +5621,29 @@ module CrystalV2
           if member_call = fast_member_method_call_at_offset(doc_state.text_document.text, offset)
             receiver_name, method_name, receiver_offset, arity = member_call
             if receiver_type = textual_assignment_type_before_offset(doc_state.text_document.text, receiver_name, receiver_offset)
-              if location = find_method_location_for_receiver_type(doc_state, receiver_type, method_name, arity: arity)
+              location = find_method_location_for_receiver_type(doc_state, receiver_type, method_name, arity: arity)
+              location ||= synthetic_numeric_conversion_location(method_name, arity)
+              if location
                 send_response(id, [location].to_json)
                 debug("Definition completed in #{elapsed_ms_since(started_at)}ms -> hit(member-call-text)")
                 return
               end
             elsif bang_or_question_method_name?(method_name)
-              if location = find_method_location_by_text(doc_state, method_name, arity: arity)
+              location = find_method_location_by_text(doc_state, method_name, arity: arity)
+              location ||= synthetic_numeric_conversion_location(method_name, arity)
+              if location
                 send_response(id, [location].to_json)
                 debug("Definition completed in #{elapsed_ms_since(started_at)}ms -> hit(member-call-suffix-text)")
                 return
               end
+            end
+          end
+
+          if constant_name = fast_constant_name_at_offset(doc_state.text_document.text, offset)
+            if location = definition_from_constant(constant_name, doc_state)
+              send_response(id, [location].to_json)
+              debug("Definition completed in #{elapsed_ms_since(started_at)}ms -> hit(constant-text)")
+              return
             end
           end
 
@@ -11472,6 +11518,27 @@ module CrystalV2
           nil
         end
 
+        private def find_constant_declaration_signature_by_text(doc_state : DocumentState, constant_name : String) : String?
+          location = find_constant_location_by_text(doc_state, constant_name)
+          return nil unless location
+          path = uri_to_path(location.uri)
+          return nil unless path && File.file?(path)
+
+          line_index = 0
+          File.each_line(path) do |line|
+            if line_index == location.range.start.line
+              stripped = line.lstrip.chomp
+              return stripped if stripped.matches?(/^(abstract\s+class|abstract\s+struct|class|struct|module|annotation)\b/)
+              return nil
+            end
+            line_index += 1
+          end
+
+          nil
+        rescue
+          nil
+        end
+
         private def method_name_regex_tail : String
           "(?=\\s|\\(|:|;|$)"
         end
@@ -11484,6 +11551,32 @@ module CrystalV2
             return "def #{method_name} : #{prefix}#{match[2]}"
           end
 
+          nil
+        end
+
+        private def synthetic_numeric_conversion_location(method_name : String, arity : Int32?) : Location?
+          return nil unless synthetic_numeric_conversion_signature(method_name, arity)
+
+          path = File.join(File.dirname(PRELUDE_PATH), "primitives.cr")
+          return nil unless File.file?(path)
+
+          line_index = 0
+          File.each_line(path) do |line|
+            if line.includes?("def {{name.id}}! : {{type}}")
+              start_column = line.index("{{name.id}}!").not_nil!
+              return Location.new(
+                uri: file_uri(path),
+                range: Range.new(
+                  Position.new(line_index, start_column),
+                  Position.new(line_index, start_column + "{{name.id}}!".bytesize)
+                )
+              )
+            end
+            line_index += 1
+          end
+
+          nil
+        rescue
           nil
         end
 
