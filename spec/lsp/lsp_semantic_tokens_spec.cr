@@ -40,7 +40,7 @@ describe "LSP Semantic Tokens" do
     end
 
     it "creates semantic tokens with data" do
-      data = [0, 5, 3, 2, 0]  # deltaLine, deltaStart, length, tokenType, modifiers
+      data = [0, 5, 3, 2, 0] # deltaLine, deltaStart, length, tokenType, modifiers
       tokens = CrystalV2::Compiler::LSP::SemanticTokens.new(data: data)
 
       tokens.data.should eq(data)
@@ -61,7 +61,7 @@ describe "LSP Semantic Tokens" do
       json = tokens.to_json
       json.should contain("\"data\"")
       json.should contain("\"resultId\"")
-      json.should_not contain("\"result_id\"")  # Not snake_case
+      json.should_not contain("\"result_id\"") # Not snake_case
     end
   end
 
@@ -99,7 +99,7 @@ describe "LSP Semantic Tokens" do
       # Should have tokens for identifier and number
       # Delta encoding: first token uses absolute position
       tokens.data.should_not be_empty
-      tokens.data.size.should be >= 5  # At least 1 token (5 integers)
+      tokens.data.size.should be >= 5 # At least 1 token (5 integers)
     end
 
     it "encodes tokens on same line with relative position" do
@@ -117,16 +117,16 @@ describe "LSP Semantic Tokens" do
       # Tokens on same line should use delta position (relative to previous)
       # Format: [deltaLine, deltaStart, length, tokenType, modifiers]
       data = tokens.data
-      data.size.should be >= 10  # At least 2 tokens
+      data.size.should be >= 10 # At least 2 tokens
 
       # First token: absolute position (deltaLine = 0 for first line)
       first_delta_line = data[0]
-      first_delta_line.should eq(0)  # Line 0 (0-indexed)
+      first_delta_line.should eq(0) # Line 0 (0-indexed)
 
       # Second token on same line: deltaLine = 0, deltaStart = relative
       if data.size >= 10
-        second_delta_line = data[5]  # Second token starts at index 5
-        second_delta_line.should eq(0)  # Same line
+        second_delta_line = data[5]    # Second token starts at index 5
+        second_delta_line.should eq(0) # Same line
       end
     end
 
@@ -144,7 +144,7 @@ describe "LSP Semantic Tokens" do
       tokens = server.collect_semantic_tokens(program, source)
 
       data = tokens.data
-      data.size.should be >= 20  # At least 4 tokens (x, 1, y, 2)
+      data.size.should be >= 20 # At least 4 tokens (x, 1, y, 2)
 
       # Find transition between lines
       # When deltaLine > 0, deltaStart should be absolute position on new line
@@ -186,7 +186,7 @@ describe "LSP Semantic Tokens" do
 
       (0...data.size).step(5) do |i|
         token_type = data[i + 3]
-        if token_type == 2  # Class
+        if token_type == 2 # Class
           has_class_token = true
         end
       end
@@ -218,6 +218,31 @@ describe "LSP Semantic Tokens" do
       has_number_42.should be_true
     end
 
+    it "emits operator tokens for AST binary operators" do
+      source = <<-CRYSTAL
+      0_u8 &- self
+      1 &+ 2
+      3 &* 4
+      CRYSTAL
+
+      lexer = CrystalV2::Compiler::Frontend::Lexer.new(source)
+      parser = CrystalV2::Compiler::Frontend::Parser.new(lexer)
+      program = parser.parse_program
+
+      server = CrystalV2::Compiler::LSP::Server.new
+      tokens = server.collect_semantic_tokens(program, source)
+      decoded = SemanticTokensSpecHelper.decode_tokens(tokens.data)
+
+      operator_type = 21
+      has_wrapping_sub = decoded.any? { |(line, col, len, type)| line == 0 && col == 5 && len == 2 && type == operator_type }
+      has_wrapping_add = decoded.any? { |(line, col, len, type)| line == 1 && col == 2 && len == 2 && type == operator_type }
+      has_wrapping_mul = decoded.any? { |(line, col, len, type)| line == 2 && col == 2 && len == 2 && type == operator_type }
+
+      has_wrapping_sub.should be_true
+      has_wrapping_add.should be_true
+      has_wrapping_mul.should be_true
+    end
+
     it "collects method token" do
       source = <<-CRYSTAL
       def calculate
@@ -238,7 +263,7 @@ describe "LSP Semantic Tokens" do
 
       (0...data.size).step(5) do |i|
         token_type = data[i + 3]
-        if token_type == 13  # Method
+        if token_type == 13 # Method
           has_method_token = true
         end
       end
@@ -266,12 +291,12 @@ describe "LSP Semantic Tokens" do
 
       (0...data.size).step(5) do |i|
         token_type = data[i + 3]
-        if token_type == 7  # Parameter
+        if token_type == 7 # Parameter
           parameter_count += 1
         end
       end
 
-      parameter_count.should eq(2)  # x and y
+      parameter_count.should eq(2) # x and y
     end
 
     it "collects variable token" do
@@ -293,7 +318,7 @@ describe "LSP Semantic Tokens" do
 
       (0...data.size).step(5) do |i|
         token_type = data[i + 3]
-        if token_type == 8  # Variable
+        if token_type == 8 # Variable
           has_variable_token = true
         end
       end
@@ -320,7 +345,7 @@ describe "LSP Semantic Tokens" do
 
       (0...data.size).step(5) do |i|
         token_type = data[i + 3]
-        if token_type == 18  # String
+        if token_type == 18 # String
           has_string_token = true
         end
       end
@@ -347,7 +372,7 @@ describe "LSP Semantic Tokens" do
 
       (0...data.size).step(5) do |i|
         token_type = data[i + 3]
-        if token_type == 19  # Number
+        if token_type == 19 # Number
           has_number_token = true
         end
       end
@@ -523,7 +548,7 @@ describe "LSP Semantic Tokens" do
 
       # Should have tokens from if, elsif, and else branches
       token_count = data.size // 5
-      token_count.should be >= 9  # x, 0, positive, true, x, 0, negative, true, zero, true
+      token_count.should be >= 9 # x, 0, positive, true, x, 0, negative, true, zero, true
     end
   end
 
@@ -563,9 +588,9 @@ describe "LSP Semantic Tokens" do
 
       (0...data.size).step(5) do |i|
         token_type = data[i + 3]
-        has_class = true if token_type == 2   # Class
-        has_method = true if token_type == 13  # Method
-        has_parameter = true if token_type == 7  # Parameter
+        has_class = true if token_type == 2     # Class
+        has_method = true if token_type == 13   # Method
+        has_parameter = true if token_type == 7 # Parameter
       end
 
       has_class.should be_true
@@ -638,7 +663,7 @@ describe "LSP Semantic Tokens" do
       data.should_not be_empty
 
       first_delta_line = data[0]
-      first_delta_line.should eq(0)  # First line is line 0 in LSP
+      first_delta_line.should eq(0) # First line is line 0 in LSP
     end
 
     it "verifies parser gives 1-indexed, tokens are 0-indexed" do
@@ -655,7 +680,7 @@ describe "LSP Semantic Tokens" do
       # Parser: 1-indexed (verified by previous tests)
       root = program.arena[program.roots[0]]
       def_node = root.as(CrystalV2::Compiler::Frontend::DefNode)
-      def_node.span.start_line.should eq(1)  # Parser gives 1
+      def_node.span.start_line.should eq(1) # Parser gives 1
 
       # Tokens: 0-indexed (LSP requirement)
       server = CrystalV2::Compiler::LSP::Server.new
@@ -663,7 +688,7 @@ describe "LSP Semantic Tokens" do
 
       data = tokens.data
       first_delta_line = data[0]
-      first_delta_line.should eq(0)  # Tokens give 0 (converted)
+      first_delta_line.should eq(0) # Tokens give 0 (converted)
     end
   end
 end

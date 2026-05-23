@@ -235,6 +235,9 @@ to the `fun` line instead of selecting the wrapper `def self.popcount8`.
 After LM-645, `&-` definition responses include an explicit
 `originSelectionRange` via `LocationLink`, so editors have the operator token
 range needed for clickable-source decoration.
+After LM-646, AST-owned unary/binary operators also emit semantic-token
+`operator` ranges, and the disk semantic-token cache moved to v3 so unchanged
+large stdlib files do not serve stale pre-operator-token JSON.
 
 Spec-first bootstrap checkpoint (2026-05-08): `docs/specs/` now contains the
 first executable contract slice for Crystal V2, modeled after the DiamondDB

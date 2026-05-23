@@ -3,7 +3,7 @@ module CrystalV2
     module LSP
       class SemanticTokenDiskCache
         MAGIC            = "CV2S"
-        VERSION          = 2_u32
+        VERSION          = 3_u32
         MIN_SOURCE_BYTES = 64 * 1024
 
         def self.cache_path(file_path : String) : String

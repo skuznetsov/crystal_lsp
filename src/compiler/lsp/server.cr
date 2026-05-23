@@ -7619,7 +7619,7 @@ module CrystalV2
           if disk_cache_eligible_for_semantic_tokens?(doc_state)
             path = doc_state.path.not_nil!
             info = File.info(path)
-            return "disk:#{AstCache.compiler_fingerprint.to_s(16)}:#{info.modification_time.to_unix_ns}:#{info.size}"
+            return "disk:v#{SemanticTokenDiskCache::VERSION}:#{AstCache.compiler_fingerprint.to_s(16)}:#{info.modification_time.to_unix_ns}:#{info.size}"
           end
 
           "mem:#{uri}:#{doc_state.text_document.version}:#{doc_state.text_document.text.bytesize}"
@@ -12806,8 +12806,10 @@ module CrystalV2
             end
           when Frontend::BinaryNode
             collect_tokens_recursive(context, node.left, tokens)
+            emit_binary_operator_token(context, arena, node, tokens)
             collect_tokens_recursive(context, node.right, tokens)
           when Frontend::UnaryNode
+            emit_unary_operator_token(context, arena, node, tokens)
             collect_tokens_recursive(context, node.operand, tokens)
           when Frontend::AssignNode
             collect_tokens_recursive(context, node.target, tokens)
@@ -13608,6 +13610,58 @@ module CrystalV2
           position = position_from_offset(context.source, absolute, context.line_offsets)
           emit_raw_token(tokens, position.line, position.character, member.size, SemanticTokenType::Method.value)
         rescue
+        end
+
+        private def emit_binary_operator_token(
+          context : SemanticTokenContext,
+          arena : Frontend::ArenaLike,
+          node : Frontend::BinaryNode,
+          tokens : Array(RawToken),
+        ) : Nil
+          operator = node.operator
+          return if operator.empty?
+
+          left = arena[node.left]
+          right = arena[node.right]
+          start_offset = left.span.end_offset
+          end_offset = right.span.start_offset
+          emit_operator_token_between_offsets(context, operator, start_offset, end_offset, tokens)
+        rescue
+        end
+
+        private def emit_unary_operator_token(
+          context : SemanticTokenContext,
+          arena : Frontend::ArenaLike,
+          node : Frontend::UnaryNode,
+          tokens : Array(RawToken),
+        ) : Nil
+          operator = node.operator
+          return if operator.empty?
+
+          operand = arena[node.operand]
+          emit_operator_token_between_offsets(context, operator, node.span.start_offset, operand.span.start_offset, tokens)
+        rescue
+        end
+
+        private def emit_operator_token_between_offsets(
+          context : SemanticTokenContext,
+          operator : Slice(UInt8),
+          start_offset : Int32,
+          end_offset : Int32,
+          tokens : Array(RawToken),
+        ) : Nil
+          return if start_offset < 0 || end_offset <= start_offset
+          return if start_offset >= context.bytes.size
+          end_offset = context.bytes.size if end_offset > context.bytes.size
+
+          window = end_offset - start_offset
+          segment = context.bytes[start_offset, window]
+          relative = bytes_index(segment, operator)
+          return unless relative
+
+          absolute = start_offset + relative
+          position = position_from_offset(context.source, absolute, context.line_offsets)
+          emit_raw_token(tokens, position.line, position.character, operator.size, SemanticTokenType::Operator.value)
         end
 
         private def emit_constant_node_token(

@@ -7227,6 +7227,55 @@ Adversary notes:
 
 Trust: {F/G/R: 0.87/0.37/0.89} [verified]
 
+### LM-646 - AST operators emit semantic-token operator ranges
+
+Ordinary AST-owned unary and binary operators now emit LSP semantic tokens with
+token type `operator`. The server already advertised `operator` in the
+semantic-token legend, but normal `BinaryNode` / `UnaryNode` traversal only
+recursed into operands, so tokens such as `&-`, `&+`, and `&*` could hover and
+navigate without receiving an operator-shaped token for editor decoration.
+
+The semantic-token disk cache namespace was bumped from v2 to v3, and
+disk-backed result ids now include that token-cache version. This prevents
+unchanged large stdlib files such as `int.cr` from serving stale pre-LM-646
+token JSON after the token-emission implementation changes.
+
+Evidence:
+
+- `logs/vscode_debug.log` showed `int.cr` semantic-token requests returning
+  cached/delta-empty responses while the server code only emitted `operator`
+  tokens for string interpolation punctuation, not normal AST operators.
+- Focused semantic-token regression checks `0_u8 &- self`, `1 &+ 2`, and
+  `3 &* 4` produce token type `operator` over the exact two-byte operator
+  spans.
+- `crystal tool format --check src/compiler/lsp/server.cr
+  src/compiler/lsp/semantic_token_cache.cr spec/lsp/lsp_semantic_tokens_spec.cr`
+  -> exit 0.
+- `scripts/run_safe.sh crystal 180 4096 spec
+  spec/lsp/lsp_semantic_tokens_spec.cr
+  spec/lsp/semantic_token_disk_cache_spec.cr
+  spec/lsp/hover_definition_integration_spec.cr` -> 45 examples, 0 failures.
+- `scripts/run_safe.sh crystal 300 4096 spec spec/lsp` -> 263 examples,
+  0 failures.
+- `./build_lsp_debug.sh` rebuilt `bin/crystal_v2_lsp` successfully.
+
+Adversary notes:
+
+- This is not a broad lexical operator-coloring patch. The token is emitted
+  only after the parser has created a unary/binary AST node, so strings,
+  comments, and unrelated punctuation are outside the move.
+- Cache invalidation is part of the fix. Without the cache namespace bump,
+  large unchanged stdlib files can keep stale semantic-token JSON even when the
+  code path is fixed.
+- LTP/WBA shape: trigger is an AST operator node with no emitted source token;
+  transport carries the operator slice across the bounded span between operand
+  spans; legal move emits one semantic-token range without changing hover or
+  definition targets; potential decreases from navigable-but-tokenless operator
+  to navigable operator with a decorated source range, while the disk-cache
+  version bump collapses the stale-token boundary.
+
+Trust: {F/G/R: 0.90/0.50/0.91} [verified]
+
 ## LM-583 — LSP foreground hover avoids workspace reference scans by default
 
 Status: verified for the focused LSP hover/cache/harness slice on `codegen`.
