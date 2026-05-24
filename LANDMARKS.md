@@ -6401,6 +6401,47 @@ Adversary notes:
 
 Trust: {F/G/R: 0.87/0.44/0.88} [verified]
 
+### LM-657 - Nil-return block proc annotations control raw callback ABI
+
+Raw block callback materialization now treats callee block annotations such as
+`&block : String ->` and `& : T ->` as a `Nil` return contract. The inline-yield
+fallback path and regular call path both prefer that contract over the block
+body's incidental return type, and return terminator normalization now replaces
+non-nil values with an explicit nil value when the function return type is
+`Nil`.
+
+Evidence:
+
+- `regression_tests/p2_nil_return_block_proc_no_prelude.sh
+  /tmp/cv2_nil_block_fix_host` -> `p2_nil_return_block_proc_no_prelude_ok`.
+  The guard compiles a no-prelude `&block : String ->` callback whose body
+  returns `Token.new`, then verifies the generated raw block proc is
+  `Proc(String, Nil)` and returns explicit nil.
+- Full host HIR for `src/crystal_v2.cr --emit hir --no-link` now shows
+  `Crystal::HIR::AstToHir#invalidate_generated_allocator_state$String_String`
+  emitting `%144 = func_pointer @__crystal_block_proc_1260 : 883`, where
+  `type.883 = Proc Proc(15, 16)`, and
+  `func @__crystal_block_proc_1260(%1: 15) -> 16`.
+- Produced `s2` build now reaches past `fixup_inherited_ivars done`; the next
+  frontier is later in MIR optimization:
+  `CrystalV2::Compiler::CLI#file_sha256$String: Arithmetic overflow`.
+- Nearby guards still pass:
+  `regression_tests/p2_bare_generic_new_uses_expected_return_no_prelude.sh
+  /tmp/cv2_nil_block_fix_host` and
+  `regression_tests/p2_qualified_module_namespace_no_prelude.sh
+  /tmp/cv2_nil_block_fix_host`.
+
+Adversary notes:
+
+- This is an ABI fix, not a `Set` special case. The regression uses an
+  unrelated `consume(&block : String ->)` call to catch the same raw callback
+  return pollution without stdlib dependencies.
+- Non-`Nil` block return contracts are not generalized by this change; the
+  patch only prevents known `Nil` callback contracts from inheriting incidental
+  body returns.
+
+Trust: {F/G/R: 0.88/0.44/0.88} [verified]
+
 ### LM-655 - Nilable Proc unions preserve callable signatures
 
 HIR union construction now uses proc-aware type names when a union is built

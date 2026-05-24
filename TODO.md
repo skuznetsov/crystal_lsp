@@ -135,6 +135,20 @@ frontier is `Set(String)#each` called from
 during `align_all_class_ivars`. Continue there rather than revisiting
 `Array(String)#to_set` or patching `.to_set`/`Set#hash` symptoms.
 
+Nil-return block proc checkpoint (LM-657, 2026-05-24): raw block callback
+materialization now honors callee `& : T ->` / `Proc(T, Nil)` contracts instead
+of using the block body's incidental return type as the function-pointer ABI.
+The no-prelude guard verifies that a block passed to `&block : String ->` can
+return `Token.new` internally while the materialized `__crystal_block_proc`
+still has return type `Nil` and explicitly returns nil. Full host HIR now shows
+the previous `Set(String)#each` crash site in
+`invalidate_generated_allocator_state` passing `Proc(String, Nil)` to
+`Set(String)#each$block`, and produced `s2` reaches past
+`fixup_inherited_ivars`. Current frontier: produced `s2` build now fails later
+with `Worker 0: MIR opt error for CrystalV2::Compiler::CLI#file_sha256$String:
+Arithmetic overflow`; continue there as the next root, not at allocator-state
+Set iteration.
+
 LSP performance side checkpoint (LM-605, 2026-05-20): the background prelude
 loader now has a single in-flight owner. Repeated foreground requests while
 `@prelude_state` is still nil no longer spawn duplicate cache rebuilds. The
