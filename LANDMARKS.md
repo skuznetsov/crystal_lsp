@@ -6473,6 +6473,60 @@ Adversary notes:
 
 Trust: {F/G/R: 0.89/0.48/0.90} [verified]
 
+### LM-659 - Module stripped lookup no longer rebuilds by iterating module defs
+
+Generic module stripped-name lookup is now an incrementally maintained ordered
+index, not a lazily rebuilt `Hash(String, String)` derived from
+`@module_defs.each_key`. This removes the produced-stage2 full-prelude crash
+while registering `String include Comparable(self)`. The refuted lazy path
+rebuilt the stripped lookup during include registration; produced `s2` first
+returned an empty key for `Comparable`, and a narrower trace then crashed
+inside the rebuild before the first `Comparable` candidate was printed.
+
+Evidence:
+
+- Instrumented produced-s2 run before the fix reached
+  `phase=after_stripped_lookup_ready module=Comparable`,
+  `phase=stripped_hit module=Comparable key=`, then crashed at the next
+  `@module_defs.has_key?` lookup.
+- A second trace crashed immediately after
+  `[STRIPPED_LOOKUP] rebuild old_version=11 size=34`, before any candidate was
+  emitted, localizing the unsafe corridor to lazy `@module_defs` iteration.
+- `crystal tool format --check src/compiler/hir/ast_to_hir.cr` -> exit 0.
+- `git diff --check` -> exit 0.
+- `crystal build src/crystal_v2.cr -o /tmp/cv2_module_stripped_array_host
+  --error-trace` -> exit 0.
+- Produced-s2 build:
+  `scripts/run_safe.sh /tmp/cv2_module_stripped_array_host 300 4096
+  src/crystal_v2.cr -o /tmp/cv2_module_stripped_array_s2/cv2_s2` -> exit 0.
+- `regression_tests/p2_full_prelude_module_stripped_lookup_frontier.sh
+  /tmp/cv2_module_stripped_array_s2/cv2_s2` ->
+  `p2_full_prelude_module_stripped_lookup_frontier_ok`.
+- `regression_tests/p2_qualified_module_namespace_no_prelude.sh
+  /tmp/cv2_module_stripped_array_host` and the same guard on produced `s2`
+  both pass.
+
+Boundary:
+
+- This is a bootstrap frontier fix, not a full-prelude completion claim.
+  Produced-s2 full-prelude `puts 42` now passes class registration, constants,
+  pass2 registration, and inherited-ivar fixup, then reaches
+  `lower_main: exprs=12`. The compile still exits non-zero: a plain
+  `STAGE2_BOOTSTRAP_TRACE=1` run can segfault after lower-main starts, while
+  lldb perturbs it into a 90s safe-wrapper timeout at the same lower-main
+  frontier.
+
+Adversary notes:
+
+- This is not a `String`/`Comparable` special case. The fix changes the derived
+  generic-module lookup invariant and avoids rebuilding it from a mutable
+  module-def hash in a produced-stage2 hot path.
+- The new full-prelude regression guard deliberately checks frontier movement
+  (`class register done` and `lower_main: exprs=`), not successful target
+  compilation.
+
+Trust: {F/G/R: 0.88/0.50/0.88} [verified]
+
 ### LM-655 - Nilable Proc unions preserve callable signatures
 
 HIR union construction now uses proc-aware type names when a union is built

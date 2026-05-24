@@ -160,6 +160,19 @@ frontier: produced-s2 full-prelude `puts 42` exits 139 during target compile,
 with trace reaching `class register idx=3/92`; continue from class
 registration state/memory, not MIR constant folding.
 
+Module stripped-lookup checkpoint (LM-659, 2026-05-24): generic module stripped
+name lookup is now maintained incrementally instead of rebuilding
+`@module_defs_stripped_lookup` by iterating `@module_defs` during include
+registration. This removes the produced-s2 full-prelude crash at
+`String include Comparable(self)`, where the lazy cache rebuild/lookup corridor
+returned an empty generic key and then crashed in `Hash(String, Array(...))`.
+Nested module registration now bumps the module-def cache version as well.
+Produced-s2 full-prelude `puts 42` now passes class registration,
+constant registration, pass2 function registration, and inherited-ivar fixup,
+then reaches `lower_main: exprs=12`; it is still not a clean compile and may
+segfault or time out in the lower-main frontier. Continue from lower-main
+demand/layout behavior, not from `String`/`Comparable` include registration.
+
 LSP performance side checkpoint (LM-605, 2026-05-20): the background prelude
 loader now has a single in-flight owner. Repeated foreground requests while
 `@prelude_state` is still nil no longer spawn duplicate cache rebuilds. The
