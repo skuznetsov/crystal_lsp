@@ -2381,7 +2381,7 @@ describe Adamas::HIR::AstToHir do
         foo(name: nil, same_thread: false) { 42 }
       CRYSTAL
 
-      main = converter.module.function_by_name("__crystal_main")
+      main = converter.module.function_by_name("__adamas_main")
       main.should_not be_nil
 
       text = hir_text(main.not_nil!)
@@ -2528,7 +2528,7 @@ describe Adamas::HIR::AstToHir do
         Outer.wrap()
       CRYSTAL
 
-      main = converter.module.function_by_name("__crystal_main")
+      main = converter.module.function_by_name("__adamas_main")
       main.should_not be_nil
 
       text = hir_text(main.not_nil!)
@@ -2723,7 +2723,7 @@ describe Adamas::HIR::AstToHir do
         puts [Point.new(1.0, 2_i64)].inspect
       CRYSTAL
 
-      main = converter.module.function_by_name("__crystal_main")
+      main = converter.module.function_by_name("__adamas_main")
       main.should_not be_nil
 
       text = hir_text(main.not_nil!)
@@ -2748,7 +2748,7 @@ describe Adamas::HIR::AstToHir do
         run()
       CRYSTAL
 
-      main = converter.module.function_by_name("__crystal_main")
+      main = converter.module.function_by_name("__adamas_main")
       main.should_not be_nil
 
       text = hir_text(main.not_nil!)
@@ -2780,7 +2780,7 @@ describe Adamas::HIR::AstToHir do
         run()
       CRYSTAL
 
-      main = converter.module.function_by_name("__crystal_main")
+      main = converter.module.function_by_name("__adamas_main")
       main.should_not be_nil
 
       text = hir_text(main.not_nil!)
@@ -3255,7 +3255,7 @@ describe Adamas::HIR::AstToHir do
         Outer.wrap(1) { 42 }
       CRYSTAL
 
-      main = converter.module.function_by_name("__crystal_main")
+      main = converter.module.function_by_name("__adamas_main")
       main.should_not be_nil
 
       text = hir_text(main.not_nil!)
@@ -3469,7 +3469,7 @@ describe Adamas::HIR::AstToHir do
 
       converter.module.function_by_name("Time.instant$arity0").should_not be_nil
 
-      main = converter.module.function_by_name("__crystal_main")
+      main = converter.module.function_by_name("__adamas_main")
       main.should_not be_nil
 
       text = hir_text(main.not_nil!)
@@ -3493,7 +3493,7 @@ describe Adamas::HIR::AstToHir do
 
       converter.module.function_by_name("Time::Location.utc$arity0").should_not be_nil
 
-      main = converter.module.function_by_name("__crystal_main")
+      main = converter.module.function_by_name("__adamas_main")
       main.should_not be_nil
 
       text = hir_text(main.not_nil!)

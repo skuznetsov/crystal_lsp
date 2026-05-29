@@ -115,9 +115,9 @@ describe Adamas::MIR::LLVMIRGenerator do
       output.should contain("define void @__adamas_slab_frame_pop()")
     end
 
-    it "emits entrypoint when __crystal_main is present" do
+    it "emits entrypoint when __adamas_main is present" do
       mod = Adamas::MIR::Module.new("test")
-      func = mod.create_function("__crystal_main", Adamas::MIR::TypeRef::VOID)
+      func = mod.create_function("__adamas_main", Adamas::MIR::TypeRef::VOID)
       builder = Adamas::MIR::Builder.new(func)
       builder.ret
 
@@ -127,7 +127,7 @@ describe Adamas::MIR::LLVMIRGenerator do
       output = gen.generate
 
       output.should contain("define i32 @main")
-      output.should contain("call void @__crystal_main")
+      output.should contain("call void @__adamas_main")
     end
 
     it "emits slab frame prolog/epilog when enabled" do
@@ -145,9 +145,9 @@ describe Adamas::MIR::LLVMIRGenerator do
       output.should contain("call void @__adamas_slab_frame_pop()")
     end
 
-    it "keeps entrypoint when __crystal_main contains typeof_ extern calls" do
+    it "keeps entrypoint when __adamas_main contains typeof_ extern calls" do
       mod = Adamas::MIR::Module.new("test")
-      func = mod.create_function("__crystal_main", Adamas::MIR::TypeRef::VOID)
+      func = mod.create_function("__adamas_main", Adamas::MIR::TypeRef::VOID)
       builder = Adamas::MIR::Builder.new(func)
       args = [] of Adamas::MIR::ValueId
       builder.extern_call("typeof_foo", args, Adamas::MIR::TypeRef::VOID)
@@ -159,7 +159,7 @@ describe Adamas::MIR::LLVMIRGenerator do
       output = gen.generate
 
       output.should contain("define i32 @main")
-      output.should contain("call void @__crystal_main")
+      output.should contain("call void @__adamas_main")
     end
 
     it "generates simple function" do

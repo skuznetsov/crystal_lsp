@@ -1805,7 +1805,7 @@ module Adamas::MIR
     end
 
     private def llvm_entry_guard_target_name?(mangled_name : String) : Bool
-      mangled_name == "__crystal_main" ||
+      mangled_name == "__adamas_main" ||
         mangled_name == "Crystal$Dmain$$Int32_Pointer$LPointer$LUInt8$R$R" ||
         mangled_name == "Crystal$Dmain_user_code$$Int32_Pointer$LPointer$LUInt8$R$R"
     end
@@ -1822,7 +1822,7 @@ module Adamas::MIR
     end
 
     private def emit_function_definition_header(return_type : String, mangled_name : String, param_types : Array(String)) : Nil
-      emit_function_trace = bootstrap_env_enabled?("CRYSTAL_V2_EMIT_FUNCTION_TRACE", "CRYSTAL2_EMIT_FUNCTION_TRACE") && mangled_name == "__crystal_main"
+      emit_function_trace = bootstrap_env_enabled?("CRYSTAL_V2_EMIT_FUNCTION_TRACE", "CRYSTAL2_EMIT_FUNCTION_TRACE") && mangled_name == "__adamas_main"
       attrs = if llvm_entry_opt_guard_enabled? && llvm_entry_guard_target_name?(mangled_name)
                 " noinline optnone"
               else
@@ -3131,7 +3131,7 @@ module Adamas::MIR
       worklist = [] of FunctionId
 
       # Find entry functions (Crystal uses __crystal_main as the synthetic entry).
-      roots = @module.functions.select { |f| f.name == "main" || f.name == "__crystal_main" }
+      roots = @module.functions.select { |f| f.name == "main" || f.name == "__adamas_main" }
       if roots.empty?
         # No entry, emit all functions
         @module.functions.each { |f| reachable << f.id }
@@ -9193,24 +9193,40 @@ module Adamas::MIR
     end
 
     private def emit_entrypoint_if_needed(functions_to_emit : ::Array(Function))
-      has_user_main = functions_to_emit.any? { |f| f.name == "main" }
-      has_crystal_main = functions_to_emit.any? { |f| f.name == "__crystal_main" }
-      return if has_user_main || !has_crystal_main
+      has_adamas_main = functions_to_emit.any? { |f| f.name == "__adamas_main" }
+      return unless has_adamas_main
 
-      # Entry point: main() calls __crystal_main()
+      # Crystal stdlib ABI compatibility shim.
+      # The original (unmodifiable) stdlib startup `Crystal.main` calls
+      # `LibCrystalMain.__crystal_main` (src/stdlib/crystal/main.cr). Our user-code entry
+      # is `__adamas_main`; forward `__crystal_main` to it so the stdlib ABI keeps
+      # resolving without modifying stdlib. Emitted whenever `__adamas_main` exists,
+      # independent of whether a native `main` is also emitted below.
+      emit_raw "; Crystal stdlib ABI compat shim (__crystal_main -> __adamas_main)\n"
+      emit_raw "define void @__crystal_main(i32 %argc, ptr %argv) {\n"
+      emit_raw "  call void @__adamas_main(i32 %argc, ptr %argv)\n"
+      emit_raw "  ret void\n"
+      emit_raw "}\n\n"
+
+      # Native entry point: only when no `main` is provided (e.g. --no-prelude builds).
+      # In prelude builds the stdlib supplies `main` -> `Crystal.main` -> the shim above.
+      has_user_main = functions_to_emit.any? { |f| f.name == "main" }
+      return if has_user_main
+
+      # Entry point: main() calls __adamas_main()
       emit_raw "; Program entry point\n"
       if ENV.has_key?("CRYSTAL_V2_DEBUG_MAIN")
         emit_raw "@.dbg_main_enter = private unnamed_addr constant [13 x i8] c\"[MAIN_ENTER]\\0A\\00\"\n"
         emit_raw "@.dbg_main_exit = private unnamed_addr constant [12 x i8] c\"[MAIN_EXIT]\\0A\\00\"\n"
         emit_raw "define i32 @main(i32 %argc, ptr %argv) {\n"
         emit_raw "  call i64 @write(i32 2, ptr @.dbg_main_enter, i64 12)\n"
-        emit_raw "  call void @__crystal_main(i32 %argc, ptr %argv)\n"
+        emit_raw "  call void @__adamas_main(i32 %argc, ptr %argv)\n"
         emit_raw "  call i64 @write(i32 2, ptr @.dbg_main_exit, i64 11)\n"
         emit_raw "  ret i32 0\n"
         emit_raw "}\n\n"
       else
         emit_raw "define i32 @main(i32 %argc, ptr %argv) {\n"
-        emit_raw "  call void @__crystal_main(i32 %argc, ptr %argv)\n"
+        emit_raw "  call void @__adamas_main(i32 %argc, ptr %argv)\n"
         emit_raw "  ret i32 0\n"
         emit_raw "}\n\n"
       end
@@ -12707,7 +12723,7 @@ module Adamas::MIR
 
     private def emit_function(func : Function)
       mangled_name = mangle_function_name(func.name)
-      emit_function_trace = bootstrap_env_enabled?("CRYSTAL_V2_EMIT_FUNCTION_TRACE", "CRYSTAL2_EMIT_FUNCTION_TRACE") && func.name == "__crystal_main"
+      emit_function_trace = bootstrap_env_enabled?("CRYSTAL_V2_EMIT_FUNCTION_TRACE", "CRYSTAL2_EMIT_FUNCTION_TRACE") && func.name == "__adamas_main"
 
       if emit_builtin_override(func)
         # Builtin overrides emit raw LLVM directly and can return before the regular
@@ -14284,7 +14300,7 @@ module Adamas::MIR
       @dominance_out_time.clear
       return if func.blocks.size <= 1
 
-      dom_trace = (ENV["CRYSTAL_V2_DOM_TRACE"]? || ENV["CRYSTAL2_DOM_TRACE"]?) && func.name == "__crystal_main"
+      dom_trace = (ENV["CRYSTAL_V2_DOM_TRACE"]? || ENV["CRYSTAL2_DOM_TRACE"]?) && func.name == "__adamas_main"
 
       STDERR.puts "[DOM] compute_predecessors:start" if dom_trace
       func.compute_predecessors

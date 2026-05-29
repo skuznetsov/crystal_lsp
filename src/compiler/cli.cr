@@ -2274,7 +2274,7 @@ module Adamas
 
         # Reduce later phases by keeping only functions reachable from entrypoints.
         rta_start = Time.instant
-        reachable = hir_module.reachable_function_names(["__crystal_main", "main"])
+        reachable = hir_module.reachable_function_names(["__adamas_main", "main"])
         if !reachable.empty? && reachable.size < hir_module.functions.size
           total_before = hir_module.functions.size
           if BootstrapEnv.enabled?("CRYSTAL_V2_RTA_PRUNED_DUMP")
@@ -3052,7 +3052,8 @@ module Adamas
       end
 
       private def llvm_entry_guard_target_line?(line : String) : Bool
-        line.starts_with?("define void @__crystal_main(") ||
+        line.starts_with?("define void @__adamas_main(") ||
+          line.starts_with?("define void @__crystal_main(") ||
           line.starts_with?("define void @Crystal$Dmain$$Int32_Pointer$LPointer$LUInt8$R$R(") ||
           line.starts_with?("define void @\"Crystal$Dmain$$Int32_Pointer$LPointer$LUInt8$R$R\"(") ||
           line.starts_with?("define void @Crystal$Dmain_user_code$$Int32_Pointer$LPointer$LUInt8$R$R(") ||

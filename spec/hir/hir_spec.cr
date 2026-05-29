@@ -55,7 +55,7 @@ describe Adamas::HIR do
 
     it "includes virtual call targets by base name" do
       mod = Adamas::HIR::Module.new
-      main = mod.create_function("__crystal_main", Adamas::HIR::TypeRef::VOID)
+      main = mod.create_function("__adamas_main", Adamas::HIR::TypeRef::VOID)
       receiver = main.add_param("self", Adamas::HIR::TypeRef::POINTER)
 
       call = Adamas::HIR::Call.new(
@@ -84,7 +84,7 @@ describe Adamas::HIR do
       mod.create_function("B#foo", Adamas::HIR::TypeRef::VOID)
       mod.create_function("C#bar", Adamas::HIR::TypeRef::VOID)
 
-      reachable = mod.reachable_function_names(["__crystal_main"])
+      reachable = mod.reachable_function_names(["__adamas_main"])
       reachable.should contain("A#foo")
       reachable.should contain("B#foo")
       reachable.should_not contain("C#bar")
