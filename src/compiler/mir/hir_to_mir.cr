@@ -2403,6 +2403,7 @@ module Adamas
           @stats.slab_allocations += 1
         when MemoryStrategy::GC
           @stats.gc_allocations += 1
+          @mir_module.uses_gc = true
         end
 
         ptr
@@ -6870,6 +6871,7 @@ module Adamas
           elements,
           strategy
         )
+        @mir_module.uses_gc = true if strategy == MIR::MemoryStrategy::GC
         builder.emit(mir_arr)
       end
 

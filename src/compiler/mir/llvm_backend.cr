@@ -2421,6 +2421,7 @@ module Adamas::MIR
     property progress : Bool = false   # Print progress during generation
     property reachability : Bool = false  # Only emit reachable functions (from main) - DISABLED, needs HIR-level implementation
     property no_prelude : Bool = false   # --no-prelude mode: emit C strings instead of Crystal String objects
+    property no_gc : Bool = false        # --no-gc mode: program must not require the GC (no GC_init)
     property constant_initial_values : Hash(String, Float64 | Int64) = {} of String => (Float64 | Int64)  # Constant literal values for globals (e.g., Math::PI)
 
     # Fused parallel pipeline: MIR lowering in fork workers (experimental, correctness issues).
@@ -9234,12 +9235,23 @@ module Adamas::MIR
       has_user_main = functions_to_emit.any? { |f| f.name == "main" }
       return if has_user_main
 
+      # Initialize the Boehm GC at startup (matches Crystal's own `GC.init` before
+      # main) so stdlib paths that call into LibGC — e.g. Thread.current's lazy init
+      # -> GC.current_thread_stack_bottom -> GC_get_my_stackbottom — don't crash on
+      # an unregistered main thread. Under the hybrid memory model the GC is only
+      # actually used when some allocation was assigned MemoryStrategy::GC during
+      # lowering (@module.uses_gc, set at assignment time — no per-function scan), so
+      # skip GC_init for pure stack/ARC programs. Also skipped under --no-gc (by
+      # contract there are no GC allocations) and --no-prelude (does not link libgc).
+      emit_gc_init = !no_prelude && !no_gc && @module.uses_gc
+
       # Entry point: main() calls __adamas_main()
       emit_raw "; Program entry point\n"
       if ENV.has_key?("ADAMAS_DEBUG_MAIN")
         emit_raw "@.dbg_main_enter = private unnamed_addr constant [13 x i8] c\"[MAIN_ENTER]\\0A\\00\"\n"
         emit_raw "@.dbg_main_exit = private unnamed_addr constant [12 x i8] c\"[MAIN_EXIT]\\0A\\00\"\n"
         emit_raw "define i32 @main(i32 %argc, ptr %argv) {\n"
+        emit_raw "  call void @GC_init()\n" if emit_gc_init
         emit_raw "  call i64 @write(i32 2, ptr @.dbg_main_enter, i64 12)\n"
         emit_raw "  call void @__adamas_main(i32 %argc, ptr %argv)\n"
         emit_raw "  call i64 @write(i32 2, ptr @.dbg_main_exit, i64 11)\n"
@@ -9247,6 +9259,7 @@ module Adamas::MIR
         emit_raw "}\n\n"
       else
         emit_raw "define i32 @main(i32 %argc, ptr %argv) {\n"
+        emit_raw "  call void @GC_init()\n" if emit_gc_init
         emit_raw "  call void @__adamas_main(i32 %argc, ptr %argv)\n"
         emit_raw "  ret i32 0\n"
         emit_raw "}\n\n"

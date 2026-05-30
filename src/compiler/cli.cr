@@ -2687,6 +2687,7 @@ module Adamas
         llvm_gen.reachability = BootstrapEnv.enabled?("ADAMAS_LLVM_REACHABILITY")
         bootstrap_trace_puts "[STAGE2_TRACE] step5: flags4"; STDERR.flush
         llvm_gen.no_prelude = options.no_prelude
+        llvm_gen.no_gc = options.no_gc
         bootstrap_trace_puts "[STAGE2_TRACE] step5: flags5"; STDERR.flush
         if fused_parallel
           llvm_gen.fused_mir_lowering = mir_lowering

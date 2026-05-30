@@ -2042,6 +2042,10 @@ module Adamas::MIR
     getter union_descriptor_entries : ::Array(UnionDescriptorEntry)
     getter module_type_refs : ::Set(TypeRef)
     property source_file : String?
+    # Set during HIR->MIR lowering when any allocation is assigned MemoryStrategy::GC.
+    # The entry point reads this to decide whether to emit GC_init (hybrid memory
+    # model): pure stack/ARC programs never touch the Boehm collector and skip it.
+    property uses_gc : Bool = false
 
     @next_function_id : FunctionId = 0_u32
     @function_map : ::Hash(String, Function)
